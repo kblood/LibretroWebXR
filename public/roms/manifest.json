@@ -1,0 +1,19 @@
+{
+  "cartridges": [
+    { "file": "mario.smc",        "system": "snes",      "core": "snes9x",            "title": "Super Mario World", "color": "#5a3a8a",
+      "boxart": "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Super_Nintendo_Entertainment_System/master/Named_Boxarts/Super%20Mario%20World%20(USA).png" },
+    { "file": "1942.nes",         "system": "nes",       "core": "nestopia",          "title": "1942",              "color": "#8a8a8a",
+      "boxart": "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Nintendo_Entertainment_System/master/Named_Boxarts/1942%20(Japan%2C%20USA).png" },
+    { "file": "adventure.a26",    "system": "atari2600", "core": "stella2014",        "title": "Adventure",         "color": "#6a4a2a",
+      "boxart": "https://raw.githubusercontent.com/libretro-thumbnails/Atari_-_2600/master/Named_Boxarts/Adventure%20(USA).png" },
+    { "file": "mariotennis.vb",   "system": "vb",        "core": "mednafen_vb",       "title": "Mario's Tennis",    "color": "#aa1a1a",
+      "boxart": "https://raw.githubusercontent.com/libretro-thumbnails/Nintendo_-_Virtual_Boy/master/Named_Boxarts/Mario%27s%20Tennis%20(Japan%2C%20USA).png" },
+    { "file": "alexkidd.sms",     "system": "sms",       "core": "picodrive",         "title": "Alex Kidd",         "color": "#1a1a4a",
+      "boxart": "https://raw.githubusercontent.com/libretro-thumbnails/Sega_-_Master_System_-_Mark_III/master/Named_Boxarts/Alex%20Kidd%20in%20Miracle%20World%20(USA%2C%20Europe).png" },
+    { "file": "columns.gg",       "system": "gg",        "core": "picodrive",         "title": "Columns",           "color": "#1a3a6a",
+      "boxart": "https://raw.githubusercontent.com/libretro-thumbnails/Sega_-_Game_Gear/master/Named_Boxarts/Columns%20(USA%2C%20Europe%2C%20Brazil)%20(En).png" },
+    { "file": "1943kai.pce",      "system": "pce",       "core": "mednafen_pce_fast", "title": "1943 Kai",          "color": "#dadada",
+      "boxart": "https://raw.githubusercontent.com/libretro-thumbnails/NEC_-_PC_Engine_-_TurboGrafx_16/master/Named_Boxarts/1943%20Kai%20(Japan).png" },
+    { "file": "chessersride.d64", "system": "c64",       "core": "vice_x64",          "title": "Chessers Ride",     "color": "#404040" }
+  ]
+}

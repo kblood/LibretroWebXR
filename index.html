@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <title>LibretroWebXR</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; padding: 0; height: 100%; background: #111; color: #eee; font-family: system-ui, sans-serif; overflow: hidden; }
+      body { display: flex; flex-direction: column; }
+      header { padding: 12px 16px; display: flex; gap: 12px; align-items: center; width: 100%; box-sizing: border-box; background: #1b1b1b; border-bottom: 1px solid #2a2a2a; z-index: 2; }
+      header h1 { margin: 0; font-size: 14px; font-weight: 500; letter-spacing: .04em; color: #888; }
+      header .sp { flex: 1; }
+      header button, header label { font: inherit; background: #2a2a2a; color: #eee; border: 1px solid #3a3a3a; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+      header button:hover, header label:hover { background: #333; }
+      header input[type=file] { display: none; }
+      #status { font-size: 12px; color: #888; }
+
+      /* The Three.js renderer is appended into #stage. It fills the area
+         under the header in both desktop and VR mode. */
+      #stage { flex: 1; position: relative; width: 100%; min-height: 0; }
+      #stage canvas { display: block; width: 100%; height: 100%; }
+
+      /* Two offscreen canvases drive the TV mesh's texture:
+         - #placeholder-canvas: 2D context, animated by Placeholder while idle.
+         - #canvas:             WebGL context grabbed by the libretro core.
+         The emulator canvas MUST be id="canvas" — RetroArch's web input
+         driver does an internal querySelector('#canvas') for input events
+         and silently breaks (null deref in addEventListener) if absent. */
+      #placeholder-canvas, #canvas {
+        position: absolute; left: -99999px; top: -99999px; image-rendering: pixelated;
+      }
+
+      /* Three.js's VRButton is fixed-position; nudge it above the canvas. */
+      body > button { z-index: 3 !important; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>LibretroWebXR · idle</h1>
+      <label for="rom-input">Load ROM</label>
+      <input id="rom-input" type="file" accept=".smc,.sfc,.swc,.fig,.bs,.nes,.fds,.a26,.bin,.md,.gen,.smd,.gba,.vb,.vboy,.sms,.gg,.pce,.gb,.gbc,.d64,.t64,.prg,.crt" />
+      <button id="reset-btn" disabled>Reset</button>
+      <span class="sp"></span>
+      <span id="status">idle</span>
+    </header>
+    <main id="stage"></main>
+    <canvas id="placeholder-canvas" width="512" height="448"></canvas>
+    <canvas id="canvas" width="512" height="448"></canvas>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

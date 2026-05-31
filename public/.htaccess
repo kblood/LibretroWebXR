@@ -1,0 +1,20 @@
+# Cross-origin isolation — required so window.crossOriginIsolated === true,
+# which is the gate Quest / Chrome / Firefox put around SharedArrayBuffer.
+# The libretro worker core (PROXY_TO_PTHREAD=1) needs a pthread pool backed
+# by SharedArrayBuffer; without these headers the core won't initialize and
+# the emulator will not run in VR.
+<IfModule mod_headers.c>
+  Header set Cross-Origin-Embedder-Policy "require-corp"
+  Header set Cross-Origin-Opener-Policy   "same-origin"
+
+  # Cache discipline borrowed from castlemastervr — Quest browser is happy
+  # to serve stale modules unless told otherwise.
+  <FilesMatch "\.(js|mjs|html|json)$">
+    Header set Cache-Control "no-cache, must-revalidate"
+  </FilesMatch>
+</IfModule>
+
+# Apache 2.4 default mime.types covers .js but not always .wasm.
+<IfModule mod_mime.c>
+  AddType application/wasm .wasm
+</IfModule>

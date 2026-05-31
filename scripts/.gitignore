@@ -1,0 +1,25 @@
+# Test ROM fixtures dropped here ad-hoc by the debug harness. Don't commit
+# them — copyright + repo size.
+*.smc
+*.sfc
+*.nes
+*.bin
+*.sms
+*.gg
+*.gb
+*.gbc
+*.gba
+*.vb
+*.vboy
+*.pce
+*.d64
+*.t64
+*.prg
+*.crt
+*.md
+*.gen
+*.smd
+junk.smc
+
+# Debug screenshots written by snap-*.js / probe-*.js runs.
+*.png

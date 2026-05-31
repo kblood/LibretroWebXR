@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.vite/
+*.log
+
+# Local screenshot/probe scratch dir
+tmp/
+
+# Commercial ROMs — user-owned, never commit.
+# Keep manifest.json (paths + boxart URLs) so the cartridge wall builds.
+# Free/homebrew/public-domain test ROMs that ARE shippable live under
+# public/roms/freeware/ and are force-included below.
+public/roms/*
+!public/roms/manifest.json
+!public/roms/README.md
+!public/roms/freeware/
+
+# Libretro cores (~2-5 MB each). NOT distributed in this repo — fetched at
+# build/deploy time by scripts/fetch-cores.mjs and rehosted on the deploy
+# server. See docs/LICENSING.md for why we don't bundle them.
+public/cores/

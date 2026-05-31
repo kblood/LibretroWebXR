@@ -1,0 +1,91 @@
+# LibretroWebXR
+
+A **browser-based WebXR libretro frontend** — play retro console games inside a
+3D room, on **desktop browsers** and **standalone Meta Quest**, with no install.
+Think [EmuVR](https://emuvr.net), but open-source and running in a web page.
+
+> **Status:** working prototype, freshly re-homed into a clean, shareable repo.
+> See `docs/ROADMAP.md` for where it's going (JSON-defined rooms & collections,
+> an in-VR room editor, and multiplayer).
+
+## What it does today
+
+- A 3D room you can enter in VR (Quest browser / PCVR) or explore on a flat
+  screen.
+- Grabbable **cartridges** on a **shelf**; slot one into the **console** and it
+  boots on the in-world **CRT TV**.
+- ~13 systems via libretro cores: SNES, NES, Atari 2600, Genesis / Master System
+  / Game Gear, GBA, Virtual Boy, PC Engine / TurboGrafx-16, C64, VIC-20.
+- Keyboard, gamepad, and WebXR-controller input with per-core RetroPad mapping;
+  save states, spatial audio, in-VR menus.
+
+## Important: no ROMs, no bundled cores
+
+This repo ships **neither game ROMs nor emulator cores**, by design — see
+`docs/LICENSING.md`.
+
+- **Cores** (`.wasm`/`.js`) are fetched at build/deploy time, not committed.
+  Run `npm run fetch-cores` (see that script for sources). They keep their own
+  upstream licenses (`THIRD_PARTY_LICENSES.md`); some are non-commercial.
+- **ROMs & BIOS** are copyrighted — supply your own from media you own. The only
+  game content here is free / homebrew / public-domain test material; see
+  `public/roms/README.md`.
+
+## Quick start
+
+```bash
+npm install
+npm run fetch-cores      # populates public/cores/ (gitignored) — see script
+npm run dev              # http://localhost:5173  (sets COOP/COEP for SharedArrayBuffer)
+```
+
+Click **Load ROM** to pick a game, or load a collection/room (see
+`docs/ROOM_AND_COLLECTIONS.md`). On Quest, open the HTTPS deploy and tap **Enter
+VR**. `npm run debug` runs the headless health-check harness (`DEBUGGING.md`).
+
+Requirements: HTTPS + `Cross-Origin-Opener-Policy: same-origin` +
+`Cross-Origin-Embedder-Policy: require-corp` (handled by `vite.config.js` in dev
+and `deploy/` + `public/.htaccess` in prod) so `SharedArrayBuffer` — and thus the
+threaded cores — work.
+
+## The big idea: rooms & collections as portable JSON
+
+Instead of EmuVR's opaque binary room saves and per-machine folder scans,
+everything here is **open, declarative JSON** that references content by location
+(a web URL, or a local folder on your PC / headset) and **never embeds ROMs**:
+
+- a **Collection** (`*.collection.json`) is a library of games (system, core,
+  boxart, and a ROM *pointer*);
+- a **Room** (`*.room.json`) is the 3D scene + how collections are laid out in
+  it (wallpaper, shelves, console, posters, portals to other rooms);
+- a room can be **shared as a single file or URL** — free games travel with it,
+  your owned games resolve against your own local folder.
+
+Full design: `docs/ROOM_AND_COLLECTIONS.md`. Multiplayer plan:
+`docs/MULTIPLAYER.md`. EmuVR research that informs all of this:
+`docs/EMUVR_RESEARCH.md`.
+
+## Layout
+
+```
+LibretroWebXR/
+├── index.html              Flat-mode shell (header + canvases)
+├── vite.config.js          Dev server with COOP/COEP
+├── src/                    The app (Three.js + WebXR, emulator client, input, VR room)
+├── scripts/
+│   ├── debug.js            Puppeteer health-check harness (see DEBUGGING.md)
+│   └── fetch-cores.mjs     Pulls libretro cores into public/cores/ (gitignored)
+├── public/
+│   ├── cores/              (gitignored) fetched cores
+│   └── roms/               manifest + free/homebrew test ROMs only (README inside)
+├── deploy/                 Apache config to enable .htaccess COOP/COEP
+└── docs/                   ROADMAP, EMUVR_RESEARCH, ROOM_AND_COLLECTIONS, MULTIPLAYER, LICENSING, PROJECT_HISTORY
+```
+
+## License
+
+Frontend code: **MIT** (`LICENSE`). Cores and ROMs are **not** covered by it —
+see `THIRD_PARTY_LICENSES.md` and `docs/LICENSING.md`.
+
+History of the five prototypes this distilled from: `docs/PROJECT_HISTORY.md`.
+Where it came from: `PROVENANCE.md`.
