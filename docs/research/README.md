@@ -89,6 +89,12 @@ booting in the actual app (headless-Chrome screenshot of the in-world CRT):
   → `freeware/lwx-pce-pong.pce`). Two-joypad Pong on the char grid; runs on mednafen_pce_fast.
 - **SNES — LWX SNES Demo** (`games/snes-demo/snesdemo.c`, PVSnesLib 4.5.0, `npm run make-snes-demo`
   → `freeware/lwx-snes-demo.sfc`). LoROM 256K sprite-mover; runs on snes9x.
+- **GBA — LWX Paint** (`games/gba-paint/main.c`, devkitARM + libtonc Mode 3, `npm run make-gba-paint`
+  → `freeware/lwx-gba-paint.gba`). Framebuffer paint toy; runs on mgba. (devkitARM installed
+  non-interactively from devkitPro pacman packages — see the doc.)
+- **Virtual Boy — LWX VB Demo** (`games/vb-demo/`, VUEngine ves-v0.6.0, `npm run make-vb-demo`
+  → `freeware/lwx-vb-demo.vb`). Movable box with real stereoscopic A/B depth; runs on mednafen_vb.
+  (V810 toolchain + VUEngine extracted from the VUEngine Studio installer with 7-Zip, no IDE.)
 - **Atari 2600 — LWX Beam Dodger** (`games/atari-dodger/game.bas`, batari Basic 1.8 + dasm,
   `npm run make-atari-dodger` → `freeware/lwx-atari-dodger.a26`). 4K cart. ⚠ Built &
   structurally valid, but **not yet renderable** — Atari's only libretro core is Stella,

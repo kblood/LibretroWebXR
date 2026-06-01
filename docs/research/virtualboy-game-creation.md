@@ -10,6 +10,121 @@ Goal: author a small CC0/MIT stereoscopic Virtual Boy game shippable as test con
 
 ---
 
+## ✅ DONE — ACTUAL verified non-interactive build (2026-06-02)
+
+We shipped **LWX VB Demo** (`games/vb-demo/`, `public/roms/freeware/lwx-vb-demo.vb`,
+built by `scripts/make-vb-demo.mjs`) — a movable box with stereoscopic A/B depth.
+**Verified rendering** in `mednafen_vb` inside LibretroWebXR (red box + "LWX VB DEMO"
+title on the in-world CRT). The recipe below is the real, working one — it supersedes
+the speculative "install Studio interactively once" guidance further down.
+
+### Key insight: the whole toolchain ships *inside* the VUEngine Studio installer
+
+The VUEngine Studio Setup `.exe` is an **NSIS installer** — you can extract it with
+7-Zip and **never run the Electron IDE**. Inside it is everything needed to build from
+the command line:
+- **V810 GCC 4.7.4** (Windows .exe binaries: `v810-gcc`, `v810-as`, `v810-objcopy`, …)
+- **VUEngine-Core** engine (MIT) + the bundled **plugins**
+- A **full MSYS2** (`make`, `bash`, `sed`, `awk`, coreutils) — no external make/sh needed
+  (unlike the SNES build, this toolchain is fully self-contained)
+
+### Step 1 — Download + extract (one time, non-interactive)
+
+```bash
+# 354 MB NSIS installer (v0.6.0; URL verified 2026-06-02)
+curl -L -o vuestudio-setup.exe \
+  https://github.com/VUEngine/VUEngine-Studio/releases/download/v0.6.0/VUEngine-Studio-0-6-0-Setup.exe
+
+# Unwrap NSIS -> $PLUGINSDIR/app-64.7z -> the real app tree
+"C:/Program Files/7-Zip/7z.exe" x -y -oTMP        vuestudio-setup.exe
+"C:/Program Files/7-Zip/7z.exe" x -y -oC:/vuengine/app  'TMP/$PLUGINSDIR/app-64.7z'
+```
+
+This yields `C:\vuengine\app\resources\app\` containing:
+- `binaries\vuengine-studio-tools\win\gcc\` — V810 GCC 4.7.4 (bin + libexec)
+- `binaries\vuengine-studio-tools\win\msys\usr\bin\` — make/bash/sed/awk
+- `vuengine\core\` — VUEngine-Core (MIT) with `lib\compiler\make\makefile-game`
+- `vuengine\plugins\` — bundled plugins
+
+(`linux/` and `web/` toolchains are also present — pick `win/` on Windows.)
+
+### Step 2 — Get a template that MATCHES the bundled Core version (critical gotcha)
+
+The latest `VUEngine-Barebone` (master) tracks a *newer* Core than v0.6.0 and fails with
+`fatal error: SoundUnit.h / SRAM.h / DisplayUnit.h: No such file or directory`. **Use the
+Barebone tag that matches the Studio release:**
+
+```bash
+git clone https://github.com/VUEngine/VUEngine-Barebone barebone
+cd barebone && git checkout ves-v0.6.0     # matches VUEngine Studio v0.6.0
+```
+
+Copy `assets config headers lib source config.make LICENSE` into the game dir
+(`games/vb-demo/`). The Barebone config (`config.make`, `config/`) and the linker scripts
+(`lib/compiler/linker/vb_<mode>.ld`) are the frozen boilerplate — leave them alone.
+
+### Step 3 — Author only game logic
+
+Edit only `source/States/MyGameState/MyGameState.{c,h}` and one line of `source/Game.c`.
+Useful v0.6.0 API:
+- Per-frame input: `override void processUserInput(const UserInput* userInput)` on the
+  GameState (auto-called when any key is active; `KeypadManager::enable()` in `enter()`).
+  Keys: `K_LU/K_LD/K_LL/K_LR` (left D-pad), `K_A`, `K_B`, … (see `KeypadManager.h`).
+  `userInput->pressedKey | userInput->holdKey`.
+- Text: `Printer::text("...", colX, rowY, "VirtualBoyExt")`, `Printer::clear()`. Visible
+  field is 48×28 cells (384×224 px).
+- **Stereo depth (the whole point):** `Printer::setWorldCoordinates(x, y, z, parallax)` —
+  the `parallax` (int8) is the left/right-eye horizontal offset = depth. Cheapest way to
+  get real VB stereoscopy without authoring a CharSet/Texture/Actor asset pipeline.
+- To show the demo immediately, return `MyGameState::getInstance()` from `game()` instead
+  of the `PrecautionScreenState` splash chain (otherwise you boot into the "IMPORTANT —
+  read precaution booklet" splash and must press buttons to reach the game).
+
+### Step 4 — Build command (exactly what the IDE's build service runs)
+
+The IDE's build service constructs this; we replicate it via the bundled bash. PATH must
+include `gcc/bin`, `gcc/libexec/gcc/v810/4.7.4`, and `msys/usr/bin`:
+
+```bash
+BASH=C:/vuengine/app/resources/app/binaries/vuengine-studio-tools/win/msys/usr/bin/bash.exe
+A=/c/vuengine/app/resources/app
+"$BASH" --login -c "
+  cd /c/.../games/vb-demo &&
+  export PATH=$A/binaries/vuengine-studio-tools/win/gcc/bin:\
+$A/binaries/vuengine-studio-tools/win/gcc/libexec/gcc/v810/4.7.4:\
+$A/binaries/vuengine-studio-tools/win/msys/usr/bin:\$PATH \
+    LC_ALL=C BUILD_ALL=0 MAKE_JOBS=4 PREPROCESSING_WAIT_FOR_LOCK_DELAY_FACTOR=0.0 \
+    DUMP_ELF=0 PRINT_PEDANTIC_WARNINGS=0 &&
+  make all -e TYPE=release PAD_ROM=1 \
+    ENGINE_FOLDER=$A/vuengine/core \
+    PLUGINS_FOLDER=$A/vuengine/plugins \
+    USER_PLUGINS_FOLDER=$A/vuengine/plugins \
+    -f $A/vuengine/core/lib/compiler/make/makefile-game
+"
+```
+
+Output: `build/output.vb` (512 KB, **already power-of-two** — mednafen_vb accepts it) and,
+with `PAD_ROM=1`, also `build/output_pad.vb` (2 MB). We ship the 512 KB `output.vb`.
+First (clean) build ≈ 6–7 min; incremental ≈ 15–20 s. `node scripts/make-vb-demo.mjs`
+wraps all of this and discovers the toolchain via `$VUENGINE_HOME` →
+`C:\vuengine\app\resources\app`.
+
+### Gotchas that actually bit us
+
+1. **Template/Core version mismatch** → missing `SoundUnit.h`/`SRAM.h`/`DisplayUnit.h`.
+   Fix: `git checkout ves-v0.6.0` on Barebone. (General rule: match the Barebone tag to
+   the Studio release you extracted.)
+2. **No path may contain a space** — the build service hard-errors on spaces in the
+   project, engine, or plugins path. `C:\vuengine\…` and the repo path are fine.
+3. **Booting into the splash screen** looks like "it only shows a precaution notice" —
+   that's the default first state; return `MyGameState` from `game()` to skip it.
+4. **Self-contained make/bash** — do NOT reuse Git-for-Windows `sh` here (as the SNES
+   build does); the bundled MSYS2 is required for VUEngine's preprocessor (`processSourceFile.sh`, awk).
+5. **`mednafen_vb` is red/black** — a working ROM shows red imagery on black; a fully
+   black CRT (header still says "running") means it booted but rendered nothing.
+
+---
+
 ## TL;DR Verdict
 
 Authoring a small Virtual Boy game is **feasible and the recommended path** — but use

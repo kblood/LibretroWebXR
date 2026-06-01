@@ -31,6 +31,12 @@
     { "file": "freeware/lwx-snes-demo.sfc", "system": "snes", "core": "snes9x", "title": "LWX SNES Demo", "color": "#3a2a6a",
       "license": "CC0", "credits": "LibretroWebXR (game in games/snes-demo, built with PVSnesLib 4.5.0; see scripts/make-snes-demo.mjs). LoROM 256K." },
 
+    { "file": "freeware/lwx-gba-paint.gba", "system": "gba", "core": "mgba", "title": "LWX Paint (GBA)", "color": "#3a5a8a",
+      "license": "CC0", "credits": "LibretroWebXR (game in games/gba-paint, built with devkitARM + libtonc Mode 3; see scripts/make-gba-paint.mjs)" },
+
+    { "file": "freeware/lwx-vb-demo.vb", "system": "vb", "core": "mednafen_vb", "title": "LWX VB Demo", "color": "#aa1a1a",
+      "license": "CC0", "credits": "LibretroWebXR (game in games/vb-demo, built with VUEngine ves-v0.6.0; see scripts/make-vb-demo.mjs). Move a box with the D-pad; A/B change stereo depth." },
+
     { "file": "freeware/super-tilt-bro.nes", "system": "nes", "core": "nestopia", "title": "Super Tilt Bro.", "color": "#3a6a8a",
       "license": "WTFPL (effectively public domain)", "credits": "Sylvain Gadrat",
       "download": "https://github.com/retrobrews/nes-games/raw/master/super-tilt-bro.nes" },

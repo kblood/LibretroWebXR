@@ -50,6 +50,85 @@ possible targets for AI code generation.
     `graphics/`, Makefile; build with `make`).
   - Alt template: <https://github.com/nytpu/tonc_template>
 
+### Option A′ — VERIFIED non-interactive install (what we actually did, 2026-06)
+
+The GUI installer in Option A is unattended-hostile. devkitPro's pacman packages
+are just plain `.pkg.tar.zst` / `.pkg.tar.xz` archives, so you can pull them with
+`curl` and extract with 7-Zip / `tar` — **no installer, no MSYS2, no PATH changes.**
+This is the path `scripts/make-gba-paint.mjs` relies on. (Verified building
+`lwx-gba-paint.gba` and booting it on the libretro **mGBA** core.)
+
+**Gotchas that cost time (read first):**
+- `pkg.devkitpro.org`'s *HTML directory listing* is behind Cloudflare and returns
+  **403** to scripted clients — but **direct file URLs return 200** with a normal
+  browser `User-Agent`. So you cannot browse, but you *can* download if you know the
+  filename. Get the filenames from the **pacman database**, not the web page.
+- The package server layout is:
+  - any-arch libs + the pacman DBs live at base `https://pkg.devkitpro.org/packages/`
+    (DB: `dkp-libs.db.tar.gz`).
+  - Windows host tools live under `…/packages/windows/x86_64/` and are tagged
+    arch **`x86_64`** (not `windows`); DB: `windows/dkp-windows.db.tar.gz`.
+- `devkitARM-r67.1-…-any.pkg.tar.zst` is a tiny **meta-package** (4.8 KB). The real
+  compiler is three separate packages it depends on:
+  `devkitarm-gcc`, `devkitarm-binutils` (both `x86_64`), and `devkitarm-newlib` (`any`).
+  You also need `devkitarm-crtls`, `devkitarm-rules`, `dkp-toolchain-vars`, `libtonc`,
+  and `gba-tools` (for `gbafix`).
+- Every package extracts to an internal `opt/devkitpro/…` prefix; drop the contents
+  of that prefix into `C:\devkitPro\` so you get `C:\devkitPro\devkitARM\…`,
+  `C:\devkitPro\libtonc\…`, `C:\devkitPro\tools\bin\gbafix.exe`.
+- libtonc's `RGB15()` is an **inline function**, so it can't initialise a `static
+  const COLOR[]` array (`error: initializer element is not constant`). For a
+  compile-time palette use a macro: `#define CRGB15(r,g,b) ((COLOR)((r)|((g)<<5)|((b)<<10)))`.
+
+**Find current filenames (versions drift — always re-read the DB):**
+```bash
+UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
+base="https://pkg.devkitpro.org/packages"
+curl -sSL -A "$UA" -o libs.db.tar.gz "$base/dkp-libs.db.tar.gz"
+curl -sSL -A "$UA" -o win.db.tar.gz  "$base/windows/dkp-windows.db.tar.gz"
+mkdir libs win && tar -xzf libs.db.tar.gz -C libs && tar -xzf win.db.tar.gz -C win
+# each <pkg>-<ver>/desc has a %FILENAME% line:
+grep -A1 '%FILENAME%' win/devkitarm-gcc*/desc | tail -1   # etc.
+```
+
+**Exact files we used (June 2026 — substitute current versions from the DB):**
+- `…/packages/windows/x86_64/devkitarm-gcc-15.2.0-7-x86_64.pkg.tar.zst`
+- `…/packages/windows/x86_64/devkitarm-binutils-2.45.1-2-x86_64.pkg.tar.zst`
+- `…/packages/windows/x86_64/gba-tools-1.2.0-2-x86_64.pkg.tar.xz`  (provides `gbafix`)
+- `…/packages/devkitarm-newlib-4.6.0.20260123-5-any.pkg.tar.zst`
+- `…/packages/devkitarm-crtls-1.2.6-1-any.pkg.tar.zst`
+- `…/packages/devkitarm-rules-1.6.0-4-any.pkg.tar.zst`
+- `…/packages/dkp-toolchain-vars-1.0.5-1-any.pkg.tar.zst`
+- `…/packages/libtonc-1.4.5-1-any.pkg.tar.zst`
+- `…/packages/libgba-0.5.4-1-any.pkg.tar.zst`  (optional; libtonc is what we use)
+
+**Download + extract (curl + 7-Zip; `.zst` and `.xz` both need a two-step un-tar):**
+```bash
+SZ="C:\\Program Files\\7-Zip\\7z.exe"
+# for each downloaded <pkg>.pkg.tar.zst (or .xz):
+"$SZ" x -y "$pkg" -o.            # .zst/.xz -> .tar
+"$SZ" x -y "${pkg%.zst}" -ostage # .tar    -> stage/opt/devkitpro/...
+cp -rf stage/opt/devkitpro/* /c/devkitPro/
+```
+
+**Build (no Makefile needed — direct gcc, mirrors `scripts/make-gba-paint.mjs`):**
+```bash
+export DEVKITPRO=/c/devkitPro DEVKITARM=/c/devkitPro/devkitARM
+GCC=/c/devkitPro/devkitARM/bin/arm-none-eabi-gcc.exe
+ARCH="-mthumb -mthumb-interwork"
+$GCC $ARCH -O2 -mcpu=arm7tdmi -mtune=arm7tdmi -fomit-frame-pointer -Wall \
+     -I/c/devkitPro/libtonc/include -c main.c -o main.o
+$GCC main.o $ARCH -specs=gba.specs -L/c/devkitPro/libtonc/lib -ltonc -o game.elf
+/c/devkitPro/devkitARM/bin/arm-none-eabi-objcopy.exe -O binary game.elf game.gba
+/c/devkitPro/tools/bin/gbafix.exe game.gba -tLWXPAINT -cLWXP -m00   # header + checksum
+```
+`-specs=gba.specs` pulls in `gba_crt0.o` + the GBA linker script automatically, so
+you never hand-roll link flags (Failure mode #2). Output here was a 2676-byte ROM
+that boots and renders on the libretro mGBA core.
+
+Verified versions: `arm-none-eabi-gcc (devkitARM) 15.2.0`, `gbafix v1.05`,
+`libtonc 1.4.5`.
+
 ### Option B (modern C++): Butano
 
 - **What:** Butano (<https://github.com/GValiente/butano>) is a high-level **C++17** GBA

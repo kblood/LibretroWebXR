@@ -31,6 +31,8 @@ npm run make-sms-arcade     # -> freeware/lwx-sms-arcade.sms + lwx-gg-arcade.gg
 npm run make-pce-pong       # -> freeware/lwx-pce-pong.pce     (PCE Pong;     HuC,           games/pce-pong/)
 npm run make-atari-dodger   # -> freeware/lwx-atari-dodger.a26 (Beam Dodger;  batari Basic,  games/atari-dodger/)
 npm run make-snes-demo      # -> freeware/lwx-snes-demo.sfc    (SNES demo;    PVSnesLib,     games/snes-demo/)
+npm run make-gba-paint      # -> freeware/lwx-gba-paint.gba    (GBA paint;    devkitARM+libtonc, games/gba-paint/)
+npm run make-vb-demo        # -> freeware/lwx-vb-demo.vb       (Virtual Boy;  VUEngine,      games/vb-demo/)
 ```
 
 These are ours, CC0/public-domain, and safe to redistribute. The shared
