@@ -82,6 +82,12 @@ LibretroWebXR/
 └── docs/                   ROADMAP, EMUVR_RESEARCH, ROOM_AND_COLLECTIONS, MULTIPLAYER, LICENSING, PROJECT_HISTORY
 ```
 
+## Picking this up
+
+New to the codebase (or a fresh session)? Read **`docs/HANDOFF.md`** first — it
+orients you on state, how to run it, the hard invariants, the architecture map,
+and what's next.
+
 ## License
 
 Frontend code: **MIT** (`LICENSE`). Cores and ROMs are **not** covered by it —
