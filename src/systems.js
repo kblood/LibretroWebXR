@@ -20,15 +20,20 @@
 //                    cores). 'module' = MODULARIZE=1 ES-module factory from the
 //                    libretro buildbot, loaded via dynamic import().
 export const CORES = {
-  // Legacy WebEmu cores (classic-script auto-init)
-  snes9x:            { url: 'cores/snes9x_libretro.js',            exts: ['smc','sfc','swc','fig','bs'], label: 'SNES (snes9x)',               style: 'classic', license: 'Non-commercial' },
-  nestopia:          { url: 'cores/nestopia_libretro.js',          exts: ['nes','fds','unf','unif'],     label: 'NES (nestopia)',              style: 'classic', license: 'GPLv2' },
+  // Legacy WebEmu core (classic-script auto-init). NOTE: classic cores render
+  // black in this loader (they load+map the ROM but never start video — see
+  // docs/research/README.md "Known issue"). Replace with a buildbot MODULARIZE
+  // build and move to the 'module' group when one becomes available. stella2014
+  // is the last classic core because the emscripten buildbot ships no Stella
+  // build, so Atari 2600 currently cannot render.
   stella2014:        { url: 'cores/stella2014_libretro.js',        exts: ['a26','bin'],                  label: 'Atari 2600 (stella)',         style: 'classic', license: 'GPLv2' },
-  genesis_plus_gx:   { url: 'cores/genesis_plus_gx_libretro.js',   exts: ['md','gen','smd'],             label: 'Genesis (genesis_plus_gx)',   style: 'classic', license: 'Non-commercial' },
-  mgba:              { url: 'cores/mgba_libretro.js',              exts: ['gba'],                        label: 'GBA (mGBA)',                  style: 'classic', license: 'MPL-2.0' },
-  mednafen_vb:       { url: 'cores/mednafen_vb_libretro.js',       exts: ['vb','vboy'],                  label: 'Virtual Boy (mednafen)',      style: 'classic', license: 'GPLv2' },
 
   // Modern libretro buildbot cores (ES-module factory)
+  snes9x:            { url: 'cores/snes9x_libretro.js',            exts: ['smc','sfc','swc','fig','bs'], label: 'SNES (snes9x)',               style: 'module', license: 'Non-commercial' },
+  nestopia:          { url: 'cores/nestopia_libretro.js',          exts: ['nes','fds','unf','unif'],     label: 'NES (nestopia)',              style: 'module', license: 'GPLv2' },
+  genesis_plus_gx:   { url: 'cores/genesis_plus_gx_libretro.js',   exts: ['md','gen','smd'],             label: 'Genesis (genesis_plus_gx)',   style: 'module', license: 'Non-commercial' },
+  mgba:              { url: 'cores/mgba_libretro.js',              exts: ['gba'],                        label: 'GBA (mGBA)',                  style: 'module', license: 'MPL-2.0' },
+  mednafen_vb:       { url: 'cores/mednafen_vb_libretro.js',       exts: ['vb','vboy'],                  label: 'Virtual Boy (mednafen)',      style: 'module', license: 'GPLv2' },
   picodrive:         { url: 'cores/picodrive_libretro.js',         exts: ['sms','gg','md','gen','smd','32x','cue','iso'], label: 'Sega multi (picodrive)', style: 'module', license: 'Non-commercial' },
   gearsystem:        { url: 'cores/gearsystem_libretro.js',        exts: ['sms','gg','sg'],              label: 'SMS/GG (gearsystem)',         style: 'module', license: 'GPLv3' },
   fceumm:            { url: 'cores/fceumm_libretro.js',            exts: [],                             label: 'NES (fceumm)',                style: 'module', license: 'GPLv2' },
