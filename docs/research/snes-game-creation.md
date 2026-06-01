@@ -204,6 +204,71 @@ wiki) sources — then we know the provenance and can relicense our additions CC
 
 ---
 
+## VERIFIED BUILD (2026-06-01) — what actually worked
+
+We built `games/snes-demo/` (a CC0 D-pad sprite-mover) to a 256 KB LoROM
+`lwx-snes-demo.sfc` with **PVSnesLib 4.5.0**. Reproduce with
+`node scripts/make-snes-demo.mjs`. Exact recipe + gotchas below.
+
+### Toolchain install (non-interactive, no GUI)
+1. **PVSnesLib 4.5.0** (bundles the whole 65816 toolchain: `816-tcc`,
+   `wla-65816`, `wlalink`, `gfx4snes`, `snestools`, etc.):
+   - Download: <https://github.com/alekmaul/pvsneslib/releases/download/4.5.0/pvsneslib_450_64b_windows.zip>
+     (≈10 MB; the release zip is named `pvsneslib_450_64b_windows.zip`, NOT the
+     `pvsneslib_4xx_64b_windows_release.zip` pattern the older wiki implies).
+   - Extract so that `C:\pvsneslib\devkitsnes\snes_rules` exists (the zip contains
+     a top-level `pvsneslib/` dir — move its contents up one level).
+2. **GNU make** — we used `mingw32-make.exe` (GNU Make 4.4.1) from an existing
+   MinGW-w64 install at `C:\ProgramData\mingw64\mingw64\bin\mingw32-make.exe`.
+   Any GNU make works (MSYS2 `pacman -S --noconfirm make`, a standalone
+   mingw32-make, etc.). **No MSYS2 GUI installer is needed.**
+3. **Unix coreutils** — PVSnesLib's `snes_rules` recipes shell out to
+   `sh`/`sed`/`ls`/`rm`/`echo`/`find` and use `for` loops + pipes, so make needs
+   a real Unix shell, not cmd.exe. We used the coreutils that ship with **Git for
+   Windows** at `C:\Program Files\Git\usr\bin` (already present — no install). The
+   build prepends that dir to `PATH` and passes `SHELL=...\Git\usr\bin\sh.exe`.
+
+### The exact working build invocation
+```
+set PVSNESLIB_HOME=C:/pvsneslib            :: forward slashes, drive letter kept
+set PATH=C:\Program Files\Git\usr\bin;%PATH%
+mingw32-make SHELL="C:/Program Files/Git/usr/bin/sh.exe" OS=
+```
+`scripts/make-snes-demo.mjs` does all of this from Node (discovers the three
+paths, sets the env, runs `clean` then the build, copies the `.sfc`, cleans
+intermediates).
+
+### Gotchas (these cost real time — read before reusing)
+- **`OS=` is mandatory.** `snes_rules` has an `ifeq ($(OS),Windows_NT)` branch
+  (lines ~49-53) that munges the library path into `C::\$(echo ... | sed ...)`,
+  which a real Unix shell then chokes on (`syntax error near unexpected token '('`).
+  Forcing make's `OS` variable empty selects the correct Unix path branch.
+- **`SHELL=` must point at a Unix sh.** Without it, native make uses cmd.exe and
+  every recipe (`for i in ...; do echo ... >> linkfile; done`, `sed -i`, `rm -f`)
+  fails.
+- **`PVSNESLIB_HOME` path style:** `snes_rules` *errors out* if the value contains
+  a backslash ("must be in Unix style"). But native (non-MSYS) make's `include`
+  must `fopen` the path, and a `/c/...` MSYS mount does NOT exist under a plain
+  Node/cmd process. The value that satisfies both is **`C:/pvsneslib`** —
+  forward slashes (no backslash → guard passes) with the drive letter kept
+  (native-openable). `/c/pvsneslib` only works from inside an MSYS/git-bash shell.
+- **PVSnesLib ships prebuilt `.sfc`/`.obj` in every `snes-examples/` folder**, so a
+  bare `make` says "Nothing to be done". Run `make clean` first (the script does)
+  to prove a real rebuild.
+- **`tilfont`/`palfont` are NOT library symbols** — `hello_world`/`controller`
+  define them in their own `data.asm` via `.incbin` of the converted font
+  `.pic`/`.pal`. Our `data.asm` does the same (font as the BG tile set) and also
+  `.include`s the gfx4snes-generated `sprites_data.as` for the player sprite.
+- **gfx4snes flags:** font tiles use `-s 8 -o 16 -u 16 -p -e 0 -t bmp -i`; a
+  16×16 sprite uses `-s 16 -o 16 -u 16 -t bmp -i`. The `.c` must `#include` the
+  generated `sprites.inc` (extern decls) — so the Makefile's `bitmaps` target must
+  run before compilation (it does, as an `all:` prerequisite).
+- **Output:** 256 KB (8×32 KB) LoROM, internal header at `0x7FC0`
+  (title `LWX SNES DEMO`, mapmode `0x20`, checksum⊕complement = `0xFFFF`). snes9x
+  accepts `.sfc` directly.
+
+---
+
 ## Key URLs
 - PVSnesLib repo (MIT): https://github.com/alekmaul/pvsneslib
 - PVSnesLib install wiki: https://github.com/alekmaul/pvsneslib/wiki/Installation

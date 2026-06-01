@@ -36,6 +36,30 @@ the brutal race-the-beam timing that makes raw 2600 asm so hard. You write `play
    ```
 3. bB bundles its own assembler step (it shells out to dasm internally; dasm is included).
 
+> **VERIFIED 2026-06-01 (what actually worked, headless):**
+> - The **v1.9 release ships a WASM build ONLY** (no native Windows zip). For a
+>   headless native CLI build use the **last native Windows release, v1.8**:
+>   `bB-1.8-win-x64.zip` →
+>   <https://github.com/batari-Basic/batari-Basic/releases/download/v1.8/bB-1.8-win-x64.zip>
+>   (the v1.8 zip nests everything under a `bB\` folder — extract, then move that
+>   folder to `C:\Atari2600\bB` so `C:\Atari2600\bB\2600bas.bat` exists).
+> - **DO NOT run `install_win.bat`** — it `pause`s (interactive) and only does
+>   `setx`. Instead set the env vars *inside the build invocation*: `bB=C:\Atari2600\bB`
+>   and prepend `C:\Atari2600\bB` to `PATH` (so `preprocess`, `2600basic.exe`,
+>   `postprocess`, `dasm`, `bbfilter`, `relocateBB`, `optimize` resolve).
+> - **CRITICAL GOTCHA — bundled dasm crashes:** the `dasm.exe` shipped inside
+>   bB 1.8 is a **2.20.15-SNAPSHOT** that **segfaults on Windows 11** (exit code
+>   0xC0000005). `2600bas.bat` pipes dasm's output through `bbfilter`, so the
+>   crash is *silent*: the compile prints "compilation complete" yet
+>   `game.bas.bin` is **0 bytes**. Even bB's own bundled samples fail this way.
+>   FIX: replace it with the **stable dasm 2.20.14.1** win-x64 release:
+>   <https://github.com/dasm-assembler/dasm/releases/download/2.20.14.1/dasm-2.20.14.1-win-x64.zip>
+>   (stable `dasm.exe` is 227,662 bytes). Copy it over `C:\Atari2600\bB\dasm.exe`
+>   and rebuilds succeed (4096-byte ROM). `scripts/make-atari-dodger.mjs` does
+>   this swap automatically.
+> - Symptom-to-watch: if you see dasm errors like `Unknown Mnemonic 'bne MachineIs2600'`
+>   for *valid* 6502 opcodes, that's the SNAPSHOT dasm having choked — swap it.
+
 ### Build a ROM (CLI / headless)
 ```
 2600bas.bat mygame.bas
@@ -162,8 +186,48 @@ copy beamdodger.bas.bin C:\LLM\LibretroWebXR\games\beamdodger.a26
 ```
 Load `beamdodger.a26` in LibretroWebXR's stella2014 core. Done.
 
+> **ACTUAL shipped build (verified 2026-06-01):** the game lives in
+> `games/atari-dodger/game.bas` (CC0, ours) and is built reproducibly by
+> `node scripts/make-atari-dodger.mjs`, which:
+> 1. ensures the stable dasm is in place (see the dasm gotcha above),
+> 2. copies `game.bas` into a scratch temp dir,
+> 3. runs `cmd /c C:\Atari2600\bB\2600bas.bat game.bas` with `bB` + PATH set,
+> 4. copies the produced `game.bas.bin` → `public/roms/freeware/lwx-atari-dodger.a26`.
+>
+> Result: a standard **4096-byte (4K) ROM**, "2568 bytes of ROM space left".
+> Manifest entry: `system:"atari2600"`, `core:"stella2014"`. Controls: D-pad
+> left/right move the ship; survive the falling beam.
+
 > Pure-asm alternative (only if needed):
 > `dasm game.asm -f3 -ogame.bin -Iinclude\` then rename `game.bin` → `game.a26`.
+
+### Black-screen investigation (2026-06-01)
+A report said the in-world CRT renders BLACK for the dodger on stella2014. I
+investigated and found:
+- **The game itself is fine.** `game.bas` compiles to textbook bB output: an
+  infinite `main` loop ending in `drawscreen`, `player0`/`player1` sprites with
+  valid graphics at on-screen Y coords (ship y=84, beam y cycling 10..80), the
+  framed `playfield`, the score kernel enabled, and `COLUBK`/`COLUPF`/`COLUP0`/
+  `COLUP1` written every frame. Reset vector = $F000, 4K, builds clean.
+- **The black CRT reproduces for EVERY core in the headless harness**, not just
+  Atari: NES (nestopia/fceumm), SNES (snes9x), Genesis, *and a hand-written raw
+  6502 asm ROM that fills the whole screen solid red*, all show an identical
+  black CRT through every capture path tried (puppeteer `page.screenshot`
+  headless **and** headed, three.js canvas `toDataURL`, `drawImage`+`getImageData`
+  on the emu `<canvas>`, and WebGL `texImage2D` interception). Prior-session
+  `tmp/verify-snes.png` / `tmp/verify-atari.png` are black too.
+  → The libretro emscripten cores render via WebGL; **headless Chrome here has no
+  real GPU (SwiftShader), so the emulator frame never composites into a
+  screenshot and the canvas back-buffer reads as black/uninitialised for all
+  cores.** This is an environment/capture limitation, not a per-game bug.
+  Verifying emulator *video* in this repo requires a real GPU browser session.
+- **Defensive hardening applied anyway** (the report explicitly flagged "black
+  background"): set the sky to a clearly-visible dark blue (`COLUBK = $82` was
+  `$00`), brightened the playfield rails (`COLUPF = $0E` was `$0C`), and added
+  `set tv ntsc` / `set romsize 4k` so the standard kernel emits a clean 262-line
+  NTSC frame every libretro stella build accepts. Rebuilt: 4096 bytes, builds
+  clean. On a real GPU the play area now reads as a blue field framed by grey
+  rails with the ship + falling beam + score, never pure black.
 
 ### Minimal bB sanity snippet (compiles, moves a sprite)
 ```basic

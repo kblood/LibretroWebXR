@@ -55,15 +55,34 @@ Direct Windows download:
 ```
 https://github.com/pce-devel/huc/releases/download/current/huc-2026-05-28-Win64.zip
 ```
-Install (headless, scriptable — PowerShell):
+
+> **VERIFIED 2026-06-01 — this URL works and was used to build `games/pce-pong`.**
+> Downloaded 9,434,035 bytes; installed `huc.exe v4.10.533.ge9db22d`.
+
+Install (headless, scriptable — PowerShell). **Two gotchas confirmed in
+practice — read these or the build fails:**
+
 ```powershell
 $zip = "$env:TEMP\huc-win64.zip"
 Invoke-WebRequest -Uri "https://github.com/pce-devel/huc/releases/download/current/huc-2026-05-28-Win64.zip" -OutFile $zip
 Expand-Archive $zip -DestinationPath "C:\tools\huc" -Force
-# zip contains bin\ (huc.exe, pceas.exe, isolink/...) plus include\ libraries.
+# GOTCHA 1 — the zip nests EVERYTHING under an inner huc\ folder, so a plain
+# Expand-Archive gives you C:\tools\huc\huc\bin\... (double "huc"). Move the
+# inner contents up one level so huc.exe lands at C:\tools\huc\bin\huc.exe:
+Get-ChildItem "C:\tools\huc\huc" -Force | Move-Item -Destination "C:\tools\huc" -Force
+Remove-Item "C:\tools\huc\huc" -Recurse -Force
+
+# GOTCHA 2 — the C library is in include\HUC (NOT include\pce; this build has
+# include\huc and include\hucc). huc.h is at C:\tools\huc\include\huc\huc.h.
+$env:PCE_INCLUDE = "C:\tools\huc\include\huc"   # NOT include\pce
+# GOTCHA 3 — huc.exe shells out to "pceas.exe" by bare name, so bin\ MUST be on
+# PATH (or set $env:PCE_PCEAS to the full pceas.exe path). Without this, huc
+# compiles C->asm fine ("No errors") but then dies with
+# "'pceas.exe' is not recognized" and produces NO .pce.
 $env:PATH += ";C:\tools\huc\bin"
-$env:PCE_INCLUDE = "C:\tools\huc\include\pce"   # huc finds its libs via include path
 ```
+The bundled `bin\` has: huc.exe, hucc.exe, pceas.exe, fujias.exe, nesasm.exe,
+isolink.exe, pce2png.exe, plus mml/mod tools.
 (If a future "current" build has a newer date, list assets with
 `gh release view current --repo pce-devel/huc --json assets`.)
 
@@ -71,14 +90,23 @@ No GUI, no Cygwin/MinGW needed when using the prebuilt Win64 zip. Building the
 toolchain from source on Windows is possible via Cygwin but unnecessary for us.
 
 ### Build a .pce from C
-HuC produces the `.pce` directly (it writes the 8 KB HuCard header and bank
-layout for you). Canonical command:
+HuC produces the `.pce` directly (it writes the HuCard header and bank layout
+for you). Canonical command (with the two env vars above set):
 ```
 huc -O2 game.c
 ```
 → emits `game.pce` (plus `game.s`, `.sym`, `.lst`). That's it — runs in
 mednafen_pce_fast. Common extra flags: `-msmall` (smaller/faster, no recursion),
 `-S` to keep asm, `-cd`/`-scd` for CD targets (not needed for HuCard).
+
+**VERIFIED build (2026-06-01):** `huc -O2 main.c` on `games/pce-pong/main.c`
+emitted a valid `lwx-pce-pong.pce` of **65,536 bytes** (8 × 8 KB, remainder 0 —
+a clean HuCard image; reset vector area at offset 0x10 holds real HuC6280
+startup code). Reproduced deterministically by `scripts/make-pce-pong.mjs`, which
+auto-discovers `C:\tools\huc`, sets `PCE_INCLUDE=...\include\huc`, puts `bin\` on
+PATH, runs huc, copies the `.pce` to `public/roms/freeware/`, and deletes the
+`main.s/.sym/.lst/.pce` intermediates. Even a trivial hello-world `.pce` came out
+32,768 bytes — HuC pads to a multiple of 8 KB, so don't expect a tiny ROM.
 
 ### License
 HuC is a mixed bag, but **does not affect our game**: PCEAS/MagicKit asm is

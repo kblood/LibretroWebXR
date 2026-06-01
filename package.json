@@ -13,6 +13,9 @@
     "make-gb-snake": "node scripts/make-gb-snake.mjs",
     "make-genesis-demo": "node scripts/make-genesis-demo.mjs",
     "make-sms-arcade": "node scripts/make-sms-arcade.mjs",
+    "make-pce-pong": "node scripts/make-pce-pong.mjs",
+    "make-atari-dodger": "node scripts/make-atari-dodger.mjs",
+    "make-snes-demo": "node scripts/make-snes-demo.mjs",
     "test": "node scripts/test-collection.mjs",
     "debug": "node scripts/debug.js"
   },

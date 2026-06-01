@@ -28,6 +28,9 @@ npm run make-gb-snake       # -> freeware/lwx-gb-snake.gb      (GB Snake;     GB
 npm run make-genesis-demo   # -> freeware/lwx-genesis-demo.md  (Genesis demo; SGDK 2.11,     games/genesis-demo/)
 npm run make-sms-arcade     # -> freeware/lwx-sms-arcade.sms + lwx-gg-arcade.gg
                             #                                 (SMS+GG Catch;  devkitSMS+SDCC, games/sms-arcade/)
+npm run make-pce-pong       # -> freeware/lwx-pce-pong.pce     (PCE Pong;     HuC,           games/pce-pong/)
+npm run make-atari-dodger   # -> freeware/lwx-atari-dodger.a26 (Beam Dodger;  batari Basic,  games/atari-dodger/)
+npm run make-snes-demo      # -> freeware/lwx-snes-demo.sfc    (SNES demo;    PVSnesLib,     games/snes-demo/)
 ```
 
 These are ours, CC0/public-domain, and safe to redistribute. The shared

@@ -86,10 +86,40 @@ booting in the actual app (headless-Chrome screenshot of the in-world CRT):
 - **SMS + Game Gear — LWX Catch** (`games/sms-arcade/main.c`, devkitSMS + SDCC,
   `npm run make-sms-arcade` → `freeware/lwx-sms-arcade.sms` + `lwx-gg-arcade.gg`).
   One source, GG built with `-DTARGET_GG`. Catch falling fruit. Manifest pins **gearsystem**.
+- **PC Engine — LWX Pong** (`games/pce-pong/main.c`, HuC, `npm run make-pce-pong`
+  → `freeware/lwx-pce-pong.pce`). Two-joypad Pong on the char grid; runs on mednafen_pce_fast.
+- **Atari 2600 — LWX Beam Dodger** (`games/atari-dodger/game.bas`, batari Basic 1.8 + dasm,
+  `npm run make-atari-dodger` → `freeware/lwx-atari-dodger.a26`). 4K cart. ⚠ Built &
+  structurally valid, but **not yet renderable** — see "Known issue" below. Held out of the manifest.
+- **SNES — LWX SNES Demo** (`games/snes-demo/snesdemo.c`, PVSnesLib 4.5.0, `npm run make-snes-demo`
+  → `freeware/lwx-snes-demo.sfc`). LoROM 256K sprite-mover. ⚠ Built & structurally valid, but
+  **not yet renderable** — see "Known issue" below. Held out of the manifest.
+
+## Known issue — legacy "classic" cores render black (blocks SNES, Atari, GBA, VB)
+
+Runtime verification (booting each game in-app and screenshotting the CRT) revealed
+that **every libretro core marked `style: 'classic'` in `src/systems.js` produces a
+black screen**: the core loads and maps the ROM but never starts its video loop
+(snes9x logs `Map_LoROMMap` then nothing; 0 WebGL draw calls). Every working core is
+`style: 'module'`. The `classic` cores (snes9x, stella2014, mgba, mednafen_vb,
+nestopia, genesis_plus_gx) are the old ~210 KB WebEmu auto-init builds; the `module`
+cores (gambatte, fceumm, picodrive, gearsystem, mednafen_pce_fast, vice) are modern
+~261 KB buildbot MODULARIZE (`export default` + `import.meta`) builds.
+
+This also explains the earlier "core pin" gotchas — NES rendered on fceumm not
+nestopia, Genesis on picodrive not genesis_plus_gx — those weren't ROM quirks, they
+were the same classic-core bug, masked by falling back to a module core.
+
+**Fix:** replace the 6 classic cores in `public/cores/` with modern buildbot
+MODULARIZE builds and flip their `style` to `'module'`. Systems with ONLY a classic
+core (snes/snes9x, atari2600/stella2014, gba/mgba, vb/mednafen_vb) are unplayable
+until then; SNES + Atari games are built and waiting.
 
 The Commodore BASIC v2 tokenizer/assembler is shared in `scripts/lib/cbm-basic.mjs`.
 Installed toolchains: cc65 `C:\cc65`, GBDK-2020 `C:\gbdk-2020`, SGDK 2.11 `C:\sgdk`,
-SDCC `C:\sdcc` + devkitSMS `C:\devkitSMS`. (GBA/devkitPro still needs its GUI installer.)
+SDCC `C:\sdcc` + devkitSMS `C:\devkitSMS`, HuC `C:\tools\huc`, batari Basic `C:\Atari2600\bB`,
+PVSnesLib 4.5.0 `C:\pvsneslib`. (Virtual Boy/VUEngine Studio and GBA/devkitPro still need
+their GUI installers.)
 
 ## Recommended next wave (build order)
 

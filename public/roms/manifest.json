@@ -25,6 +25,9 @@
     { "file": "freeware/lwx-gg-arcade.gg", "system": "gg", "core": "gearsystem", "title": "LWX Catch (GG)", "color": "#102040",
       "license": "CC0", "credits": "LibretroWebXR (game in games/sms-arcade, built with devkitSMS + SDCC; see scripts/make-sms-arcade.mjs)" },
 
+    { "file": "freeware/lwx-pce-pong.pce", "system": "pce", "core": "mednafen_pce_fast", "title": "LWX Pong (PCE)", "color": "#8a3a1a",
+      "license": "CC0", "credits": "LibretroWebXR (game in games/pce-pong, built with HuC; see scripts/make-pce-pong.mjs)" },
+
     { "file": "freeware/super-tilt-bro.nes", "system": "nes", "core": "nestopia", "title": "Super Tilt Bro.", "color": "#3a6a8a",
       "license": "WTFPL (effectively public domain)", "credits": "Sylvain Gadrat",
       "download": "https://github.com/retrobrews/nes-games/raw/master/super-tilt-bro.nes" },
