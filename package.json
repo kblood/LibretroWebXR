@@ -8,6 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "fetch-cores": "node scripts/fetch-cores.mjs",
+    "make-games": "node scripts/make-c64-demo.mjs && node scripts/make-c64-snake.mjs && node scripts/make-vic20-demo.mjs",
+    "make-nes-pong": "node scripts/make-nes-pong.mjs",
     "test": "node scripts/test-collection.mjs",
     "debug": "node scripts/debug.js"
   },

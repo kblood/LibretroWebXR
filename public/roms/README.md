@@ -12,14 +12,25 @@
 ## How to get test games legally
 
 ### Option A — our own CC0 demos (ship out of the box)
-We generate tiny demo games from source so there's zero licensing doubt:
+We generate tiny demo games from source so there's zero licensing doubt. All
+ship under `freeware/` and are referenced by `manifest.json`:
 
 ```bash
-node scripts/make-c64-demo.mjs      # -> public/roms/freeware/lwx-demo.prg (C64 BASIC, CC0)
+# Zero-install (pure Node — Commodore BASIC v2 tokenized to .prg)
+npm run make-games          # builds all three below
+node scripts/make-c64-demo.mjs    # -> freeware/lwx-demo.prg        (C64 "guess my number")
+node scripts/make-c64-snake.mjs   # -> freeware/lwx-snake.prg       (C64 joystick Snake)
+node scripts/make-vic20-demo.mjs  # -> freeware/lwx-vic20-demo.prg  (VIC-20 demo, load addr $1001)
+
+# Needs the cc65 toolchain (see docs/research/nes-game-creation.md)
+npm run make-nes-pong       # -> freeware/lwx-nes-pong.nes    (NES Pong; source in games/nes-pong/)
 ```
 
-These are ours, CC0/public-domain, and safe to redistribute. More to come for
-other systems (see "Creating custom games" below).
+These are ours, CC0/public-domain, and safe to redistribute. The shared
+Commodore BASIC tokenizer lives in `scripts/lib/cbm-basic.mjs`. The NES game uses
+the cc65 + neslib template-fill workflow (`games/nes-pong/`, boilerplate frozen,
+only `main.c` authored). Per-system research on creating more is in
+`docs/research/` (one file per system + a `README.md` synthesis).
 
 ### Option B — curated redistributable homebrew (download yourself)
 This is the default `manifest.json` starter pack, chosen for **clear** licenses.
