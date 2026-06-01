@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "fetch-cores": "node scripts/fetch-cores.mjs",
+    "test": "node scripts/test-collection.mjs",
     "debug": "node scripts/debug.js"
   },
   "devDependencies": {

@@ -38,8 +38,13 @@ export function createCartridge(meta) {
   label.position.set(0, CART_H * 0.05, CART_D / 2 + 0.0005);
   group.add(label);
 
-  if (meta.boxart) {
-    loadBoxart(meta.boxart).then((img) => {
+  // Try box-art candidates in order (filename → title → tag-stripped, per
+  // ArtResolver), falling through to the next on load failure. Legacy callers
+  // that only set `meta.boxart` still work — it's the single-element list.
+  const boxartList = meta.boxartList?.length ? meta.boxartList
+                   : (meta.boxart ? [meta.boxart] : []);
+  if (boxartList.length) {
+    loadFirstBoxart(boxartList).then((img) => {
       drawBoxartLabel(labelCanvas, img, meta.title);
       labelTex.needsUpdate = true;
     }).catch(() => { /* keep text label */ });
@@ -141,6 +146,14 @@ function loadBoxart(url) {
     img.onerror = () => reject(new Error(`boxart load failed: ${url}`));
     img.src = url;
   });
+}
+
+// Resolve with the first candidate URL that loads; reject only if all fail.
+function loadFirstBoxart(urls) {
+  return urls.reduce(
+    (p, url) => p.catch(() => loadBoxart(url)),
+    Promise.reject(new Error('no boxart candidates')),
+  );
 }
 
 function wrap(ctx, text, x, y, maxW, lineH) {

@@ -40,22 +40,36 @@ Quest-native, shareable-as-data).
 Clean re-home, MIT license, licensing docs, EmuVR research, this roadmap, a
 core-fetch script, and free test ROMs. Initialize git; push to a host.
 
-## Phase R — Rooms & Collections as JSON  ← next
+## Phase R — Rooms & Collections as JSON  ← in progress
 Turn today's imperative scene-building into a declarative layer (no rewrite).
+
+### R.1 — Data layer  ✅ done
 - `src/systems.js` — system-first registry (label, default/allowed cores, exts,
-  folder aliases, thumbnail repo). Refactor of the `CORES` map.
-- `Collection` loader — superset of today's `manifest.json`
-  (`*.collection.json`, see `docs/ROOM_AND_COLLECTIONS.md`).
-- `RomResolver` — url / local (File System Access API) / pick / opfs sources.
-  This delivers the user goal: reference **web folders** *or* **local folders on
-  PCs/headsets**.
-- `ArtResolver` — libretro-thumbnails fallback chain (filename → title →
-  tag-stripped).
-- `RoomLoader` — reads `*.room.json`, drives the existing factories
-  (`createShelf/Cartridge/Console/...`), applies surfaces/lighting.
-- Load room/collection by `?room=URL` / drag-drop. **Acceptance:** a shared
-  `.room.json` URL reconstructs a room + collection on another machine; free
-  games play, owned games show empty slots.
+  folder aliases, thumbnail repo, core license). Refactor of the `CORES` map;
+  `main.js` now imports from here instead of defining cores inline.
+- `src/ArtResolver.js` — libretro-thumbnails candidate chain (filename → title →
+  tag-stripped), with RetroArch's forbidden-char sanitization.
+- `src/Collection.js` — loads/normalizes both the legacy `manifest.json`
+  (`cartridges[]`) and the new `*.collection.json` (`games[]`); auto-fills core
+  from the system default and box-art candidates. `Cartridge.js` now tries the
+  candidate list, falling through on 404 to a text label.
+- `main.js` loads via `loadCollection`, supports `?collection=URL` (alias
+  `?room=URL`), and resolves ROM URLs (absolute / rooted / roms-relative).
+- Tests: `npm test` (`scripts/test-collection.mjs`, 24 pure-logic assertions);
+  `npm run debug` verdict OK with boxart 404s reclassified as expected probes.
+- Example: `public/roms/snes-demo.collection.json`.
+
+### R.2 — ROM sources  ← next
+- `src/RomResolver.js` — url / local (File System Access API) / pick / opfs
+  sources, persisted directory handles in IndexedDB. Delivers the user goal:
+  reference **web folders** *or* **local folders on PCs/headsets**.
+
+### R.3 — Room loader
+- `src/RoomLoader.js` — reads `*.room.json`, drives the existing factories
+  (`createShelf/Cartridge/Console/...`), applies surfaces/lighting/portals.
+- Load room by `?room=URL` / drag-drop. **Acceptance:** a shared `.room.json`
+  URL reconstructs a room + collection on another machine; free games play,
+  owned games show empty slots.
 
 ## Phase E — In-VR room editor
 Place/rotate props, swap wallpaper/floor/posters, assign collections to shelves,

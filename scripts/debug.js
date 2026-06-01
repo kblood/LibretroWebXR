@@ -66,10 +66,29 @@ const page = await browser.newPage();
 page.setDefaultTimeout(TIMEOUT);
 
 const log = (tag, msg) => console.log(`[${tag}] ${msg}`);
-const events = { console: [], pageerror: [], requestfailed: [], response: [] };
+const events = { console: [], pageerror: [], requestfailed: [], response: [], expected: [] };
+
+// Box-art is resolved by probing libretro-thumbnails with an ordered list of
+// candidate URLs (filename → title → tag-stripped, see src/ArtResolver.js) and
+// using the first that loads. Misses are EXPECTED — homebrew/region variants
+// often have no thumbnail — and the cartridge falls back to a text label. So
+// these 404s (and the matching "Failed to load resource" console errors the
+// browser emits for them) are health noise, not failures.
+const isBoxartProbe = (url) =>
+  /raw\.githubusercontent\.com\/libretro-thumbnails\//.test(url || '');
 
 page.on('console', (m) => {
   const text = m.text();
+  // Chrome logs a generic "Failed to load resource: …404" error for each
+  // image probe miss, with the URL on the message's args/location. Treat any
+  // resource-load error as expected (image probes are the only sub-resources
+  // the page fetches cross-origin that can 404 by design).
+  const loc = m.location?.()?.url || '';
+  if (m.type() === 'error' && /Failed to load resource/.test(text) && isBoxartProbe(loc)) {
+    events.expected.push(text);
+    log('console:error(expected boxart)', text);
+    return;
+  }
   events.console.push({ type: m.type(), text });
   log(`console:${m.type()}`, text);
 });
@@ -86,6 +105,7 @@ page.on('response', (r) => {
   // Only flag non-2xx — 2xx noise drowns out real problems.
   if (r.status() >= 400) {
     const f = `${r.status()} ${r.url()}`;
+    if (isBoxartProbe(r.url())) { events.expected.push(f); log('response:expected boxart', f); return; }
     events.response.push(f);
     log('response:err', f);
   }
@@ -159,6 +179,7 @@ console.log(`  console errors:  ${events.console.filter((c) => c.type === 'error
 console.log(`  page errors:     ${events.pageerror.length}`);
 console.log(`  request failures:${events.requestfailed.length}`);
 console.log(`  4xx/5xx:         ${events.response.length}`);
+console.log(`  expected probes: ${events.expected.length} (boxart misses → text label; not a failure)`);
 console.log(`  verdict:         ${hadErrors ? 'FAIL' : 'OK'}`);
 
 process.exit(hadErrors ? 1 : 0);

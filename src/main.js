@@ -18,48 +18,13 @@ import { createDebugHud } from './DebugHud.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
+import { CORES, coreForFile } from './systems.js';
+import { loadCollection } from './Collection.js';
 
-// Available libretro cores keyed by short name. Each entry has:
-//   url:    filename under public/cores/
-//   exts:   ROM file extensions this core can load (used for auto-detect)
-//   label:  shown in the UI
-//   style:  'classic' = old-style auto-init against window.Module (legacy
-//                       WebEmu cores). 'module' = MODULARIZE=1 ES-module
-//                       factory from the libretro buildbot, loaded via
-//                       dynamic import().
-//
-// When two cores map to the same extension, the first one declared wins
-// auto-detection — pass ?core=<name> to force the other.
-const CORES = {
-  // Legacy WebEmu cores (classic-script auto-init)
-  snes9x:           { url: 'cores/snes9x_libretro.js',           exts: ['smc','sfc','swc','fig','bs'], label: 'SNES (snes9x)',               style: 'classic' },
-  nestopia:         { url: 'cores/nestopia_libretro.js',         exts: ['nes','fds','unf','unif'],     label: 'NES (nestopia)',              style: 'classic' },
-  stella2014:       { url: 'cores/stella2014_libretro.js',       exts: ['a26','bin'],                  label: 'Atari 2600 (stella)',         style: 'classic' },
-  genesis_plus_gx:  { url: 'cores/genesis_plus_gx_libretro.js',  exts: ['md','gen','smd'],             label: 'Genesis (genesis_plus_gx)',   style: 'classic' },
-  mgba:             { url: 'cores/mgba_libretro.js',             exts: ['gba'],                        label: 'GBA (mGBA)',                  style: 'classic' },
-  mednafen_vb:      { url: 'cores/mednafen_vb_libretro.js',      exts: ['vb','vboy'],                  label: 'Virtual Boy (mednafen)',      style: 'classic' },
-
-  // Modern libretro buildbot cores (ES-module factory)
-  picodrive:        { url: 'cores/picodrive_libretro.js',        exts: ['sms','gg','md','gen','smd','32x','cue','iso'], label: 'Sega multi (picodrive)', style: 'module' },
-  gearsystem:       { url: 'cores/gearsystem_libretro.js',       exts: ['sms','gg','sg'],              label: 'SMS/GG (gearsystem)',         style: 'module' },
-  fceumm:           { url: 'cores/fceumm_libretro.js',           exts: [],                             label: 'NES (fceumm)',                style: 'module' },
-  gambatte:         { url: 'cores/gambatte_libretro.js',         exts: ['gb','gbc'],                   label: 'Game Boy/Color (gambatte)',   style: 'module' },
-  mednafen_pce_fast:{ url: 'cores/mednafen_pce_fast_libretro.js',exts: ['pce'],                        label: 'PC Engine/TurboGrafx (mednafen_pce_fast)', style: 'module' },
-  vice_x64:         { url: 'cores/vice_x64_libretro.js',         exts: ['d64','d71','d80','d81','d82','g64','x64','t64','tap','prg','p00','crt'], label: 'C64 (VICE)', style: 'module' },
-  vice_xvic:        { url: 'cores/vice_xvic_libretro.js',        exts: ['20','40','60','a0','b0','rom'], label: 'VIC-20 (VICE)',             style: 'module' },
-};
-
-// .bin is ambiguous (Atari 2600 / Megadrive / etc.). When detection sees
-// .bin we default to Atari 2600 because that's what we have ROMs of —
-// any other usage should pass ?core=<name> in the URL to override.
-function detectCore(filename, override) {
-  if (override && CORES[override]) return { name: override, ...CORES[override] };
-  const ext = filename.split('.').pop().toLowerCase();
-  for (const [name, info] of Object.entries(CORES)) {
-    if (info.exts.includes(ext)) return { name, ...info };
-  }
-  return null;
-}
+// CORES and the system registry now live in src/systems.js (system-first,
+// single source of truth). detectCore() is coreForFile() from there; the
+// room/collection layer (Collection.js) consumes the same registry.
+const detectCore = coreForFile;
 
 const $ = (sel) => document.querySelector(sel);
 const stage = $('#stage');
@@ -136,20 +101,15 @@ let grabMgr = null;
 let gameInput = null;
 let cartridges = [];
 async function buildCartridgeWorld() {
-  let manifest;
-  try {
-    const r = await fetch('roms/manifest.json');
-    if (!r.ok) throw new Error(`manifest ${r.status}`);
-    manifest = await r.json();
-  } catch (e) {
-    console.warn('[main] no roms/manifest.json — running without bundled cartridges:', e.message);
-    manifest = { cartridges: [] };
-  }
+  // Default collection is roms/manifest.json; ?collection=URL (alias ?room=)
+  // loads any collection JSON instead (web folder of games). The loader
+  // auto-fills core + box-art candidates from the system registry, so a
+  // collection can omit them. See docs/ROOM_AND_COLLECTIONS.md.
+  const collectionUrl = urlParams.get('collection') || urlParams.get('room') || 'roms/manifest.json';
+  const collection = await loadCollection(collectionUrl);
+  setStatus(collection.games.length ? `${collection.games.length} games` : 'no games');
 
-  cartridges = (manifest.cartridges || []).map((m) => {
-    const c = createCartridge(m);
-    return c;
-  });
+  cartridges = collection.games.map((m) => createCartridge(m));
 
   if (cartridges.length) {
     // Split cartridges across two wall-mounted shelves so the user has
@@ -336,11 +296,22 @@ function handleCartridgeInserted(meta) {
   loadCartridge(meta);
 }
 
+// Resolve a game's ROM bytes to a fetchable URL. An absolute http(s) URL or a
+// rooted path is used as-is (a collection hosted elsewhere can point at its own
+// ROMs); a bare relative path is resolved under roms/. (The url/local/opfs
+// RomResolver of Phase R.2 will slot in here.)
+function romUrl(meta) {
+  const f = meta.rom?.url || meta.file;
+  if (/^https?:\/\//i.test(f) || f.startsWith('/')) return f;
+  return 'roms/' + f;
+}
+
 async function loadCartridge(meta) {
   setStatus(`loading ${meta.title}…`);
   try {
-    const buf = await fetch('roms/' + meta.file).then((r) => {
-      if (!r.ok) throw new Error(`roms/${meta.file} → ${r.status}`);
+    const url = romUrl(meta);
+    const buf = await fetch(url).then((r) => {
+      if (!r.ok) throw new Error(`${url} → ${r.status}`);
       return r.arrayBuffer();
     });
     const core = CORES[meta.core];
