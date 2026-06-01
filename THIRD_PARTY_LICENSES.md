@@ -1,5 +1,19 @@
 # Third-Party Licenses
 
+## Scope of the MIT license
+
+The MIT license in `LICENSE` covers **only** the LibretroWebXR frontend source
+code in this repository (everything under `src/`, `scripts/`, `index.html`, the
+build config, and the docs under `docs/`). It does **not** cover:
+
+- **libretro emulator cores** (`.wasm`/`.js`) — not distributed in this repo;
+  fetched/installed separately, each keeping its own upstream license. Several
+  are GPL and some are NON-COMMERCIAL. See the table below and `docs/LICENSING.md`.
+- **Game ROMs and console BIOS files** — copyrighted by their respective owners,
+  never included here, and supplied by the end user from media they legally own.
+
+---
+
 LibretroWebXR's own code is MIT (see `LICENSE`). It runs **libretro emulator
 cores** that are **not distributed in this repository** — they are fetched or
 installed separately at build/deploy time (see `scripts/fetch-cores.mjs` and
