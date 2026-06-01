@@ -22,14 +22,18 @@ node scripts/make-c64-demo.mjs    # -> freeware/lwx-demo.prg        (C64 "guess 
 node scripts/make-c64-snake.mjs   # -> freeware/lwx-snake.prg       (C64 joystick Snake)
 node scripts/make-vic20-demo.mjs  # -> freeware/lwx-vic20-demo.prg  (VIC-20 demo, load addr $1001)
 
-# Needs the cc65 toolchain (see docs/research/nes-game-creation.md)
-npm run make-nes-pong       # -> freeware/lwx-nes-pong.nes    (NES Pong; source in games/nes-pong/)
+# Needs a compiler toolchain (one-time install; see each docs/research/<system>-game-creation.md)
+npm run make-nes-pong       # -> freeware/lwx-nes-pong.nes     (NES Pong;     cc65 + neslib, games/nes-pong/)
+npm run make-gb-snake       # -> freeware/lwx-gb-snake.gb      (GB Snake;     GBDK-2020,     games/gb-snake/)
+npm run make-genesis-demo   # -> freeware/lwx-genesis-demo.md  (Genesis demo; SGDK 2.11,     games/genesis-demo/)
+npm run make-sms-arcade     # -> freeware/lwx-sms-arcade.sms + lwx-gg-arcade.gg
+                            #                                 (SMS+GG Catch;  devkitSMS+SDCC, games/sms-arcade/)
 ```
 
 These are ours, CC0/public-domain, and safe to redistribute. The shared
-Commodore BASIC tokenizer lives in `scripts/lib/cbm-basic.mjs`. The NES game uses
-the cc65 + neslib template-fill workflow (`games/nes-pong/`, boilerplate frozen,
-only `main.c` authored). Per-system research on creating more is in
+Commodore BASIC tokenizer lives in `scripts/lib/cbm-basic.mjs`. The compiled
+games use the template-fill workflow (boilerplate frozen from each SDK, only the
+game `main.c` authored). Per-system research on creating more is in
 `docs/research/` (one file per system + a `README.md` synthesis).
 
 ### Option B — curated redistributable homebrew (download yourself)

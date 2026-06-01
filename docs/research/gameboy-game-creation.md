@@ -214,6 +214,58 @@ attribution if desired.
 
 ---
 
+## Goal 7 — VERIFIED build log (LWX Snake, 2026-06-01)
+
+We actually built a CC0 Snake game with this toolchain. Below is the
+ground-truth record (URLs, commands, gotchas) from that run.
+
+### Install (what worked, headless / zip-only)
+- Asset confirmed via the GitHub API
+  (`releases/latest` of `gbdk-2020/gbdk-2020`): **tag `4.5.0`**.
+- Windows asset: **`gbdk-win64.zip`** (~8.6 MB). Working URL:
+  `https://github.com/gbdk-2020/gbdk-2020/releases/download/4.5.0/gbdk-win64.zip`
+- Download + extract (no installer, no prompts):
+  ```powershell
+  Invoke-WebRequest -Uri "https://github.com/gbdk-2020/gbdk-2020/releases/download/4.5.0/gbdk-win64.zip" -OutFile "$env:TEMP\gbdk-win64.zip"
+  Expand-Archive -Path "$env:TEMP\gbdk-win64.zip" -DestinationPath "C:\" -Force
+  ```
+- **GOTCHA — zip layout:** the zip contains a top-level `gbdk\` folder, so
+  `Expand-Archive ... -DestinationPath C:\` yields `C:\gbdk\bin\lcc.exe`
+  (NOT `C:\gbdk-2020\...`). If you want it at `C:\gbdk-2020`, move it after
+  extraction (`Move-Item C:\gbdk C:\gbdk-2020`). The build script
+  `scripts/make-gb-snake.mjs` searches both `C:\gbdk-2020\bin` and
+  `C:\gbdk\bin` (plus `%GBDK_HOME%\bin` and `PATH`) so either location works.
+- Version confirmed from `C:\gbdk-2020\ChangeLog` (top entry `gbdk-4.5.0`).
+
+### Build (exact, verified)
+```bat
+C:\gbdk-2020\bin\lcc -Wm-ynLWX_SNAKE -o lwx-gb-snake.gb main.c
+```
+- Single-step `lcc -o out.gb main.c` works fine; no separate `-c` step needed.
+- **GOTCHA — title with spaces:** `-Wm-yn"LWX SNAKE"` breaks when spawned
+  through a shell — the space splits the argument and lcc tries to open a file
+  named `SNAKE`. Either spawn lcc WITHOUT a shell (`spawnSync(..., {shell:false})`)
+  or use a space-free title (we used `LWX_SNAKE`). The repo script does both.
+
+### Verify (what to check on the output `.gb`)
+- Size: **32768 bytes** (ROM-only, 2× 16 KB banks) — sane.
+- Nintendo logo at `0x104..0x133`: written by makebin, byte-exact match. ✔
+- Cart type `0x147` = `0x00` (ROM ONLY); ROM size `0x148` = `0x00` (32 KB). ✔
+- **Header checksum `0x14D`: correct** — this is the byte the DMG boot ROM
+  actually enforces, and makebin computes it. ✔
+- **GOTCHA — global checksum `0x14E/0x14F`:** GBDK/makebin does NOT compute the
+  16-bit global checksum (leaves it `0x0084`-ish, not the true sum). This is
+  EXPECTED and harmless: neither real hardware nor gambatte verifies the global
+  checksum. Do not treat a global-checksum mismatch as a build failure. (RGBDS's
+  `rgbfix -v` would fill it in; GBDK does not, by design.)
+
+### Result
+- Game: `games/gb-snake/main.c` (CC0, ~280 lines, our own tile graphics).
+- Build script: `scripts/make-gb-snake.mjs` (`node scripts/make-gb-snake.mjs`).
+- ROM: `public/roms/freeware/lwx-gb-snake.gb` (32768 bytes), runs on gambatte.
+
+---
+
 ## Sources
 - GBDK-2020: https://github.com/gbdk-2020/gbdk-2020 , http://gbdk.org/docs/api/docs_getting_started.html , http://gbdk.org/docs/api/docs_toolchain.html
 - GBDK minimal project: https://laroldsjubilantjunkyard.com/tutorial/minimal-gbdk-project/

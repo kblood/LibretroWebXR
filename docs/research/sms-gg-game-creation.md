@@ -2,6 +2,14 @@
 
 Research date: 2026-06-01
 
+> **VERIFIED 2026-06-01:** This recipe was used end-to-end to build the CC0
+> `games/sms-arcade/` ("LWX Catch") game into both
+> `public/roms/freeware/lwx-sms-arcade.sms` and `lwx-gg-arcade.gg` (each 32 KB,
+> valid `TMR SEGA` header + checksum). The exact install URLs, build commands,
+> and the one real gotcha (SDCC-version / `--sdcccall` ABI mismatch with the
+> *prebuilt* SMSlib libs) are recorded in **"VERIFIED working setup"** at the end
+> of this doc. Build with `node scripts/make-sms-arcade.mjs`.
+
 **Goal:** author small, original CC0/MIT games we own, shippable as `.sms` (Master System)
 and `.gg` (Game Gear) test content. Targets the libretro cores LibretroWebXR uses:
 **picodrive** (default) and **gearsystem**. SMS and GG share nearly identical hardware
@@ -257,6 +265,109 @@ Be skeptical here — most SMS homebrew is **NOT** open-licensed even when freel
 **Authoring our own with devkitSMS is both the safest licensing path and the lowest effort
 for guaranteed CC0/MIT test content.** Treat third-party homebrew as opt-in extras only
 after explicit per-title license confirmation from the author.
+
+---
+
+## VERIFIED working setup (2026-06-01) — exact URLs, commands, gotchas
+
+This is what actually built `games/sms-arcade` into a working `.sms` + `.gg`.
+
+### Install (zip-only, no interactive installer)
+
+**SDCC** — the win64 *setup.exe* installers (under `sdcc-win64/`) are the only
+thing in the per-version folders, but a **portable zip** lives under the
+snapshot-builds tree. Used SDCC **4.6.0 #16555**:
+
+```
+# portable zip (no installer; just unzip):
+https://sourceforge.net/projects/sdcc/files/snapshot_builds/x86_64-w64-mingw32/sdcc-snapshot-x86_64-w64-mingw32-20260601-16555.zip/download
+```
+The zip extracts to a top-level `sdcc/` folder. Place it so `sdcc.exe` is at
+`C:\sdcc\bin\sdcc.exe` (the snapshot dir is regenerated daily — if that dated
+filename 404s, pick the newest `sdcc-snapshot-x86_64-w64-mingw32-YYYYMMDD-*.zip`
+in that same folder). `sdar.exe` and `sdasz80.exe` are in the same `bin`.
+Verify: `C:\sdcc\bin\sdcc.exe -v` → `... 4.6.0 #16555 (MINGW64)`.
+
+**devkitSMS** — the GitHub *releases* have **no binary assets** and the latest
+tag ("for SDCC 4.1.x") is stale; the prebuilt Windows tools + libs live in the
+repo tree itself. Clone master:
+```
+git clone --depth 1 https://github.com/sverx/devkitSMS.git   # -> C:\devkitSMS
+```
+Key paths used:
+- `C:\devkitSMS\ihx2sms\Windows\ihx2sms.exe`  (ROM packer; also `makesms\Windows\makesms.exe`, `folder2c\Windows\folder2c.exe`)
+- `C:\devkitSMS\crt0\crt0_sms.rel`
+- `C:\devkitSMS\SMSlib\SMSlib.lib`, `SMSlib_GG.lib`, and headers in `SMSlib\src\`
+- `C:\devkitSMS\SMSlib\src\peep-rules.txt`
+
+### GOTCHA #1 (the big one): prebuilt SMSlib libs vs SDCC 4.6 `--sdcccall`
+
+The libs shipped in the devkitSMS repo were built with an **older SDCC whose
+default calling convention was `--sdcccall 0`**. SDCC **4.4+ defaults to
+`--sdcccall 1`**. Linking 4.6-compiled `main.rel` against the prebuilt
+`SMSlib.lib` makes the linker (`sdldz80`) **fail** with a wall of
+`?ASlink-Warning-Conflicting sdcc options: "...sdcccall(1)" in module "main" and
+"-mz80" in module "SMSlib..."`. Worse, even forcing `main.c` to
+`--sdcccall 0` only moves the conflict to SDCC's own stdlib `divunsigned`
+(`/` and `%` helpers are sdcccall-1 in 4.6) — an ABI mismatch that would silently
+corrupt integer math.
+
+**Fix that works: rebuild SMSlib from source with the same SDCC 4.6**, so every
+module + the stdlib agree on sdcccall 1. Use the shipped recipe
+`SMSlib\src\how to build this.txt` (the authoritative `.bat`; the sibling
+`Makefile` has a typo referencing `SMSlib_metasprite.rel` as a source). In
+`SMSlib\src\`, compile each module with
+`C:\sdcc\bin\sdcc.exe -c -mz80 --max-allocs-per-node 100000 --peep-file peep-rules.txt <file>.c`
+(the core `SMSlib.c` adds `--reserve-regs-iy`; build a second `SMSlib_GG.rel` and
+the `*_GG` palette/autotext/spriteClip variants with an extra `-DTARGET_GG`;
+zx7/aPLib/paddle/debug compile *without* `--peep-file`), then archive with
+`C:\sdcc\bin\sdar.exe r SMSlib.lib <all SMS .rel...>` and
+`sdar r SMSlib_GG.lib <all GG .rel...>` exactly per that file's two `sdar` lines.
+Copy the resulting `SMSlib.lib` / `SMSlib_GG.lib` up into `C:\devkitSMS\SMSlib\`.
+Also re-assemble `crt0_sms.rel` with the matching assembler
+(`C:\sdcc\bin\sdasz80.exe -g -o crt0_sms.s`) for good measure (asm carries no
+sdcccall, so this is belt-and-suspenders). After rebuilding, the link is clean.
+
+### GOTCHA #2: the GG build needs `-DTARGET_GG` at *compile* time
+
+`SMSlib.h` is `#ifdef TARGET_GG` throughout: it omits the SMS `TMR SEGA` header
+placement, switches the palette macros to the GG 12-bit format, and exposes
+`GG_setBGPaletteColor`/`GG_loadBGPalette` (the SMS names don't exist in GG mode).
+So a single `main.c` must be **compiled twice** — plain for SMS, with
+`-DTARGET_GG` for GG — and use `#ifdef TARGET_GG` around the palette call. ihx2sms
+then writes the right region byte automatically: **0x4C** (SMS Export) vs **0x7C**
+(GG International), confirmed in the built ROMs at offset 0x7FFF.
+
+### GOTCHA #3: no number printer in SMSlib
+
+This SMSlib build has `SMS_print(const unsigned char *)` for strings but **no**
+`SMS_printNumber`/printf-style decimal helper. Roll a tiny fixed-width
+uint→string formatter for score/HUD (see `games/sms-arcade/main.c`). The
+`warning 336: incomplete array type` from `SMSlib.h:96` during compile is benign
+(it fires in the official examples too).
+
+### Exact build commands used (per target; see scripts/make-sms-arcade.mjs)
+
+```bat
+:: --- Master System ---
+C:\sdcc\bin\sdcc.exe -mz80 -IC:\devkitSMS\SMSlib\src --peep-file C:\devkitSMS\SMSlib\src\peep-rules.txt -c main.c -o main_sms.rel
+C:\sdcc\bin\sdcc.exe -o game_sms.ihx -mz80 --no-std-crt0 --data-loc 0xC000 C:\devkitSMS\crt0\crt0_sms.rel C:\devkitSMS\SMSlib\SMSlib.lib main_sms.rel
+C:\devkitSMS\ihx2sms\Windows\ihx2sms.exe game_sms.ihx lwx-sms-arcade.sms
+
+:: --- Game Gear (same main.c, add -DTARGET_GG, link the GG lib) ---
+C:\sdcc\bin\sdcc.exe -mz80 -IC:\devkitSMS\SMSlib\src --peep-file C:\devkitSMS\SMSlib\src\peep-rules.txt -DTARGET_GG -c main.c -o main_gg.rel
+C:\sdcc\bin\sdcc.exe -o game_gg.ihx -mz80 --no-std-crt0 --data-loc 0xC000 C:\devkitSMS\crt0\crt0_sms.rel C:\devkitSMS\SMSlib\SMSlib_GG.lib main_gg.rel
+C:\devkitSMS\ihx2sms\Windows\ihx2sms.exe game_gg.ihx lwx-gg-arcade.gg
+```
+Both outputs: 32768 bytes, `TMR SEGA` @ 0x7FF0, valid checksum @ 0x7FFA.
+
+### Cores
+
+Manifest pins **gearsystem** for both ROMs (it is SMS/GG-specific and the most
+reliable renderer for plain tilemap homebrew). **picodrive** (the system default)
+also lists `.sms`/`.gg` support and should run them; if picodrive shows issues,
+gearsystem is the safe choice. (In-app render verification is done by the
+orchestrator, not this build step.)
 
 ---
 

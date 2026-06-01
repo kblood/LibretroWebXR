@@ -10,6 +10,9 @@
     "fetch-cores": "node scripts/fetch-cores.mjs",
     "make-games": "node scripts/make-c64-demo.mjs && node scripts/make-c64-snake.mjs && node scripts/make-vic20-demo.mjs",
     "make-nes-pong": "node scripts/make-nes-pong.mjs",
+    "make-gb-snake": "node scripts/make-gb-snake.mjs",
+    "make-genesis-demo": "node scripts/make-genesis-demo.mjs",
+    "make-sms-arcade": "node scripts/make-sms-arcade.mjs",
     "test": "node scripts/test-collection.mjs",
     "debug": "node scripts/debug.js"
   },

@@ -13,6 +13,18 @@
     { "file": "freeware/lwx-nes-pong.nes", "system": "nes", "core": "fceumm", "title": "LWX Pong", "color": "#3a3a8a",
       "license": "CC0", "credits": "LibretroWebXR (game in games/nes-pong, built with cc65 + neslib; see scripts/make-nes-pong.mjs). Renders on fceumm; nestopia shows black for this ROM." },
 
+    { "file": "freeware/lwx-gb-snake.gb", "system": "gb", "core": "gambatte", "title": "LWX Snake (GB)", "color": "#3a8a3a",
+      "license": "CC0", "credits": "LibretroWebXR (game in games/gb-snake, built with GBDK-2020; see scripts/make-gb-snake.mjs)" },
+
+    { "file": "freeware/lwx-genesis-demo.md", "system": "md", "core": "picodrive", "title": "LWX Genesis Demo", "color": "#283860",
+      "license": "CC0", "credits": "LibretroWebXR (game in games/genesis-demo, built with SGDK 2.11; see scripts/make-genesis-demo.mjs). Renders on picodrive; genesis_plus_gx shows black for this ROM." },
+
+    { "file": "freeware/lwx-sms-arcade.sms", "system": "sms", "core": "gearsystem", "title": "LWX Catch (SMS)", "color": "#102040",
+      "license": "CC0", "credits": "LibretroWebXR (game in games/sms-arcade, built with devkitSMS + SDCC; see scripts/make-sms-arcade.mjs)" },
+
+    { "file": "freeware/lwx-gg-arcade.gg", "system": "gg", "core": "gearsystem", "title": "LWX Catch (GG)", "color": "#102040",
+      "license": "CC0", "credits": "LibretroWebXR (game in games/sms-arcade, built with devkitSMS + SDCC; see scripts/make-sms-arcade.mjs)" },
+
     { "file": "freeware/super-tilt-bro.nes", "system": "nes", "core": "nestopia", "title": "Super Tilt Bro.", "color": "#3a6a8a",
       "license": "WTFPL (effectively public domain)", "credits": "Sylvain Gadrat",
       "download": "https://github.com/retrobrews/nes-games/raw/master/super-tilt-bro.nes" },

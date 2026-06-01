@@ -214,6 +214,64 @@ SGDK — it is the only path with a guaranteed CC0/MIT result.
 
 ---
 
+## VERIFIED BUILD (2026-06-01) — what actually worked
+
+We authored and built `games/genesis-demo` (a CC0 D-pad sprite-mover) end to end.
+This section records the *exact* working steps so the build is reproducible.
+
+### Install (zip/7z extract only — NO installer)
+- **Release asset is a `.7z`, not a `.zip`.** Latest = SGDK **2.11**:
+  `https://github.com/Stephane-D/SGDK/releases/download/v2.11/sgdk211.7z`
+  (54 MB; resolved via the GitHub releases API — the `/latest` page redirects).
+- Extracted with the system 7-Zip:
+  ```
+  curl -L -o %TEMP%\sgdk211.7z https://github.com/Stephane-D/SGDK/releases/download/v2.11/sgdk211.7z
+  "C:\Program Files\7-Zip\7z.exe" x %TEMP%\sgdk211.7z -oC:\sgdk -y
+  ```
+  Result root: `C:\sgdk\` (contains `makefile.gen`, `bin\make.exe`, `bin\gcc.exe`,
+  `lib\libmd.a` **prebuilt**, `bin\rescomp.jar`, `bin\sizebnd.jar`).
+- **Java**: already at `C:\Program Files\Microsoft\jdk-21...` and on `PATH`
+  (`java -version` → OpenJDK 21). SGDK only needs it for `rescomp`/`sizebnd`.
+  We did **not** need to set `JAVA_HOME`.
+- **`libmd.a` ships prebuilt** in 2.11 — the `makelib.gen` step in Goal 1 is
+  **not required**. Skip it.
+
+### Build (headless, one command)
+- `makefile.gen` auto-derives `GDK` from its own location, so you can run it
+  in-place. We still export `GDK`/`GDK_WIN` and prepend `C:\sgdk\bin` to PATH
+  for safety. From the project dir:
+  ```
+  set GDK=C:\sgdk
+  C:\sgdk\bin\make.exe -f C:\sgdk\makefile.gen
+  ```
+  → `out\rom.bin`. Wrapped in `scripts/make-genesis-demo.mjs`
+  (`node scripts/make-genesis-demo.mjs`), which cleans `out/`, builds, then
+  copies to `public/roms/freeware/lwx-genesis-demo.md`.
+
+### Result
+- Output **131072 bytes** (128 KB). `sizebnd` aligns to 131072 and writes the
+  checksum. `SEGA MEGA DRIVE` signature confirmed at offset `0x100`.
+- ROM header is the auto-generated `src/boot/rom_head.c` **C struct**; we edited
+  only the title/copyright text fields (→ "LWX GENESIS DEMO (CC0)"). The header
+  byte layout and vector table are untouched.
+
+### Gotchas (confirmed)
+- The release asset is **`.7z`** — use 7-Zip; `tar`/Expand-Archive won't open it.
+- `bin/make.exe` is an MSYS make and uses MSYS DLLs in `bin/` — run it from
+  `C:\sgdk\bin` (or with that dir on PATH); don't substitute the system `make`.
+- For an inline-art game, **no PNG / no rescomp** is needed: define tiles as
+  `u32[8]` (4bpp, 2 px/byte) and upload with `VDP_loadTileData`. This removes
+  the only nondeterministic asset step.
+- 2x2 hardware sprites read 4 tiles in **column order** (TL, BL, TR, BR), not
+  row order — lay the player tiles out accordingly.
+- `makefile.gen` copies `src/boot/{sega.s,rom_head.c}` only as **order-only**
+  prerequisites (`|`), so once they exist your edits to `rom_head.c` survive
+  rebuilds. Commit them with the game so it's self-contained.
+- Sprite palette colours live in PAL1 = VDP colour slots 16..31 (so body slot 5
+  is `PAL_setColor(16+5, ...)`).
+- Core: runs on **`genesis_plus_gx`** (project default for system `md`).
+  `picodrive` should also accept it; no core-specific quirk hit.
+
 ## Key URLs (quick reference)
 - SGDK repo / releases / wiki:
   https://github.com/Stephane-D/SGDK ·

@@ -78,9 +78,18 @@ booting in the actual app (headless-Chrome screenshot of the in-world CRT):
 - **NES — LWX Pong** (`games/nes-pong/main.c`, cc65 + neslib, `npm run make-nes-pong`
   → `freeware/lwx-nes-pong.nes`). NROM-256. ⚠ renders on **fceumm**; nestopia shows
   black for this ROM, so the manifest pins `"core": "fceumm"`.
+- **Game Boy — LWX Snake** (`games/gb-snake/main.c`, GBDK-2020, `npm run make-gb-snake`
+  → `freeware/lwx-gb-snake.gb`). ROM-only, runs on gambatte. D-pad steer, START to start/restart.
+- **Genesis — LWX Genesis Demo** (`games/genesis-demo/main.c`, SGDK 2.11, `npm run make-genesis-demo`
+  → `freeware/lwx-genesis-demo.md`). D-pad sprite-mover, A/B/C recolor. ⚠ renders on
+  **picodrive**; genesis_plus_gx shows black for this ROM, so the manifest pins `"core": "picodrive"`.
+- **SMS + Game Gear — LWX Catch** (`games/sms-arcade/main.c`, devkitSMS + SDCC,
+  `npm run make-sms-arcade` → `freeware/lwx-sms-arcade.sms` + `lwx-gg-arcade.gg`).
+  One source, GG built with `-DTARGET_GG`. Catch falling fruit. Manifest pins **gearsystem**.
 
 The Commodore BASIC v2 tokenizer/assembler is shared in `scripts/lib/cbm-basic.mjs`.
-cc65 is installed at `C:\cc65`.
+Installed toolchains: cc65 `C:\cc65`, GBDK-2020 `C:\gbdk-2020`, SGDK 2.11 `C:\sgdk`,
+SDCC `C:\sdcc` + devkitSMS `C:\devkitSMS`. (GBA/devkitPro still needs its GUI installer.)
 
 ## Recommended next wave (build order)
 
