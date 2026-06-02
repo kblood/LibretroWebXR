@@ -1,7 +1,9 @@
 # Handoff
 
-Single orientation doc for picking this project up cold. Last updated after
-**Phase R.1** (JSON collection layer).
+Single orientation doc for picking this project up cold. Last updated 2026-06-02
+after the **CC0 test-game library** + the **classic-core render fix** (below).
+Phase R.1 (JSON collection layer) is done; **Phase R.2 (RomResolver) is still the
+next roadmap step.**
 
 ## What this is
 
@@ -29,6 +31,25 @@ menus. See `docs/ROADMAP.md` "Current state" for the module list.
 
 **Phase R.1 (done)** added a declarative collection layer over that scene
 without rewriting it. **Phase R.2 (RomResolver) is next.**
+
+**CC0 test-game library (done 2026-06-02).** The default `manifest.json` now ships
+our own source-built CC0 games so the frontend has playable content on every
+system — no commercial ROMs. **11 of 12 wired systems** have a working,
+screenshot-verified game: C64 (×2), VIC-20, NES, GB, GBA, Genesis, SMS, GG, PC
+Engine, SNES, Virtual Boy. Each builds from source via `npm run make-<sys>` (game
+source in `games/<sys>/`, build scripts in `scripts/make-*.mjs`); per-system
+toolchain + authoring notes in `docs/research/` (one file per system + a synthesis
+`README.md`). **Only gap: Atari 2600** — game is built (`games/atari-dodger`) but
+held out of the manifest because its only core (Stella) has no module build (see
+the core invariant below and `docs/research/README.md` "Known issue").
+
+**Classic-core render fix (done 2026-06-02).** Booting each game in-app revealed
+that every libretro core marked `style:'classic'` in `src/systems.js` rendered
+**black** (loaded+mapped the ROM but never started video). These were old ~210 KB
+WebEmu auto-init builds. Replaced snes9x/nestopia/genesis_plus_gx/mgba/mednafen_vb
+with modern ~261 KB buildbot MODULARIZE builds and set `style:'module'`. This is
+why SNES/NES/Genesis now work on their default cores and the old fceumm/picodrive
+"pins" were dropped.
 
 ## Get running (Windows / PowerShell)
 
@@ -63,6 +84,14 @@ expected; real VR needs the Quest/headset on the HTTPS deploy.
   `import()`, NOT in a Web Worker (webretro's worker path is buggy — see
   `DEBUGGING.md` "Architectural lesson"). `XRRafShim` keeps its rAF loop alive
   during a WebXR session.
+- **Use `style:'module'` (MODULARIZE) cores, not `style:'classic'`.** The legacy
+  classic-script path renders **black** (loads the ROM, never starts video). Every
+  shipping core must be a modern buildbot MODULARIZE build (`export default` +
+  `import.meta`, ~261 KB). Get them from
+  `buildbot.libretro.com/nightly/emscripten/RetroArch.7z`. `stella2014` is the only
+  remaining `classic` core (no Stella module build exists), so Atari 2600 can't
+  render yet. Don't let `npm run fetch-cores` restore an old classic core over a
+  module one. See `docs/research/README.md` "Known issue".
 - **`LICENSE` must stay pure MIT text** (no appended notes) or GitHub stops
   detecting it as MIT. Scope note lives in `THIRD_PARTY_LICENSES.md`.
 
@@ -90,16 +119,28 @@ src/
   SaveState.js       IndexedDB save-state store (per slot).
   CrtShader / SpatialAudio / Placeholder / XRRafShim  Effects + shims.
 scripts/
-  debug.js           Puppeteer health harness (DEBUGGING.md).
-  fetch-cores.mjs    Populate public/cores/ from a local source.
+  debug.js           Puppeteer health harness. `--rom=<path>` injects a ROM via the
+                     real file-picker path; `--core=<name>` forces a core (?core=).
+  fetch-cores.mjs    Populate public/cores/ from a local source (scratch workspace).
   make-c64-demo.mjs  Generate the CC0 C64 BASIC demo .prg.
+  lib/cbm-basic.mjs  Shared Commodore BASIC v2 tokenizer (C64 + VIC-20).
+  make-*.mjs         One per CC0 game (make-nes-pong, make-gb-snake, make-genesis-demo,
+                     make-sms-arcade, make-pce-pong, make-snes-demo, make-gba-paint,
+                     make-vb-demo, make-c64-snake, make-vic20-demo). Each rebuilds a
+                     ROM in games/<sys>/ → public/roms/freeware/. npm run make-games
+                     runs the zero-install (pure-Node CBM) trio.
   test-collection.mjs  npm test — pure-logic assertions for the R.1 layer.
+games/               Source for our CC0 games (committed), one dir per system. SDK
+                     boilerplate frozen from each toolchain's template; only the game
+                     logic is authored. See docs/research/ for per-system recipes.
 public/roms/
-  manifest.json      Default collection (free/homebrew starter pack).
+  manifest.json      Default collection — now ships our CC0 games (11 systems) + a
+                     few homebrew pointers.
   *.collection.json  Example collection schema (snes-demo).
-  freeware/          Shippable ROMs (lwx-demo.prg ships; rest are pointers).
+  freeware/          Shippable ROMs: all lwx-*.* (our CC0 games) ship; rest are pointers.
 docs/                ROADMAP, EMUVR_RESEARCH, ROOM_AND_COLLECTIONS, MULTIPLAYER,
-                     LICENSING, PROJECT_HISTORY, HANDOFF (this file).
+                     LICENSING, PROJECT_HISTORY, HANDOFF (this file),
+                     research/ (per-system game-authoring notes + synthesis README).
 ```
 ★ = added in Phase R.1.
 
@@ -155,14 +196,24 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   is sparse); the harness reclassifies them as "expected probes". Don't treat
   them as failures.
 - Many "freeware" homebrew ROMs have **no explicit redistribution license** —
-  the manifest ships *pointers*, only `lwx-demo.prg` (CC0, ours) is committed.
-  See `public/roms/README.md` for the verified-license picks.
+  those manifest entries are *pointers* (download yourself). Our own `lwx-*.*`
+  CC0 games ARE committed and ship. See `public/roms/README.md`.
+- **Always screenshot-verify a new game/core in-app** — a core can build/load a
+  ROM and still render black (it's how the classic-core bug was found). Build-only
+  checks miss it. `npm run debug -- --rom=<path> --core=<name> --screenshot=...`
+  then Read the PNG and look at the CRT pixels (the header says "running" even when
+  black).
 - `gh` CLI wasn't logged in but git push worked (Windows credential store).
   `gh` was bridged via `git credential fill → gh auth login --with-token`.
 - Don't batch a failing shell command with dependent tool calls — a non-zero
   exit cancels the rest of the batch. Run git/verification steps sequentially.
+- Authoring CC0 games: write logic against the SDK library, freeze the SDK's
+  boot/header template, build, then screenshot-verify. Toolchains were installed
+  non-interactively (zip/pacman-package extraction, not GUI installers) — devkitARM
+  came from devkitPro pacman packages, VUEngine from 7z-extracting its installer.
 
 ## Memory
 
-A persistent memory note (`canonical-repo-moved`) records that
-`C:\LLM\LibretroWebXR` is now canonical and the old path is historical.
+Persistent memory notes: `canonical-repo-moved` (`C:\LLM\LibretroWebXR` is canonical,
+old path historical) and `test-game-authoring-goal` (the CC0 test-game effort, its
+status, the classic-core fix, and installed-toolchain locations).
