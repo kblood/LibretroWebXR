@@ -1,0 +1,12 @@
+{
+  "schema": "libretrowebxr/collection@1",
+  "id": "snes-demo",
+  "title": "SNES Collection (example)",
+  "author": "LibretroWebXR",
+  "_comment": "Example of the collection schema (vs the legacy manifest). Core and box-art are omitted on purpose — the loader fills core from the system's default and resolves box art from libretro-thumbnails. ROMs are user-supplied; these point at files you'd drop in roms/ (none ship here). Demonstrates ?collection=roms/snes-demo.collection.json.",
+  "games": [
+    { "file": "smw.sfc",  "system": "snes", "title": "Super Mario World (USA)" },
+    { "file": "yi.sfc",   "system": "snes", "title": "Super Mario World 2 - Yoshi's Island (USA)" },
+    { "file": "zelda.sfc","system": "snes", "title": "Legend of Zelda, The - A Link to the Past (USA)" }
+  ]
+}

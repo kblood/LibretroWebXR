@@ -1,10 +1,11 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated 2026-06-02
-after **Phase R.2 (RomResolver)**, the **CC0 test-game library**, and the
-**classic-core render fix** (all below). Phases R.1 (JSON collection layer) and
-R.2 (ROM source resolution) are done; **Phase R.3 (RoomLoader) is the next
-roadmap step.**
+after **Phase R.3 (RoomLoader)** — on top of R.2 (RomResolver), the CC0
+test-game library, and the classic-core render fix (all below). Phases R.1 (JSON
+collection layer), R.2 (ROM source resolution) and **R.3 (rooms as JSON) are
+done.** Phase R is complete; **Phase E (in-VR room editor) is the next roadmap
+step**, with a few R.3 follow-ups noted in `docs/ROADMAP.md`.
 
 ## What this is
 
@@ -34,7 +35,13 @@ menus. See `docs/ROADMAP.md` "Current state" for the module list.
 without rewriting it. **Phase R.2 (done)** added `src/RomResolver.js` — games
 resolve their ROM bytes from url / local folder (File System Access API, handle
 persisted in IndexedDB) / file picker / OPFS cache, wired behind
-`loadCartridge()`. **Phase R.3 (RoomLoader) is next.**
+`loadCartridge()`. **Phase R.3 (done)** made the whole world declarative: a
+`*.room.json` (`src/RoomLoader.js` parses, `src/RoomBuilder.js` builds) drives
+the existing Shelf/Console/Cartridge/Gamepad factories, applies surfaces +
+lighting (`SceneMgr.applyEnvironment`), and places posters/models/portals.
+`?room=URL` loads a full room (drag-drop too); portals walk you between rooms.
+With no `?room` the built-in `defaultRoom()` reproduces the old two-shelf layout
+exactly. **Phase E (in-VR editor) is next.**
 
 **CC0 test-game library (done 2026-06-02).** The default `manifest.json` now ships
 our own source-built CC0 games so the frontend has playable content on every
@@ -63,7 +70,7 @@ npm install
 npm run fetch-cores     # copies cores into public/cores/ (gitignored). Auto-finds
                         # them in the old scratch workspace; else see the script.
 npm run dev             # http://localhost:5173  (Vite sets COOP/COEP)
-npm test                # 45 pure-logic assertions (systems/ArtResolver/Collection/RomResolver)
+npm test                # 70 pure-logic assertions (systems/ArtResolver/Collection/RomResolver/RoomLoader)
 npm run debug           # headless-Chrome health check (see DEBUGGING.md)
 ```
 
@@ -103,8 +110,18 @@ expected; real VR needs the Quest/headset on the HTTPS deploy.
 
 ```
 src/
-  main.js            Bootstrap + wiring. Loads a collection, builds the room,
-                     handles cartridge-insert → load, save-state memory cards.
+  main.js            Bootstrap + wiring. Resolves the world (dropped file /
+                     ?room= / ?collection= / default), loads collections, calls
+                     RoomBuilder, then owns grab/input/menus, cartridge-insert →
+                     load, save-state memory cards, portal navigation, drag-drop.
+  RoomLoader.js      ★R.3 PURE parse of *.room.json → canonical descriptor
+                     (parseRoom / defaultRoom / normalizeProp / normalizePortal /
+                     roomCollectionRefs). No THREE → unit-tested.
+  RoomBuilder.js     ★R.3 buildRoom({scene,room,collections}) drives the
+                     Shelf/Console/Cartridge/Gamepad factories from the
+                     descriptor; builds posters/models/portals; returns the
+                     handles main.js wires. Shelf games via collection +
+                     filter/slice/half.
   systems.js         ★R.1 SYSTEMS (system-first) + CORES (core-first) registry.
                      Single source of truth: cores, exts, folder aliases,
                      thumbnail repos, licenses. coreForFile / systemForFile /
@@ -120,6 +137,8 @@ src/
                      ready/error; serializeState/unserializeState.
   SceneMgr.js        Three.js scene, room geometry, WebXR session, TV mesh,
                      render loop. setScreenSource() swaps TV texture source.
+                     ★R.3 applyEnvironment() repapers walls/floor/ceiling +
+                     relights from a room's environment; applyTv() toggles CRT.
   Cartridge/Shelf/Console/Gamepad/MemoryCard.js  Grabbable 3D prop factories.
   GrabMgr / LocomotionMgr / GameInputMgr / InputMgr / ControllerMaps  Input + VR.
   MenuMgr / MenuPanel / ControlsPanel / DebugHud  In-VR UI.
@@ -146,12 +165,14 @@ public/roms/
   manifest.json      Default collection — now ships our CC0 games (11 systems) + a
                      few homebrew pointers.
   *.collection.json  Example collection schema (snes-demo).
+  *.room.json        ★R.3 Example rooms (bedroom + arcade, cross-linked by
+                     portals). Load via ?room=roms/bedroom.room.json.
   freeware/          Shippable ROMs: all lwx-*.* (our CC0 games) ship; rest are pointers.
 docs/                ROADMAP, EMUVR_RESEARCH, ROOM_AND_COLLECTIONS, MULTIPLAYER,
                      LICENSING, PROJECT_HISTORY, HANDOFF (this file),
                      research/ (per-system game-authoring notes + synthesis README).
 ```
-★R.1 = added in Phase R.1; ★R.2 = added in Phase R.2.
+★R.1 = added in Phase R.1; ★R.2 = added in Phase R.2; ★R.3 = added in Phase R.3.
 
 ## Data model (the project's core idea)
 
@@ -162,18 +183,20 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   `{ file/rom, system, core?, title, color?, boxart? }`. Core + boxart are
   auto-filled if omitted. Superset of the legacy `manifest.json` (`cartridges[]`).
 - **Room** (`*.room.json`) = the 3D scene + how collections lay out in it
-  (surfaces, shelves, console, posters, **portals** to other rooms). *Schema
-  designed, loader not built yet (Phase R.3).*
+  (surfaces, shelves, console, posters, **portals** to other rooms). *Loaded by
+  RoomLoader/RoomBuilder since R.3.*
 - A game entry consumed by `Cartridge.js` keeps fields: `file, system, core,
   title, color, boxart`, plus R.1 extras `boxartList, license, credits, rom`.
-- Load a collection at runtime: `?collection=URL` (alias `?room=URL`); default
-  is `roms/manifest.json`.
+- Load at runtime: **`?room=URL`** loads a full room; **`?collection=URL`** drops
+  a bare collection into the built-in `defaultRoom()`; **drag-drop** a
+  `.room.json`/`.collection.json` onto the page. Default is `roms/manifest.json`.
+  (`?room` is no longer an alias for `?collection` — R.3 split them.)
 
 ## Roadmap position
 
 `docs/ROADMAP.md` is authoritative. Phases:
 - **Phase 0** ✅ clean repo published (MIT, licensing docs, EmuVR research).
-- **Phase R — Rooms & Collections as JSON** ← in progress
+- **Phase R — Rooms & Collections as JSON** ✅ complete
   - **R.1 ✅ done** — data layer (systems / ArtResolver / Collection; main.js
     refactored; tests; debug harness boxart-404 reclassification).
   - **R.2 ✅ done** — `src/RomResolver.js`: url / local (File System Access API,
@@ -181,39 +204,39 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
     cache). Delivers the user goal of referencing **web folders OR local folders
     on PCs/headsets**. Wired behind `loadCartridge()`; "ROM folder…" header
     button grants the local library where the FSA API exists.
-  - **R.3 ← NEXT** — `src/RoomLoader.js`: read `*.room.json`, drive the existing
-    factories, apply surfaces/lighting/portals. Load room by URL/drag-drop.
-- **Phase E** — in-VR room editor (write back `*.room.json`).
+  - **R.3 ✅ done** — `src/RoomLoader.js` (pure parse) + `src/RoomBuilder.js`
+    (build) drive the factories from a `*.room.json`; `SceneMgr.applyEnvironment`
+    applies surfaces/lighting. `?room=URL`, drag-drop, and portals all work;
+    examples `bedroom`/`arcade`. Default layout unchanged.
+- **Phase E ← NEXT** — in-VR room editor (write back `*.room.json`).
 - **Phase M** — multiplayer (`docs/MULTIPLAYER.md`): M0 presence/avatars/voice,
   M1 host-authoritative game sync, M2 rollback, M3 crossplay.
 - **Phase C** — open prop package schema, community gallery, BIOS-needing
   systems (PSX/N64), PWA.
 
-## R.2 follow-ups (deferred, not blocking R.3)
+## Deferred follow-ups (not blocking Phase E)
 
 - **Verify File System Access on the Quest browser** with a real headset — the
   "ROM folder…" button self-hides where `showDirectoryPicker` is absent, and
   `pick` + `opfs` are the guaranteed fallbacks, but Quest support is unverified.
-- **In-VR library grant + drag-drop** of `.collection.json`/`.room.json` onto
-  the page aren't wired yet (the grant button is flat-screen only for now).
+- **In-VR** library grant + room/collection drop are still flat-screen only
+  (desktop drag-drop + the grant button work; no in-VR equivalent yet).
 - **sha1 verification** of fetched/local bytes is not enforced (the field is
   only used as the OPFS cache key today).
+- **R.3 specifics:** `tv` prop only toggles the CRT shader (no TV reposition);
+  portal targets are room URLs (no local-id registry); no "you don't own this"
+  affordance on cartridges whose ROM can't resolve. See `docs/ROADMAP.md`.
 
-## Immediate next actions for R.3
+## Immediate next actions for Phase E (in-VR room editor)
 
-1. `src/RoomLoader.js`: read a `*.room.json` (schema in
-   `docs/ROOM_AND_COLLECTIONS.md` §3) and drive the existing
-   `createShelf/Cartridge/Console/...` factories declaratively, instead of
-   `main.js` calling them imperatively in `buildCartridgeWorld()`.
-2. Apply `environment.surfaces` onto the `SceneMgr` room mesh + `CrtShader`
-   material; apply lighting; place props by `pos/rot`.
-3. **Portals** — a prop that loads another room (local id or URL) on enter.
-4. Load a room by `?room=URL` (already an alias for `?collection=`; split them)
-   and by drag-drop. **Acceptance:** a shared `.room.json` URL reconstructs the
-   room + collection on another machine (free `url` games play; `local`/owned
-   games show empty slots).
-5. Extend `npm test` for the pure room-parsing parts; keep `npm run debug`
-   verdict OK (and screenshot-verify a room renders in-app).
+The room format + loader exist; Phase E adds **writing** it back from in-VR.
+1. Grab/move/rotate props in VR and snap their `pos/rot` back into the room
+   descriptor (the inverse of `RoomBuilder.buildRoom`).
+2. Swap wallpaper/floor/posters and assign collections to shelves from an in-VR
+   panel (reuse `MenuMgr`/`MenuPanel`); re-run `SceneMgr.applyEnvironment`.
+3. Add/aim **portals** to other rooms in-editor.
+4. **Export** the edited `*.room.json` (download / copy URL) — closes the
+   share loop. Keep `npm test` + `npm run debug` green; screenshot-verify.
 
 ## Gotchas already hit (so you don't re-hit them)
 

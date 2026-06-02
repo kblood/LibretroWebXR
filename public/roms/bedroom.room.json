@@ -1,0 +1,36 @@
+{
+  "schema": "libretrowebxr/room@1",
+  "id": "bedroom",
+  "title": "90s Bedroom",
+  "author": "LibretroWebXR",
+  "_comment": "Example room (Phase R.3). Load with ?room=roms/bedroom.room.json. References the default manifest collection by URL; the two shelves split it left/right exactly like the built-in default layout, but now it's declarative JSON. Walk into the doorway on the right to portal to the arcade room. rot is in degrees; pos is metres.",
+  "collections": ["roms/manifest.json"],
+  "environment": {
+    "surfaces": {
+      "wallpaper": "builtin:retro-blue",
+      "floor": "builtin:wood",
+      "ceiling": "builtin:dark"
+    },
+    "lighting": {
+      "timeOfDay": "evening",
+      "lamps": [
+        { "pos": [1.4, 1.7, -2.0], "color": "#ffd9a0", "intensity": 2.4, "distance": 5 }
+      ]
+    }
+  },
+  "props": [
+    { "type": "shelf",   "id": "shelf-left",  "collection": "roms/manifest.json", "half": "left",
+      "pos": [-2.85, 1.25, -1.5], "rot": [0, 90, 0] },
+    { "type": "shelf",   "id": "shelf-right", "collection": "roms/manifest.json", "half": "right",
+      "pos": [2.85, 1.25, -1.5],  "rot": [0, -90, 0] },
+    { "type": "console", "id": "console-1",   "pos": [0, 0.74, -2.4] },
+    { "type": "gamepad", "id": "gamepad-1",   "pos": [0.55, 0.78, -2.15] },
+    { "type": "tv",      "id": "tv-1",        "shader": "crt" },
+    { "type": "poster",  "id": "poster-1",    "texture": "builtin:poster-1",
+      "size": [0.8, 1.1], "pos": [-1.7, 1.8, -3.94] }
+  ],
+  "portals": [
+    { "id": "to-arcade", "target": "roms/arcade.room.json", "radius": 0.6,
+      "pos": [2.7, 0, 1.0], "rot": [0, -90, 0] }
+  ]
+}

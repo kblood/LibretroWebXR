@@ -6,6 +6,7 @@ import { coreForFile, systemForFile, systemForName, SYSTEMS, CORES } from '../sr
 import { baseName, stripTags, sanitizeThumbName, boxartCandidates } from '../src/ArtResolver.js';
 import { normalizeGame, parseCollection } from '../src/Collection.js';
 import { romUrlFor, sourceOrder, cacheKey, fileBaseName, wantedFileName, fileNameMatches, resolve as resolveRom } from '../src/RomResolver.js';
+import { parseRoom, defaultRoom, normalizeProp, normalizePortal, roomCollectionRefs, vec3 } from '../src/RoomLoader.js';
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -109,6 +110,62 @@ ok('fileNameMatches rejects empty', !fileNameMatches('', 'b.nes'));
   try { await resolveRom({ file: 'a.nes' }, { fetchImpl }); }
   catch { threw = true; }
   ok('resolve throws when the only source fails', threw);
+}
+
+// --- RoomLoader (pure room parsing) ---------------------------------------
+eq('vec3 fills missing comps', vec3([1, 2]), [1, 2, 0]);
+eq('vec3 non-array → default triple', vec3(undefined, 0), [0, 0, 0]);
+
+{
+  const p = normalizeProp({ type: 'Shelf', pos: [1, 2, 3] }, 0);
+  eq('normalizeProp lowercases type', p.type, 'shelf');
+  eq('normalizeProp fills id', p.id, 'shelf-1');
+  eq('normalizeProp keeps pos', p.pos, [1, 2, 3]);
+  eq('normalizeProp defaults rot', p.rot, [0, 0, 0]);
+  ok('normalizeProp drops unknown type', normalizeProp({ type: 'bogus' }) === null);
+  ok('normalizeProp preserves extras (collection/half)',
+     normalizeProp({ type: 'shelf', collection: 'c', half: 'left' }).half === 'left');
+}
+{
+  ok('normalizePortal needs target', normalizePortal({ pos: [0, 0, 0] }) === null);
+  const pt = normalizePortal({ target: 'roms/x.room.json', pos: [1, 0, 1] }, 2);
+  eq('portal id default', pt.id, 'portal-3');
+  eq('portal default radius', pt.radius, 0.6);
+}
+{
+  const room = parseRoom({
+    schema: 'libretrowebxr/room@1', id: 'r', title: 'R',
+    collections: ['a.collection.json'],
+    props: [
+      { type: 'shelf', collection: 'b.collection.json' },
+      { type: 'console', pos: [0, 0.7, -2] },
+      { type: 'oops' },
+    ],
+    portals: [{ target: 'r2.room.json' }, { /* no target */ }],
+    environment: { surfaces: { wallpaper: 'builtin:retro-blue' } },
+  }, { sourceLabel: 'r' });
+  eq('parseRoom drops bad prop', room.props.length, 2);
+  eq('parseRoom drops targetless portal', room.portals.length, 1);
+  eq('parseRoom keeps environment', room.environment.surfaces.wallpaper, 'builtin:retro-blue');
+  eq('roomCollectionRefs merges top-level + shelf, deduped',
+     roomCollectionRefs(room), ['a.collection.json', 'b.collection.json']);
+}
+{
+  const room = parseRoom({}, { sourceLabel: 'empty' });
+  eq('parseRoom tolerates empty: props', room.props, []);
+  eq('parseRoom tolerates empty: portals', room.portals, []);
+  eq('parseRoom defaults schema', room.schema, 'libretrowebxr/room@1');
+  eq('parseRoom labels from sourceLabel', room.id, 'empty');
+}
+{
+  const r = defaultRoom('roms/manifest.json');
+  const shelves = r.props.filter((p) => p.type === 'shelf');
+  eq('defaultRoom has two shelves', shelves.length, 2);
+  eq('defaultRoom shelves split left/right', shelves.map((s) => s.half), ['left', 'right']);
+  ok('defaultRoom has a console', r.props.some((p) => p.type === 'console'));
+  ok('defaultRoom has a gamepad', r.props.some((p) => p.type === 'gamepad'));
+  eq('defaultRoom references the collection', r.collections, ['roms/manifest.json']);
+  eq('defaultRoom collection refs', roomCollectionRefs(r), ['roms/manifest.json']);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

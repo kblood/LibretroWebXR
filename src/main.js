@@ -3,8 +3,6 @@ import { EmulatorClient } from './EmulatorClient.js';
 import { InputMgr } from './InputMgr.js';
 import { Placeholder } from './Placeholder.js';
 import { SceneMgr } from './SceneMgr.js';
-import { createCartridge } from './Cartridge.js';
-import { createShelf, lockShelfHomes } from './Shelf.js';
 import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
 import { GrabMgr } from './GrabMgr.js';
@@ -19,8 +17,10 @@ import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
 import { CORES, coreForFile } from './systems.js';
-import { loadCollection } from './Collection.js';
+import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
+import { parseRoom, defaultRoom, roomCollectionRefs } from './RoomLoader.js';
+import { buildRoom } from './RoomBuilder.js';
 
 // CORES and the system registry now live in src/systems.js (system-first,
 // single source of truth). detectCore() is coreForFile() from there; the
@@ -82,60 +82,120 @@ window.__scene = scene;
 window.__client = client;
 
 // --- Build the VR cartridge world ----------------------------------------
-
-const consoleObj = createConsole({ position: new THREE.Vector3(0, 0.74, -2.4) });
-scene.addObject(consoleObj);
-
-const gamepadObj = createGamepad({ position: new THREE.Vector3(0.55, 0.78, -2.15) });
-scene.addObject(gamepadObj);
-
-// Live gamepad debug readout floats above the controller mesh. Parented
-// to the gamepad so it follows whether the gamepad is sitting at rest or
-// being held — the user can glance at it to see exactly which button
-// indices are firing on Quest.
-const debugHud = createDebugHud();
-debugHud.position.set(0, 0.30, 0);
-debugHud.rotation.x = -Math.PI / 6;
-gamepadObj.add(debugHud);
+//
+// The world is now declarative (Phase R.3): a parsed *.room.json descriptor
+// ([[src/RoomLoader.js]]) is handed to RoomBuilder, which drives the same
+// Shelf/Console/Cartridge/Gamepad factories that used to be called by hand
+// here. main.js keeps ownership of everything stateful (grab/input/menus,
+// save states, portal navigation). With no ?room= the built-in defaultRoom()
+// reproduces the historical two-shelf layout exactly.
 
 let grabMgr = null;
 let gameInput = null;
 let cartridges = [];
-async function buildCartridgeWorld() {
-  // Default collection is roms/manifest.json; ?collection=URL (alias ?room=)
-  // loads any collection JSON instead (web folder of games). The loader
-  // auto-fills core + box-art candidates from the system registry, so a
-  // collection can omit them. See docs/ROOM_AND_COLLECTIONS.md.
-  const collectionUrl = urlParams.get('collection') || urlParams.get('room') || 'roms/manifest.json';
-  const collection = await loadCollection(collectionUrl);
-  setStatus(collection.games.length ? `${collection.games.length} games` : 'no games');
+let consoleObj = null;
+let gamepadObj = null;
+let debugHud = null;
 
-  cartridges = collection.games.map((m) => createCartridge(m));
-  window.__games = collection.games; // debug hook: harness boots via these metas
+const DROP_KEY = 'libretrowebxr.dropped';
 
-  if (cartridges.length) {
-    // Split cartridges across two wall-mounted shelves so the user has
-    // something on either side. Room is 6m × 8m, walls at ±3m on X.
-    const half = Math.ceil(cartridges.length / 2);
-    const left = cartridges.slice(0, half);
-    const right = cartridges.slice(half);
-
-    const leftShelf = createShelf(left, {
-      position: new THREE.Vector3(-2.85, 1.25, -1.5),
-      rotationY: Math.PI / 2, // face into room (+X)
-    });
-    scene.addObject(leftShelf);
-    lockShelfHomes(leftShelf);
-
-    if (right.length) {
-      const rightShelf = createShelf(right, {
-        position: new THREE.Vector3(2.85, 1.25, -1.5),
-        rotationY: -Math.PI / 2, // face into room (-X)
-      });
-      scene.addObject(rightShelf);
-      lockShelfHomes(rightShelf);
-    }
+async function fetchJson(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`${url} → ${r.status}`);
+    return await r.json();
+  } catch (e) {
+    console.warn('[main] fetch json failed:', e.message || e);
+    return null;
   }
+}
+
+// A room/collection JSON dropped onto the page is stashed and the page
+// reloads (same robust path as a cross-core swap); we pick it up here.
+function readDroppedWorld() {
+  const raw = sessionStorage.getItem(DROP_KEY);
+  if (!raw) return null;
+  sessionStorage.removeItem(DROP_KEY);
+  try {
+    const { kind, text } = JSON.parse(raw);
+    const obj = JSON.parse(text);
+    if (kind === 'room') return { room: parseRoom(obj, { sourceLabel: 'dropped room' }), inline: [] };
+    const col = parseCollection(obj, { sourceLabel: 'dropped collection' });
+    const ref = `dropped:${col.id || 'collection'}`;
+    return { room: defaultRoom(ref), inline: [[ref, col]] };
+  } catch (e) {
+    console.warn('[main] bad dropped world:', e);
+    return null;
+  }
+}
+
+// Decide what to build: a dropped file wins; else ?room=URL loads a full
+// room; else ?collection=URL (or the default manifest) drops a bare
+// collection into the built-in room layout.
+async function resolveWorld() {
+  const dropped = readDroppedWorld();
+  if (dropped) return dropped;
+
+  const roomUrl = urlParams.get('room');
+  if (roomUrl) {
+    const obj = await fetchJson(roomUrl);
+    return { room: parseRoom(obj || {}, { sourceLabel: roomUrl }), inline: [] };
+  }
+
+  const collectionUrl = urlParams.get('collection') || 'roms/manifest.json';
+  return { room: defaultRoom(collectionUrl), inline: [] };
+}
+
+// Load every collection a room references into a { byKey, list } the builder
+// can resolve shelves against. Inline (dropped) collections are pre-seeded.
+async function loadRoomCollections(room, inline) {
+  const byKey = new Map();
+  const list = [];
+  const register = (refs, col) => {
+    if (!col) return;
+    list.push(col);
+    for (const r of refs) if (r) byKey.set(r, col);
+    if (col.id) byKey.set(col.id, col);
+  };
+  for (const [ref, col] of inline) register([ref], col);
+  for (const ref of roomCollectionRefs(room)) {
+    if (byKey.has(ref)) continue;
+    register([ref], await loadCollection(ref));
+  }
+  return { byKey, list };
+}
+
+async function buildCartridgeWorld() {
+  const { room, inline } = await resolveWorld();
+  const collections = await loadRoomCollections(room, inline);
+  const allGames = collections.list.flatMap((c) => c.games);
+  window.__games = allGames; // debug hook: harness boots via these metas
+  setStatus(allGames.length ? `${allGames.length} games` : 'no games');
+
+  const built = buildRoom({ scene, room, collections });
+  cartridges = built.cartridges;
+  consoleObj = built.consoleObj;
+  gamepadObj = built.gamepadObj;
+
+  // A room may omit a console/gamepad; the load + input wiring below needs
+  // both, so fall back to the default placements.
+  if (!consoleObj) {
+    consoleObj = createConsole({ position: new THREE.Vector3(0, 0.74, -2.4) });
+    scene.addObject(consoleObj);
+  }
+  if (!gamepadObj) {
+    gamepadObj = createGamepad({ position: new THREE.Vector3(0.55, 0.78, -2.15) });
+    scene.addObject(gamepadObj);
+  }
+
+  // Live gamepad debug readout floats above the controller mesh. Parented
+  // to the gamepad so it follows whether the gamepad is sitting at rest or
+  // being held — the user can glance at it to see exactly which button
+  // indices are firing on Quest.
+  debugHud = createDebugHud();
+  debugHud.position.set(0, 0.30, 0);
+  debugHud.rotation.x = -Math.PI / 6;
+  gamepadObj.add(debugHud);
 
   grabMgr = new GrabMgr({
     scene: scene.scene,
@@ -204,13 +264,39 @@ async function buildCartridgeWorld() {
   });
 
   buildMenuAndControlsPanel();
+  installPortals(built.portals);
 
   window.__grab = grabMgr;
   window.__locomotion = locomotion;
   window.__gameInput = gameInput;
+  window.__room = room;
 
   // After everything's built, see if we're resuming a cross-system swap.
   await resumePendingLoad();
+}
+
+// Portals navigate to another room (a *.room.json URL) when the player walks
+// into the doorway. We change the URL and let the page rebuild from scratch —
+// the same clean-slate approach used for cross-core swaps (libretro cores
+// can't cleanly unload). Proximity is checked on the rig's XZ position.
+function installPortals(portals) {
+  if (!portals?.length) return;
+  let navigated = false;
+  const playerPos = new THREE.Vector3();
+  scene.addTickCallback(() => {
+    if (navigated) return;
+    scene.playerRig.getWorldPosition(playerPos);
+    for (const p of portals) {
+      const dx = playerPos.x - p.object.position.x;
+      const dz = playerPos.z - p.object.position.z;
+      if (Math.hypot(dx, dz) <= p.radius) {
+        navigated = true;
+        setStatus(`entering ${p.target}…`);
+        location.assign(`${location.pathname}?room=${encodeURIComponent(p.target)}`);
+        break;
+      }
+    }
+  });
 }
 
 // --- In-VR menu + controls panel -----------------------------------------
@@ -509,5 +595,31 @@ if (romFolderBtn && fileSystemAccessSupported()) {
   });
 }
 
+// Drag-and-drop a *.room.json or *.collection.json onto the page to load it
+// (Phase R.3 sharing model). We stash the file and reload — the build path
+// then reads it from sessionStorage. Detecting room vs collection: a room has
+// props/environment/portals or a room schema; everything else is a collection.
+function installDragAndDrop() {
+  window.addEventListener('dragover', (e) => { e.preventDefault(); });
+  window.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer?.files?.[0];
+    if (!file || !/\.json$/i.test(file.name)) return;
+    try {
+      const text = await file.text();
+      const obj = JSON.parse(text);
+      const isRoom = (typeof obj?.schema === 'string' && obj.schema.includes('room'))
+                   || Array.isArray(obj?.props) || Array.isArray(obj?.portals)
+                   || (obj?.environment != null && !Array.isArray(obj?.games) && !Array.isArray(obj?.cartridges));
+      sessionStorage.setItem(DROP_KEY, JSON.stringify({ kind: isRoom ? 'room' : 'collection', text }));
+      setStatus(`loading ${file.name}…`);
+      location.reload();
+    } catch (err) {
+      setStatus(`bad drop: ${err.message || err}`);
+    }
+  });
+}
+
+installDragAndDrop();
 setSystemLabel(null);
 buildCartridgeWorld();

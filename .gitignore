@@ -14,6 +14,11 @@ public/roms/*
 !public/roms/manifest.json
 !public/roms/README.md
 !public/roms/freeware/
+# Collection + room descriptors are pointers-only (they never embed ROMs) —
+# they ARE the shareable schema, and a shared room/collection URL must resolve
+# on another machine, so these ship.
+!public/roms/*.collection.json
+!public/roms/*.room.json
 
 # Libretro cores (~2-5 MB each). NOT distributed in this repo — fetched at
 # build/deploy time by scripts/fetch-cores.mjs and rehosted on the deploy

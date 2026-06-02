@@ -61,6 +61,11 @@ everything here is **open, declarative JSON** that references content by locatio
 - a room can be **shared as a single file or URL** — free games travel with it,
   your owned games resolve against your own local folder.
 
+Try it: `?room=roms/bedroom.room.json` loads an example room (walk into the
+doorway to portal to `arcade.room.json`); `?collection=URL` drops a bare
+collection into the default room; or drag a `.room.json` / `.collection.json`
+onto the page. With no parameter you get the built-in room.
+
 Full design: `docs/ROOM_AND_COLLECTIONS.md`. Multiplayer plan:
 `docs/MULTIPLAYER.md`. EmuVR research that informs all of this:
 `docs/EMUVR_RESEARCH.md`.

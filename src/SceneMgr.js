@@ -14,6 +14,26 @@ import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import { createCrtMaterial } from './CrtShader.js';
 
+// Built-in surface colours a room can name as `builtin:<key>` without shipping
+// a texture. Unknown keys fall back to mid-grey.
+const BUILTIN_SURFACES = {
+  'retro-blue':  '#26344f',
+  'retro-green': '#2c4a32',
+  'retro-pink':  '#4a2c3e',
+  'crt-grey':    '#26262e',
+  'wood':        '#5a3a22',
+  'dark':        '#141418',
+};
+
+// time-of-day lighting presets (hemisphere ambient + warm key intensity/tint).
+const TIME_OF_DAY = {
+  day:     { hemi: 0.9,  hemiColor: 0x88aacc, key: 6.0, keyColor: 0xffffff },
+  evening: { hemi: 0.5,  hemiColor: 0x6a5a6a, key: 4.0, keyColor: 0xffd9a0 },
+  night:   { hemi: 0.25, hemiColor: 0x303048, key: 2.5, keyColor: 0x8899cc },
+};
+
+const isTextureUrl = (s) => typeof s === 'string' && /^(https?:|\/|\.\/|roms\/)/.test(s);
+
 export class SceneMgr {
   constructor({ container, sourceCanvas, onControllerButton }) {
     this.container = container;
@@ -77,7 +97,9 @@ export class SceneMgr {
     this.camera.lookAt(this._cameraTarget);
     this.playerRig.add(this.camera);
 
-    // Build a 6m × 4m × 8m room.
+    // Build a 6m × 4m × 8m room. Each wall gets its OWN material clone so a
+    // room file can repaper one wall without touching the others (per-wall
+    // wallpaper_* overrides — see applyEnvironment / docs/ROOM_AND_COLLECTIONS).
     const roomW = 6, roomD = 8, roomH = 3.2;
     const wallMat   = new THREE.MeshStandardMaterial({ color: 0x1a1a22, roughness: 0.95 });
     const floorMat  = new THREE.MeshStandardMaterial({ color: 0x2a2a32, roughness: 0.85 });
@@ -92,28 +114,37 @@ export class SceneMgr {
     ceiling.position.y = roomH;
     this.scene.add(ceiling);
 
-    const back = new THREE.Mesh(new THREE.PlaneGeometry(roomW, roomH), wallMat);
+    const back = new THREE.Mesh(new THREE.PlaneGeometry(roomW, roomH), wallMat.clone());
     back.position.set(0, roomH / 2, -roomD / 2);
     this.scene.add(back);
 
-    const front = new THREE.Mesh(new THREE.PlaneGeometry(roomW, roomH), wallMat);
+    const front = new THREE.Mesh(new THREE.PlaneGeometry(roomW, roomH), wallMat.clone());
     front.position.set(0, roomH / 2, roomD / 2);
     front.rotation.y = Math.PI;
     this.scene.add(front);
 
-    const left = new THREE.Mesh(new THREE.PlaneGeometry(roomD, roomH), wallMat);
+    const left = new THREE.Mesh(new THREE.PlaneGeometry(roomD, roomH), wallMat.clone());
     left.position.set(-roomW / 2, roomH / 2, 0);
     left.rotation.y = Math.PI / 2;
     this.scene.add(left);
 
-    const right = new THREE.Mesh(new THREE.PlaneGeometry(roomD, roomH), wallMat);
+    const right = new THREE.Mesh(new THREE.PlaneGeometry(roomD, roomH), wallMat.clone());
     right.position.set(roomW / 2, roomH / 2, 0);
     right.rotation.y = -Math.PI / 2;
     this.scene.add(right);
 
-    this.scene.add(new THREE.HemisphereLight(0x404055, 0x101015, 0.7));
+    // Refs so applyEnvironment() can repaper/relight after construction.
+    this._roomDims = { w: roomW, d: roomD, h: roomH };
+    this._floor = floor;
+    this._ceiling = ceiling;
+    this._walls = { back, front, left, right };
+    this._lamps = []; // room-supplied point lights (cleared on re-apply)
+
+    this._hemi = new THREE.HemisphereLight(0x404055, 0x101015, 0.7);
+    this.scene.add(this._hemi);
     const key = new THREE.PointLight(0xfff0d0, 6.0, 10, 1.5);
     key.position.set(0, 2.6, -1.0);
+    this._key = key;
     this.scene.add(key);
     const fill = new THREE.PointLight(0x5566aa, 1.5, 8, 1.8);
     fill.position.set(-1.2, 1.6, 1.2);
@@ -195,6 +226,73 @@ export class SceneMgr {
     }
     if (this.screenTexture) this.screenTexture.dispose();
     this.screenTexture = newTex;
+  }
+
+  // --- Room environment (driven by RoomBuilder from a *.room.json) ---------
+
+  /** Apply a room's `environment` block (surfaces + lighting). Safe on {}. */
+  applyEnvironment(env) {
+    if (!env || typeof env !== 'object') return;
+    const s = env.surfaces || {};
+    this._applySurface(this._floor.material, s.floor);
+    this._applySurface(this._ceiling.material, s.ceiling);
+    // `wallpaper` covers all four walls; `wallpaper_<b|f|l|r>` overrides one.
+    const perWall = { back: 'wallpaper_b', front: 'wallpaper_f', left: 'wallpaper_l', right: 'wallpaper_r' };
+    for (const [side, mesh] of Object.entries(this._walls)) {
+      this._applySurface(mesh.material, s[perWall[side]] || s.wallpaper);
+    }
+    this._applyLighting(env.lighting);
+  }
+
+  _applySurface(mat, spec) {
+    if (!mat || !spec) return;
+    const tex = typeof spec === 'string' ? spec : spec.texture;
+    const tiling = (typeof spec === 'object' && Array.isArray(spec.tiling)) ? spec.tiling : null;
+    if (typeof spec === 'object' && spec.color) mat.color.set(spec.color);
+    if (typeof tex === 'string' && tex.startsWith('builtin:')) {
+      mat.map = null; mat.color.set(BUILTIN_SURFACES[tex.slice(8)] || '#444'); mat.needsUpdate = true; return;
+    }
+    if (typeof tex === 'string' && tex.startsWith('#')) {
+      mat.map = null; mat.color.set(tex); mat.needsUpdate = true; return;
+    }
+    if (isTextureUrl(tex)) {
+      new THREE.TextureLoader().load(tex, (t) => {
+        t.colorSpace = THREE.SRGBColorSpace;
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        if (tiling) t.repeat.set(tiling[0], tiling[1]);
+        mat.map = t; mat.color.set('#ffffff'); mat.needsUpdate = true;
+      }, undefined, () => { /* keep base colour on load failure */ });
+    }
+  }
+
+  _applyLighting(lighting) {
+    // Clear previously room-supplied lamps so re-applying is idempotent.
+    for (const l of this._lamps) this.scene.remove(l);
+    this._lamps = [];
+    if (!lighting || typeof lighting !== 'object') return;
+    const tod = TIME_OF_DAY[lighting.timeOfDay];
+    if (tod) {
+      this._hemi.intensity = tod.hemi; this._hemi.color.setHex(tod.hemiColor);
+      this._key.intensity = tod.key;   this._key.color.setHex(tod.keyColor);
+    }
+    for (const lamp of (Array.isArray(lighting.lamps) ? lighting.lamps : [])) {
+      const p = new THREE.PointLight(new THREE.Color(lamp.color || '#ffd9a0'), lamp.intensity ?? 2.0, lamp.distance ?? 5, 1.6);
+      const pos = Array.isArray(lamp.pos) ? lamp.pos : [0, 2, 0];
+      p.position.set(pos[0], pos[1], pos[2]);
+      this.scene.add(p);
+      this._lamps.push(p);
+    }
+  }
+
+  /** Apply a `tv` prop. Today: toggle the CRT shader (`crt` | `flat`). */
+  applyTv(prop) {
+    const u = this.screenMaterial?.uniforms;
+    if (!u || !prop) return;
+    if (prop.shader === 'flat') {
+      u.uCurvature.value = 0; u.uScanlineIntensity.value = 0; u.uMaskIntensity.value = 0; u.uVignette.value = 0;
+    } else if (prop.shader === 'crt') {
+      u.uCurvature.value = 0.18; u.uScanlineIntensity.value = 0.22; u.uMaskIntensity.value = 0.15; u.uVignette.value = 0.35;
+    }
   }
 
   _initControllers() {

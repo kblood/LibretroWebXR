@@ -77,12 +77,40 @@ Turn today's imperative scene-building into a declarative layer (no rewrite).
   collection game through the real resolver/core-start path; verdict OK with NES
   rendering verified in-app.
 
-### R.3 — Room loader  ← next
-- `src/RoomLoader.js` — reads `*.room.json`, drives the existing factories
-  (`createShelf/Cartridge/Console/...`), applies surfaces/lighting/portals.
-- Load room by `?room=URL` / drag-drop. **Acceptance:** a shared `.room.json`
-  URL reconstructs a room + collection on another machine; free games play,
-  owned games show empty slots.
+### R.3 — Room loader  ✅ done
+- `src/RoomLoader.js` — **pure** parse/normalize of a `*.room.json` into a
+  canonical descriptor (`parseRoom`, `defaultRoom`, `normalizeProp/Portal`,
+  `roomCollectionRefs`). No THREE, so `npm test` covers it (mirrors the
+  Collection.js-parses / builder-builds split).
+- `src/RoomBuilder.js` — **imperative**: `buildRoom({scene, room, collections})`
+  drives the existing `createShelf/Console/Cartridge/Gamepad` factories from the
+  descriptor, builds posters/models/portals inline, and returns the handles
+  (`consoleObj, gamepadObj, cartridges, portals`) main.js keeps wiring. Shelf
+  games come from a named collection + optional `filter`/`slice`/`half`.
+- `SceneMgr.applyEnvironment(env)` repapers floor/ceiling/walls (flat colour,
+  `builtin:` palette, or texture URL with tiling; per-wall `wallpaper_*`
+  overrides) and relights (`timeOfDay` preset + `lamps[]`). `applyTv(prop)`
+  toggles the CRT shader (`crt`|`flat`).
+- `main.js` now builds every world through RoomLoader/RoomBuilder. **`?room=URL`
+  loads a full room** (split from `?collection=`, which still drops a bare
+  collection into the built-in `defaultRoom()` layout); **drag-drop** a
+  `.room.json`/`.collection.json` onto the page (stashed → reload). **Portals**
+  navigate to the target room on walk-in (proximity → `?room=` reload).
+  No-`?room` default reproduces the historical two-shelf layout exactly.
+- Tests: `npm test` now 70 assertions (room parsing). `npm run debug` verdict OK
+  for default + `?room=roms/bedroom.room.json` + `?room=roms/arcade.room.json`;
+  GB game boots in-room, screenshot-verified.
+- Examples: `public/roms/bedroom.room.json` + `arcade.room.json` (cross-linked
+  by portals).
+
+### R.3 follow-ups (deferred)
+- `tv` prop only toggles the CRT shader today; repositioning the TV mesh (and
+  the separate stand) from `pos/rot` is not wired.
+- Portal target is treated as a room URL; local room **ids** (a gallery/registry)
+  aren't resolved yet.
+- A shared room with `owned`/`local` games shows empty slots only insofar as
+  RomResolver can't fetch them at play time — there's no pre-flight "you don't
+  own this" affordance on the cartridge yet.
 
 ## Phase E — In-VR room editor
 Place/rotate props, swap wallpaper/floor/posters, assign collections to shelves,

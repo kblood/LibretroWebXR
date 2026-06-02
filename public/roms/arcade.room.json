@@ -1,0 +1,31 @@
+{
+  "schema": "libretrowebxr/room@1",
+  "id": "arcade",
+  "title": "Back-room Arcade",
+  "author": "LibretroWebXR",
+  "_comment": "Second example room, cross-linked with bedroom.room.json to demonstrate portals. A single back-wall shelf filtered to one system (filter:{system:'nes'}) shows the shelf collection/filter feature. Walk into the doorway to portal back to the bedroom.",
+  "collections": ["roms/manifest.json"],
+  "environment": {
+    "surfaces": {
+      "wallpaper": "builtin:retro-pink",
+      "floor": "builtin:dark"
+    },
+    "lighting": {
+      "timeOfDay": "night",
+      "lamps": [
+        { "pos": [0, 2.4, -2.0], "color": "#66ccff", "intensity": 2.0, "distance": 6 }
+      ]
+    }
+  },
+  "props": [
+    { "type": "shelf",   "id": "nes-shelf", "collection": "roms/manifest.json", "filter": { "system": "nes" },
+      "pos": [0, 1.25, -3.7], "rot": [0, 0, 0] },
+    { "type": "console", "id": "console-1", "pos": [0, 0.74, -2.4] },
+    { "type": "gamepad", "id": "gamepad-1", "pos": [0.55, 0.78, -2.15] },
+    { "type": "tv",      "id": "tv-1",      "shader": "flat" }
+  ],
+  "portals": [
+    { "id": "to-bedroom", "target": "roms/bedroom.room.json", "radius": 0.6,
+      "pos": [-2.7, 0, 1.0], "rot": [0, 90, 0] }
+  ]
+}
