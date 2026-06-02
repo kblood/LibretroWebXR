@@ -53,14 +53,21 @@ export class GrabMgr {
   }
 
   addGrabbable(object) {
-    this.grabbables.push(object);
+    // Idempotent: the gamepad is registered both by main.js (as a play object)
+    // and by RoomEditor (as an editable prop) — don't list it twice.
+    if (!this.grabbables.includes(object)) this.grabbables.push(object);
   }
 
-  // A grabbable is only a candidate when its editable-ness matches the current
-  // mode: in play mode → cartridges/gamepad/cards (the non-editable set); in
-  // edit mode → room props (the editable set). This is what keeps furniture
-  // inert while playing and prevents an accidental ROM load while arranging.
+  // Which grabbables are valid targets right now.
+  //  - The gamepad is DUAL-PURPOSE: grabbable in BOTH modes (to play, and to
+  //    reposition while editing). Without this it'd be editable-only and games
+  //    couldn't be played.
+  //  - Everything else is modal: play mode targets the non-editable set
+  //    (cartridges/cards), edit mode targets the editable props. This keeps
+  //    furniture inert while playing and avoids an accidental ROM load while
+  //    arranging.
   _isCandidate(obj) {
+    if (obj.userData?.kind === 'gamepad') return true;
     return !!obj.userData?.editable === this.isEditMode();
   }
 
@@ -183,25 +190,24 @@ export class GrabMgr {
     this.held.delete(ctrl);
     this.scene.attach(obj);
 
-    // Edit-mode prop: leave it exactly where dropped (the editor may snap it to
-    // a grid); never snap-home or insert.
-    if (obj.userData?.editable) {
-      this.onEditRelease(obj);
-      return;
-    }
-
     const kind = obj.userData?.kind;
-    if (kind === 'cartridge') {
+
+    // In edit mode, an editable prop is left exactly where dropped (the editor
+    // may snap it to a grid) — never snapped home or inserted. The gamepad is
+    // editable too, but still needs its held-state reconciled below.
+    if (this.isEditMode() && obj.userData?.editable) {
+      this.onEditRelease(obj);
+    } else if (kind === 'cartridge') {
       this._handleCartridgeRelease(obj);
-    }
-    if (kind === 'memory-card') {
+    } else if (kind === 'memory-card') {
       this._handleCardRelease(obj);
     }
-    if (kind === 'gamepad') {
-      if (!this.isGamepadHeld()) {
-        obj.userData.setHeld?.(false);
-        this.onGamepadHeldChanged(false);
-      }
+
+    // The gamepad is grabbable in both modes, so always reconcile its held-state
+    // on release (flush input, re-enable menu/locomotion) whichever branch ran.
+    if (kind === 'gamepad' && !this.isGamepadHeld()) {
+      obj.userData.setHeld?.(false);
+      this.onGamepadHeldChanged(false);
     }
   }
 

@@ -226,7 +226,10 @@ async function buildCartridgeWorld() {
   editor = new RoomEditor({
     scene, room: currentRoom, placed: built.placed, grabMgr, onStatus: setStatus,
   });
+  // Debug hooks exposed early (before the awaits below) so they're available
+  // even if a later async step (e.g. IndexedDB) is slow.
   window.__editor = editor;
+  window.__grab = grabMgr;
 
   await buildMemoryCards();
 
@@ -281,7 +284,6 @@ async function buildCartridgeWorld() {
   buildMenuAndControlsPanel();
   installPortals(built.portals);
 
-  window.__grab = grabMgr;
   window.__locomotion = locomotion;
   window.__gameInput = gameInput;
   window.__room = room;
