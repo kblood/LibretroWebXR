@@ -3,6 +3,12 @@ dist/
 .vite/
 *.log
 
+# Real deploy script holds connection details (host/user/key path) — keep it
+# local. Publish only scripts/deploy.example.ps1. Copy that → scripts/deploy.ps1
+# and fill in your own values.
+scripts/deploy.ps1
+scripts/deploy.local.ps1
+
 # Local screenshot/probe scratch dir
 tmp/
 
