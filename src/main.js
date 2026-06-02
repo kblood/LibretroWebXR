@@ -20,6 +20,7 @@ import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
 import { CORES, coreForFile } from './systems.js';
 import { loadCollection } from './Collection.js';
+import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
 
 // CORES and the system registry now live in src/systems.js (system-first,
 // single source of truth). detectCore() is coreForFile() from there; the
@@ -110,6 +111,7 @@ async function buildCartridgeWorld() {
   setStatus(collection.games.length ? `${collection.games.length} games` : 'no games');
 
   cartridges = collection.games.map((m) => createCartridge(m));
+  window.__games = collection.games; // debug hook: harness boots via these metas
 
   if (cartridges.length) {
     // Split cartridges across two wall-mounted shelves so the user has
@@ -296,24 +298,12 @@ function handleCartridgeInserted(meta) {
   loadCartridge(meta);
 }
 
-// Resolve a game's ROM bytes to a fetchable URL. An absolute http(s) URL or a
-// rooted path is used as-is (a collection hosted elsewhere can point at its own
-// ROMs); a bare relative path is resolved under roms/. (The url/local/opfs
-// RomResolver of Phase R.2 will slot in here.)
-function romUrl(meta) {
-  const f = meta.rom?.url || meta.file;
-  if (/^https?:\/\//i.test(f) || f.startsWith('/')) return f;
-  return 'roms/' + f;
-}
-
 async function loadCartridge(meta) {
   setStatus(`loading ${meta.title}…`);
   try {
-    const url = romUrl(meta);
-    const buf = await fetch(url).then((r) => {
-      if (!r.ok) throw new Error(`${url} → ${r.status}`);
-      return r.arrayBuffer();
-    });
+    // RomResolver (Phase R.2) turns the entry into bytes from url / local
+    // folder / picker / OPFS cache, per its rom.source (default: url).
+    const buf = await resolveRom(meta);
     const core = CORES[meta.core];
     await client.start(emuCanvas, buf, { coreUrl: core.url, coreName: meta.core, moduleStyle: core.style });
     currentCore = meta.core;
@@ -325,6 +315,7 @@ async function loadCartridge(meta) {
     setStatus(`error: ${e.message || e}`);
   }
 }
+window.__loadCartridge = loadCartridge; // debug hook: boot a game via RomResolver
 
 async function resumePendingLoad() {
   const raw = sessionStorage.getItem(PENDING_KEY);
@@ -501,6 +492,22 @@ romInput.addEventListener('change', async (e) => {
 });
 
 resetBtn.addEventListener('click', () => client.reset());
+
+// ROM library folder (Phase R.2): only meaningful where the File System Access
+// API exists (desktop Chromium today; Quest support varies — pick/opfs are the
+// fallbacks). Reveal the button only when supported.
+const romFolderBtn = $('#rom-folder-btn');
+if (romFolderBtn && fileSystemAccessSupported()) {
+  romFolderBtn.hidden = false;
+  romFolderBtn.addEventListener('click', async () => {
+    try {
+      await pickLibraryDirectory();
+      setStatus('ROM library folder granted');
+    } catch (e) {
+      if (e?.name !== 'AbortError') setStatus(`folder grant failed: ${e.message || e}`);
+    }
+  });
+}
 
 setSystemLabel(null);
 buildCartridgeWorld();

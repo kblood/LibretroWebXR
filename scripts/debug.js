@@ -155,6 +155,21 @@ if (ROM_PATH) {
   }, romBytes.toString('base64'), romBasename);
 }
 
+// --boot[=<system>] boots a game from the loaded collection through the real
+// RomResolver/loadCartridge path (url source by default), so we exercise
+// in-app ROM resolution + core start, not just the file-picker shortcut.
+if (args.boot) {
+  const wantSystem = typeof args.boot === 'string' ? args.boot : null;
+  const booted = await page.evaluate(async (sys) => {
+    const games = window.__games || [];
+    const meta = sys ? games.find((g) => g.system === sys) : games[0];
+    if (!meta) return { ok: false, reason: sys ? `no game for system ${sys}` : 'no games' };
+    await window.__loadCartridge(meta);
+    return { ok: true, title: meta.title, system: meta.system, core: meta.core };
+  }, wantSystem);
+  console.log('# boot:', booted);
+}
+
 console.log(`# idling ${TIMEOUT}ms to collect logs…`);
 await new Promise((r) => setTimeout(r, TIMEOUT));
 

@@ -1,9 +1,10 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated 2026-06-02
-after the **CC0 test-game library** + the **classic-core render fix** (below).
-Phase R.1 (JSON collection layer) is done; **Phase R.2 (RomResolver) is still the
-next roadmap step.**
+after **Phase R.2 (RomResolver)**, the **CC0 test-game library**, and the
+**classic-core render fix** (all below). Phases R.1 (JSON collection layer) and
+R.2 (ROM source resolution) are done; **Phase R.3 (RoomLoader) is the next
+roadmap step.**
 
 ## What this is
 
@@ -30,7 +31,10 @@ per-core RetroPad mapping, save states (memory cards), spatial audio, in-VR
 menus. See `docs/ROADMAP.md` "Current state" for the module list.
 
 **Phase R.1 (done)** added a declarative collection layer over that scene
-without rewriting it. **Phase R.2 (RomResolver) is next.**
+without rewriting it. **Phase R.2 (done)** added `src/RomResolver.js` — games
+resolve their ROM bytes from url / local folder (File System Access API, handle
+persisted in IndexedDB) / file picker / OPFS cache, wired behind
+`loadCartridge()`. **Phase R.3 (RoomLoader) is next.**
 
 **CC0 test-game library (done 2026-06-02).** The default `manifest.json` now ships
 our own source-built CC0 games so the frontend has playable content on every
@@ -59,7 +63,7 @@ npm install
 npm run fetch-cores     # copies cores into public/cores/ (gitignored). Auto-finds
                         # them in the old scratch workspace; else see the script.
 npm run dev             # http://localhost:5173  (Vite sets COOP/COEP)
-npm test                # 24 pure-logic assertions (systems/ArtResolver/Collection)
+npm test                # 45 pure-logic assertions (systems/ArtResolver/Collection/RomResolver)
 npm run debug           # headless-Chrome health check (see DEBUGGING.md)
 ```
 
@@ -109,6 +113,9 @@ src/
                      *.collection.json (games[]); auto-fill core + boxart.
   ArtResolver.js     ★R.1 libretro-thumbnails candidate chain (filename → title
                      → tag-stripped) + RetroArch char sanitization. Pure.
+  RomResolver.js     ★R.2 resolve(meta)→ArrayBuffer from url / local (File System
+                     Access folder, handle persisted in IndexedDB) / pick / opfs
+                     (sha1 content-addressed cache). Pure helpers unit-tested.
   EmulatorClient.js  Main-thread proxy that loads the core + drives it; events
                      ready/error; serializeState/unserializeState.
   SceneMgr.js        Three.js scene, room geometry, WebXR session, TV mesh,
@@ -120,7 +127,9 @@ src/
   CrtShader / SpatialAudio / Placeholder / XRRafShim  Effects + shims.
 scripts/
   debug.js           Puppeteer health harness. `--rom=<path>` injects a ROM via the
-                     real file-picker path; `--core=<name>` forces a core (?core=).
+                     real file-picker path; `--core=<name>` forces a core (?core=);
+                     `--boot[=<system>]` boots a collection game through the real
+                     RomResolver/loadCartridge path (url source) + core start.
   fetch-cores.mjs    Populate public/cores/ from a local source (scratch workspace).
   make-c64-demo.mjs  Generate the CC0 C64 BASIC demo .prg.
   lib/cbm-basic.mjs  Shared Commodore BASIC v2 tokenizer (C64 + VIC-20).
@@ -142,7 +151,7 @@ docs/                ROADMAP, EMUVR_RESEARCH, ROOM_AND_COLLECTIONS, MULTIPLAYER,
                      LICENSING, PROJECT_HISTORY, HANDOFF (this file),
                      research/ (per-system game-authoring notes + synthesis README).
 ```
-★ = added in Phase R.1.
+★R.1 = added in Phase R.1; ★R.2 = added in Phase R.2.
 
 ## Data model (the project's core idea)
 
@@ -167,11 +176,12 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
 - **Phase R — Rooms & Collections as JSON** ← in progress
   - **R.1 ✅ done** — data layer (systems / ArtResolver / Collection; main.js
     refactored; tests; debug harness boxart-404 reclassification).
-  - **R.2 ← NEXT** — `src/RomResolver.js`: url / local (File System Access API,
-    persisted dir handles in IndexedDB) / pick / opfs. Delivers the user goal of
-    referencing **web folders OR local folders on PCs/headsets**. Slots into
-    `main.js`'s `romUrl(meta)` (already factored out as the seam).
-  - **R.3** — `src/RoomLoader.js`: read `*.room.json`, drive the existing
+  - **R.2 ✅ done** — `src/RomResolver.js`: url / local (File System Access API,
+    persisted dir handle in IndexedDB) / pick / opfs (sha1 content-addressed
+    cache). Delivers the user goal of referencing **web folders OR local folders
+    on PCs/headsets**. Wired behind `loadCartridge()`; "ROM folder…" header
+    button grants the local library where the FSA API exists.
+  - **R.3 ← NEXT** — `src/RoomLoader.js`: read `*.room.json`, drive the existing
     factories, apply surfaces/lighting/portals. Load room by URL/drag-drop.
 - **Phase E** — in-VR room editor (write back `*.room.json`).
 - **Phase M** — multiplayer (`docs/MULTIPLAYER.md`): M0 presence/avatars/voice,
@@ -179,16 +189,31 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
 - **Phase C** — open prop package schema, community gallery, BIOS-needing
   systems (PSX/N64), PWA.
 
-## Immediate next actions for R.2
+## R.2 follow-ups (deferred, not blocking R.3)
 
-1. `src/RomResolver.js` exposing `resolve(meta) → Promise<ArrayBuffer>` with
-   sources url / local / pick / opfs (see `docs/ROOM_AND_COLLECTIONS.md` §2).
-2. Persist a user-granted directory handle (File System Access API) in
-   IndexedDB; match games by filename + optional sha1; OPFS cache by sha1.
-3. Wire it behind `main.js`'s `romUrl()`/`loadCartridge()` seam.
-4. Verify File System Access availability on Quest browser (fallback: pick + opfs).
-5. Extend `npm test` for the pure parts (filename/hash matching); harness for
-   the rest. Keep `npm run debug` verdict OK.
+- **Verify File System Access on the Quest browser** with a real headset — the
+  "ROM folder…" button self-hides where `showDirectoryPicker` is absent, and
+  `pick` + `opfs` are the guaranteed fallbacks, but Quest support is unverified.
+- **In-VR library grant + drag-drop** of `.collection.json`/`.room.json` onto
+  the page aren't wired yet (the grant button is flat-screen only for now).
+- **sha1 verification** of fetched/local bytes is not enforced (the field is
+  only used as the OPFS cache key today).
+
+## Immediate next actions for R.3
+
+1. `src/RoomLoader.js`: read a `*.room.json` (schema in
+   `docs/ROOM_AND_COLLECTIONS.md` §3) and drive the existing
+   `createShelf/Cartridge/Console/...` factories declaratively, instead of
+   `main.js` calling them imperatively in `buildCartridgeWorld()`.
+2. Apply `environment.surfaces` onto the `SceneMgr` room mesh + `CrtShader`
+   material; apply lighting; place props by `pos/rot`.
+3. **Portals** — a prop that loads another room (local id or URL) on enter.
+4. Load a room by `?room=URL` (already an alias for `?collection=`; split them)
+   and by drag-drop. **Acceptance:** a shared `.room.json` URL reconstructs the
+   room + collection on another machine (free `url` games play; `local`/owned
+   games show empty slots).
+5. Extend `npm test` for the pure room-parsing parts; keep `npm run debug`
+   verdict OK (and screenshot-verify a room renders in-app).
 
 ## Gotchas already hit (so you don't re-hit them)
 

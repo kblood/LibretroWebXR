@@ -5,6 +5,7 @@
 import { coreForFile, systemForFile, systemForName, SYSTEMS, CORES } from '../src/systems.js';
 import { baseName, stripTags, sanitizeThumbName, boxartCandidates } from '../src/ArtResolver.js';
 import { normalizeGame, parseCollection } from '../src/Collection.js';
+import { romUrlFor, sourceOrder, cacheKey, fileBaseName, wantedFileName, fileNameMatches, resolve as resolveRom } from '../src/RomResolver.js';
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -65,6 +66,49 @@ eq('sanitize forbidden', sanitizeThumbName('A/B:C?D'), 'A_B_C_D');
   ]});
   eq('collection auto-core from system default', c.games[0].core, 'gambatte');
   eq('collection auto-system', c.games[0].system, 'gb');
+}
+
+// --- RomResolver (pure parts) ---------------------------------------------
+eq('romUrlFor relative → roms/', romUrlFor({ file: 'freeware/lwx-snake.prg' }), 'roms/freeware/lwx-snake.prg');
+eq('romUrlFor absolute http kept', romUrlFor({ file: 'https://x.org/a.nes' }), 'https://x.org/a.nes');
+eq('romUrlFor rooted path kept', romUrlFor({ file: '/cdn/a.gb' }), '/cdn/a.gb');
+eq('romUrlFor rom.url overrides file', romUrlFor({ file: 'a.gb', rom: { url: 'https://x.org/b.gb' } }), 'https://x.org/b.gb');
+eq('romUrlFor nothing → null', romUrlFor({ title: 'x' }), null);
+
+eq('sourceOrder default url', sourceOrder({ file: 'a.nes' }), ['url']);
+eq('sourceOrder explicit source', sourceOrder({ file: 'a.nes', rom: { source: 'local' } }), ['local']);
+eq('sourceOrder explicit sources[] wins', sourceOrder({ file: 'a.nes', rom: { sources: ['opfs', 'url'] } }), ['opfs', 'url']);
+eq('sourceOrder no url → pick', sourceOrder({ rom: { source: undefined } }), ['pick']);
+
+eq('cacheKey from sha1 (lowercased)', cacheKey({ rom: { sha1: 'ABCdef123' } }), 'sha1-abcdef123');
+eq('cacheKey none → null', cacheKey({ file: 'a.nes' }), null);
+
+eq('fileBaseName posix', fileBaseName('freeware/sub/Game (USA).nes'), 'Game (USA).nes');
+eq('fileBaseName windows', fileBaseName('C:\\roms\\Game.gb'), 'Game.gb');
+eq('wantedFileName prefers rom.path', wantedFileName({ file: 'a.gb', rom: { path: 'gb/Tobu Tobu Girl.gb' } }), 'Tobu Tobu Girl.gb');
+eq('wantedFileName falls back to file', wantedFileName({ file: 'sub/a.gb' }), 'a.gb');
+ok('fileNameMatches case-insensitive basename', fileNameMatches('sub/Mario.NES', 'other/mario.nes'));
+ok('fileNameMatches rejects mismatch', !fileNameMatches('a.nes', 'b.nes'));
+ok('fileNameMatches rejects empty', !fileNameMatches('', 'b.nes'));
+
+// resolve() url path with an injected fetch (no browser; opfs/local absent →
+// skipped because no sha1). Confirms the orchestrator returns the fetched bytes.
+{
+  const bytes = new Uint8Array([1, 2, 3, 4]).buffer;
+  const fetchImpl = async (url) => {
+    ok('resolve fetched the roms/-relative url', url === 'roms/freeware/lwx-snake.prg');
+    return { ok: true, arrayBuffer: async () => bytes };
+  };
+  const got = await resolveRom({ file: 'freeware/lwx-snake.prg' }, { fetchImpl });
+  ok('resolve returns the fetched ArrayBuffer', got === bytes);
+}
+{
+  // A failing fetch surfaces as a thrown error (no other source to fall back to).
+  const fetchImpl = async () => ({ ok: false, status: 404 });
+  let threw = false;
+  try { await resolveRom({ file: 'a.nes' }, { fetchImpl }); }
+  catch { threw = true; }
+  ok('resolve throws when the only source fails', threw);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -59,12 +59,25 @@ Turn today's imperative scene-building into a declarative layer (no rewrite).
   `npm run debug` verdict OK with boxart 404s reclassified as expected probes.
 - Example: `public/roms/snes-demo.collection.json`.
 
-### R.2 — ROM sources  ← next
-- `src/RomResolver.js` — url / local (File System Access API) / pick / opfs
-  sources, persisted directory handles in IndexedDB. Delivers the user goal:
-  reference **web folders** *or* **local folders on PCs/headsets**.
+### R.2 — ROM sources  ✅ done
+- `src/RomResolver.js` — `resolve(meta) → Promise<ArrayBuffer>` across four
+  sources: **url** (fetch / roms-relative), **local** (File System Access API —
+  a folder the user grants once, directory handle persisted in IndexedDB, games
+  matched by basename a few levels deep), **pick** (one-off `<input type=file>`),
+  **opfs** (Origin-Private File System cache). Delivers the user goal: reference
+  **web folders** *or* **local folders on PCs/headsets**.
+- OPFS caching is purely content-addressed (only entries with a declared `sha1`
+  are cached/served), so a hit can never be stale — filename-only entries (our
+  relative CC0 games, which rebuild in place) are never cached.
+- Wired behind `main.js`'s `loadCartridge()` seam (replaced the old
+  `romUrl()`+`fetch`). A "ROM folder…" header button (shown only where the FSA
+  API exists) grants the local library.
+- Tests: `npm test` now 45 assertions (RomResolver pure helpers +
+  fetch-injected `resolve()` url path). `npm run debug --boot=<system>` boots a
+  collection game through the real resolver/core-start path; verdict OK with NES
+  rendering verified in-app.
 
-### R.3 — Room loader
+### R.3 — Room loader  ← next
 - `src/RoomLoader.js` — reads `*.room.json`, drives the existing factories
   (`createShelf/Cartridge/Console/...`), applies surfaces/lighting/portals.
 - Load room by `?room=URL` / drag-drop. **Acceptance:** a shared `.room.json`
