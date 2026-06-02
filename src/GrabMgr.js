@@ -26,13 +26,18 @@ const LASER_IDLE = 0x88aaff;
 const LASER_HOVER = 0xffd060;
 
 export class GrabMgr {
-  constructor({ scene, controllers, console: consoleObj, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted }) {
+  constructor({ scene, controllers, console: consoleObj, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, isEditMode, onEditRelease }) {
     this.scene = scene;
     this.controllers = controllers;
     this.console = consoleObj;
     this.onCartridgeInserted = onCartridgeInserted || (() => {});
     this.onGamepadHeldChanged = onGamepadHeldChanged || (() => {});
     this.onMemoryCardInserted = onMemoryCardInserted || (() => {});
+    // Edit mode (Phase E): when true, the only grab targets are room props
+    // (userData.editable) and releasing one leaves it where dropped instead of
+    // snapping home / inserting. onEditRelease lets the editor apply snapping.
+    this.isEditMode = isEditMode || (() => false);
+    this.onEditRelease = onEditRelease || (() => {});
     this.grabbables = [];
     this.held = new Map();              // controller -> Object3D
     this._hover = new Map();            // controller -> Object3D (or null)
@@ -49,6 +54,14 @@ export class GrabMgr {
 
   addGrabbable(object) {
     this.grabbables.push(object);
+  }
+
+  // A grabbable is only a candidate when its editable-ness matches the current
+  // mode: in play mode → cartridges/gamepad/cards (the non-editable set); in
+  // edit mode → room props (the editable set). This is what keeps furniture
+  // inert while playing and prevents an accidental ROM load while arranging.
+  _isCandidate(obj) {
+    return !!obj.userData?.editable === this.isEditMode();
   }
 
   isGamepadHeld() {
@@ -108,18 +121,19 @@ export class GrabMgr {
   }
 
   _aimTarget(ctrl) {
-    if (this.grabbables.length === 0) return null;
+    const candidates = this.grabbables.filter((g) => this._isCandidate(g));
+    if (candidates.length === 0) return null;
     ctrl.updateMatrixWorld();
     this._origin.setFromMatrixPosition(ctrl.matrixWorld);
     ctrl.getWorldQuaternion(this._quat);
     this._dir.set(0, 0, -1).applyQuaternion(this._quat).normalize();
     this._ray.set(this._origin, this._dir);
     this._ray.far = RAY_RANGE;
-    const hits = this._ray.intersectObjects(this.grabbables, true);
+    const hits = this._ray.intersectObjects(candidates, true);
     if (!hits.length) return null;
     // Walk up to find the registered grabbable root.
     let n = hits[0].object;
-    while (n && !this.grabbables.includes(n)) n = n.parent;
+    while (n && !candidates.includes(n)) n = n.parent;
     if (!n) return null;
     // Skip if another controller is already holding it.
     for (const o of this.held.values()) if (o === n) return null;
@@ -131,6 +145,7 @@ export class GrabMgr {
     this._origin.setFromMatrixPosition(ctrl.matrixWorld);
     let best = null, bestDist = ARM_RANGE;
     for (const obj of this.grabbables) {
+      if (!this._isCandidate(obj)) continue;
       let busy = false;
       for (const o of this.held.values()) if (o === obj) { busy = true; break; }
       if (busy) continue;
@@ -167,6 +182,13 @@ export class GrabMgr {
     if (!obj) return;
     this.held.delete(ctrl);
     this.scene.attach(obj);
+
+    // Edit-mode prop: leave it exactly where dropped (the editor may snap it to
+    // a grid); never snap-home or insert.
+    if (obj.userData?.editable) {
+      this.onEditRelease(obj);
+      return;
+    }
 
     const kind = obj.userData?.kind;
     if (kind === 'cartridge') {

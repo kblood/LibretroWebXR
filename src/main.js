@@ -21,6 +21,7 @@ import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
 import { parseRoom, defaultRoom, roomCollectionRefs } from './RoomLoader.js';
 import { buildRoom } from './RoomBuilder.js';
+import { RoomEditor } from './RoomEditor.js';
 
 // CORES and the system registry now live in src/systems.js (system-first,
 // single source of truth). detectCore() is coreForFile() from there; the
@@ -96,6 +97,8 @@ let cartridges = [];
 let consoleObj = null;
 let gamepadObj = null;
 let debugHud = null;
+let editor = null;       // Phase E.1 in-VR room editor (set in buildCartridgeWorld)
+let currentRoom = null;  // the parsed room descriptor we serialize back on export
 
 const DROP_KEY = 'libretrowebxr.dropped';
 
@@ -167,6 +170,7 @@ async function loadRoomCollections(room, inline) {
 
 async function buildCartridgeWorld() {
   const { room, inline } = await resolveWorld();
+  currentRoom = room;
   const collections = await loadRoomCollections(room, inline);
   const allGames = collections.list.flatMap((c) => c.games);
   window.__games = allGames; // debug hook: harness boots via these metas
@@ -209,9 +213,20 @@ async function buildCartridgeWorld() {
       if (!held) gameInput.flushReleases();
     },
     onMemoryCardInserted: handleMemoryCardInserted,
+    // Phase E: deferred arrows — `editor` is assigned just below and these are
+    // only called at tick/release time, never during GrabMgr construction.
+    isEditMode: () => editor?.isEditMode() || false,
+    onEditRelease: (obj) => editor?.onEditRelease(obj),
   });
   cartridges.forEach((c) => grabMgr.addGrabbable(c));
   grabMgr.addGrabbable(gamepadObj);
+
+  // In-VR room editor (Phase E.1): registers the room's props as editable
+  // grabbables (inert until edit mode) and serializes them back on export.
+  editor = new RoomEditor({
+    scene, room: currentRoom, placed: built.placed, grabMgr, onStatus: setStatus,
+  });
+  window.__editor = editor;
 
   await buildMemoryCards();
 
@@ -285,6 +300,7 @@ function installPortals(portals) {
   const playerPos = new THREE.Vector3();
   scene.addTickCallback(() => {
     if (navigated) return;
+    if (editor?.isEditMode()) return; // don't teleport while dragging a portal
     scene.playerRig.getWorldPosition(playerPos);
     for (const p of portals) {
       const dx = playerPos.x - p.object.position.x;
@@ -322,13 +338,16 @@ function buildMenuAndControlsPanel() {
       { label: 'Show Controls', onActivate: () => {} },
       { label: 'Show Debug',    onActivate: () => {} },
       { label: 'Reset Game',    onActivate: () => client.reset() },
+      { label: 'Edit Room',     onActivate: () => {} },
+      { label: 'Snap: Off',     onActivate: () => {} },
+      { label: 'Export Room',   onActivate: () => editor?.export() },
     ],
   });
   scene.addObject(menu);
 
   // Wire each button's onActivate now that the panel exists (the toggle
   // closures need to mutate the same button to relabel between Show/Hide).
-  const [controlsBtn, debugBtn] = menu.userData.buttons;
+  const [controlsBtn, debugBtn, , editBtn, snapBtn] = menu.userData.buttons;
   let controlsVisible = false;
   controlsBtn.onActivate = () => {
     controlsVisible = !controlsVisible;
@@ -342,6 +361,16 @@ function buildMenuAndControlsPanel() {
     debugBtn.setLabel(debugVisible ? 'Hide Debug' : 'Show Debug');
   };
   debugBtn.setLabel('Hide Debug');
+
+  // Phase E.1: toggle the in-VR room editor + its free/grid snap setting.
+  editBtn.onActivate = () => {
+    const on = editor?.toggle();
+    editBtn.setLabel(on ? 'Exit Edit' : 'Edit Room');
+  };
+  snapBtn.onActivate = () => {
+    const on = editor?.setSnap(!editor?.snapEnabled());
+    snapBtn.setLabel(on ? 'Snap: On' : 'Snap: Off');
+  };
 
   for (const b of menu.userData.buttons) {
     menuMgr.addItem(b.mesh, b.onActivate);
@@ -593,6 +622,13 @@ if (romFolderBtn && fileSystemAccessSupported()) {
       if (e?.name !== 'AbortError') setStatus(`folder grant failed: ${e.message || e}`);
     }
   });
+}
+
+// Export the current (possibly edited) room as *.room.json — desktop
+// convenience mirroring the in-VR "Export Room" menu item (Phase E.1).
+const exportRoomBtn = $('#export-room-btn');
+if (exportRoomBtn) {
+  exportRoomBtn.addEventListener('click', () => editor?.export());
 }
 
 // Drag-and-drop a *.room.json or *.collection.json onto the page to load it

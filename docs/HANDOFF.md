@@ -1,11 +1,12 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated 2026-06-02
-after **Phase R.3 (RoomLoader)** — on top of R.2 (RomResolver), the CC0
-test-game library, and the classic-core render fix (all below). Phases R.1 (JSON
-collection layer), R.2 (ROM source resolution) and **R.3 (rooms as JSON) are
-done.** Phase R is complete; **Phase E (in-VR room editor) is the next roadmap
-step**, with a few R.3 follow-ups noted in `docs/ROADMAP.md`.
+after **Phase E.1 (in-VR room editor: move props + export)** — on top of Phase R
+(R.1 JSON collection layer, R.2 RomResolver, R.3 rooms as JSON), the CC0 test-game
+library, and the classic-core render fix (all below). Phase R is complete.
+**Phase E.1 is done** (grab/move/rotate the room's props in VR and export the
+edited `*.room.json`); **Phase E.2 (in-VR environment/collection editing) is the
+next roadmap step**, then E.3 (create new props/portals in-VR).
 
 ## What this is
 
@@ -121,7 +122,16 @@ src/
                      Shelf/Console/Cartridge/Gamepad factories from the
                      descriptor; builds posters/models/portals; returns the
                      handles main.js wires. Shelf games via collection +
-                     filter/slice/half.
+                     filter/slice/half. ★E.1 also stamps userData.roomProp on
+                     every movable object + returns placed:[{prop,object}].
+  RoomSerializer.js  ★E.1 PURE inverse of RoomLoader.parseRoom:
+                     serializeRoom(room, transforms)→clean room@1 object (live
+                     pos/rot by id over the descriptor's non-spatial fields).
+                     No THREE → unit-tested; round-trips with parseRoom.
+  RoomEditor.js      ★E.1 In-VR Edit mode: registers placed props as editable
+                     grabbables (inert until editing), free/grid snap setting,
+                     serialize() harvests live transforms, export() →
+                     download + clipboard. Owns no scene geometry.
   systems.js         ★R.1 SYSTEMS (system-first) + CORES (core-first) registry.
                      Single source of truth: cores, exts, folder aliases,
                      thumbnail repos, licenses. coreForFile / systemForFile /
@@ -141,6 +151,8 @@ src/
                      relights from a room's environment; applyTv() toggles CRT.
   Cartridge/Shelf/Console/Gamepad/MemoryCard.js  Grabbable 3D prop factories.
   GrabMgr / LocomotionMgr / GameInputMgr / InputMgr / ControllerMaps  Input + VR.
+                     ★E.1 GrabMgr gained an isEditMode/onEditRelease seam: edit
+                     mode targets only props, play mode only carts/gamepad/cards.
   MenuMgr / MenuPanel / ControlsPanel / DebugHud  In-VR UI.
   SaveState.js       IndexedDB save-state store (per slot).
   CrtShader / SpatialAudio / Placeholder / XRRafShim  Effects + shims.
@@ -208,7 +220,14 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
     (build) drive the factories from a `*.room.json`; `SceneMgr.applyEnvironment`
     applies surfaces/lighting. `?room=URL`, drag-drop, and portals all work;
     examples `bedroom`/`arcade`. Default layout unchanged.
-- **Phase E ← NEXT** — in-VR room editor (write back `*.room.json`).
+- **Phase E — in-VR room editor** (write back `*.room.json`)
+  - **E.1 ✅ done** — Edit-mode toggle; grab/move/rotate the room's props;
+    free/grid snap setting; `RoomSerializer` (pure inverse of RoomLoader) +
+    `RoomEditor` serialize the live scene and export the `*.room.json`
+    (download + clipboard; "Export Room" header button + in-VR menu item).
+  - **E.2 ← NEXT** — in-VR environment editing: swap wallpaper/floor/posters,
+    assign collections to shelves (reuse `SceneMgr.applyEnvironment`/`MenuMgr`).
+  - **E.3** — create/place brand-new props and aim new portals in-VR.
 - **Phase M** — multiplayer (`docs/MULTIPLAYER.md`): M0 presence/avatars/voice,
   M1 host-authoritative game sync, M2 rollback, M3 crossplay.
 - **Phase C** — open prop package schema, community gallery, BIOS-needing
@@ -227,16 +246,23 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   portal targets are room URLs (no local-id registry); no "you don't own this"
   affordance on cartridges whose ROM can't resolve. See `docs/ROADMAP.md`.
 
-## Immediate next actions for Phase E (in-VR room editor)
+## Immediate next actions for Phase E.2 (in-VR environment editing)
 
-The room format + loader exist; Phase E adds **writing** it back from in-VR.
-1. Grab/move/rotate props in VR and snap their `pos/rot` back into the room
-   descriptor (the inverse of `RoomBuilder.buildRoom`).
-2. Swap wallpaper/floor/posters and assign collections to shelves from an in-VR
-   panel (reuse `MenuMgr`/`MenuPanel`); re-run `SceneMgr.applyEnvironment`.
-3. Add/aim **portals** to other rooms in-editor.
-4. **Export** the edited `*.room.json` (download / copy URL) — closes the
-   share loop. Keep `npm test` + `npm run debug` green; screenshot-verify.
+E.1 closed the layout half (move props → export). E.2 edits the room's *look*
+and *contents* in-VR, then exports the same way (the serializer already preserves
+`environment` + shelf `collection`/`half`/`filter`, so only the in-VR editing UI
+is new):
+1. An in-VR panel (reuse `MenuMgr`/`MenuPanel`) to cycle wallpaper/floor/poster
+   surfaces; on change call `SceneMgr.applyEnvironment` and write the chosen
+   `surfaces` back into `currentRoom.environment` so `serialize()` picks it up.
+2. Assign a loaded collection (and a `filter`/`half`) to a selected shelf;
+   rebuild that shelf's cartridges and update its prop descriptor.
+3. Then **E.3**: create/place brand-new props and aim new portals in-VR (the
+   only parts that add to the descriptor rather than editing existing entries).
+
+Keep `npm test` + `npm run debug` green and screenshot-verify. Live check:
+`window.__editor.toggle()` then `window.__editor.serialize()` should reproduce
+the loaded room (with edits applied).
 
 ## Gotchas already hit (so you don't re-hit them)
 

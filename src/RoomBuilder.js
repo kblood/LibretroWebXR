@@ -144,7 +144,11 @@ async function buildModel(prop, scene) {
 /**
  * Build a room into the scene. `collections` is { byKey: Map<ref,col>,
  * list: col[] } (keyed by both url and id, de-duplicated list in declared
- * order). Returns the handles main.js needs to finish wiring.
+ * order). Returns the handles main.js needs to finish wiring, including
+ * `placed: [{ prop, object }]` — the prop↔object link the in-VR editor
+ * ([[src/RoomEditor.js]]) needs to harvest live transforms back into the
+ * descriptor on export ([[src/RoomSerializer.js]]). Each movable object also
+ * carries its source descriptor on `userData.roomProp`.
  */
 export function buildRoom({ scene, room, collections }) {
   scene.applyEnvironment?.(room.environment);
@@ -153,6 +157,16 @@ export function buildRoom({ scene, room, collections }) {
   let gamepadObj = null;
   const cartridges = [];
   const shelves = [];
+  const placed = []; // { prop, object } for every movable, editor-grabbable prop
+
+  // Tag an object with its source descriptor and add it to the editor's
+  // movable set. `tv` is intentionally not placed (it has no object — it only
+  // toggles the CRT shader — yet still round-trips via the descriptor).
+  const place = (object, prop) => {
+    object.userData.roomProp = prop;
+    placed.push({ prop, object });
+    return object;
+  };
 
   for (const prop of room.props) {
     switch (prop.type) {
@@ -160,10 +174,12 @@ export function buildRoom({ scene, room, collections }) {
         const carts = gamesForShelf(prop, collections).map((m) => createCartridge(m));
         if (!carts.length) break; // skip empty halves (matches old behavior)
         const shelf = createShelf(carts, { position: v3(prop.pos), rotationY: prop.rot[1] * DEG });
+        shelf.userData.kind = 'shelf'; // createShelf sets none; editor identifies by this
         scene.addObject(shelf);
         lockShelfHomes(shelf);
         shelves.push(shelf);
         cartridges.push(...carts);
+        place(shelf, prop);
         break;
       }
       case 'console': {
@@ -171,6 +187,7 @@ export function buildRoom({ scene, room, collections }) {
         applyRot(obj, prop.rot);
         scene.addObject(obj);
         if (!consoleObj) consoleObj = obj; // first console is the active one
+        place(obj, prop);
         break;
       }
       case 'gamepad': {
@@ -178,16 +195,19 @@ export function buildRoom({ scene, room, collections }) {
         applyRot(obj, prop.rot);
         scene.addObject(obj);
         if (!gamepadObj) gamepadObj = obj;
+        place(obj, prop);
         break;
       }
       case 'tv':
         scene.applyTv?.(prop);
         break;
       case 'poster':
-        scene.addObject(buildPoster(prop));
+        scene.addObject(place(buildPoster(prop), prop));
         break;
       case 'model':
-        buildModel(prop, scene); // async, non-blocking
+        // Async + may fail; not added to `placed` (not movable in E.1), but it
+        // still serializes from the descriptor's pos/rot.
+        buildModel(prop, scene);
         break;
       default:
         console.warn(`[RoomBuilder] unknown prop type "${prop.type}" (${prop.id}) — skipped`);
@@ -196,9 +216,11 @@ export function buildRoom({ scene, room, collections }) {
 
   const portals = room.portals.map((p) => {
     const object = buildPortal(p);
+    object.userData.roomProp = p;
     scene.addObject(object);
-    return { object, target: p.target, radius: p.radius };
+    placed.push({ prop: p, object });
+    return { object, prop: p, target: p.target, radius: p.radius };
   });
 
-  return { consoleObj, gamepadObj, cartridges, portals, shelves };
+  return { consoleObj, gamepadObj, cartridges, portals, shelves, placed };
 }

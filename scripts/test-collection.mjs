@@ -7,6 +7,7 @@ import { baseName, stripTags, sanitizeThumbName, boxartCandidates } from '../src
 import { normalizeGame, parseCollection } from '../src/Collection.js';
 import { romUrlFor, sourceOrder, cacheKey, fileBaseName, wantedFileName, fileNameMatches, resolve as resolveRom } from '../src/RomResolver.js';
 import { parseRoom, defaultRoom, normalizeProp, normalizePortal, roomCollectionRefs, vec3 } from '../src/RoomLoader.js';
+import { serializeRoom, round } from '../src/RoomSerializer.js';
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -166,6 +167,69 @@ eq('vec3 non-array → default triple', vec3(undefined, 0), [0, 0, 0]);
   ok('defaultRoom has a gamepad', r.props.some((p) => p.type === 'gamepad'));
   eq('defaultRoom references the collection', r.collections, ['roms/manifest.json']);
   eq('defaultRoom collection refs', roomCollectionRefs(r), ['roms/manifest.json']);
+}
+
+// --- RoomSerializer (pure room export, inverse of parseRoom) --------------
+// Key-order-insensitive deep compare: the serializer re-emits canonical keys
+// in its own order, so a literal JSON.stringify diff would be spurious.
+const canon = (v) => {
+  if (Array.isArray(v)) return v.map(canon);
+  if (v && typeof v === 'object') {
+    const o = {};
+    for (const k of Object.keys(v).sort()) o[k] = canon(v[k]);
+    return o;
+  }
+  return v;
+};
+const deepEq = (name, got, want) => eq(name, canon(got), canon(want));
+
+eq('round to 3dp', round(1.23456), 1.235);
+eq('round normalizes -0 → 0', round(-0.0001), 0);
+eq('round non-finite → 0', round(NaN), 0);
+
+{
+  // Identity round-trip: parse → serialize (no moves) → parse must match.
+  const raw = {
+    schema: 'libretrowebxr/room@1', id: 'rt', title: 'Round Trip', author: 'tester',
+    collections: ['roms/manifest.json'],
+    environment: { surfaces: { wallpaper: 'builtin:retro-blue', floor: 'builtin:wood' } },
+    props: [
+      { type: 'shelf', id: 's-left', collection: 'roms/manifest.json', half: 'left', pos: [-2.85, 1.25, -1.5], rot: [0, 90, 0] },
+      { type: 'console', id: 'c1', pos: [0, 0.74, -2.4] },
+      { type: 'tv', id: 'tv1', shader: 'crt' },
+      { type: 'poster', id: 'p1', texture: 'builtin:poster-1', size: [0.8, 1.1], pos: [-1.7, 1.8, -3.94] },
+    ],
+    portals: [{ id: 'to-arcade', target: 'roms/arcade.room.json', radius: 0.6, pos: [2.7, 0, 1], rot: [0, -90, 0] }],
+  };
+  const parsed = parseRoom(raw, { sourceLabel: 'rt' });
+  const reparsed = parseRoom(serializeRoom(parsed, new Map()), { sourceLabel: 'rt' });
+  deepEq('serializeRoom identity round-trip', reparsed, parsed);
+  ok('serializeRoom keeps author', serializeRoom(parsed).author === 'tester');
+  ok('serializeRoom preserves tv shader extra',
+     serializeRoom(parsed).props.find((p) => p.id === 'tv1').shader === 'crt');
+}
+{
+  // defaultRoom also round-trips (built-in layout exports cleanly).
+  const dr = defaultRoom('roms/manifest.json');
+  const back = parseRoom(serializeRoom(dr, new Map()));
+  eq('defaultRoom round-trips: prop count', back.props.length, dr.props.length);
+  eq('defaultRoom round-trips: shelf halves', back.props.filter((p) => p.type === 'shelf').map((s) => s.half), ['left', 'right']);
+}
+{
+  // Live transforms override only the named prop's pos/rot; others untouched.
+  const parsed = parseRoom({
+    props: [
+      { type: 'console', id: 'c1', pos: [0, 0.74, -2.4] },
+      { type: 'gamepad', id: 'g1', pos: [0.55, 0.78, -2.15] },
+    ],
+  });
+  const tf = new Map([['c1', { pos: [1.111111, 2, 3], rot: [0, 45.5, 0] }]]);
+  const out = serializeRoom(parsed, tf);
+  const c1 = out.props.find((p) => p.id === 'c1');
+  const g1 = out.props.find((p) => p.id === 'g1');
+  eq('serializeRoom applies live pos (rounded)', c1.pos, [1.111, 2, 3]);
+  eq('serializeRoom applies live rot', c1.rot, [0, 45.5, 0]);
+  eq('serializeRoom leaves unmoved prop', g1.pos, [0.55, 0.78, -2.15]);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -112,10 +112,40 @@ Turn today's imperative scene-building into a declarative layer (no rewrite).
   RomResolver can't fetch them at play time — there's no pre-flight "you don't
   own this" affordance on the cartridge yet.
 
-## Phase E — In-VR room editor
+## Phase E — In-VR room editor  ← in progress
 Place/rotate props, swap wallpaper/floor/posters, assign collections to shelves,
 add **portals** to other rooms — all writing back to `*.room.json`. Export/share
 a room. This is the open, declarative replacement for EmuVR's closed WIGUx mod.
+
+### E.1 — Move props + export  ✅ done
+- In-VR **Edit mode** (a Menu toggle): the room's props (shelves, console,
+  gamepad, posters, portals) become grabbable; releasing one leaves it where
+  dropped instead of snapping home / inserting. A **Snap** menu toggle switches
+  free placement ↔ grid (0.1 m / 15°). Portal walk-through navigation is
+  suspended while editing.
+- `src/RoomSerializer.js` — **pure** inverse of `RoomLoader.parseRoom`:
+  `serializeRoom(room, transforms)` re-emits a clean room@1 object, refreshing
+  each prop/portal's pos/rot from a live-transform map by id and preserving every
+  non-spatial field. Round-trips with `parseRoom` (the descriptor carries
+  collection/half/texture/shader/target; the live objects carry pos/rot).
+- `src/RoomEditor.js` — **imperative**: registers `RoomBuilder`'s new
+  `placed:[{prop,object}]` handles as editable grabbables (inert until edit
+  mode via a `GrabMgr` candidate filter), harvests live transforms, and
+  **exports** the room (file download + clipboard). An "Export Room" header
+  button mirrors the in-VR item.
+- `RoomBuilder` now stamps `userData.roomProp` on every movable object and
+  returns `placed`; `GrabMgr` gained an `isEditMode`/`onEditRelease` seam (no
+  play-mode behavior change — edit targets only props, play targets only
+  cartridges/gamepad/cards).
+- Tests: `npm test` now 81 assertions (RoomSerializer round-trip + live-transform
+  override). `npm run debug` verdict OK; live `window.__editor.serialize()`
+  verified to reproduce the loaded room.
+
+### E.2 / E.3 (next)
+- **E.2** — in-VR environment editing: swap wallpaper/floor/posters and assign
+  collections to shelves from a panel (reuse `SceneMgr.applyEnvironment` +
+  `MenuMgr`).
+- **E.3** — create/place brand-new props and aim new portals in-VR.
 
 ## Phase M — Multiplayer (see `docs/MULTIPLAYER.md`)
 - **M0:** shared room presence — avatars + voice + room-object sync (works for
