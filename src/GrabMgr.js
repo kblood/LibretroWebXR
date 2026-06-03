@@ -26,13 +26,19 @@ const LASER_IDLE = 0x88aaff;
 const LASER_HOVER = 0xffd060;
 
 export class GrabMgr {
-  constructor({ scene, controllers, console: consoleObj, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, isEditMode, onEditRelease }) {
+  constructor({ scene, controllers, console: consoleObj, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, isEditMode, onEditRelease }) {
     this.scene = scene;
     this.controllers = controllers;
     this.console = consoleObj;
+    // Local-multiplayer cable system ([[src/CableMgr.js]]). Optional: when
+    // absent the gamepad behaves as before (always player 1, never seats).
+    this.cable = cable || null;
     this.onCartridgeInserted = onCartridgeInserted || (() => {});
     this.onGamepadHeldChanged = onGamepadHeldChanged || (() => {});
     this.onMemoryCardInserted = onMemoryCardInserted || (() => {});
+    // Fired after a gamepad plugs into / unplugs from a port so main.js can
+    // refresh input routing. Receives (gamepadObject).
+    this.onGamepadPlugged = onGamepadPlugged || (() => {});
     // Edit mode (Phase E): when true, the only grab targets are room props
     // (userData.editable) and releasing one leaves it where dropped instead of
     // snapping home / inserting. onEditRelease lets the editor apply snapping.
@@ -84,6 +90,12 @@ export class GrabMgr {
 
   isControllerHoldingGamepad(ctrl) {
     return this.held.get(ctrl)?.userData?.kind === 'gamepad';
+  }
+
+  // The object a controller currently holds (or null). Used by main.js to map
+  // each hand to the gamepad → player it drives (local-multiplayer routing).
+  heldObject(ctrl) {
+    return this.held.get(ctrl) || null;
   }
 
   insertedCartridge() {
@@ -179,6 +191,13 @@ export class GrabMgr {
     this._setHover(ctrl, null);
 
     if (target.userData?.kind === 'gamepad') {
+      // Picking up a plugged gamepad unplugs it (frees its port), mirroring how
+      // grabbing the inserted cartridge clears the slot above.
+      if (this.cable && target.userData.cableId != null &&
+          this.cable.portOf(target.userData.cableId) != null) {
+        this.cable.unplug(target.userData.cableId);
+        this.onGamepadPlugged(target);
+      }
       target.userData.setHeld?.(true);
       this.onGamepadHeldChanged(true);
     }
@@ -201,6 +220,10 @@ export class GrabMgr {
       this._handleCartridgeRelease(obj);
     } else if (kind === 'memory-card') {
       this._handleCardRelease(obj);
+    } else if (kind === 'gamepad') {
+      // Play mode: dropping a gamepad near a free, enabled port plugs it in
+      // (→ that port's player). Dropped elsewhere it just stays put.
+      this._handleGamepadRelease(obj);
     }
 
     // The gamepad is grabbable in both modes, so always reconcile its held-state
@@ -241,6 +264,37 @@ export class GrabMgr {
       cart.position.copy(cart.userData.homePosition);
       cart.quaternion.copy(cart.userData.homeQuaternion);
     }
+  }
+
+  // Snap a released gamepad onto the nearest free, enabled controller port and
+  // plug it into the cable system. No console/cable → leaves it where dropped.
+  _handleGamepadRelease(gp) {
+    const cu = this.console?.userData;
+    if (!this.cable || !cu?.portAnchors || gp.userData.cableId == null) return;
+
+    const gpWorld = new THREE.Vector3();
+    gp.getWorldPosition(gpWorld);
+    const radius = cu.portRadius || 0.16;
+
+    let bestPort = -1, bestDist = radius;
+    const aw = new THREE.Vector3();
+    for (let i = 0; i < cu.portAnchors.length; i++) {
+      if (i >= cu.activePorts) continue;        // port disabled for this system
+      if (!this.cable.isPortFree(i)) continue;  // already occupied
+      cu.portAnchors[i].getWorldPosition(aw);
+      const d = aw.distanceTo(gpWorld);
+      if (d < bestDist) { bestDist = d; bestPort = i; }
+    }
+    if (bestPort < 0) return;                    // not near a free port → stay put
+
+    const anchor = cu.portAnchors[bestPort];
+    const aq = new THREE.Quaternion();
+    anchor.getWorldPosition(aw);
+    anchor.getWorldQuaternion(aq);
+    gp.position.copy(aw);
+    gp.quaternion.copy(aq);
+    this.cable.plug(gp.userData.cableId, bestPort);
+    this.onGamepadPlugged(gp);
   }
 
   _handleCardRelease(card) {

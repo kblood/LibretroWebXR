@@ -197,7 +197,21 @@ done; only *assign collections to shelves in-VR* remains (deferred — needs
   live shelf+cartridge rebuild and `GrabMgr.removeGrabbable` the grab/insert
   lifecycle doesn't have yet. The descriptor + serializer already support it.
 
-## Phase M — Multiplayer (see `docs/MULTIPLAYER.md`)
+## Local multiplayer — couch co-op  ✅ done (2026-06-03)
+Up to 4 *local* players on one console, routed by which port a controller is
+plugged into. **Distinct from networked Phase M below** (this is same-machine
+co-op; no server). `src/CableMgr.js` (pure, unit-tested) maps gamepad ↔ port ↔
+player; `src/Console.js` renders the P1..P4 port row and `portsForSystem()`
+enables the count the hardware accepts; plugging is a grab-drop (reusing the
+cartridge-insert snap in `GrabMgr`); `GameInputMgr` dispatches per-gamepad,
+per-player (P1 double-dispatch + P2-4 `EXTRA_PLAYER_KEYS`, bound in
+`RetroArchConfig`); `InputMgr` also forwards P2-4 keyboard keys for same-keyboard
+desktop co-op. A `npm test` assertion guarantees no key code collides across
+players. **VR controller routing still needs a real-headset smoke test; not yet
+redeployed.** Follow-ons: physical USB-gamepad routing, per-pad mesh animation +
+DebugHud for players 2-4, in-VR port retargeting.
+
+## Phase M — Multiplayer, networked (see `docs/MULTIPLAYER.md`)
 - **M0:** shared room presence — avatars + voice + room-object sync (works for
   all cores). Signaling/matchmaking server + TURN.
 - **M1:** host-authoritative game sync (input + video stream) for 2-player.

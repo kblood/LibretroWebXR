@@ -16,6 +16,12 @@ import {
   uniqueId, existingIds, createProp, createPortal, addProp, addPortal,
   CREATABLE_PROP_TYPES,
 } from '../src/PropCreator.js';
+import { CableMgr, playerForPort } from '../src/CableMgr.js';
+import { portsForSystem, MAX_PORTS } from '../src/systems.js';
+import {
+  RETROPAD_KEYS, EXTRA_PLAYER_KEYS, EXTRA_KEY_DEFS, RA_KEY_NAME,
+} from '../src/ControllerMaps.js';
+import { DEFAULT_BIND_CODES } from '../src/InputMgr.js';
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -340,6 +346,74 @@ eq('nextInCycle unknown → first', nextInCycle('nope', SURFACE_OPTIONS), SURFAC
   const shelf = createProp(room, 'shelf', { pos: [-2, 1.25, -1.5], rot: [0, 90, 0] });
   ok('new shelf has no collection (builder fills it)', shelf.collection === undefined);
   eq('new shelf id', shelf.id, 'shelf-1');
+}
+
+// --- systems: controller ports (local multiplayer) ------------------------
+eq('portsForSystem snes = 4', portsForSystem('snes'), 4);
+eq('portsForSystem gb (handheld) = 1', portsForSystem('gb'), 1);
+eq('portsForSystem pce = 2', portsForSystem('pce'), 2);
+eq('portsForSystem unknown → default 2', portsForSystem('zzz'), 2);
+ok('portsForSystem never exceeds MAX_PORTS',
+   Object.keys(SYSTEMS).every((s) => portsForSystem(s) <= MAX_PORTS && portsForSystem(s) >= 1));
+
+// --- CableMgr (pure port↔player↔gamepad registry) -------------------------
+eq('playerForPort 0 → P1', playerForPort(0), 1);
+eq('playerForPort 3 → P4', playerForPort(3), 4);
+{
+  const cable = new CableMgr();
+  eq('unplugged gamepad defaults to player 1', cable.playerOf('g1'), 1);
+  eq('portOf unplugged → null', cable.portOf('g1'), null);
+
+  eq('plug g1 into port 0', cable.plug('g1', 0), 0);
+  eq('g1 now player 1', cable.playerOf('g1'), 1);
+  eq('plug g2 into port 1 → player 2', (cable.plug('g2', 1), cable.playerOf('g2')), 2);
+  eq('occupantOf port 1 is g2', cable.occupantOf('1' * 1), 'g2');
+  eq('firstFreePort with 0,1 taken (4 ports) = 2', cable.firstFreePort(4), 2);
+  eq('firstFreePort clamped to a 2-port system = null', cable.firstFreePort(2), null);
+
+  // Re-plugging a gamepad moves it and frees its old port.
+  cable.plug('g1', 2);
+  eq('g1 moved to port 2 → player 3', cable.playerOf('g1'), 3);
+  ok('old port 0 is free again', cable.isPortFree(0));
+
+  // Plugging into an occupied port evicts the prior tenant.
+  cable.plug('g3', 1);
+  eq('g3 evicts g2 from port 1', cable.occupantOf(1), 'g3');
+  eq('evicted g2 falls back to player 1', cable.playerOf('g2'), 1);
+
+  // Unplug is idempotent and frees the port.
+  cable.unplug('g3');
+  ok('port 1 free after unplug', cable.isPortFree(1));
+  cable.unplug('g3'); // no throw
+  eq('plug rejects out-of-range port', cable.plug('gX', MAX_PORTS), null);
+  eq('plug rejects null id', cable.plug(null, 0), null);
+}
+
+// --- Multiplayer key tables: no overlaps (the promised invariant) ---------
+{
+  // Player-1 codes: the VR dispatch table (RETROPAD_KEYS) + the keyboard
+  // forward set (DEFAULT_BIND_CODES). Players 2-4 must avoid all of them and
+  // each other, or one keypress would drive two players.
+  const p1 = new Set([...Object.values(RETROPAD_KEYS).flat(), ...DEFAULT_BIND_CODES]);
+  const seen = new Map(); // code -> owner label
+  for (const c of p1) seen.set(c, 'P1');
+
+  let overlaps = 0, missingDef = 0, missingRaName = 0;
+  for (const p of [2, 3, 4]) {
+    for (const [btn, code] of Object.entries(EXTRA_PLAYER_KEYS[p])) {
+      if (seen.has(code)) { overlaps++; console.error(`  overlap: P${p}.${btn}=${code} clashes with ${seen.get(code)}`); }
+      seen.set(code, `P${p}.${btn}`);
+      if (!EXTRA_KEY_DEFS[code]) missingDef++;
+      if (!RA_KEY_NAME[code]) missingRaName++;
+    }
+  }
+  eq('no key overlaps across P1..P4', overlaps, 0);
+  eq('every P2-4 code has an EXTRA_KEY_DEFS payload', missingDef, 0);
+  eq('every P2-4 code has an RA_KEY_NAME', missingRaName, 0);
+  // Each player exposes a full RetroPad button set.
+  const BTNS = ['Up', 'Down', 'Left', 'Right', 'A', 'B', 'X', 'Y', 'L', 'R', 'Start', 'Select'];
+  ok('P2-4 each map all 12 RetroPad buttons',
+     [2, 3, 4].every((p) => BTNS.every((b) => typeof EXTRA_PLAYER_KEYS[p][b] === 'string')));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

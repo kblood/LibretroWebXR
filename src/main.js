@@ -16,7 +16,8 @@ import { createDebugHud } from './DebugHud.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile } from './systems.js';
+import { CORES, coreForFile, portsForSystem } from './systems.js';
+import { CableMgr } from './CableMgr.js';
 import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
 import { parseRoom, defaultRoom, roomCollectionRefs } from './RoomLoader.js';
@@ -101,6 +102,43 @@ let gameInput = null;
 let cartridges = [];
 let consoleObj = null;
 let gamepadObj = null;
+// Local-multiplayer cable system: which gamepad is plugged into which console
+// port → which player it drives ([[src/CableMgr.js]]). Each gamepad object gets
+// a stable userData.cableId; the default one auto-plugs into port 0 (player 1).
+const cable = new CableMgr();
+let gamepadCount = 0;
+const registerGamepad = (obj) => {
+  if (obj && obj.userData.cableId == null) obj.userData.cableId = `gp-${++gamepadCount}`;
+  return obj;
+};
+
+// Which player each hand drives this frame, for GameInputMgr ([[src/
+// GameInputMgr.js]]). Policy: one held gamepad → both hands forward to its
+// player (the original two-hands-one-player feel for >4-button systems); two
+// held gamepads → each holding hand drives only its own gamepad's player.
+function computeRouting() {
+  if (!grabMgr) return [];
+  const held = [];
+  for (const ctrl of scene.controllers) {
+    const obj = grabMgr.heldObject(ctrl);
+    if (obj?.userData?.kind === 'gamepad') held.push({ ctrl, obj });
+  }
+  if (held.length === 0) return [];
+  if (held.length === 1) {
+    const { ctrl: holdCtrl, obj } = held[0];
+    const player = cable.playerOf(obj.userData.cableId);
+    const routing = [{ ctrl: holdCtrl, player, hand: 'holding' }];
+    for (const ctrl of scene.controllers) {
+      if (ctrl !== holdCtrl && grabMgr.isControllerFree(ctrl)) {
+        routing.push({ ctrl, player, hand: 'free' });
+      }
+    }
+    return routing;
+  }
+  return held.map(({ ctrl, obj }) => ({
+    ctrl, player: cable.playerOf(obj.userData.cableId), hand: 'holding',
+  }));
+}
 let debugHud = null;
 let editor = null;       // Phase E.1 in-VR room editor (set in buildCartridgeWorld)
 let currentRoom = null;  // the parsed room descriptor we serialize back on export
@@ -202,6 +240,13 @@ async function buildCartridgeWorld() {
     gamepadObj = createGamepad({ position: new THREE.Vector3(0.55, 0.78, -2.15) });
     scene.addObject(gamepadObj);
   }
+  // The default gamepad is player 1: logically plug it into port 0 (it stays at
+  // its rest spot — only explicit re-plugging moves the mesh). This also marks
+  // port 0 taken so the first "Add Gamepad" auto-plugs into port 1 (player 2).
+  registerGamepad(gamepadObj);
+  cable.plug(gamepadObj.userData.cableId, 0);
+  // Show the controller-port count for the current system (2 until a game loads).
+  consoleObj.userData.setPorts?.(portsForSystem(currentMeta?.system));
 
   // Live gamepad debug readout floats above the controller mesh. Parented
   // to the gamepad so it follows whether the gamepad is sitting at rest or
@@ -216,6 +261,7 @@ async function buildCartridgeWorld() {
     scene: scene.scene,
     controllers: scene.controllers,
     console: consoleObj,
+    cable,
     onCartridgeInserted: handleCartridgeInserted,
     onGamepadHeldChanged: (held) => {
       // When the gamepad is released, flush any still-pressed keys so the
@@ -223,6 +269,9 @@ async function buildCartridgeWorld() {
       // pre-drop state.
       if (!held) gameInput.flushReleases();
     },
+    // Plugging/unplugging a gamepad changes which player it drives; flush so a
+    // key held under the old assignment doesn't latch on the core.
+    onGamepadPlugged: () => gameInput?.flushReleases(),
     onMemoryCardInserted: handleMemoryCardInserted,
     // Phase E: deferred arrows — `editor` is assigned just below and these are
     // only called at tick/release time, never during GrabMgr construction.
@@ -243,6 +292,7 @@ async function buildCartridgeWorld() {
   // built after the buildMemoryCards await that stalls in headless Chrome).
   window.__editor = editor;
   window.__grab = grabMgr;
+  window.__cable = cable; // debug: inspect port↔player↔gamepad assignments
   window.__add = {
     shelf:   () => addProp('shelf'),
     console: () => addProp('console'),
@@ -270,6 +320,8 @@ async function buildCartridgeWorld() {
     client,
     isControllerHoldingGamepad: (ctrl) => grabMgr.isControllerHoldingGamepad(ctrl),
     isGamepadHeld: () => grabMgr.isGamepadHeld(),
+    // Local-multiplayer routing: which player each hand drives this frame.
+    getRouting: computeRouting,
     // LED pulse for every emulator keydown — visible in-VR feedback that
     // gamepad input is reaching the core.
     onKeyDown: () => consoleObj.userData.pulse?.(0xffffff, 90),
@@ -399,9 +451,37 @@ function addProp(type) {
   // any other cartridge — register them so they can be picked up and inserted.
   if (r.kind === 'shelf') r.cartridges.forEach((c) => grabMgr.addGrabbable(c));
 
+  // A new gamepad joins the cable system: register it, make it grabbable, and
+  // auto-plug it into the next free port so one tap yields the next player.
+  // It seats at the port (no placement step) rather than spawning mid-air.
+  if (r.kind === 'gamepad') {
+    registerGamepad(r.object);
+    grabMgr.addGrabbable(r.object);
+    const port = seatGamepadInFreePort(r.object);
+    setStatus(port == null ? 'added gamepad (no free port)' : `added gamepad → player ${port + 1}`);
+    return prop;
+  }
+
   ensureEditMode();
   setStatus(`added ${type} — grab to place`);
   return prop;
+}
+
+// Plug a gamepad into the lowest free, enabled console port and snap its mesh
+// onto that port's seat. Returns the port index, or null if all are taken.
+function seatGamepadInFreePort(obj) {
+  const cu = consoleObj?.userData;
+  if (!cu?.portAnchors) return null;
+  const port = cable.firstFreePort(cu.activePorts);
+  if (port == null) return null;
+  const anchor = cu.portAnchors[port];
+  const p = new THREE.Vector3(), q = new THREE.Quaternion();
+  anchor.getWorldPosition(p);
+  anchor.getWorldQuaternion(q);
+  obj.position.copy(p);
+  obj.quaternion.copy(q);
+  cable.plug(obj.userData.cableId, port);
+  return port;
 }
 
 // Add a new portal aimed at an example room (one that isn't the current room),
@@ -584,6 +664,8 @@ async function loadCartridge(meta) {
     currentCore = meta.core;
     currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system };
     gameInput?.setSystem(meta.system);
+    // Enable exactly the controller ports this system's hardware accepts.
+    consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
     setSystemLabel(meta.core);
     updateControlsPanel();
   } catch (e) {

@@ -68,6 +68,28 @@ export const SYSTEMS = {
   vic20:     { label: 'Commodore VIC-20',   defaultCore: 'vice_xvic',        cores: ['vice_xvic'],                    exts: ['20','40','60','a0','b0','rom'], aliases: ['vic20','vic-20','commodore vic-20'],                    thumbnailRepo: 'Commodore_-_VIC-20' },
 };
 
+// Controller ports per system — how many controllers the base hardware
+// accepts (the console's "up to 4" port row enables exactly this many; the
+// rest hide). Handhelds = 1. Most cartridge consoles = 2. Systems with a
+// stock 4-player adapter (NES Four Score, Genesis/Mega Drive team-player,
+// SNES multitap) are given 4 here so the full port row is exercised; the
+// multitap-5 systems (PCE, SNES) are capped at 4 by the console mesh anyway.
+// A room/console prop may override via `ports` on the console descriptor.
+const SYSTEM_PORTS = {
+  nes: 4, snes: 4, md: 4,        // stock 4-player adapters existed
+  sms: 2, gg: 1, atari2600: 2,
+  gb: 1, gbc: 1, gba: 1, vb: 1,
+  pce: 2, c64: 2, vic20: 1,
+};
+const DEFAULT_PORTS = 2;   // unknown system / no game loaded yet
+export const MAX_PORTS = 4; // hardware ceiling the console mesh renders
+
+/** Controller-port count for a system id (clamped to [1, MAX_PORTS]). */
+export function portsForSystem(systemId) {
+  const n = SYSTEM_PORTS[systemId] ?? DEFAULT_PORTS;
+  return Math.max(1, Math.min(MAX_PORTS, n));
+}
+
 // .bin is ambiguous (Atari 2600 / Mega Drive / PSX / …). When detection sees a
 // bare .bin we default to Atari 2600, the only .bin system we ship sample
 // content for. Override with an explicit `core`/`system`, or ?core= in the URL.

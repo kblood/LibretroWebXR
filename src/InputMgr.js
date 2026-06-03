@@ -8,12 +8,26 @@
 // KeyboardEvent.code/key through unchanged — RetroArch's web input driver
 // maps from these.
 
-const DEFAULT_BIND_CODES = new Set([
+import { EXTRA_PLAYER_KEYS } from './ControllerMaps.js';
+
+// Player-1 keyboard codes (webretro cfg defaults). Exported so the test suite
+// can assert players 2-4 ([[src/ControllerMaps.js]] EXTRA_PLAYER_KEYS) never
+// collide with them.
+export const DEFAULT_BIND_CODES = new Set([
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
   'Enter', 'Space',
   'KeyH', 'KeyG', 'KeyY', 'KeyT',
   'KeyE', 'KeyP', 'KeyR', 'KeyO',
 ]);
+
+// Forward set = player 1 + the local-multiplayer players 2-4 keyboard codes.
+// retroarch.cfg binds those P2-4 keys ([[src/RetroArchConfig.js]]), so once we
+// forward a trusted keypress the core drives the right player. This is the
+// same-keyboard couch-co-op path; VR controllers route through GameInputMgr.
+const FORWARD_CODES = new Set(DEFAULT_BIND_CODES);
+for (const p of [2, 3, 4]) {
+  for (const code of Object.values(EXTRA_PLAYER_KEYS[p])) FORWARD_CODES.add(code);
+}
 
 export class InputMgr {
   constructor(client) {
@@ -40,8 +54,9 @@ export class InputMgr {
     // GameInputMgr → EmulatorClient.sendInput share the same window target,
     // and re-forwarding them here would loop infinitely.
     if (!e.isTrusted) return;
-    if (!DEFAULT_BIND_CODES.has(e.code)) return;
-    // Stop arrow keys / space from scrolling the page.
+    if (!FORWARD_CODES.has(e.code)) return;
+    // Stop arrow keys / space from scrolling the page (and P3's F-keys from
+    // triggering browser reload/fullscreen/devtools).
     e.preventDefault();
     if (e.repeat) return;
     this.client.sendInput(eventType, e.code, e.key, e.keyCode, e.location);

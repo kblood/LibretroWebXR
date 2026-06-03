@@ -1,22 +1,24 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated 2026-06-03
-after **Phase E.3 (create props/portals in-VR)** — on top of E.2 (in-VR look
-editing), E.1 (move props + export) + its gamepad fix + first deploy, Phase R
-(R.1 JSON collection layer, R.2 RomResolver, R.3 rooms as JSON), the CC0
-test-game library, and the classic-core render fix (all below). Phase R is
-complete. **Phase E.1 is done and deployed** (grab/move/rotate props, export
-`*.room.json`). **Phase E.2 is done** (in-VR Wallpaper/Floor/Lighting/Posters
-menu cycling). **Phase E.3 is done** (Add Shelf/Console/Poster/Portal menu
-buttons spawn a new prop in front of the player, build it through the same
-`RoomBuilder` factory, register it as an editable grabbable, and append it to the
-descriptor — so move + look-editing + Export Room all apply immediately; a new
-portal also joins the live walk-through nav list). The whole of Phase E is done
-**except "assign collections to shelves", which is still deferred** (needs a live
-shelf+cartridge rebuild + `GrabMgr.removeGrabbable`; see below). **Next roadmap
-step: Phase M (multiplayer) — or close out the deferred collections-to-shelves.**
+after **local multiplayer (couch co-op)** — on top of Phase E.3 (create
+props/portals in-VR), E.2 (in-VR look editing), E.1 (move props + export) + its
+gamepad fix + first deploy, Phase R (R.1 JSON collection layer, R.2 RomResolver,
+R.3 rooms as JSON), the CC0 test-game library, and the classic-core render fix
+(all below). Phase R is complete. **Phase E is done** (E.1 grab/move/rotate +
+export, E.2 Wallpaper/Floor/Lighting/Posters cycling, E.3 Add
+Shelf/Console/Poster/Portal) **except "assign collections to shelves", still
+deferred** (needs a live shelf+cartridge rebuild + `GrabMgr.removeGrabbable`; see
+below). **Local multiplayer is done** (route a controller's input to the player
+of the console port it's plugged into — `src/CableMgr.js`, per-player
+`GameInputMgr` dispatch, P1..P4 console ports; *local couch co-op, distinct from
+the networked Phase M in `docs/MULTIPLAYER.md`*). Tests + headless + screenshot
+green; **VR controller routing still needs a real-headset smoke test, and it's
+not yet redeployed** (live build is E.3). **Next roadmap step: real-VR verify +
+redeploy the multiplayer build, or close out the deferred collections-to-shelves.**
 
-**Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, Phase E.1).
+**Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, Phase E.3,
+deployed 2026-06-03; local multiplayer is committed but NOT yet deployed).
 The original https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and
 is left untouched — `libretrowebxr2` is a deliberate separate folder. User
 confirmed E.1 works in VR; the gamepad-pickup regression below is fixed + redeployed.
@@ -72,7 +74,41 @@ prop in front of the player, build it through the same single-prop
 apply to it immediately (a new portal also joins the live proximity-nav list).
 All three ride out through Export Room. *Assigning collections to shelves in-VR is
 still deferred* (needs a live shelf+cartridge rebuild + `GrabMgr.removeGrabbable`).
-**Next: Phase M (multiplayer), or the deferred collections-to-shelves.**
+**Next: the deferred collections-to-shelves.**
+
+**Local multiplayer — couch co-op (done 2026-06-03).** Up to 4 local players on
+one console, routed by **which port a controller is plugged into**. This is
+*local* same-machine co-op and is **distinct from networked Phase M** in
+`docs/MULTIPLAYER.md` (presence/voice/game-sync over WebRTC — still future).
+- `src/CableMgr.js` (pure, unit-tested) is the registry: gamepad ↔ port ↔ player
+  (port 0 = player 1, …). `src/Console.js` renders a labelled `P1..P4` port row;
+  `portsForSystem(system)` in `src/systems.js` enables exactly the ports the
+  hardware accepts (NES/SNES/MD = 4, most = 2, handhelds = 1).
+- **Plugging is a grab-drop**, reusing the cartridge-insert pattern: release a
+  gamepad near a free port → it snaps + plugs (`GrabMgr._handleGamepadRelease`);
+  grabbing a plugged gamepad unplugs it. The default gamepad auto-plugs into
+  port 0 (player 1, single-player unchanged); E.3's **Add Gamepad** auto-plugs the
+  new one into the next free port (one tap → player 2).
+- **Input routing:** `GameInputMgr` now dispatches **per-gamepad, per-player** via
+  an injected `getRouting()` (main.js `computeRouting`): one held gamepad → both
+  hands forward to its player (the original two-hands-one-player feel); two held →
+  each hand drives its own. Player 1 keeps the resilient double-dispatch; players
+  2-4 use `EXTRA_PLAYER_KEYS` (single cfg-bound key each) from
+  `src/ControllerMaps.js`, which `src/RetroArchConfig.js` binds in `retroarch.cfg`.
+- **Keyboard couch co-op (secondary):** `src/InputMgr.js` also forwards the P2-4
+  keyboard codes, so same-keyboard players work on desktop. (P3 uses F-keys, which
+  are `preventDefault`-ed — F5 won't reload while playing. VR is unaffected: it
+  routes through `GameInputMgr`, not `InputMgr`.)
+- **Invariant added:** a `npm test` assertion proves no key code collides across
+  players 1-4 (this caught a real shipped bug: P4-Down was `KeyZ`, which is P1's
+  stock B — now `Numpad2`/`keypad2`).
+- **Verification status:** `npm test` + headless probe (`__cable`, auto-plug) +
+  screenshot all green. **VR controller routing itself needs a real-headset smoke
+  test** (headless has no XR gamepads), same caveat as E.1/E.2/E.3. Not yet
+  redeployed — the live build is E.3.
+- **Deferred follow-ons:** physical USB-gamepad routing (`navigator.getGamepads()`),
+  per-button mesh animation + a DebugHud for gamepads 2-4 (extra pads play but only
+  the primary animates), and an in-VR way to retarget a port.
 
 **CC0 test-game library (done 2026-06-02).** The default `manifest.json` now ships
 our own source-built CC0 games so the frontend has playable content on every
@@ -217,7 +253,11 @@ src/
   systems.js         ★R.1 SYSTEMS (system-first) + CORES (core-first) registry.
                      Single source of truth: cores, exts, folder aliases,
                      thumbnail repos, licenses. coreForFile / systemForFile /
-                     systemForName.
+                     systemForName. ★MP portsForSystem(system) + MAX_PORTS.
+  CableMgr.js        ★MP PURE local-multiplayer registry: gamepad ↔ console port
+                     ↔ player (port N → player N+1). plug/unplug/playerOf/
+                     firstFreePort. No THREE → unit-tested. GrabMgr plugs on
+                     drop, GameInputMgr reads playerOf via main.js getRouting.
   Collection.js      ★R.1 Load/normalize manifest.json (cartridges[]) AND
                      *.collection.json (games[]); auto-fill core + boxart.
   ArtResolver.js     ★R.1 libretro-thumbnails candidate chain (filename → title
@@ -232,9 +272,15 @@ src/
                      ★R.3 applyEnvironment() repapers walls/floor/ceiling +
                      relights from a room's environment; applyTv() toggles CRT.
   Cartridge/Shelf/Console/Gamepad/MemoryCard.js  Grabbable 3D prop factories.
+                     ★MP Console.js renders a P1..P4 port row + seat anchors;
+                     setPorts(n) shows the active count.
   GrabMgr / LocomotionMgr / GameInputMgr / InputMgr / ControllerMaps  Input + VR.
                      ★E.1 GrabMgr gained an isEditMode/onEditRelease seam: edit
                      mode targets only props, play mode only carts/gamepad/cards.
+                     ★MP GrabMgr plugs/unplugs a gamepad into a console port on
+                     drop/grab (cable); GameInputMgr dispatches per-gamepad,
+                     per-player via getRouting(); ControllerMaps adds P2-4 key
+                     tables; InputMgr forwards P2-4 keyboard codes too.
   MenuMgr / MenuPanel / ControlsPanel / DebugHud  In-VR UI.
   SaveState.js       IndexedDB save-state store (per slot).
   CrtShader / SpatialAudio / Placeholder / XRRafShim  Effects + shims.

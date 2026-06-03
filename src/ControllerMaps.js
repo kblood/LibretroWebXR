@@ -124,3 +124,93 @@ export const SYSTEM_MAPS = {
 export function mapForSystem(system) {
   return SYSTEM_MAPS[system] || SYSTEM_MAPS.default;
 }
+
+// --- Multiplayer key routing (players 2-4) ---------------------------------
+//
+// Player 1 keeps the historical double-dispatch above (webretro cfg key + RA
+// stock key) for resilience. Players 2-4 are NEW: RetroArch ships no stock
+// keyboard defaults for them, so we fully control their binds via
+// retroarch.cfg (see [[src/RetroArchConfig.js]]). Each plugged controller
+// drives the player number of the console port it's plugged into; the cable
+// system ([[src/CableMgr.js]]) sets that index.
+//
+// EXTRA_PLAYER_KEYS maps each logical RetroPad button to ONE KeyboardEvent
+// `code` per player. The allocation is deliberately collision-free against
+// player 1's keys (letters a,d,e,g,h,i,j,k,l,o,p,q,r,s,t,w,x,y + comma +
+// arrows/enter/space/rshift) and the f1-f4 hotkeys — a unit test asserts no
+// overlaps. EXTRA_KEY_DEFS gives the DOM payload for each code; RA_KEY_NAME
+// gives the retroarch.cfg key string. All three are the single source of
+// truth shared by GameInputMgr (dispatch) and RetroArchConfig (binds).
+export const EXTRA_PLAYER_KEYS = {
+  2: {
+    Up: 'Digit1', Down: 'Digit2', Left: 'Digit3', Right: 'Digit4',
+    A: 'Digit5', B: 'Digit6', X: 'Digit7', Y: 'Digit8',
+    L: 'KeyB', R: 'KeyC', Start: 'KeyF', Select: 'KeyM',
+  },
+  3: {
+    Up: 'F5', Down: 'F6', Left: 'F7', Right: 'F8',
+    A: 'F9', B: 'F10', X: 'F11', Y: 'F12',
+    L: 'Digit9', R: 'Digit0', Start: 'KeyN', Select: 'KeyV',
+  },
+  4: {
+    // Down is a keypad key, not KeyZ: 'z' is player 1's RA stock B button
+    // (RETROPAD_KEYS.B = ['KeyG','KeyZ']) so KeyZ would fire P1's B too. Every
+    // letter is already taken by P1/P2/P3, so P4 borrows the keypad here.
+    Up: 'KeyU', Down: 'Numpad2', Left: 'Backquote', Right: 'Minus',
+    A: 'Equal', B: 'BracketLeft', X: 'BracketRight', Y: 'Semicolon',
+    L: 'Quote', R: 'Period', Start: 'Slash', Select: 'Backslash',
+  },
+};
+
+// DOM KeyboardEvent payloads for every code used by players 2-4. (Player 1's
+// codes live in GameInputMgr.KEY_TABLE — kept there so that proven path is
+// untouched.) GameInputMgr merges these in at construction.
+export const EXTRA_KEY_DEFS = {
+  Digit1: { code: 'Digit1', key: '1', keyCode: 49 },
+  Digit2: { code: 'Digit2', key: '2', keyCode: 50 },
+  Digit3: { code: 'Digit3', key: '3', keyCode: 51 },
+  Digit4: { code: 'Digit4', key: '4', keyCode: 52 },
+  Digit5: { code: 'Digit5', key: '5', keyCode: 53 },
+  Digit6: { code: 'Digit6', key: '6', keyCode: 54 },
+  Digit7: { code: 'Digit7', key: '7', keyCode: 55 },
+  Digit8: { code: 'Digit8', key: '8', keyCode: 56 },
+  Digit9: { code: 'Digit9', key: '9', keyCode: 57 },
+  Digit0: { code: 'Digit0', key: '0', keyCode: 48 },
+  F5:  { code: 'F5',  key: 'F5',  keyCode: 116 },
+  F6:  { code: 'F6',  key: 'F6',  keyCode: 117 },
+  F7:  { code: 'F7',  key: 'F7',  keyCode: 118 },
+  F8:  { code: 'F8',  key: 'F8',  keyCode: 119 },
+  F9:  { code: 'F9',  key: 'F9',  keyCode: 120 },
+  F10: { code: 'F10', key: 'F10', keyCode: 121 },
+  F11: { code: 'F11', key: 'F11', keyCode: 122 },
+  F12: { code: 'F12', key: 'F12', keyCode: 123 },
+  KeyB: { code: 'KeyB', key: 'b', keyCode: 66 },
+  KeyC: { code: 'KeyC', key: 'c', keyCode: 67 },
+  KeyF: { code: 'KeyF', key: 'f', keyCode: 70 },
+  KeyM: { code: 'KeyM', key: 'm', keyCode: 77 },
+  KeyN: { code: 'KeyN', key: 'n', keyCode: 78 },
+  KeyU: { code: 'KeyU', key: 'u', keyCode: 85 },
+  KeyV: { code: 'KeyV', key: 'v', keyCode: 86 },
+  Numpad2: { code: 'Numpad2', key: '2', keyCode: 98 },
+  Minus:        { code: 'Minus',        key: '-',  keyCode: 189 },
+  Equal:        { code: 'Equal',        key: '=',  keyCode: 187 },
+  BracketLeft:  { code: 'BracketLeft',  key: '[',  keyCode: 219 },
+  BracketRight: { code: 'BracketRight', key: ']',  keyCode: 221 },
+  Semicolon:    { code: 'Semicolon',    key: ';',  keyCode: 186 },
+  Quote:        { code: 'Quote',        key: "'",  keyCode: 222 },
+  Period:       { code: 'Period',       key: '.',  keyCode: 190 },
+  Slash:        { code: 'Slash',        key: '/',  keyCode: 191 },
+  Backslash:    { code: 'Backslash',    key: '\\', keyCode: 220 },
+  Backquote:    { code: 'Backquote',    key: '`',  keyCode: 192 },
+};
+
+// DOM code -> retroarch.cfg key string (input_playerN_<btn> = "<name>").
+export const RA_KEY_NAME = {
+  Digit1: 'num1', Digit2: 'num2', Digit3: 'num3', Digit4: 'num4', Digit5: 'num5',
+  Digit6: 'num6', Digit7: 'num7', Digit8: 'num8', Digit9: 'num9', Digit0: 'num0',
+  F5: 'f5', F6: 'f6', F7: 'f7', F8: 'f8', F9: 'f9', F10: 'f10', F11: 'f11', F12: 'f12',
+  KeyB: 'b', KeyC: 'c', KeyF: 'f', KeyM: 'm', KeyN: 'n', KeyU: 'u', KeyV: 'v', Numpad2: 'keypad2',
+  Minus: 'minus', Equal: 'equals', BracketLeft: 'leftbracket', BracketRight: 'rightbracket',
+  Semicolon: 'semicolon', Quote: 'quote', Period: 'period', Slash: 'slash',
+  Backslash: 'backslash', Backquote: 'backquote',
+};

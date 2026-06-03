@@ -9,10 +9,20 @@
 import * as THREE from 'three';
 import { CARTRIDGE_DIMS } from './Cartridge.js';
 import { CARD_DIMS } from './MemoryCard.js';
+import { MAX_PORTS } from './systems.js';
 
 const CON_W = 0.52;
 const CON_H = 0.08;
 const CON_D = 0.30;
+
+// Controller ports: a row of labelled jacks on the console's front face, one
+// per local player. A gamepad released near a port's anchor "plugs in" there
+// ([[src/GrabMgr.js]]) and from then on drives that port's player number
+// ([[src/CableMgr.js]]). setPorts(n) shows the first n and hides the rest —
+// the current game's system decides n (portsForSystem in [[src/systems.js]]).
+const PORT_SPACING = CON_W / MAX_PORTS;        // even spread across the width
+const PORT_SEAT_FWD = CON_D / 2 + 0.13;        // how far in front a plug seats
+const PORT_RADIUS = 0.16;                      // plug acceptance radius
 
 export function createConsole({ position = new THREE.Vector3(0, 0.74, -2.4) } = {}) {
   const group = new THREE.Group();
@@ -67,6 +77,38 @@ export function createConsole({ position = new THREE.Vector3(0, 0.74, -2.4) } = 
   strip.position.set(0, -CON_H / 4, CON_D / 2 + 0.002);
   group.add(strip);
 
+  // Controller ports: MAX_PORTS labelled jacks across the front face, each with
+  // a seat anchor a short way in front where a plugged gamepad rests. Built up
+  // front; setPorts(n) below shows the first n. portUnits[i].group is toggled.
+  const portUnits = [];
+  const portAnchors = [];
+  for (let i = 0; i < MAX_PORTS; i++) {
+    const x = -CON_W / 2 + PORT_SPACING * (i + 0.5);
+    const unit = new THREE.Group();
+
+    // The jack: a small recessed dark square on the front face.
+    const jack = new THREE.Mesh(
+      new THREE.BoxGeometry(0.028, 0.020, 0.006),
+      new THREE.MeshStandardMaterial({ color: 0x0a0a0c, roughness: 0.85 }),
+    );
+    jack.position.set(x, 0, CON_D / 2 + 0.002);
+    unit.add(jack);
+
+    // P1..P4 label just above the jack, facing forward.
+    const label = makeLabel(`P${i + 1}`, 0.020);
+    label.position.set(x, CON_H / 2 - 0.012, CON_D / 2 + 0.004);
+    unit.add(label);
+
+    group.add(unit);
+    portUnits.push(unit);
+
+    // Seat anchor: where the gamepad snaps when plugged into this port.
+    const seat = new THREE.Object3D();
+    seat.position.set(x, CON_H / 2 + 0.012, PORT_SEAT_FWD);
+    group.add(seat);
+    portAnchors.push(seat);
+  }
+
   // Drop-zone metadata in world space — populated below after add-to-scene.
   let _baseColor = 0xaa2222;
   let _pulseEndAt = 0;
@@ -95,7 +137,22 @@ export function createConsole({ position = new THREE.Vector3(0, 0.74, -2.4) } = 
     slotRadius: 0.18,
     cardSlotAnchor: new THREE.Object3D(),
     cardSlotRadius: 0.14,
+
+    // Controller ports (local multiplayer). portAnchors[i] is the seat for
+    // port i; portRadius is the plug acceptance distance. activePorts is how
+    // many are currently enabled (the current system's controller count).
+    portAnchors,
+    portRadius: PORT_RADIUS,
+    activePorts: MAX_PORTS,
+    // Show the first n ports, hide the rest. GrabMgr only plugs into a port
+    // whose index < activePorts, so a 1-port handheld can't seat player 2.
+    setPorts(n) {
+      const count = Math.max(1, Math.min(MAX_PORTS, n | 0));
+      this.activePorts = count;
+      portUnits.forEach((u, i) => { u.visible = i < count; });
+    },
   };
+  group.userData.setPorts(MAX_PORTS);
 
   const anchor = group.userData.slotAnchor;
   anchor.position.set(cartSlotX, CON_H / 2 + CARTRIDGE_DIMS.H * 0.45, 0);
@@ -106,4 +163,21 @@ export function createConsole({ position = new THREE.Vector3(0, 0.74, -2.4) } = 
   group.add(cardAnchor);
 
   return group;
+}
+
+// Tiny baked text plane for the P1..P4 port labels — same trick as the
+// gamepad's button labels, kept local so Console has no cross-prop import.
+function makeLabel(text, size) {
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#cfd6ff';
+  ctx.font = 'bold 40px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 32, 34);
+  const tex = new THREE.CanvasTexture(c);
+  tex.minFilter = THREE.LinearFilter;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
+  return new THREE.Mesh(new THREE.PlaneGeometry(size, size), mat);
 }
