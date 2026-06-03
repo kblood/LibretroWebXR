@@ -1,12 +1,20 @@
 # Handoff
 
-Single orientation doc for picking this project up cold. Last updated 2026-06-02
-after **Phase E.1 (in-VR room editor: move props + export)** — on top of Phase R
-(R.1 JSON collection layer, R.2 RomResolver, R.3 rooms as JSON), the CC0 test-game
-library, and the classic-core render fix (all below). Phase R is complete.
-**Phase E.1 is done** (grab/move/rotate the room's props in VR and export the
-edited `*.room.json`); **Phase E.2 (in-VR environment/collection editing) is the
-next roadmap step**, then E.3 (create new props/portals in-VR).
+Single orientation doc for picking this project up cold. Last updated 2026-06-03
+after **Phase E.2 (in-VR environment editing)** — on top of E.1 (move props +
+export) + its gamepad fix + first deploy, Phase R (R.1 JSON collection layer,
+R.2 RomResolver, R.3 rooms as JSON), the CC0 test-game library, and the
+classic-core render fix (all below). Phase R is complete.
+**Phase E.1 is done and deployed** (grab/move/rotate props, export `*.room.json`).
+**Phase E.2 is done** (in-VR Wallpaper/Floor/Lighting/Posters menu cycling, edits
+ride out through Export Room) — **except "assign collections to shelves", which is
+deferred** (needs a live shelf+cartridge rebuild; see below). **Phase E.3 (create
+new props/portals in-VR) is the next roadmap step.**
+
+**Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, Phase E.1).
+The original https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and
+is left untouched — `libretrowebxr2` is a deliberate separate folder. User
+confirmed E.1 works in VR; the gamepad-pickup regression below is fixed + redeployed.
 
 ## What this is
 
@@ -20,9 +28,11 @@ collections, share rooms as data, eventually play together.
 - **Local working copy:** `C:\LLM\LibretroWebXR` ← all work happens here
 - **Old scratch workspace:** `C:\LLM\Projects\ClaudeTest\LibretroWebXR`
   (historical/reference only — see `PROVENANCE.md`; do not develop there)
-- **Deploy target (from prior project):** `https://dionysus.dk/webxr/libretrowebxr/`
-  (Apache; COOP/COEP via `deploy/` + `public/.htaccess`). Not yet redeployed
-  from this clean repo.
+- **Deploy:** live at `https://dionysus.dk/webxr/libretrowebxr2/` (GCloud Apache).
+  `npm run deploy` → `scripts/deploy.ps1` (**gitignored, local-only — holds the
+  SSH host/user/key path**; the published template is `scripts/deploy.example.ps1`).
+  See "Deploying" below. The older `/webxr/libretrowebxr/` is the prior prototype,
+  left as-is.
 
 ## Current state (works today)
 
@@ -42,7 +52,15 @@ the existing Shelf/Console/Cartridge/Gamepad factories, applies surfaces +
 lighting (`SceneMgr.applyEnvironment`), and places posters/models/portals.
 `?room=URL` loads a full room (drag-drop too); portals walk you between rooms.
 With no `?room` the built-in `defaultRoom()` reproduces the old two-shelf layout
-exactly. **Phase E (in-VR editor) is next.**
+exactly.
+
+**Phase E.1 + E.2 (done)** are the in-VR room editor: E.1 grabs/moves/rotates the
+room's props and exports the edited `*.room.json`; **E.2** (`src/EnvEditor.js`,
+pure cycling) adds **Wallpaper / Floor / Lighting / Posters** menu buttons that
+re-paint live (`SceneMgr.applyEnvironment`, `RoomBuilder.applyPosterTexture`) and
+mutate `currentRoom`, so the look rides out through Export Room. *Assigning
+collections to shelves in-VR is deferred* (needs a live shelf+cartridge rebuild +
+`GrabMgr.removeGrabbable`). **Phase E.3 (create props in-VR) is next.**
 
 **CC0 test-game library (done 2026-06-02).** The default `manifest.json` now ships
 our own source-built CC0 games so the frontend has playable content on every
@@ -71,7 +89,7 @@ npm install
 npm run fetch-cores     # copies cores into public/cores/ (gitignored). Auto-finds
                         # them in the old scratch workspace; else see the script.
 npm run dev             # http://localhost:5173  (Vite sets COOP/COEP)
-npm test                # 70 pure-logic assertions (systems/ArtResolver/Collection/RomResolver/RoomLoader)
+npm test                # 99 pure-logic assertions (…/RoomLoader/RoomSerializer/EnvEditor)
 npm run debug           # headless-Chrome health check (see DEBUGGING.md)
 ```
 
@@ -80,7 +98,44 @@ Read the PNG is the fastest way to *see* the scene. Verdict OK / exit 0 = health
 Headless Chrome has no XR runtime, so it always logs "VR NOT SUPPORTED" — that's
 expected; real VR needs the Quest/headset on the HTTPS deploy.
 
+**Headless gotcha:** under headless Chrome, `buildCartridgeWorld()` stalls at
+`await buildMemoryCards()` (IndexedDB `open` hangs), so `__locomotion/__gameInput/
+__menu/__room` never get set and grab/input tick callbacks never register. The
+scene still renders (so `npm run debug` is fine for render/error smoke tests), and
+real browsers complete it normally. To probe editor/grab state headlessly use
+`window.__editor` / `window.__grab` (both exposed *before* that await on purpose).
+See the deferred "harden buildMemoryCards" item below.
+
+## Deploying
+
+```powershell
+npm run deploy                 # build + deploy to /webxr/libretrowebxr2/
+pwsh scripts/deploy.ps1 -DryRun -SkipBuild   # see remote actions, touch nothing
+```
+
+- `scripts/deploy.ps1` is **gitignored** (it bakes in the GCloud SSH host/user/key
+  path, matching the sibling projects IWSDK/Boligsøgning). Only the credential-free
+  `scripts/deploy.example.ps1` is published — copy it to `scripts/deploy.ps1` and
+  fill in details (or set `DEPLOY_*` env vars) on a new machine. **Never commit the
+  real one.** (History was scrubbed once already — see PROJECT_HISTORY/git log.)
+- Flow: `fetch-cores` → `vite build` → per-item `scp` of `dist/` into a staging dir
+  → atomic `mv` to live (keeps a `.old` until success). `public/.htaccess` is
+  uploaded explicitly (a bare `scp dist/*` skips the dotfile).
+- **New-folder COOP/COEP gotcha:** the `.htaccess` headers only apply if Apache has
+  `AllowOverride FileInfo` for that dir. Each new folder needs its own
+  `/etc/apache2/conf-available/<name>.conf` (template: `deploy/libretrowebxr2.conf`)
+  installed as root + `a2enconf <name>` + `systemctl reload apache2`. Already done
+  for `libretrowebxr2`. Verify after deploy:
+  `curl -sI https://dionysus.dk/webxr/<name>/ | grep -i cross-origin`.
+
 ## Hard invariants (don't break these)
+
+- **The gamepad is grabbable in BOTH play and edit mode.** It's a room prop (so
+  `RoomEditor` marks it `editable`), but the modal grab filter must still let it be
+  picked up in play mode or games can't be played — this was the E.1 regression.
+  `GrabMgr._isCandidate` special-cases `kind:'gamepad'`; `_release` reconciles its
+  held-state in either mode. Don't collapse the gamepad back into the editable-only
+  set. Cartridges/cards stay play-only; furniture stays edit-only.
 
 - **COOP/COEP everywhere.** `crossOriginIsolated` must be `true` or
   `SharedArrayBuffer` vanishes and the threaded cores won't start. Enforced in
@@ -124,6 +179,8 @@ src/
                      handles main.js wires. Shelf games via collection +
                      filter/slice/half. ★E.1 also stamps userData.roomProp on
                      every movable object + returns placed:[{prop,object}].
+                     ★E.2 exports applyPosterTexture() (builtin:/URL) for live
+                     poster re-skinning.
   RoomSerializer.js  ★E.1 PURE inverse of RoomLoader.parseRoom:
                      serializeRoom(room, transforms)→clean room@1 object (live
                      pos/rot by id over the descriptor's non-spatial fields).
@@ -132,6 +189,10 @@ src/
                      grabbables (inert until editing), free/grid snap setting,
                      serialize() harvests live transforms, export() →
                      download + clipboard. Owns no scene geometry.
+  EnvEditor.js       ★E.2 PURE env-option cycling (cycleSurface/cycleTimeOfDay/
+                     cyclePosterTexture over fixed palettes). Mutates the room
+                     descriptor in place; main.js's Wallpaper/Floor/Lighting/
+                     Posters menu buttons re-apply live + export. Unit-tested.
   systems.js         ★R.1 SYSTEMS (system-first) + CORES (core-first) registry.
                      Single source of truth: cores, exts, folder aliases,
                      thumbnail repos, licenses. coreForFile / systemForFile /
@@ -160,7 +221,9 @@ scripts/
   debug.js           Puppeteer health harness. `--rom=<path>` injects a ROM via the
                      real file-picker path; `--core=<name>` forces a core (?core=);
                      `--boot[=<system>]` boots a collection game through the real
-                     RomResolver/loadCartridge path (url source) + core start.
+                     RomResolver/loadCartridge path (url source) + core start;
+                     `--probe-file=<path>` evaluates a JS file in the page + logs
+                     its JSON return before the screenshot (poke window.__* hooks).
   fetch-cores.mjs    Populate public/cores/ from a local source (scratch workspace).
   make-c64-demo.mjs  Generate the CC0 C64 BASIC demo .prg.
   lib/cbm-basic.mjs  Shared Commodore BASIC v2 tokenizer (C64 + VIC-20).
@@ -184,7 +247,7 @@ docs/                ROADMAP, EMUVR_RESEARCH, ROOM_AND_COLLECTIONS, MULTIPLAYER,
                      LICENSING, PROJECT_HISTORY, HANDOFF (this file),
                      research/ (per-system game-authoring notes + synthesis README).
 ```
-★R.1 = added in Phase R.1; ★R.2 = added in Phase R.2; ★R.3 = added in Phase R.3.
+★R.1/★R.2/★R.3 = added in Phase R.1/R.2/R.3; ★E.1/★E.2 = added in Phase E.1/E.2.
 
 ## Data model (the project's core idea)
 
@@ -225,9 +288,12 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
     free/grid snap setting; `RoomSerializer` (pure inverse of RoomLoader) +
     `RoomEditor` serialize the live scene and export the `*.room.json`
     (download + clipboard; "Export Room" header button + in-VR menu item).
-  - **E.2 ← NEXT** — in-VR environment editing: swap wallpaper/floor/posters,
-    assign collections to shelves (reuse `SceneMgr.applyEnvironment`/`MenuMgr`).
-  - **E.3** — create/place brand-new props and aim new portals in-VR.
+  - **E.2 ✅ done** — in-VR environment editing: `src/EnvEditor.js` (pure
+    cycling) + Wallpaper/Floor/Lighting/Posters menu buttons re-paint live
+    (`SceneMgr.applyEnvironment`, `RoomBuilder.applyPosterTexture`) and export
+    via RoomSerializer. *Assign collections to shelves deferred* (live shelf
+    rebuild + `GrabMgr.removeGrabbable`).
+  - **E.3 ← NEXT** — create/place brand-new props and aim new portals in-VR.
 - **Phase M** — multiplayer (`docs/MULTIPLAYER.md`): M0 presence/avatars/voice,
   M1 host-authoritative game sync, M2 rollback, M3 crossplay.
 - **Phase C** — open prop package schema, community gallery, BIOS-needing
@@ -245,24 +311,40 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
 - **R.3 specifics:** `tv` prop only toggles the CRT shader (no TV reposition);
   portal targets are room URLs (no local-id registry); no "you don't own this"
   affordance on cartridges whose ROM can't resolve. See `docs/ROADMAP.md`.
+- **E.2: assign collections to shelves in-VR.** Env (look) editing is done;
+  reassigning a shelf's collection live needs a shelf+cartridge rebuild and a
+  `GrabMgr.removeGrabbable` the grab/insert lifecycle doesn't have yet. The
+  descriptor + serializer already support it — only the live rebuild is missing.
+- **Harden `buildMemoryCards()` / input init.** It awaits IndexedDB (`listStates`)
+  during `buildCartridgeWorld()`, which *hangs* in headless Chrome — so everything
+  after the await (`__locomotion/__gameInput/__menu/__room` exposure, grab/input
+  tick registration) never runs in `npm run debug`. Real browsers are fine, but
+  the init shouldn't be able to wedge on one IndexedDB call: wrap it in a
+  timeout/try-catch and/or move it off the critical path so input always wires up.
+  (`window.__editor`/`__grab` are deliberately exposed *before* the await as a
+  headless probe workaround — that's a patch, not the fix.)
 
-## Immediate next actions for Phase E.2 (in-VR environment editing)
+## Immediate next actions for Phase E.3 (create props in-VR)
 
-E.1 closed the layout half (move props → export). E.2 edits the room's *look*
-and *contents* in-VR, then exports the same way (the serializer already preserves
-`environment` + shelf `collection`/`half`/`filter`, so only the in-VR editing UI
-is new):
-1. An in-VR panel (reuse `MenuMgr`/`MenuPanel`) to cycle wallpaper/floor/poster
-   surfaces; on change call `SceneMgr.applyEnvironment` and write the chosen
-   `surfaces` back into `currentRoom.environment` so `serialize()` picks it up.
-2. Assign a loaded collection (and a `filter`/`half`) to a selected shelf;
-   rebuild that shelf's cartridges and update its prop descriptor.
-3. Then **E.3**: create/place brand-new props and aim new portals in-VR (the
-   only parts that add to the descriptor rather than editing existing entries).
+E.1 moves existing props; E.2 edits the room's *look*. E.3 is the part that
+**adds to the descriptor** rather than editing existing entries:
+1. An in-VR "add prop" affordance (reuse `MenuMgr`/`MenuPanel`) that creates a
+   new shelf/console/poster/portal at a chosen spot, pushes a normalized entry
+   into `currentRoom.props`/`.portals`, builds its object via the same
+   `RoomBuilder` paths, and registers it as an editable grabbable so E.1 move +
+   E.2 look-editing + Export Room all apply to it immediately.
+2. Aim a new **portal** at a target room (URL today; a local-id registry is a
+   separate deferred item) and verify walk-through navigation.
+3. Also tackle the **deferred E.2 "assign collections to shelves"** when ready:
+   add `GrabMgr.removeGrabbable`, then rebuild a shelf's cartridges in place when
+   its `collection`/`filter`/`half` changes (descriptor + serializer already
+   support it).
 
-Keep `npm test` + `npm run debug` green and screenshot-verify. Live check:
-`window.__editor.toggle()` then `window.__editor.serialize()` should reproduce
-the loaded room (with edits applied).
+Keep `npm test` + `npm run debug` green and screenshot-verify. For E.2, the
+`window.__env.{wallpaper,floor,lighting,posters}()` handlers drive the menu
+edits; `window.__editor.serialize()` should reproduce the loaded room with edits
+applied (note the headless `buildMemoryCards` stall — `__env`/`__room` aren't set
+in `npm run debug`; use `__editor`/`__scene` + `--probe-file`, or fix the stall).
 
 ## Gotchas already hit (so you don't re-hit them)
 
@@ -289,5 +371,8 @@ the loaded room (with edits applied).
 ## Memory
 
 Persistent memory notes: `canonical-repo-moved` (`C:\LLM\LibretroWebXR` is canonical,
-old path historical) and `test-game-authoring-goal` (the CC0 test-game effort, its
-status, the classic-core fix, and installed-toolchain locations).
+old path historical); `test-game-authoring-goal` (the CC0 test-game effort, its
+status, the classic-core fix, and installed-toolchain locations);
+`libretrowebxr-deploy` (deploy method); and `libretrowebxr-concurrent-dev` (this
+repo gets concurrent edits/WIP from other agent sessions — re-check git state
+before assuming the roadmap position, and never commit files you didn't change).
