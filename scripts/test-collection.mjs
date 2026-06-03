@@ -12,6 +12,10 @@ import {
   nextInCycle, ensureEnvironment, cycleSurface, cycleTimeOfDay, cyclePosterTexture,
   SURFACE_OPTIONS, POSTER_OPTIONS, TIME_OF_DAY_OPTIONS,
 } from '../src/EnvEditor.js';
+import {
+  uniqueId, existingIds, createProp, createPortal, addProp, addPortal,
+  CREATABLE_PROP_TYPES,
+} from '../src/PropCreator.js';
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -282,6 +286,60 @@ eq('nextInCycle unknown → first', nextInCycle('nope', SURFACE_OPTIONS), SURFAC
   eq('export captures wallpaper edit', out.environment.surfaces.wallpaper, 'builtin:retro-green');
   eq('export captures lighting edit', out.environment.lighting.timeOfDay, 'day');
   eq('export captures poster edit', out.props.find((p) => p.id === 'p1').texture, 'builtin:poster-2');
+}
+
+// --- PropCreator (pure E.3 prop/portal minting) ---------------------------
+{
+  const room = parseRoom({
+    id: 'e3', collections: ['roms/manifest.json'],
+    props: [{ type: 'shelf', id: 'shelf-1', pos: [0, 1, 0], rot: [0, 0, 0] }],
+    portals: [{ id: 'portal-1', target: 'roms/arcade.room.json', pos: [0, 0, 0] }],
+  });
+  // existingIds gathers props + portals.
+  ok('existingIds spans props + portals',
+     existingIds(room).has('shelf-1') && existingIds(room).has('portal-1'));
+  // uniqueId skips taken ids (shelf-1 exists → shelf-2).
+  eq('uniqueId avoids collision', uniqueId(room, 'shelf'), 'shelf-2');
+  eq('uniqueId fresh type starts at 1', uniqueId(room, 'console'), 'console-1');
+
+  // createProp mints a normalized prop (degrees rot, type defaults) without appending.
+  const poster = createProp(room, 'poster', { pos: [1, 1.5, -3.9], rot: [0, 45, 0] });
+  eq('createProp id', poster.id, 'poster-1');
+  eq('createProp type', poster.type, 'poster');
+  eq('createProp pos', poster.pos, [1, 1.5, -3.9]);
+  eq('createProp rot (degrees, preserved)', poster.rot, [0, 45, 0]);
+  eq('createProp poster default texture', poster.texture, 'builtin:poster-1');
+  ok('createProp did NOT append yet', room.props.length === 1);
+  ok('createProp rejects un-creatable type', createProp(room, 'tv') === null);
+  ok('createProp rejects garbage type', createProp(room, 'zzz') === null);
+  ok('CREATABLE list excludes tv/model',
+     !CREATABLE_PROP_TYPES.includes('tv') && !CREATABLE_PROP_TYPES.includes('model'));
+
+  // addProp appends; the new prop survives a serialize→parse round-trip.
+  addProp(room, poster);
+  eq('addProp appended', room.props.length, 2);
+  const reparsed = parseRoom(serializeRoom(room, new Map()));
+  ok('created poster round-trips through serializer',
+     reparsed.props.some((p) => p.id === 'poster-1' && p.texture === 'builtin:poster-1'));
+
+  // Portals: createPortal needs a target; uniqueId keeps numbering distinct.
+  ok('createPortal needs a target', createPortal(room, {}) === null);
+  const portal = createPortal(room, { target: 'roms/bedroom.room.json', pos: [2, 0, 1] });
+  eq('createPortal unique id', portal.id, 'portal-2');
+  eq('createPortal target', portal.target, 'roms/bedroom.room.json');
+  eq('createPortal default radius', portal.radius, 0.6);
+  addPortal(room, portal);
+  eq('addPortal appended', room.portals.length, 2);
+  const rp2 = parseRoom(serializeRoom(room, new Map()));
+  ok('created portal round-trips', rp2.portals.some((p) => p.id === 'portal-2'));
+}
+{
+  // A shelf created in-VR carries no collection → builder falls back to the
+  // room's first collection (so it shows content). Descriptor stays clean.
+  const room = parseRoom({ id: 'e3b', props: [] });
+  const shelf = createProp(room, 'shelf', { pos: [-2, 1.25, -1.5], rot: [0, 90, 0] });
+  ok('new shelf has no collection (builder fills it)', shelf.collection === undefined);
+  eq('new shelf id', shelf.id, 'shelf-1');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

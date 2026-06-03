@@ -40,20 +40,45 @@ export class RoomEditor {
     // Register every placed prop as an editable grabbable. GrabMgr's candidate
     // filter keeps them inert until edit mode is on, so this is safe to do once
     // up front (no behavior change in play mode).
-    for (const { object } of this.placed) {
-      object.userData.editable = true;
-      this.grabMgr.addGrabbable(object);
-    }
+    for (const { object } of this.placed) this._makeEditable(object);
+  }
+
+  // Mark an object as an editable prop and register it for grabbing. GrabMgr's
+  // candidate filter keeps it inert until edit mode is on (and dedupes), so this
+  // is safe in either mode. Used for the initial props and for props created
+  // at runtime (Phase E.3 via registerPlaced).
+  _makeEditable(object) {
+    object.userData.editable = true;
+    this.grabMgr.addGrabbable(object);
   }
 
   isEditMode() { return this._editing; }
   snapEnabled() { return this._snap; }
 
-  /** Toggle edit mode on/off. Returns the new state. */
-  toggle() {
-    this._editing = !this._editing;
+  /** Set edit mode explicitly. Returns the new state (idempotent). */
+  setEditMode(on) {
+    this._editing = !!on;
     this.onStatus(this._editing ? 'Edit mode: grab props to move them' : 'Edit mode off');
     return this._editing;
+  }
+
+  /** Toggle edit mode on/off. Returns the new state. */
+  toggle() {
+    return this.setEditMode(!this._editing);
+  }
+
+  /**
+   * Register a prop created at runtime (Phase E.3): link its descriptor↔object,
+   * make it an editable grabbable, and add it to the placed set so the next
+   * Export Room harvests its live transform. The caller (main.js `addProp`)
+   * already pushed `prop` into the room descriptor and built `object` via
+   * [[src/RoomBuilder.js]] `buildProp`/`buildPortal`.
+   */
+  registerPlaced(prop, object) {
+    if (!prop || !object) return;
+    object.userData.roomProp = prop;
+    this.placed.push({ prop, object });
+    this._makeEditable(object);
   }
 
   /** Free placement vs grid snapping (the "settings" switch). */

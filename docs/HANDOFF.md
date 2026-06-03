@@ -1,15 +1,20 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated 2026-06-03
-after **Phase E.2 (in-VR environment editing)** — on top of E.1 (move props +
-export) + its gamepad fix + first deploy, Phase R (R.1 JSON collection layer,
-R.2 RomResolver, R.3 rooms as JSON), the CC0 test-game library, and the
-classic-core render fix (all below). Phase R is complete.
-**Phase E.1 is done and deployed** (grab/move/rotate props, export `*.room.json`).
-**Phase E.2 is done** (in-VR Wallpaper/Floor/Lighting/Posters menu cycling, edits
-ride out through Export Room) — **except "assign collections to shelves", which is
-deferred** (needs a live shelf+cartridge rebuild; see below). **Phase E.3 (create
-new props/portals in-VR) is the next roadmap step.**
+after **Phase E.3 (create props/portals in-VR)** — on top of E.2 (in-VR look
+editing), E.1 (move props + export) + its gamepad fix + first deploy, Phase R
+(R.1 JSON collection layer, R.2 RomResolver, R.3 rooms as JSON), the CC0
+test-game library, and the classic-core render fix (all below). Phase R is
+complete. **Phase E.1 is done and deployed** (grab/move/rotate props, export
+`*.room.json`). **Phase E.2 is done** (in-VR Wallpaper/Floor/Lighting/Posters
+menu cycling). **Phase E.3 is done** (Add Shelf/Console/Poster/Portal menu
+buttons spawn a new prop in front of the player, build it through the same
+`RoomBuilder` factory, register it as an editable grabbable, and append it to the
+descriptor — so move + look-editing + Export Room all apply immediately; a new
+portal also joins the live walk-through nav list). The whole of Phase E is done
+**except "assign collections to shelves", which is still deferred** (needs a live
+shelf+cartridge rebuild + `GrabMgr.removeGrabbable`; see below). **Next roadmap
+step: Phase M (multiplayer) — or close out the deferred collections-to-shelves.**
 
 **Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, Phase E.1).
 The original https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and
@@ -54,13 +59,20 @@ lighting (`SceneMgr.applyEnvironment`), and places posters/models/portals.
 With no `?room` the built-in `defaultRoom()` reproduces the old two-shelf layout
 exactly.
 
-**Phase E.1 + E.2 (done)** are the in-VR room editor: E.1 grabs/moves/rotates the
-room's props and exports the edited `*.room.json`; **E.2** (`src/EnvEditor.js`,
+**Phase E.1 + E.2 + E.3 (done)** are the in-VR room editor: E.1 grabs/moves/rotates
+the room's props and exports the edited `*.room.json`; **E.2** (`src/EnvEditor.js`,
 pure cycling) adds **Wallpaper / Floor / Lighting / Posters** menu buttons that
 re-paint live (`SceneMgr.applyEnvironment`, `RoomBuilder.applyPosterTexture`) and
-mutate `currentRoom`, so the look rides out through Export Room. *Assigning
-collections to shelves in-VR is deferred* (needs a live shelf+cartridge rebuild +
-`GrabMgr.removeGrabbable`). **Phase E.3 (create props in-VR) is next.**
+mutate `currentRoom`; **E.3** (`src/PropCreator.js`, pure minting) adds **Add
+Shelf / Add Console / Add Poster / Add Portal** buttons that spawn a brand-new
+prop in front of the player, build it through the same single-prop
+`RoomBuilder.buildProp`/`buildPortal` path, append the descriptor to
+`currentRoom`, and register it as an editable grabbable via
+`RoomEditor.registerPlaced` — so E.1 move + E.2 look-editing + Export Room all
+apply to it immediately (a new portal also joins the live proximity-nav list).
+All three ride out through Export Room. *Assigning collections to shelves in-VR is
+still deferred* (needs a live shelf+cartridge rebuild + `GrabMgr.removeGrabbable`).
+**Next: Phase M (multiplayer), or the deferred collections-to-shelves.**
 
 **CC0 test-game library (done 2026-06-02).** The default `manifest.json` now ships
 our own source-built CC0 games so the frontend has playable content on every
@@ -89,7 +101,7 @@ npm install
 npm run fetch-cores     # copies cores into public/cores/ (gitignored). Auto-finds
                         # them in the old scratch workspace; else see the script.
 npm run dev             # http://localhost:5173  (Vite sets COOP/COEP)
-npm test                # 99 pure-logic assertions (…/RoomLoader/RoomSerializer/EnvEditor)
+npm test                # 121 pure-logic assertions (…/RoomSerializer/EnvEditor/PropCreator)
 npm run debug           # headless-Chrome health check (see DEBUGGING.md)
 ```
 
@@ -180,7 +192,9 @@ src/
                      filter/slice/half. ★E.1 also stamps userData.roomProp on
                      every movable object + returns placed:[{prop,object}].
                      ★E.2 exports applyPosterTexture() (builtin:/URL) for live
-                     poster re-skinning.
+                     poster re-skinning. ★E.3 extracts buildProp(prop,{scene,
+                     collections}) (single prop → {object,kind,cartridges?}) +
+                     exports buildPortal; buildRoom's loop delegates to buildProp.
   RoomSerializer.js  ★E.1 PURE inverse of RoomLoader.parseRoom:
                      serializeRoom(room, transforms)→clean room@1 object (live
                      pos/rot by id over the descriptor's non-spatial fields).
@@ -188,11 +202,18 @@ src/
   RoomEditor.js      ★E.1 In-VR Edit mode: registers placed props as editable
                      grabbables (inert until editing), free/grid snap setting,
                      serialize() harvests live transforms, export() →
-                     download + clipboard. Owns no scene geometry.
+                     download + clipboard. Owns no scene geometry. ★E.3 adds
+                     setEditMode(on) + registerPlaced(prop,object) so a
+                     runtime-created prop joins the editable/placed set.
   EnvEditor.js       ★E.2 PURE env-option cycling (cycleSurface/cycleTimeOfDay/
                      cyclePosterTexture over fixed palettes). Mutates the room
                      descriptor in place; main.js's Wallpaper/Floor/Lighting/
                      Posters menu buttons re-apply live + export. Unit-tested.
+  PropCreator.js     ★E.3 PURE prop/portal minting (createProp/createPortal +
+                     uniqueId + addProp/addPortal). Returns a normalized entry
+                     shaped like a parsed one (round-trips via RoomSerializer).
+                     CREATABLE_PROP_TYPES = shelf/console/gamepad/poster. No
+                     THREE → unit-tested; main.js's Add-* buttons build + place it.
   systems.js         ★R.1 SYSTEMS (system-first) + CORES (core-first) registry.
                      Single source of truth: cores, exts, folder aliases,
                      thumbnail repos, licenses. coreForFile / systemForFile /
@@ -293,8 +314,13 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
     (`SceneMgr.applyEnvironment`, `RoomBuilder.applyPosterTexture`) and export
     via RoomSerializer. *Assign collections to shelves deferred* (live shelf
     rebuild + `GrabMgr.removeGrabbable`).
-  - **E.3 ← NEXT** — create/place brand-new props and aim new portals in-VR.
-- **Phase M** — multiplayer (`docs/MULTIPLAYER.md`): M0 presence/avatars/voice,
+  - **E.3 ✅ done** — `src/PropCreator.js` (pure mint) + Add Shelf/Console/
+    Poster/Portal menu buttons spawn a prop in front of the player, build it via
+    the extracted `RoomBuilder.buildProp`/`buildPortal`, append it to
+    `currentRoom`, and register it editable via `RoomEditor.registerPlaced`
+    (a new portal also joins the live nav list). *Collections-to-shelves still
+    deferred* (live shelf rebuild + `GrabMgr.removeGrabbable`).
+- **Phase M ← NEXT** — multiplayer (`docs/MULTIPLAYER.md`): M0 presence/avatars/voice,
   M1 host-authoritative game sync, M2 rollback, M3 crossplay.
 - **Phase C** — open prop package schema, community gallery, BIOS-needing
   systems (PSX/N64), PWA.
@@ -324,27 +350,36 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   (`window.__editor`/`__grab` are deliberately exposed *before* the await as a
   headless probe workaround — that's a patch, not the fix.)
 
-## Immediate next actions for Phase E.3 (create props in-VR)
+## Immediate next actions (Phase E is done — pick one)
 
-E.1 moves existing props; E.2 edits the room's *look*. E.3 is the part that
-**adds to the descriptor** rather than editing existing entries:
-1. An in-VR "add prop" affordance (reuse `MenuMgr`/`MenuPanel`) that creates a
-   new shelf/console/poster/portal at a chosen spot, pushes a normalized entry
-   into `currentRoom.props`/`.portals`, builds its object via the same
-   `RoomBuilder` paths, and registers it as an editable grabbable so E.1 move +
-   E.2 look-editing + Export Room all apply to it immediately.
-2. Aim a new **portal** at a target room (URL today; a local-id registry is a
-   separate deferred item) and verify walk-through navigation.
-3. Also tackle the **deferred E.2 "assign collections to shelves"** when ready:
-   add `GrabMgr.removeGrabbable`, then rebuild a shelf's cartridges in place when
-   its `collection`/`filter`/`half` changes (descriptor + serializer already
-   support it).
+Phase E (in-VR editor) is complete bar the one deferred clause. Sensible next
+steps, in rough priority order:
 
-Keep `npm test` + `npm run debug` green and screenshot-verify. For E.2, the
-`window.__env.{wallpaper,floor,lighting,posters}()` handlers drive the menu
-edits; `window.__editor.serialize()` should reproduce the loaded room with edits
-applied (note the headless `buildMemoryCards` stall — `__env`/`__room` aren't set
-in `npm run debug`; use `__editor`/`__scene` + `--probe-file`, or fix the stall).
+1. **Deploy E.2 + E.3.** The live build at `/webxr/libretrowebxr2/` is still
+   Phase E.1. Run `npm run deploy` and re-verify COOP/COEP + a real-VR smoke
+   test (the Add-* buttons + look editing have only been desktop/headless-tested).
+2. **Close out "assign collections to shelves" in-VR** (the last deferred E.2/E.3
+   clause): add `GrabMgr.removeGrabbable`, then rebuild a shelf's cartridges in
+   place when its `collection`/`filter`/`half` changes. The descriptor +
+   serializer already support it (and E.3's `buildProp` now builds a shelf
+   standalone — so a rebuild is "removeGrabbable the old carts + buildProp the new
+   shelf"). This is the natural finish to the editor.
+3. **Start Phase M (multiplayer)** — see `docs/MULTIPLAYER.md`; M0 is
+   presence/avatars/voice + room-object sync.
+
+E.3 specifics worth knowing for whoever extends it:
+- `window.__add.{shelf,console,gamepad,poster,portal}()` drive prop creation
+  headlessly (exposed *before* the `buildMemoryCards` stall, like
+  `__editor`/`__grab`); the Add-* **menu buttons** are raycast-only so aren't
+  reachable in `npm run debug`. A probe that calls `__add.*()` then reads
+  `__editor.serialize()` proves the new prop is captured for Export Room.
+- A new prop spawns ~1.4 m in front of the player at a per-type height
+  (`SPAWN_Y` in main.js) and force-enables Edit mode so it's immediately movable.
+- A new **portal** aims at an example room that isn't the current one
+  (`KNOWN_ROOMS`) so walk-through is verifiable; the *in-VR* way to retarget a
+  portal (vs editing the exported JSON) is still open — a local-id/known-room
+  picker would pair well with the R.3 portal work.
+- Keep `npm test` + `npm run debug` green and screenshot-verify any UI change.
 
 ## Gotchas already hit (so you don't re-hit them)
 

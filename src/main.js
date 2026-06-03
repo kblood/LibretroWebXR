@@ -20,9 +20,13 @@ import { CORES, coreForFile } from './systems.js';
 import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
 import { parseRoom, defaultRoom, roomCollectionRefs } from './RoomLoader.js';
-import { buildRoom, applyPosterTexture } from './RoomBuilder.js';
+import { buildRoom, buildProp, buildPortal, applyPosterTexture } from './RoomBuilder.js';
 import { RoomEditor } from './RoomEditor.js';
 import { cycleSurface, cycleTimeOfDay, cyclePosterTexture } from './EnvEditor.js';
+import {
+  createProp, createPortal,
+  addProp as appendProp, addPortal as appendPortal,
+} from './PropCreator.js';
 
 // CORES and the system registry now live in src/systems.js (system-first,
 // single source of truth). detectCore() is coreForFile() from there; the
@@ -101,6 +105,9 @@ let debugHud = null;
 let editor = null;       // Phase E.1 in-VR room editor (set in buildCartridgeWorld)
 let currentRoom = null;  // the parsed room descriptor we serialize back on export
 let roomPosters = [];    // Phase E.2: { prop, object } for each poster, for live env edits
+let currentCollections = null; // Phase E.3: { byKey, list } — needed to build a new shelf in-VR
+let activePortals = [];  // Phase E.3: live portal records the proximity tick navigates (mutable)
+let editButton = null;   // Phase E.3: the menu's Edit Room button, so addProp can sync its label
 
 const DROP_KEY = 'libretrowebxr.dropped';
 
@@ -174,6 +181,7 @@ async function buildCartridgeWorld() {
   const { room, inline } = await resolveWorld();
   currentRoom = room;
   const collections = await loadRoomCollections(room, inline);
+  currentCollections = collections; // Phase E.3: build a new shelf against these
   const allGames = collections.list.flatMap((c) => c.games);
   window.__games = allGames; // debug hook: harness boots via these metas
   setStatus(allGames.length ? `${allGames.length} games` : 'no games');
@@ -230,9 +238,18 @@ async function buildCartridgeWorld() {
     scene, room: currentRoom, placed: built.placed, grabMgr, onStatus: setStatus,
   });
   // Debug hooks exposed early (before the awaits below) so they're available
-  // even if a later async step (e.g. IndexedDB) is slow.
+  // even if a later async step (e.g. IndexedDB) is slow. __add drives Phase E.3
+  // prop creation headlessly (the menu buttons are raycast-only, and the menu is
+  // built after the buildMemoryCards await that stalls in headless Chrome).
   window.__editor = editor;
   window.__grab = grabMgr;
+  window.__add = {
+    shelf:   () => addProp('shelf'),
+    console: () => addProp('console'),
+    gamepad: () => addProp('gamepad'),
+    poster:  () => addProp('poster'),
+    portal:  () => addPortal(),
+  };
 
   await buildMemoryCards();
 
@@ -284,8 +301,9 @@ async function buildCartridgeWorld() {
     });
   });
 
+  activePortals = built.portals; // Phase E.3: addPortal() appends to this live list
   buildMenuAndControlsPanel();
-  installPortals(built.portals);
+  installPortals();
 
   window.__locomotion = locomotion;
   window.__gameInput = gameInput;
@@ -299,15 +317,15 @@ async function buildCartridgeWorld() {
 // into the doorway. We change the URL and let the page rebuild from scratch —
 // the same clean-slate approach used for cross-core swaps (libretro cores
 // can't cleanly unload). Proximity is checked on the rig's XZ position.
-function installPortals(portals) {
-  if (!portals?.length) return;
+function installPortals() {
   let navigated = false;
   const playerPos = new THREE.Vector3();
   scene.addTickCallback(() => {
     if (navigated) return;
     if (editor?.isEditMode()) return; // don't teleport while dragging a portal
+    if (!activePortals.length) return;
     scene.playerRig.getWorldPosition(playerPos);
-    for (const p of portals) {
+    for (const p of activePortals) {
       const dx = playerPos.x - p.object.position.x;
       const dz = playerPos.z - p.object.position.z;
       if (Math.hypot(dx, dz) <= p.radius) {
@@ -318,6 +336,94 @@ function installPortals(portals) {
       }
     }
   });
+}
+
+// --- Phase E.3: create new props/portals in-VR ---------------------------
+//
+// E.1 moves existing props; E.2 edits the room's look; E.3 ADDS to the
+// descriptor. Each "Add X" spawns a fresh prop in front of the player, builds
+// it through the same RoomBuilder factory the loaded room uses, pushes the
+// descriptor into currentRoom, and registers it as an editable grabbable — so
+// E.1 move + E.2 look-editing + Export Room all apply to it immediately.
+
+// Default spawn height per type so a new prop lands at a sensible level (the
+// user then grabs it to its final spot). Posters go on walls; shelves/consoles
+// at furniture height.
+const SPAWN_Y = { shelf: 1.25, console: 0.74, gamepad: 0.78, poster: 1.5, portal: 0 };
+
+// Example rooms a new portal can target (URL today; a local-id registry is a
+// deferred item). addPortal aims at one that isn't the current room so
+// walk-through navigation is verifiable out of the box.
+const KNOWN_ROOMS = ['roms/bedroom.room.json', 'roms/arcade.room.json'];
+
+// A spot ~1.4 m in front of the player on the floor plane, with a yaw that faces
+// the new prop back toward them. Reads the camera's last-rendered world pose
+// (controller events fire outside the XR rAF, so the pose is a frame stale —
+// fine for an initial placement the user adjusts by grabbing).
+function spawnTransform(y = 1.2) {
+  const camPos = new THREE.Vector3();
+  const dir = new THREE.Vector3();
+  scene.camera.getWorldPosition(camPos);
+  scene.camera.getWorldDirection(dir); // points where the player looks (into the room)
+  dir.y = 0;
+  if (dir.lengthSq() < 1e-6) dir.set(0, 0, -1);
+  dir.normalize();
+  const p = camPos.clone().addScaledVector(dir, 1.4);
+  // Face the prop's +Z back toward the player (opposite the look direction).
+  const yawDeg = (Math.atan2(-dir.x, -dir.z) * 180) / Math.PI;
+  return { pos: [p.x, y, p.z], rot: [0, yawDeg, 0] };
+}
+
+// Force edit mode on (so the freshly added prop is immediately grabbable) and
+// keep the Edit Room button's label in sync if the menu's been built.
+function ensureEditMode() {
+  if (!editor || editor.isEditMode()) return;
+  editor.setEditMode(true);
+  editButton?.setLabel('Exit Edit');
+}
+
+// Add a new prop of `type` in front of the player. Returns the descriptor (or
+// null if it couldn't be built — e.g. a shelf with no collection to fill it).
+function addProp(type) {
+  if (!editor || !currentRoom) return null;
+  const t = spawnTransform(SPAWN_Y[type] ?? 1.2);
+  const prop = createProp(currentRoom, type, t);
+  if (!prop) { setStatus(`can't add ${type}`); return null; }
+
+  const r = buildProp(prop, { scene, collections: currentCollections });
+  if (!r) { setStatus(`add ${type} failed (nothing to build)`); return null; }
+
+  appendProp(currentRoom, prop);
+  editor.registerPlaced(prop, r.object);
+  // A new shelf's cartridges are play-mode grabbables (NOT editable props), like
+  // any other cartridge — register them so they can be picked up and inserted.
+  if (r.kind === 'shelf') r.cartridges.forEach((c) => grabMgr.addGrabbable(c));
+
+  ensureEditMode();
+  setStatus(`added ${type} — grab to place`);
+  return prop;
+}
+
+// Add a new portal aimed at an example room (one that isn't the current room),
+// register it for proximity navigation, and make it editable-grabbable.
+function addPortal() {
+  if (!editor || !currentRoom) return null;
+  const here = urlParams.get('room');
+  const target = KNOWN_ROOMS.find((u) => u !== here) || KNOWN_ROOMS[0];
+  const t = spawnTransform(SPAWN_Y.portal);
+  const portal = createPortal(currentRoom, { target, pos: t.pos, rot: t.rot });
+  if (!portal) { setStatus('add portal failed'); return null; }
+
+  const object = buildPortal(portal);
+  scene.addObject(object);
+  appendPortal(currentRoom, portal);
+  editor.registerPlaced(portal, object);
+  // Proximity nav reads object.position; the record mirrors buildRoom's shape.
+  activePortals.push({ object, prop: portal, target: portal.target, radius: portal.radius });
+
+  ensureEditMode();
+  setStatus(`added portal → ${target} — grab to place`);
+  return portal;
 }
 
 // --- In-VR menu + controls panel -----------------------------------------
@@ -352,6 +458,12 @@ function buildMenuAndControlsPanel() {
       { label: 'Floor',         onActivate: () => {} },
       { label: 'Lighting',      onActivate: () => {} },
       { label: 'Posters',       onActivate: () => {} },
+      // Phase E.3 — create new props/portals in-VR. Each spawns in front of the
+      // player, becomes an editable grabbable, and rides out through Export Room.
+      { label: 'Add Shelf',     onActivate: () => addProp('shelf') },
+      { label: 'Add Console',   onActivate: () => addProp('console') },
+      { label: 'Add Poster',    onActivate: () => addProp('poster') },
+      { label: 'Add Portal',    onActivate: () => addPortal() },
     ],
   });
   scene.addObject(menu);
@@ -359,6 +471,7 @@ function buildMenuAndControlsPanel() {
   // Wire each button's onActivate now that the panel exists (the toggle
   // closures need to mutate the same button to relabel between Show/Hide).
   const [controlsBtn, debugBtn, , editBtn, snapBtn] = menu.userData.buttons;
+  editButton = editBtn; // Phase E.3: addProp's ensureEditMode keeps this label in sync
   let controlsVisible = false;
   controlsBtn.onActivate = () => {
     controlsVisible = !controlsVisible;

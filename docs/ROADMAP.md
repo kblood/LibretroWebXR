@@ -112,10 +112,13 @@ Turn today's imperative scene-building into a declarative layer (no rewrite).
   RomResolver can't fetch them at play time — there's no pre-flight "you don't
   own this" affordance on the cartridge yet.
 
-## Phase E — In-VR room editor  ← in progress
+## Phase E — In-VR room editor  ✅ done (one deferred clause)
 Place/rotate props, swap wallpaper/floor/posters, assign collections to shelves,
 add **portals** to other rooms — all writing back to `*.room.json`. Export/share
 a room. This is the open, declarative replacement for EmuVR's closed WIGUx mod.
+E.1 (move + export), E.2 (look editing) and E.3 (create props/portals) are all
+done; only *assign collections to shelves in-VR* remains (deferred — needs
+`GrabMgr.removeGrabbable` + a live shelf rebuild).
 
 ### E.1 — Move props + export  ✅ done
 - In-VR **Edit mode** (a Menu toggle): the room's props (shelves, console,
@@ -164,8 +167,35 @@ a room. This is the open, declarative replacement for EmuVR's closed WIGUx mod.
   the current grab/insert lifecycle isn't structured for — out of scope for a
   no-rewrite increment. The other three clauses (wallpaper/floor/posters) are done.
 
-### E.3 — Create props in-VR (next)
-- Create/place brand-new props and aim new portals in-VR.
+### E.3 — Create props in-VR  ✅ done (collections-to-shelves still deferred)
+- `src/PropCreator.js` — **pure** descriptor minting: `createProp` /
+  `createPortal` return a normalized prop/portal (shaped exactly like one parsed
+  by `RoomLoader`, so it round-trips through `RoomSerializer` on export) with a
+  collision-free `uniqueId`; `addProp` / `addPortal` append to the descriptor.
+  `CREATABLE_PROP_TYPES` = shelf/console/gamepad/poster (tv has no object, model
+  needs an asset URL). No THREE/DOM → `npm test` covers it.
+- `RoomBuilder` extracted a single-prop **`buildProp(prop, {scene,collections})`**
+  (and exported **`buildPortal`**) so one new prop builds through the exact same
+  factory path as the loaded room; `buildRoom`'s switch now delegates to it.
+- `RoomEditor` gained `setEditMode(on)` + **`registerPlaced(prop,object)`** — the
+  seam that makes a runtime-created prop an editable grabbable and adds it to the
+  placed set, so E.1 move + E.2 look-editing + Export Room all apply to it
+  immediately.
+- `main.js` adds **Add Shelf / Add Console / Add Poster / Add Portal** menu
+  buttons. Each spawns the prop ~1.4 m in front of the player (facing them),
+  builds it, pushes the descriptor into `currentRoom`, registers it, force-enables
+  Edit mode, and (for a shelf) registers its cartridges as play-mode grabbables.
+  A new portal aims at an example room that isn't the current one and is appended
+  to the live proximity-nav list so walk-through works. `window.__add.*` drives it
+  headlessly (exposed before the `buildMemoryCards` stall, like `__editor`).
+- Tests: `npm test` now 121 assertions (PropCreator id/mint/append + created
+  prop/portal serialize round-trip). `npm run debug --probe-file=…` verifies
+  adding poster+shelf+portal grows props/portals/placed/grabbables, auto-enters
+  Edit mode, and the new ids appear in `editor.serialize()` — i.e. Export Room
+  captures them. Screenshot-verified the spawned props render.
+- **Still deferred** (from E.2): *assign collections to shelves* in-VR — needs a
+  live shelf+cartridge rebuild and `GrabMgr.removeGrabbable` the grab/insert
+  lifecycle doesn't have yet. The descriptor + serializer already support it.
 
 ## Phase M — Multiplayer (see `docs/MULTIPLAYER.md`)
 - **M0:** shared room presence — avatars + voice + room-object sync (works for
