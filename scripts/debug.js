@@ -170,6 +170,23 @@ if (args.boot) {
   console.log('# boot:', booted);
 }
 
+// --probe-file=<path> evaluates a JS file as a function body in the page and
+// logs its JSON return. Runs before the screenshot so any visual changes it
+// makes are captured. Useful for poking window.__* debug hooks (e.g. driving
+// the E.2 env edits and reading window.__editor.serialize() back).
+if (args['probe-file']) {
+  const code = readFileSync(resolve(args['probe-file']), 'utf8');
+  try {
+    const result = await page.evaluate((src) => {
+      const fn = new Function(src);
+      return JSON.stringify(fn());
+    }, code);
+    console.log('# probe:', result);
+  } catch (e) {
+    console.log('# probe error:', e.message);
+  }
+}
+
 console.log(`# idling ${TIMEOUT}ms to collect logs…`);
 await new Promise((r) => setTimeout(r, TIMEOUT));
 

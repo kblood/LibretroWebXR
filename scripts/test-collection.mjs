@@ -8,6 +8,10 @@ import { normalizeGame, parseCollection } from '../src/Collection.js';
 import { romUrlFor, sourceOrder, cacheKey, fileBaseName, wantedFileName, fileNameMatches, resolve as resolveRom } from '../src/RomResolver.js';
 import { parseRoom, defaultRoom, normalizeProp, normalizePortal, roomCollectionRefs, vec3 } from '../src/RoomLoader.js';
 import { serializeRoom, round } from '../src/RoomSerializer.js';
+import {
+  nextInCycle, ensureEnvironment, cycleSurface, cycleTimeOfDay, cyclePosterTexture,
+  SURFACE_OPTIONS, POSTER_OPTIONS, TIME_OF_DAY_OPTIONS,
+} from '../src/EnvEditor.js';
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -230,6 +234,54 @@ eq('round non-finite → 0', round(NaN), 0);
   eq('serializeRoom applies live pos (rounded)', c1.pos, [1.111, 2, 3]);
   eq('serializeRoom applies live rot', c1.rot, [0, 45.5, 0]);
   eq('serializeRoom leaves unmoved prop', g1.pos, [0.55, 0.78, -2.15]);
+}
+
+// --- EnvEditor (pure E.2 env cycling) -------------------------------------
+eq('nextInCycle wraps', nextInCycle('builtin:dark', SURFACE_OPTIONS), SURFACE_OPTIONS[0]);
+eq('nextInCycle advances', nextInCycle('builtin:retro-blue', SURFACE_OPTIONS), 'builtin:retro-green');
+eq('nextInCycle unknown → first', nextInCycle('nope', SURFACE_OPTIONS), SURFACE_OPTIONS[0]);
+{
+  const env = ensureEnvironment({});
+  ok('ensureEnvironment creates surfaces/lighting', env.surfaces && env.lighting);
+  const room = {};
+  ensureEnvironment(room);
+  ok('ensureEnvironment mutates the room in place', !!room.environment.surfaces);
+}
+{
+  // Cycle wallpaper from a known value; floor independent; lamps preserved.
+  const room = { environment: { surfaces: { wallpaper: 'builtin:retro-blue' }, lighting: { timeOfDay: 'day', lamps: [{ pos: [0, 2, 0] }] } } };
+  eq('cycleSurface advances wallpaper', cycleSurface(room, 'wallpaper'), 'builtin:retro-green');
+  eq('cycleSurface writes back', room.environment.surfaces.wallpaper, 'builtin:retro-green');
+  eq('cycleSurface floor starts at first', cycleSurface(room, 'floor'), SURFACE_OPTIONS[0]);
+  eq('cycleTimeOfDay advances', cycleTimeOfDay(room), 'evening');
+  eq('cycleTimeOfDay preserves lamps', room.environment.lighting.lamps.length, 1);
+}
+{
+  const room = {};
+  // First cycle on a bare room creates env and picks the first option.
+  eq('cycleSurface on empty room → first', cycleSurface(room, 'wallpaper'), SURFACE_OPTIONS[0]);
+  eq('cycleTimeOfDay on empty room → first', cycleTimeOfDay(room), TIME_OF_DAY_OPTIONS[0]);
+}
+{
+  const poster = { type: 'poster', id: 'p1', texture: 'builtin:poster-1' };
+  eq('cyclePosterTexture advances', cyclePosterTexture(poster), 'builtin:poster-2');
+  eq('cyclePosterTexture writes back', poster.texture, 'builtin:poster-2');
+  ok('cyclePosterTexture tolerates bad prop', cyclePosterTexture(null) === undefined);
+}
+{
+  // End-to-end: edit the descriptor, then export must reflect the edits.
+  const room = parseRoom({
+    id: 'edit', collections: ['roms/manifest.json'],
+    environment: { surfaces: { wallpaper: 'builtin:retro-blue' } },
+    props: [{ type: 'poster', id: 'p1', texture: 'builtin:poster-1', pos: [-1.7, 1.8, -3.9] }],
+  });
+  cycleSurface(room, 'wallpaper');                 // → retro-green
+  cycleTimeOfDay(room);                            // env had no lighting → day
+  cyclePosterTexture(room.props.find((p) => p.id === 'p1')); // → poster-2
+  const out = serializeRoom(room, new Map());
+  eq('export captures wallpaper edit', out.environment.surfaces.wallpaper, 'builtin:retro-green');
+  eq('export captures lighting edit', out.environment.lighting.timeOfDay, 'day');
+  eq('export captures poster edit', out.props.find((p) => p.id === 'p1').texture, 'builtin:poster-2');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

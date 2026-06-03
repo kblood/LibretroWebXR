@@ -69,23 +69,38 @@ function textureUrlOf(spec) {
   return typeof s === 'string' && /^(https?:|\/|\.\/|roms\/)/.test(s) ? s : null;
 }
 
+/**
+ * Apply a poster `texture` (a `builtin:` colour or a texture URL) to a material.
+ * Flat colour is set immediately; a URL loads async and overrides it on success
+ * (the flat colour stays as the fallback). Shared by the initial build and the
+ * in-VR env editor's live poster swap ([[src/EnvEditor.js]]), so both paths
+ * resolve `builtin:`/URL the same way.
+ */
+export function applyPosterTexture(material, texture) {
+  if (!material) return;
+  const color = resolveColor(texture) || '#3a2c4a';
+  material.map = null;
+  material.color.set(new THREE.Color(color));
+  material.needsUpdate = true;
+  const url = textureUrlOf(texture);
+  if (url) {
+    new THREE.TextureLoader().load(url, (tex) => {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      material.map = tex; material.color.set('#ffffff'); material.needsUpdate = true;
+    }, undefined, () => { /* keep flat colour on failure */ });
+  }
+}
+
 // A poster/picture on the wall: a thin lit plane. `texture` may be a URL or a
 // `builtin:` colour; `size` is [w,h] metres (default 0.8×1.1 portrait).
 function buildPoster(prop) {
   const [w, h] = Array.isArray(prop.size) ? prop.size : [0.8, 1.1];
-  const color = resolveColor(prop.texture) || '#3a2c4a';
-  const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(color), toneMapped: false });
+  const mat = new THREE.MeshBasicMaterial({ toneMapped: false });
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
   mesh.name = `poster:${prop.id}`;
   mesh.position.copy(v3(prop.pos));
   applyRot(mesh, prop.rot);
-  const url = textureUrlOf(prop.texture);
-  if (url) {
-    new THREE.TextureLoader().load(url, (tex) => {
-      tex.colorSpace = THREE.SRGBColorSpace;
-      mat.map = tex; mat.color.set('#ffffff'); mat.needsUpdate = true;
-    }, undefined, () => { /* keep flat colour on failure */ });
-  }
+  applyPosterTexture(mat, prop.texture);
   return mesh;
 }
 

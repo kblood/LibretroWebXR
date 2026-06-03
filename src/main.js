@@ -20,8 +20,9 @@ import { CORES, coreForFile } from './systems.js';
 import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
 import { parseRoom, defaultRoom, roomCollectionRefs } from './RoomLoader.js';
-import { buildRoom } from './RoomBuilder.js';
+import { buildRoom, applyPosterTexture } from './RoomBuilder.js';
 import { RoomEditor } from './RoomEditor.js';
+import { cycleSurface, cycleTimeOfDay, cyclePosterTexture } from './EnvEditor.js';
 
 // CORES and the system registry now live in src/systems.js (system-first,
 // single source of truth). detectCore() is coreForFile() from there; the
@@ -99,6 +100,7 @@ let gamepadObj = null;
 let debugHud = null;
 let editor = null;       // Phase E.1 in-VR room editor (set in buildCartridgeWorld)
 let currentRoom = null;  // the parsed room descriptor we serialize back on export
+let roomPosters = [];    // Phase E.2: { prop, object } for each poster, for live env edits
 
 const DROP_KEY = 'libretrowebxr.dropped';
 
@@ -180,6 +182,7 @@ async function buildCartridgeWorld() {
   cartridges = built.cartridges;
   consoleObj = built.consoleObj;
   gamepadObj = built.gamepadObj;
+  roomPosters = built.placed.filter((e) => e.prop.type === 'poster');
 
   // A room may omit a console/gamepad; the load + input wiring below needs
   // both, so fall back to the default placements.
@@ -343,6 +346,12 @@ function buildMenuAndControlsPanel() {
       { label: 'Edit Room',     onActivate: () => {} },
       { label: 'Snap: Off',     onActivate: () => {} },
       { label: 'Export Room',   onActivate: () => editor?.export() },
+      // Phase E.2 — in-VR environment editing. Each cycles a palette and
+      // re-applies live; the change rides out through Export Room.
+      { label: 'Wallpaper',     onActivate: () => {} },
+      { label: 'Floor',         onActivate: () => {} },
+      { label: 'Lighting',      onActivate: () => {} },
+      { label: 'Posters',       onActivate: () => {} },
     ],
   });
   scene.addObject(menu);
@@ -374,12 +383,48 @@ function buildMenuAndControlsPanel() {
     snapBtn.setLabel(on ? 'Snap: On' : 'Snap: Off');
   };
 
+  // Phase E.2: environment editing. Cycle a palette, mutate the live room
+  // descriptor (so Export Room captures it), and re-apply immediately.
+  const short = (v) => String(v || '').replace(/^builtin:/, '');
+  const [wallpaperBtn, floorBtn, lightingBtn, postersBtn] = menu.userData.buttons.slice(6);
+  wallpaperBtn.onActivate = () => {
+    const v = cycleSurface(currentRoom, 'wallpaper');
+    scene.applyEnvironment(currentRoom.environment);
+    setStatus(`Wallpaper: ${short(v)}`);
+  };
+  floorBtn.onActivate = () => {
+    const v = cycleSurface(currentRoom, 'floor');
+    scene.applyEnvironment(currentRoom.environment);
+    setStatus(`Floor: ${short(v)}`);
+  };
+  lightingBtn.onActivate = () => {
+    const v = cycleTimeOfDay(currentRoom);
+    scene.applyEnvironment(currentRoom.environment);
+    setStatus(`Lighting: ${v}`);
+  };
+  postersBtn.onActivate = () => {
+    if (!roomPosters.length) { setStatus('no posters in this room'); return; }
+    let last;
+    for (const { prop, object } of roomPosters) {
+      last = cyclePosterTexture(prop); // advance each poster from its own value
+      applyPosterTexture(object.material, prop.texture);
+    }
+    setStatus(`Posters: ${short(last)}`);
+  };
+
   for (const b of menu.userData.buttons) {
     menuMgr.addItem(b.mesh, b.onActivate);
   }
 
   scene.addTickCallback(() => menuMgr.tick());
   window.__menu = menuMgr;
+  // Debug hook: drive the E.2 env edits headlessly (the menu is raycast-only).
+  window.__env = {
+    wallpaper: wallpaperBtn.onActivate,
+    floor: floorBtn.onActivate,
+    lighting: lightingBtn.onActivate,
+    posters: postersBtn.onActivate,
+  };
 }
 
 function updateControlsPanel() {

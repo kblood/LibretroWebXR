@@ -141,11 +141,31 @@ a room. This is the open, declarative replacement for EmuVR's closed WIGUx mod.
   override). `npm run debug` verdict OK; live `window.__editor.serialize()`
   verified to reproduce the loaded room.
 
-### E.2 / E.3 (next)
-- **E.2** — in-VR environment editing: swap wallpaper/floor/posters and assign
-  collections to shelves from a panel (reuse `SceneMgr.applyEnvironment` +
-  `MenuMgr`).
-- **E.3** — create/place brand-new props and aim new portals in-VR.
+### E.2 — In-VR environment editing  ✅ done (collections-to-shelves deferred)
+- `src/EnvEditor.js` — **pure** option-cycling over fixed palettes
+  (`cycleSurface`/`cycleTimeOfDay`/`cyclePosterTexture`, `nextInCycle`,
+  `ensureEnvironment`). Mutates the room descriptor in place and returns the new
+  value; no THREE/DOM, so `npm test` covers it. Mirrors the pure/imperative
+  split of RoomSerializer/RoomEditor.
+- `RoomBuilder.applyPosterTexture(material, texture)` extracted from `buildPoster`
+  so the editor can swap a poster's `builtin:`/URL look live without duplicating
+  the resolve logic.
+- `main.js` adds **Wallpaper / Floor / Lighting / Posters** menu buttons that
+  cycle a palette, mutate `currentRoom`, and re-apply immediately
+  (`SceneMgr.applyEnvironment` for surfaces/lighting, `applyPosterTexture` per
+  poster). Edits ride back out through **Export Room** (RoomSerializer already
+  echoes `environment` + each prop's `texture`).
+- Tests: `npm test` now 99 assertions (EnvEditor cycling + end-to-end
+  edit→serialize capture). `npm run debug --probe-file=…` on
+  `bedroom.room.json` screenshot-verifies the live repaint (blue→green walls,
+  wood→dark floor, evening→day) and the `editor.serialize()` round-trip.
+- **Deferred to an E.2 follow-up:** *assign collections to shelves* in-VR. Doing
+  it live needs a shelf+cartridge rebuild (and a `GrabMgr.removeGrabbable`) that
+  the current grab/insert lifecycle isn't structured for — out of scope for a
+  no-rewrite increment. The other three clauses (wallpaper/floor/posters) are done.
+
+### E.3 — Create props in-VR (next)
+- Create/place brand-new props and aim new portals in-VR.
 
 ## Phase M — Multiplayer (see `docs/MULTIPLAYER.md`)
 - **M0:** shared room presence — avatars + voice + room-object sync (works for
