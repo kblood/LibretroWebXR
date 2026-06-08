@@ -26,7 +26,7 @@ const LASER_IDLE = 0x88aaff;
 const LASER_HOVER = 0xffd060;
 
 export class GrabMgr {
-  constructor({ scene, controllers, console: consoleObj, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, isEditMode, onEditRelease }) {
+  constructor({ scene, controllers, console: consoleObj, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, isEditMode, onEditRelease, getMode, onSelectProp }) {
     this.scene = scene;
     this.controllers = controllers;
     this.console = consoleObj;
@@ -44,6 +44,11 @@ export class GrabMgr {
     // snapping home / inserting. onEditRelease lets the editor apply snapping.
     this.isEditMode = isEditMode || (() => false);
     this.onEditRelease = onEditRelease || (() => {});
+    // Editor mode ([[src/RoomEditor.js]]): 'off'|'move'|'change'|'add'. In
+    // 'change' mode a grip on an editable prop SELECTS it (onSelectProp) instead
+    // of attaching/moving it — the menu then cycles the selected prop's options.
+    this.getMode = getMode || (() => (this.isEditMode() ? 'move' : 'off'));
+    this.onSelectProp = onSelectProp || (() => {});
     this.grabbables = [];
     this.held = new Map();              // controller -> Object3D
     this._hover = new Map();            // controller -> Object3D (or null)
@@ -62,6 +67,15 @@ export class GrabMgr {
     // Idempotent: the gamepad is registered both by main.js (as a play object)
     // and by RoomEditor (as an editable prop) — don't list it twice.
     if (!this.grabbables.includes(object)) this.grabbables.push(object);
+  }
+
+  // Drop an object from the grab set (e.g. the old shelf + its cartridges when
+  // Change mode rebuilds a shelf for a new collection). Also clears any pending
+  // hover that points at it so the laser doesn't linger on a freed object.
+  removeGrabbable(object) {
+    const i = this.grabbables.indexOf(object);
+    if (i >= 0) this.grabbables.splice(i, 1);
+    for (const [ctrl, hov] of this._hover) if (hov === object) this._setHover(ctrl, null);
   }
 
   // Which grabbables are valid targets right now.
@@ -180,6 +194,14 @@ export class GrabMgr {
     if (this.held.has(ctrl)) return;
     const target = this._hover.get(ctrl) || this._aimTarget(ctrl) || this._nearestInArmRange(ctrl);
     if (!target) return;
+
+    // Change mode: grip SELECTS an editable prop (not the gamepad, which stays
+    // playable) without attaching/moving it. The menu cycles its options.
+    if (this.getMode() === 'change' && target.userData?.editable && target.userData?.kind !== 'gamepad') {
+      this._setHover(ctrl, null);
+      this.onSelectProp(target);
+      return;
+    }
 
     if (this._insertedCart === target) {
       this._insertedCart = null;

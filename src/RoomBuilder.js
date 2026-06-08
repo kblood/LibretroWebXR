@@ -15,6 +15,7 @@ import { createCartridge } from './Cartridge.js';
 import { createShelf, lockShelfHomes } from './Shelf.js';
 import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
+import { createBookcase, createCupboard, createTable } from './Furniture.js';
 
 const DEG = Math.PI / 180;
 const v3 = (a) => new THREE.Vector3(a[0], a[1], a[2]);
@@ -195,6 +196,17 @@ export function buildProp(prop, { scene, collections }) {
       const obj = buildPoster(prop);
       scene.addObject(obj);
       return { object: obj, kind: 'poster' };
+    }
+    case 'bookcase':
+    case 'cupboard':
+    case 'table': {
+      // Decorative furniture (no cartridges). Origin is floor-contact, so a
+      // `pos` of [x, 0, z] stands it on the floor. See [[src/Furniture.js]].
+      const make = { bookcase: createBookcase, cupboard: createCupboard, table: createTable }[prop.type];
+      const obj = make({ position: v3(prop.pos), rotationY: prop.rot[1] * DEG });
+      applyRot(obj, prop.rot); // honour full XYZ rotation (rotationY already set; this re-applies all three)
+      scene.addObject(obj);
+      return { object: obj, kind: prop.type };
     }
     case 'tv':
       scene.applyTv?.(prop);

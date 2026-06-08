@@ -1,21 +1,47 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated 2026-06-03
-after **local multiplayer (couch co-op)** — on top of Phase E.3 (create
-props/portals in-VR), E.2 (in-VR look editing), E.1 (move props + export) + its
-gamepad fix + first deploy, Phase R (R.1 JSON collection layer, R.2 RomResolver,
-R.3 rooms as JSON), the CC0 test-game library, and the classic-core render fix
-(all below). Phase R is complete. **Phase E is done** (E.1 grab/move/rotate +
-export, E.2 Wallpaper/Floor/Lighting/Posters cycling, E.3 Add
-Shelf/Console/Poster/Portal) **except "assign collections to shelves", still
-deferred** (needs a live shelf+cartridge rebuild + `GrabMgr.removeGrabbable`; see
-below). **Local multiplayer is done** (route a controller's input to the player
+after the **three in-VR edit modes (Move / Change / Add)** restructure — on top of
+local multiplayer (couch co-op), Phase E.3 (create props/portals in-VR), E.2
+(in-VR look editing), E.1 (move props + export) + its gamepad fix + first deploy,
+Phase R (R.1 JSON collection layer, R.2 RomResolver, R.3 rooms as JSON), the CC0
+test-game library, and the classic-core render fix (all below). Phase R is
+complete.
+
+**In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
+**Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
+a boolean). **Move** = grab a prop to reposition (E.1). **Change** = grip-SELECT a
+prop then cycle its options — poster art, **shelf collection (live rebuild)** — plus
+the global Wallpaper/Floor/Lighting/All-Posters cycles (E.2). **Add** = a furniture
+catalogue: Shelf, **Bookcase / Cupboard / Table** (new decorative props in
+`src/Furniture.js`), Console, Poster, Portal (E.3). This **closes the previously
+deferred "assign collections to shelves"** — Change mode does it via
+`EnvEditor.cycleShelfCollection` (pure) + a `rebuildShelf` helper that swaps the
+shelf object live (`GrabMgr.removeGrabbable`, `SceneMgr.removeObject`,
+`RoomEditor.removePlaced`). All edits ride out through Export Room (verified: unit
+tests + headless probe — furniture spawns/serialize, shelf cycle manifest→snes
+rebuild + export round-trip). **Real-VR smoke test of the modes + redeploy are
+pending** (menu is raycast-only; can't be exercised headlessly, same as E.1/E.2/E.3).
+
+**Local multiplayer is done** (route a controller's input to the player
 of the console port it's plugged into — `src/CableMgr.js`, per-player
 `GameInputMgr` dispatch, P1..P4 console ports; *local couch co-op, distinct from
 the networked Phase M in `docs/MULTIPLAYER.md`*). Tests + headless + screenshot
 green; **VR controller routing still needs a real-headset smoke test, and it's
 not yet redeployed** (live build is E.3). **Next roadmap step: real-VR verify +
 redeploy the multiplayer build, or close out the deferred collections-to-shelves.**
+
+**Desktop (non-VR) play & edit is done.** `src/DesktopControls.js` makes the flat
+screen fully interactive: **click to capture the mouse, mouse-look + WASD to walk,
+left-click = select/menu, right-click = grab/drop (toggle), Esc = release.** It
+drives the *existing* GrabMgr/MenuMgr by feeding a **synthetic third "controller"**
+(`SceneMgr.desktopController`, added to `scene.controllers` so the managers auto-wire
+it) that tracks the camera and dispatches the same `select*`/`squeeze*` events an XR
+controller would — so no manager logic changed, and it's fully inert in a headset
+(`renderer.xr.isPresenting` gate). Gameplay was already keyboard-driven (`InputMgr`
+forwards arrows/Enter/Space/H/G/Y/T/E/P/R/O); **WASD is safe because it's not in that
+forward-set.** Crosshair + control hint live in `index.html`. Verified headless
+(movement + room-clamp + synthetic grab/release of a prop) + screenshot.
 
 **Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, Phase E.3,
 deployed 2026-06-03; local multiplayer is committed but NOT yet deployed).

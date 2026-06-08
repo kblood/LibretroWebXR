@@ -1,9 +1,16 @@
-// RoomEditor — the imperative side of Phase E.1 (in-VR room editor). Owns the
-// Edit-mode toggle, makes the room's props grabbable while editing, and
-// harvests their live transforms back into a *.room.json on export. The pure
+// RoomEditor — the imperative side of the in-VR room editor. Owns the editor
+// MODE, makes the room's props grabbable/selectable while editing, and harvests
+// their live transforms back into a *.room.json on export. The pure
 // serialization lives in [[src/RoomSerializer.js]]; grabbing/moving reuses the
-// existing [[src/GrabMgr.js]] (this just flips it into edit mode and registers
+// existing [[src/GrabMgr.js]] (this just flips it into a mode and registers
 // the props as editable grabbables). main.js wires the menu buttons to here.
+//
+// Three modes (replacing the old single Edit toggle):
+//   - 'move'   — grab a prop to reposition it (the original E.1 behaviour).
+//   - 'change' — grip-SELECT a prop, then cycle its properties from the menu
+//                (poster art, shelf collection); GrabMgr routes grip to select.
+//   - 'add'    — spawn furniture; freshly added props are grab-to-place.
+//   - 'off'    — play mode; props are inert.
 //
 // Division of labour (see RoomSerializer): the descriptor `this.room` keeps
 // every non-spatial field; the live objects keep authoritative pos/rot. On
@@ -16,6 +23,9 @@ const RAD2DEG = 180 / Math.PI;
 
 const GRID_POS = 0.1;          // metres — snap step for position
 const GRID_ROT = 15 * DEG;     // radians — snap step for rotation (15°)
+
+const MODES = ['off', 'move', 'change', 'add'];
+const HILITE_SCALE = 1.06;     // selected-prop highlight: a slight scale bump
 
 const snap = (v, step) => Math.round(v / step) * step;
 
@@ -34,8 +44,10 @@ export class RoomEditor {
     this.placed = Array.isArray(placed) ? placed : [];
     this.grabMgr = grabMgr;
     this.onStatus = onStatus || (() => {});
-    this._editing = false;
+    this._mode = 'off';
     this._snap = false;
+    this._selected = null;        // { prop, object } currently selected (Change mode)
+    this._onSelect = () => {};    // menu hook: fires with the selected record (or null)
 
     // Register every placed prop as an editable grabbable. GrabMgr's candidate
     // filter keeps them inert until edit mode is on, so this is safe to do once
@@ -52,19 +64,81 @@ export class RoomEditor {
     this.grabMgr.addGrabbable(object);
   }
 
-  isEditMode() { return this._editing; }
+  /** Any non-off mode counts as "editing" — GrabMgr's candidate filter keys off
+   * this (editable props grabbable while editing, cartridges only in play). */
+  isEditMode() { return this._mode !== 'off'; }
+  getMode() { return this._mode; }
   snapEnabled() { return this._snap; }
 
-  /** Set edit mode explicitly. Returns the new state (idempotent). */
-  setEditMode(on) {
-    this._editing = !!on;
-    this.onStatus(this._editing ? 'Edit mode: grab props to move them' : 'Edit mode off');
-    return this._editing;
+  /**
+   * Switch editor mode. Leaving 'change' clears any selection. Returns the new
+   * mode. Unknown modes fall back to 'off'.
+   */
+  setMode(mode) {
+    const m = MODES.includes(mode) ? mode : 'off';
+    if (m === this._mode) return m;
+    if (this._mode === 'change' && m !== 'change') this.clearSelection();
+    this._mode = m;
+    const msg = {
+      off: 'Play mode',
+      move: 'Move mode: grab props to reposition them',
+      change: 'Change mode: grip a prop to select, then cycle its options',
+      add: 'Add mode: pick furniture to place',
+    }[m];
+    this.onStatus(msg);
+    return m;
   }
 
-  /** Toggle edit mode on/off. Returns the new state. */
+  /** Back-compat helper for addProp/ensureEditMode: on→'move', off→'off'. */
+  setEditMode(on) {
+    this.setMode(on ? 'move' : 'off');
+    return this.isEditMode();
+  }
+
+  /** Toggle between play and move. Returns true if now editing. */
   toggle() {
-    return this.setEditMode(!this._editing);
+    this.setMode(this.isEditMode() ? 'off' : 'move');
+    return this.isEditMode();
+  }
+
+  // --- Change-mode selection ------------------------------------------------
+
+  /** Register a callback fired with the selected `{prop,object}` record (or null). */
+  onSelect(cb) { this._onSelect = cb || (() => {}); }
+
+  /** The currently selected record `{prop,object}` (Change mode), or null. */
+  selectedProp() { return this._selected; }
+
+  /** Select a placed prop by its object (Change mode). No-op for unknown objects. */
+  select(object) {
+    const rec = this.placed.find((p) => p.object === object);
+    if (!rec || rec === this._selected) return;
+    this._unhighlight(this._selected?.object);
+    this._selected = rec;
+    this._highlight(rec.object);
+    this.onStatus(`selected ${rec.prop.id}`);
+    this._onSelect(rec);
+  }
+
+  /** Clear the current selection (restores highlight). */
+  clearSelection() {
+    if (!this._selected) return;
+    this._unhighlight(this._selected.object);
+    this._selected = null;
+    this._onSelect(null);
+  }
+
+  _highlight(object) {
+    if (!object || object.userData._hiliteOrig) return;
+    object.userData._hiliteOrig = object.scale.clone();
+    object.scale.multiplyScalar(HILITE_SCALE);
+  }
+
+  _unhighlight(object) {
+    const orig = object?.userData?._hiliteOrig;
+    if (!orig) return;
+    object.scale.copy(orig);
+    delete object.userData._hiliteOrig;
   }
 
   /**
@@ -79,6 +153,20 @@ export class RoomEditor {
     object.userData.roomProp = prop;
     this.placed.push({ prop, object });
     this._makeEditable(object);
+  }
+
+  /**
+   * Drop a placed prop's object from the editor's set (it keeps its descriptor
+   * in `room.props`). Used by the in-VR Change-mode shelf rebuild, which swaps
+   * the live object for a freshly built one while leaving the `prop` in place.
+   * Clears the selection if it pointed at this object. The caller removes the
+   * object from the scene and from GrabMgr.
+   */
+  removePlaced(object) {
+    if (this._selected?.object === object) this.clearSelection();
+    this._unhighlight(object);
+    const i = this.placed.findIndex((p) => p.object === object);
+    if (i >= 0) this.placed.splice(i, 1);
   }
 
   /** Free placement vs grid snapping (the "settings" switch). */

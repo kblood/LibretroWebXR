@@ -34,6 +34,25 @@
 
       /* Three.js's VRButton is fixed-position; nudge it above the canvas. */
       body > button { z-index: 3 !important; }
+
+      /* Desktop (flat-screen) controls overlay. The crosshair shows only once
+         the mouse is captured (body.pointer-locked, set by DesktopControls); the
+         hint shows until then. Both are non-interactive and sit over the canvas. */
+      #crosshair {
+        position: absolute; left: 50%; top: 50%; width: 8px; height: 8px;
+        margin: -4px 0 0 -4px; border-radius: 50%;
+        background: rgba(255,255,255,.85); box-shadow: 0 0 2px #000;
+        pointer-events: none; opacity: 0; transition: opacity .15s; z-index: 2;
+      }
+      body.pointer-locked #crosshair { opacity: 1; }
+      #desktop-hint {
+        position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+        font-size: 12px; color: #cfd6e6; background: rgba(20,20,30,.72);
+        border: 1px solid #2a2a3a; border-radius: 6px; padding: 6px 12px;
+        pointer-events: none; opacity: .9; transition: opacity .25s; z-index: 2;
+        white-space: nowrap;
+      }
+      body.pointer-locked #desktop-hint { opacity: 0; }
     </style>
   </head>
   <body>
@@ -47,7 +66,10 @@
       <span class="sp"></span>
       <span id="status">idle</span>
     </header>
-    <main id="stage"></main>
+    <main id="stage">
+      <div id="crosshair"></div>
+      <div id="desktop-hint">Click to look · WASD move · L-click select · R-click grab · Esc release</div>
+    </main>
     <canvas id="placeholder-canvas" width="512" height="448"></canvas>
     <canvas id="canvas" width="512" height="448"></canvas>
     <script type="module" src="/src/main.js"></script>

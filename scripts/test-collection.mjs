@@ -10,7 +10,7 @@ import { parseRoom, defaultRoom, normalizeProp, normalizePortal, roomCollectionR
 import { serializeRoom, round } from '../src/RoomSerializer.js';
 import {
   nextInCycle, ensureEnvironment, cycleSurface, cycleTimeOfDay, cyclePosterTexture,
-  SURFACE_OPTIONS, POSTER_OPTIONS, TIME_OF_DAY_OPTIONS,
+  cycleShelfCollection, SURFACE_OPTIONS, POSTER_OPTIONS, TIME_OF_DAY_OPTIONS,
 } from '../src/EnvEditor.js';
 import {
   uniqueId, existingIds, createProp, createPortal, addProp, addPortal,
@@ -279,6 +279,22 @@ eq('nextInCycle unknown → first', nextInCycle('nope', SURFACE_OPTIONS), SURFAC
   ok('cyclePosterTexture tolerates bad prop', cyclePosterTexture(null) === undefined);
 }
 {
+  // cycleShelfCollection: advance a shelf's collection through an ordered key list.
+  const keys = ['nes.json', 'snes.json', 'md.json'];
+  const shelf = { type: 'shelf', id: 's1', collection: 'nes.json' };
+  eq('cycleShelfCollection advances', cycleShelfCollection(shelf, keys), 'snes.json');
+  eq('cycleShelfCollection writes back', shelf.collection, 'snes.json');
+  cycleShelfCollection(shelf, keys); // → md.json
+  eq('cycleShelfCollection wraps', cycleShelfCollection(shelf, keys), 'nes.json');
+  eq('cycleShelfCollection unknown current starts at first',
+     cycleShelfCollection({ collection: 'nope' }, keys), 'nes.json');
+  eq('cycleShelfCollection single-entry is a no-op',
+     cycleShelfCollection({ collection: 'only' }, ['only']), 'only');
+  ok('cycleShelfCollection empty list leaves value',
+     cycleShelfCollection({ collection: 'x' }, []) === 'x');
+  ok('cycleShelfCollection tolerates bad prop', cycleShelfCollection(null, keys) === undefined);
+}
+{
   // End-to-end: edit the descriptor, then export must reflect the edits.
   const room = parseRoom({
     id: 'edit', collections: ['roms/manifest.json'],
@@ -320,6 +336,16 @@ eq('nextInCycle unknown → first', nextInCycle('nope', SURFACE_OPTIONS), SURFAC
   ok('createProp rejects garbage type', createProp(room, 'zzz') === null);
   ok('CREATABLE list excludes tv/model',
      !CREATABLE_PROP_TYPES.includes('tv') && !CREATABLE_PROP_TYPES.includes('model'));
+
+  // Furniture (Add mode): bookcase/cupboard/table are creatable + round-trip.
+  for (const ft of ['bookcase', 'cupboard', 'table']) {
+    ok(`CREATABLE list includes ${ft}`, CREATABLE_PROP_TYPES.includes(ft));
+    const f = createProp(room, ft, { pos: [1, 0, -2], rot: [0, 90, 0] });
+    ok(`createProp mints ${ft}`, f && f.type === ft);
+    eq(`createProp ${ft} id`, f.id, `${ft}-1`);
+    eq(`createProp ${ft} pos`, f.pos, [1, 0, -2]);
+    ok(`normalizeProp keeps ${ft}`, normalizeProp({ type: ft, pos: [0, 0, 0] }) !== null);
+  }
 
   // addProp appends; the new prop survives a serialize→parse round-trip.
   addProp(room, poster);

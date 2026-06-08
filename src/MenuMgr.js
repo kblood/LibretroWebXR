@@ -12,6 +12,16 @@ import * as THREE from 'three';
 
 const RAY_RANGE = 8.0;
 
+// Effective visibility: a button in a hidden panel (group.visible = false) must
+// not be hoverable/clickable. THREE's Raycaster does NOT skip invisible objects
+// on its own, so the mode-switcher menu relies on this walk-up check to gate the
+// per-mode sub-panels (Move/Change/Add).
+function effVisible(obj) {
+  let n = obj;
+  while (n) { if (!n.visible) return false; n = n.parent; }
+  return true;
+}
+
 export class MenuMgr {
   constructor({ controllers, isGamepadHeld }) {
     this.controllers = controllers;
@@ -52,7 +62,9 @@ export class MenuMgr {
     this._dir.set(0, 0, -1).applyQuaternion(this._quat).normalize();
     this._ray.set(this._origin, this._dir);
     this._ray.far = RAY_RANGE;
-    const meshes = this.items.map((i) => i.mesh);
+    // Only meshes in a currently-visible panel are aimable.
+    const meshes = this.items.filter((i) => effVisible(i.mesh)).map((i) => i.mesh);
+    if (!meshes.length) return null;
     const hits = this._ray.intersectObjects(meshes, true);
     if (!hits.length) return null;
     let n = hits[0].object;
@@ -71,7 +83,7 @@ export class MenuMgr {
   _tryClick(ctrl) {
     if (this.isGamepadHeld()) return;
     const mesh = this._hover.get(ctrl);
-    if (!mesh) return;
+    if (!mesh || !effVisible(mesh)) return;
     const item = this.items.find((i) => i.mesh === mesh);
     item?.onActivate(ctrl);
   }

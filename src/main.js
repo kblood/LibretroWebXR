@@ -7,6 +7,7 @@ import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
 import { GrabMgr } from './GrabMgr.js';
 import { LocomotionMgr } from './LocomotionMgr.js';
+import { DesktopControls } from './DesktopControls.js';
 import { GameInputMgr } from './GameInputMgr.js';
 import { installXRRafShim } from './XRRafShim.js';
 import { installSpatialAudio } from './SpatialAudio.js';
@@ -23,7 +24,7 @@ import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported 
 import { parseRoom, defaultRoom, roomCollectionRefs } from './RoomLoader.js';
 import { buildRoom, buildProp, buildPortal, applyPosterTexture } from './RoomBuilder.js';
 import { RoomEditor } from './RoomEditor.js';
-import { cycleSurface, cycleTimeOfDay, cyclePosterTexture } from './EnvEditor.js';
+import { cycleSurface, cycleTimeOfDay, cyclePosterTexture, cycleShelfCollection } from './EnvEditor.js';
 import {
   createProp, createPortal,
   addProp as appendProp, addPortal as appendPortal,
@@ -145,7 +146,10 @@ let currentRoom = null;  // the parsed room descriptor we serialize back on expo
 let roomPosters = [];    // Phase E.2: { prop, object } for each poster, for live env edits
 let currentCollections = null; // Phase E.3: { byKey, list } — needed to build a new shelf in-VR
 let activePortals = [];  // Phase E.3: live portal records the proximity tick navigates (mutable)
-let editButton = null;   // Phase E.3: the menu's Edit Room button, so addProp can sync its label
+// Switch editor mode (off/move/change/add). The menu builder replaces this with
+// a version that also toggles the per-mode sub-panels; until then it just sets
+// the editor mode. addProp/ensureEditMode call it so adding a prop enters Add.
+let applyMode = (m) => editor?.setMode(m);
 
 const DROP_KEY = 'libretrowebxr.dropped';
 
@@ -277,6 +281,10 @@ async function buildCartridgeWorld() {
     // only called at tick/release time, never during GrabMgr construction.
     isEditMode: () => editor?.isEditMode() || false,
     onEditRelease: (obj) => editor?.onEditRelease(obj),
+    // Three edit modes: in 'change' mode a grip selects a prop instead of moving
+    // it; the menu then cycles the selected prop's options.
+    getMode: () => editor?.getMode() || 'off',
+    onSelectProp: (obj) => editor?.select(obj),
   });
   cartridges.forEach((c) => grabMgr.addGrabbable(c));
   grabMgr.addGrabbable(gamepadObj);
@@ -294,12 +302,35 @@ async function buildCartridgeWorld() {
   window.__grab = grabMgr;
   window.__cable = cable; // debug: inspect port↔player↔gamepad assignments
   window.__add = {
-    shelf:   () => addProp('shelf'),
-    console: () => addProp('console'),
-    gamepad: () => addProp('gamepad'),
-    poster:  () => addProp('poster'),
-    portal:  () => addPortal(),
+    shelf:    () => addProp('shelf'),
+    console:  () => addProp('console'),
+    gamepad:  () => addProp('gamepad'),
+    poster:   () => addProp('poster'),
+    bookcase: () => addProp('bookcase'),
+    cupboard: () => addProp('cupboard'),
+    table:    () => addProp('table'),
+    portal:   () => addPortal(),
   };
+  // Drive the three edit modes headlessly (the menu is raycast-only). __change
+  // cycles the currently-selected prop's options (poster art / shelf collection).
+  window.__mode = (m) => editor.setMode(m);
+  window.__change = () => cycleSelected();
+
+  // Flat-screen controls: mouse-look + WASD + click-to-interact, so the in-VR
+  // features are usable on a desktop. Inert while presenting (XR controllers win).
+  // Built here (before the buildMemoryCards await) so `window.__desktop` is
+  // exposed even when that await stalls headless, like the hooks above. It only
+  // needs the scene/camera/rig/controller; GrabMgr (already built) auto-wired the
+  // synthetic controller's squeeze events.
+  const desktop = new DesktopControls({
+    renderer: scene.renderer,
+    camera: scene.camera,
+    playerRig: scene.playerRig,
+    controller: scene.desktopController,
+    domElement: scene.renderer.domElement,
+    scene,
+  });
+  window.__desktop = desktop.debugApi();
 
   await buildMemoryCards();
 
@@ -327,6 +358,7 @@ async function buildCartridgeWorld() {
     onKeyDown: () => consoleObj.userData.pulse?.(0xffffff, 90),
   });
 
+  scene.addTickCallback((dt) => desktop.tick(dt));
   scene.addTickCallback((dt) => grabMgr.tick(dt));
   scene.addTickCallback((dt) => locomotion.tick(dt));
   scene.addTickCallback(() => gameInput.tick());
@@ -401,7 +433,10 @@ function installPortals() {
 // Default spawn height per type so a new prop lands at a sensible level (the
 // user then grabs it to its final spot). Posters go on walls; shelves/consoles
 // at furniture height.
-const SPAWN_Y = { shelf: 1.25, console: 0.74, gamepad: 0.78, poster: 1.5, portal: 0 };
+// Furniture (bookcase/cupboard/table) has a floor-contact origin, so it spawns
+// at y=0 (standing on the floor); shelves/console/poster keep their old heights.
+const SPAWN_Y = { shelf: 1.25, console: 0.74, gamepad: 0.78, poster: 1.5, portal: 0,
+                  bookcase: 0, cupboard: 0, table: 0 };
 
 // Example rooms a new portal can target (URL today; a local-id registry is a
 // deferred item). addPortal aims at one that isn't the current room so
@@ -426,12 +461,12 @@ function spawnTransform(y = 1.2) {
   return { pos: [p.x, y, p.z], rot: [0, yawDeg, 0] };
 }
 
-// Force edit mode on (so the freshly added prop is immediately grabbable) and
-// keep the Edit Room button's label in sync if the menu's been built.
+// Force edit mode on (so the freshly added prop is immediately grabbable). A
+// freshly added prop is grab-to-place, so enter Add mode (and sync the menu's
+// sub-panels via applyMode) unless we're already in some edit mode.
 function ensureEditMode() {
   if (!editor || editor.isEditMode()) return;
-  editor.setEditMode(true);
-  editButton?.setLabel('Exit Edit');
+  applyMode('add');
 }
 
 // Add a new prop of `type` in front of the player. Returns the descriptor (or
@@ -506,6 +541,77 @@ function addPortal() {
   return portal;
 }
 
+// --- Change mode: cycle a selected prop's options -------------------------
+
+// Drop the `builtin:` prefix for terse status lines.
+const short = (v) => String(v || '').replace(/^builtin:/, '');
+
+// Ordered list of collection keys a shelf can cycle through. The room's declared
+// refs (top-level `collections` + any shelf's `collection`) — these are exactly
+// the strings currentCollections.byKey was keyed with, so each resolves to a
+// loaded collection, and they match a shelf's `collection` field format (url or
+// id). A room that lists only one collection naturally can't cycle.
+function collectionKeys() {
+  return roomCollectionRefs(currentRoom);
+}
+
+// Rebuild a shelf in place after its `collection` changed: build the new shelf
+// FIRST (buildProp returns null + adds nothing for an empty collection, so we
+// can abort cleanly), then swap out the old object from scene + grab set +
+// editor, register the replacement, and re-select it. Returns true on success.
+function rebuildShelf(rec) {
+  const { prop, object } = rec;
+  const r = buildProp(prop, { scene, collections: currentCollections });
+  if (!r) return false; // empty collection — nothing built, old shelf untouched
+
+  scene.removeObject(object);
+  for (const child of object.children) {
+    if (child.userData?.kind === 'cartridge') grabMgr.removeGrabbable(child);
+  }
+  grabMgr.removeGrabbable(object);
+  editor.removePlaced(object);
+
+  editor.registerPlaced(prop, r.object);
+  r.cartridges.forEach((c) => grabMgr.addGrabbable(c));
+  editor.select(r.object); // re-highlight the rebuilt shelf
+  return true;
+}
+
+// Advance every poster in the room to its next art (the global "All Posters"
+// Change-mode action; distinct from cycling one selected poster).
+function cycleAllPosters() {
+  if (!roomPosters.length) { setStatus('no posters in this room'); return; }
+  let last;
+  for (const { prop, object } of roomPosters) {
+    last = cyclePosterTexture(prop);
+    applyPosterTexture(object.material, prop.texture);
+  }
+  setStatus(`All posters: ${short(last)}`);
+}
+
+// Advance the selected prop's primary property: poster→art, shelf→collection
+// (with a live rebuild). Furniture/console have nothing to cycle. Surfaced as a
+// "Cycle Selected" menu button and the headless window.__change hook.
+function cycleSelected() {
+  const rec = editor?.selectedProp();
+  if (!rec) { setStatus('Change: grip a prop to select it first'); return; }
+  const { prop, object } = rec;
+  if (prop.type === 'poster') {
+    const v = cyclePosterTexture(prop);
+    applyPosterTexture(object.material, prop.texture);
+    setStatus(`Poster art: ${short(v)}`);
+  } else if (prop.type === 'shelf') {
+    const keys = collectionKeys();
+    if (keys.length < 2) { setStatus('only one collection loaded'); return; }
+    const prev = prop.collection;
+    const v = cycleShelfCollection(prop, keys);
+    if (!rebuildShelf(rec)) { prop.collection = prev; setStatus(`"${v}" has no games`); return; }
+    setStatus(`Shelf collection: ${v}`);
+  } else {
+    setStatus(`nothing to change for ${prop.type}`);
+  }
+}
+
 // --- In-VR menu + controls panel -----------------------------------------
 
 let controlsPanel = null;
@@ -523,35 +629,85 @@ function buildMenuAndControlsPanel() {
     isGamepadHeld: () => grabMgr.isGamepadHeld(),
   });
 
+  // Main panel: always-available utilities + a Play/Move/Change/Add mode
+  // selector. The three per-mode action panels (built below) appear one at a
+  // time, driven by the selector.
   const menu = createMenuPanel({
     title: 'Menu',
     items: [
       { label: 'Show Controls', onActivate: () => {} },
       { label: 'Show Debug',    onActivate: () => {} },
       { label: 'Reset Game',    onActivate: () => client.reset() },
-      { label: 'Edit Room',     onActivate: () => {} },
-      { label: 'Snap: Off',     onActivate: () => {} },
       { label: 'Export Room',   onActivate: () => editor?.export() },
-      // Phase E.2 — in-VR environment editing. Each cycles a palette and
-      // re-applies live; the change rides out through Export Room.
-      { label: 'Wallpaper',     onActivate: () => {} },
-      { label: 'Floor',         onActivate: () => {} },
-      { label: 'Lighting',      onActivate: () => {} },
-      { label: 'Posters',       onActivate: () => {} },
-      // Phase E.3 — create new props/portals in-VR. Each spawns in front of the
-      // player, becomes an editable grabbable, and rides out through Export Room.
-      { label: 'Add Shelf',     onActivate: () => addProp('shelf') },
-      { label: 'Add Console',   onActivate: () => addProp('console') },
-      { label: 'Add Poster',    onActivate: () => addProp('poster') },
-      { label: 'Add Portal',    onActivate: () => addPortal() },
+      { label: 'Snap: Off',     onActivate: () => {} },
+      { label: '► Play',        onActivate: () => {} },  // mode selector
+      { label: 'Move',          onActivate: () => {} },
+      { label: 'Change',        onActivate: () => {} },
+      { label: 'Add',           onActivate: () => {} },
     ],
   });
   scene.addObject(menu);
+  const [controlsBtn, debugBtn, , , snapBtn, playBtn, moveBtn, changeBtn, addBtn] = menu.userData.buttons;
 
-  // Wire each button's onActivate now that the panel exists (the toggle
-  // closures need to mutate the same button to relabel between Show/Hide).
-  const [controlsBtn, debugBtn, , editBtn, snapBtn] = menu.userData.buttons;
-  editButton = editBtn; // Phase E.3: addProp's ensureEditMode keeps this label in sync
+  // Build a per-mode action sub-panel (hidden until its mode is active). All its
+  // buttons are registered with menuMgr up front; MenuMgr's effVisible check
+  // keeps a hidden panel's buttons un-clickable, so no add/remove churn.
+  const sub = (title, items) => {
+    const p = createMenuPanel({ title, items, position: new THREE.Vector3(-2.99, 1.5, -1.05) });
+    p.visible = false;
+    scene.addObject(p);
+    p.userData.buttons.forEach((b) => menuMgr.addItem(b.mesh, b.onActivate));
+    return p;
+  };
+
+  const movePanel = sub('Move', [
+    { label: 'Grip a prop to move', onActivate: () => setStatus('Move: grip a prop and drag it') },
+  ]);
+
+  // Change mode: global look (wallpaper/floor/lighting/all posters) plus
+  // per-prop edits on the grip-selected prop (poster art / shelf collection).
+  const changePanel = sub('Change', [
+    { label: 'Wallpaper',      onActivate: () => { const v = cycleSurface(currentRoom, 'wallpaper'); scene.applyEnvironment(currentRoom.environment); setStatus(`Wallpaper: ${short(v)}`); } },
+    { label: 'Floor',          onActivate: () => { const v = cycleSurface(currentRoom, 'floor'); scene.applyEnvironment(currentRoom.environment); setStatus(`Floor: ${short(v)}`); } },
+    { label: 'Lighting',       onActivate: () => { const v = cycleTimeOfDay(currentRoom); scene.applyEnvironment(currentRoom.environment); setStatus(`Lighting: ${v}`); } },
+    { label: 'All Posters',    onActivate: () => cycleAllPosters() },
+    { label: 'Cycle Selected', onActivate: () => cycleSelected() },
+    { label: 'Selected: none', onActivate: () => {} },  // status line, updated on select
+  ]);
+  const selectedLabelBtn = changePanel.userData.buttons[5];
+  editor.onSelect((rec) => selectedLabelBtn.setLabel(rec ? `Sel: ${rec.prop.id}` : 'Selected: none'));
+
+  // Add mode: a furniture/prop catalogue. Each spawns in front of the player,
+  // becomes editable-grabbable, and rides out through Export Room.
+  const addPanel = sub('Add', [
+    { label: 'Add Shelf',    onActivate: () => addProp('shelf') },
+    { label: 'Add Bookcase', onActivate: () => addProp('bookcase') },
+    { label: 'Add Cupboard', onActivate: () => addProp('cupboard') },
+    { label: 'Add Table',    onActivate: () => addProp('table') },
+    { label: 'Add Console',  onActivate: () => addProp('console') },
+    { label: 'Add Poster',   onActivate: () => addProp('poster') },
+    { label: 'Add Portal',   onActivate: () => addPortal() },
+  ]);
+
+  // Mode selector: set editor mode, show the matching sub-panel, mark the
+  // active button with a ► . Replaces the module-level applyMode stub so
+  // addProp/ensureEditMode/window.__mode all keep the panels in sync.
+  const modeBtns = [
+    { btn: playBtn,   mode: 'off',    label: 'Play' },
+    { btn: moveBtn,   mode: 'move',   label: 'Move' },
+    { btn: changeBtn, mode: 'change', label: 'Change' },
+    { btn: addBtn,    mode: 'add',    label: 'Add' },
+  ];
+  applyMode = (m) => {
+    const mode = editor.setMode(m); // normalizes unknown → 'off'
+    movePanel.visible = mode === 'move';
+    changePanel.visible = mode === 'change';
+    addPanel.visible = mode === 'add';
+    for (const { btn, mode: bm, label } of modeBtns) btn.setLabel((bm === mode ? '► ' : '') + label);
+  };
+  for (const { btn, mode } of modeBtns) btn.onActivate = () => applyMode(mode);
+
+  // Utilities.
   let controlsVisible = false;
   controlsBtn.onActivate = () => {
     controlsVisible = !controlsVisible;
@@ -565,58 +721,21 @@ function buildMenuAndControlsPanel() {
     debugBtn.setLabel(debugVisible ? 'Hide Debug' : 'Show Debug');
   };
   debugBtn.setLabel('Hide Debug');
-
-  // Phase E.1: toggle the in-VR room editor + its free/grid snap setting.
-  editBtn.onActivate = () => {
-    const on = editor?.toggle();
-    editBtn.setLabel(on ? 'Exit Edit' : 'Edit Room');
-  };
   snapBtn.onActivate = () => {
     const on = editor?.setSnap(!editor?.snapEnabled());
     snapBtn.setLabel(on ? 'Snap: On' : 'Snap: Off');
   };
 
-  // Phase E.2: environment editing. Cycle a palette, mutate the live room
-  // descriptor (so Export Room captures it), and re-apply immediately.
-  const short = (v) => String(v || '').replace(/^builtin:/, '');
-  const [wallpaperBtn, floorBtn, lightingBtn, postersBtn] = menu.userData.buttons.slice(6);
-  wallpaperBtn.onActivate = () => {
-    const v = cycleSurface(currentRoom, 'wallpaper');
-    scene.applyEnvironment(currentRoom.environment);
-    setStatus(`Wallpaper: ${short(v)}`);
-  };
-  floorBtn.onActivate = () => {
-    const v = cycleSurface(currentRoom, 'floor');
-    scene.applyEnvironment(currentRoom.environment);
-    setStatus(`Floor: ${short(v)}`);
-  };
-  lightingBtn.onActivate = () => {
-    const v = cycleTimeOfDay(currentRoom);
-    scene.applyEnvironment(currentRoom.environment);
-    setStatus(`Lighting: ${v}`);
-  };
-  postersBtn.onActivate = () => {
-    if (!roomPosters.length) { setStatus('no posters in this room'); return; }
-    let last;
-    for (const { prop, object } of roomPosters) {
-      last = cyclePosterTexture(prop); // advance each poster from its own value
-      applyPosterTexture(object.material, prop.texture);
-    }
-    setStatus(`Posters: ${short(last)}`);
-  };
-
-  for (const b of menu.userData.buttons) {
-    menuMgr.addItem(b.mesh, b.onActivate);
-  }
+  for (const b of menu.userData.buttons) menuMgr.addItem(b.mesh, b.onActivate);
 
   scene.addTickCallback(() => menuMgr.tick());
   window.__menu = menuMgr;
-  // Debug hook: drive the E.2 env edits headlessly (the menu is raycast-only).
+  // Debug hooks: drive the Change-mode env edits headlessly (menu is raycast-only).
   window.__env = {
-    wallpaper: wallpaperBtn.onActivate,
-    floor: floorBtn.onActivate,
-    lighting: lightingBtn.onActivate,
-    posters: postersBtn.onActivate,
+    wallpaper: changePanel.userData.buttons[0].onActivate,
+    floor:     changePanel.userData.buttons[1].onActivate,
+    lighting:  changePanel.userData.buttons[2].onActivate,
+    posters:   changePanel.userData.buttons[3].onActivate,
   };
 }
 

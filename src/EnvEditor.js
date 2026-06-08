@@ -82,3 +82,19 @@ export function cyclePosterTexture(prop, options = POSTER_OPTIONS) {
   prop.texture = next;
   return next;
 }
+
+/**
+ * Advance a shelf prop's `collection` to the next entry in an ordered list of
+ * collection keys (the keys RoomBuilder's `collections.byKey` resolves — a
+ * collection url or id). Mutates `prop.collection` and returns the new value so
+ * the imperative caller (main.js) can rebuild the shelf's cartridges. Pure: no
+ * THREE/DOM, unit-tested in Node. A single-entry (or empty) list is a no-op.
+ */
+export function cycleShelfCollection(prop, collectionKeys) {
+  if (!prop || typeof prop !== 'object') return undefined;
+  const keys = Array.isArray(collectionKeys) ? collectionKeys.filter(Boolean) : [];
+  if (keys.length === 0) return prop.collection;
+  const next = nextInCycle(prop.collection, keys);
+  prop.collection = next;
+  return next;
+}

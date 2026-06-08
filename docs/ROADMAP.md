@@ -112,13 +112,32 @@ Turn today's imperative scene-building into a declarative layer (no rewrite).
   RomResolver can't fetch them at play time — there's no pre-flight "you don't
   own this" affordance on the cartridge yet.
 
-## Phase E — In-VR room editor  ✅ done (one deferred clause)
+## Phase E — In-VR room editor  ✅ done
 Place/rotate props, swap wallpaper/floor/posters, assign collections to shelves,
 add **portals** to other rooms — all writing back to `*.room.json`. Export/share
 a room. This is the open, declarative replacement for EmuVR's closed WIGUx mod.
 E.1 (move + export), E.2 (look editing) and E.3 (create props/portals) are all
-done; only *assign collections to shelves in-VR* remains (deferred — needs
-`GrabMgr.removeGrabbable` + a live shelf rebuild).
+done, and the formerly-deferred *assign collections to shelves in-VR* is now
+done too (see **Edit modes** below).
+
+### Edit modes — Move / Change / Add  ✅ done (2026-06-03)
+The flat E.1/E.2/E.3 menu was reorganized into a **Play / Move / Change / Add**
+mode selector (`RoomEditor._mode` enum + per-mode menu sub-panels; MenuMgr skips
+buttons in hidden panels).
+- **Move** — grab a prop to reposition it (E.1).
+- **Change** — grip-SELECT a prop (`GrabMgr` routes grip→select in this mode),
+  then *Cycle Selected* advances its primary property: poster art
+  (`cyclePosterTexture`) or **shelf collection** (`cycleShelfCollection` +
+  `rebuildShelf`, a live swap using `GrabMgr.removeGrabbable` /
+  `SceneMgr.removeObject` / `RoomEditor.removePlaced`). Global Wallpaper / Floor /
+  Lighting / All-Posters cycles live here too (E.2). **This closes the previously
+  deferred "assign collections to shelves".**
+- **Add** — a furniture catalogue: Shelf, **Bookcase / Cupboard / Table** (new
+  decorative props in `src/Furniture.js`), Console, Poster, Portal (E.3).
+- Verified: `npm test` (cycleShelfCollection + furniture types + loader round-trip)
+  and a headless probe (furniture spawns/serialize; shelf cycle manifest→snes
+  rebuild swaps the object and round-trips through Export). Real-VR smoke test of
+  the modes + redeploy still pending (menu is raycast-only).
 
 ### E.1 — Move props + export  ✅ done
 - In-VR **Edit mode** (a Menu toggle): the room's props (shelves, console,

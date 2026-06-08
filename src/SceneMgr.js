@@ -343,10 +343,34 @@ export class SceneMgr {
       this.playerRig.add(ctrl);
       this.controllers.push(ctrl);
     }
+
+    // Synthetic "desktop controller": a third entry in `controllers` that
+    // DesktopControls ([[src/DesktopControls.js]]) drives on a flat screen by
+    // tracking the camera and dispatching select/squeeze events from the mouse.
+    // It's pushed here — BEFORE GrabMgr/MenuMgr/LocomotionMgr are constructed —
+    // so they auto-wire it like a real controller (ray from it, listen for its
+    // events). LocomotionMgr skips it (no inputSource.gamepad); in VR it's inert
+    // (DesktopControls never touches it while presenting). No laser child, so it
+    // shows nothing in a headset.
+    const desktop = new THREE.Group();
+    desktop.name = 'desktop-controller';
+    desktop.userData.index = 2;
+    desktop.userData.handedness = null;
+    desktop.userData.inputSource = null;
+    this.playerRig.add(desktop);
+    this.controllers.push(desktop);
+    this.desktopController = desktop;
+    this.desktopActive = false; // set true once DesktopControls takes the camera
   }
 
   addObject(obj) {
     this.scene.add(obj);
+  }
+
+  // Remove an object from the scene graph (e.g. the in-VR Change-mode shelf
+  // rebuild swaps a shelf for one filled from a different collection).
+  removeObject(obj) {
+    this.scene.remove(obj);
   }
 
   // Register a per-frame tick callback. Used by LocomotionMgr and GrabMgr
@@ -370,8 +394,9 @@ export class SceneMgr {
   _render() {
     if (this.screenTexture) this.screenTexture.needsUpdate = true;
 
-    if (!this.renderer.xr.isPresenting) {
-      // Desktop sway so the parallax sells the 3D-ness.
+    if (!this.renderer.xr.isPresenting && !this.desktopActive) {
+      // Desktop sway so the parallax sells the 3D-ness. Suppressed once the user
+      // takes manual control via DesktopControls (mouse-look + WASD).
       const t = performance.now() * 0.0005;
       this.camera.position.set(
         this._cameraHome.x + Math.sin(t) * 0.25,
