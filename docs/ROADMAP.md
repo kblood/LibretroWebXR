@@ -283,7 +283,22 @@ DebugHud for players 2-4, in-VR port retargeting.
     affordance (the button is desktop-only today); a real two-headset smoke test.
     With presence + voice + TV + held-object sync all live, M0 is functionally
     complete — these three are hardening/polish before M1.
-- **M1:** host-authoritative game sync (input + video stream) for 2-player.
+- **M1 — in progress:** host-authoritative game sync (input + video stream) for
+  2-player. Built like M0: transport spine first, then consumers.
+  - **M1.0 ✅ done + DEPLOYED** — remote-input transport: a directed `INPUT`
+    message (`src/net/NetProtocol.js` `makeInput`) relayed client→host over the
+    room socket (`server/Hub.js` `input()`, sender-id stamped, mirrors `signal`);
+    `NetMgr.sendGameInput` / `onGameInput` + a debug recv ring. Carries one
+    logical RetroPad button transition (`{player,btn,down}`) so the host can
+    resolve it per-player and feed its core (non-deterministic-core friendly).
+    Verified by `scripts/test-net.mjs` (now 106) and `scripts/smoke-gameinput.mjs`
+    (host/client/bystander: directed delivery, id-stamping, no broadcast leak)
+    locally AND live against `wss://dionysus.dk/ws/`.
+  - **M1.1 ← next** — wire it end-to-end: a non-host client captures its
+    controller/keyboard as a networked player and sends `INPUT`; the host injects
+    via `GameInputMgr` `codesFor`→`client.sendInput` (host = the `tv`-state owner).
+  - **M1.2** — host video stream over WebRTC (`canvas.captureStream()` → a track
+    on a host↔client peer connection) so non-hosts see the running game on their TV.
 - **M2:** rollback game sync for deterministic cores (adapt netplayjs +
   `SaveState`).
 - **M3:** multiple simultaneous games, mid-session join, VR↔desktop crossplay.

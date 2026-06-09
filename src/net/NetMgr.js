@@ -17,7 +17,7 @@ import { PresenceState } from './PresenceState.js';
 import { RoomObjects } from './RoomObjects.js';
 import { AvatarMgr } from './AvatarMgr.js';
 import { VoiceMgr } from './VoiceMgr.js';
-import { MSG, makeJoin, makePose, makeSignal, makeState, encode, decode } from './NetProtocol.js';
+import { MSG, makeJoin, makePose, makeSignal, makeState, makeInput, encode, decode } from './NetProtocol.js';
 
 const _p = new THREE.Vector3();
 const _q = new THREE.Quaternion();
@@ -35,7 +35,7 @@ function defaultServerUrl() {
 }
 
 export class NetMgr {
-  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, now = () => performance.now() }) {
+  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, now = () => performance.now() }) {
     this.scene = scene;
     this.room = room || 'lobby';
     this.nick = nick || 'Player';
@@ -50,6 +50,10 @@ export class NetMgr {
     // main.js can reflect it into the scene (e.g. boot the same game on the TV).
     this.objects = new RoomObjects();
     this._onObjectState = onObjectState;
+    // M1 game sync: a host receives remote players' RetroPad inputs here.
+    // onGameInput({ from, player, btn, down }) lets main.js feed them to its core.
+    this._onGameInput = onGameInput;
+    this._recvInputs = []; // small debug ring of the last received inputs
     this.avatars = new AvatarMgr({ scene });
     this.ws = null;
     this._connected = false;
@@ -104,6 +108,30 @@ export class NetMgr {
 
   getObjectState(key) { return this.objects.get(key); }
 
+  // --- M1 game sync (host-authoritative input over the relay) ---------------
+
+  /**
+   * Send one logical RetroPad button transition to the host peer `to` (the peer
+   * running the game). Used by a non-host client so the host can drive `player`
+   * (a console port slot) in its core. No-op if disconnected.
+   */
+  sendGameInput({ to, player, btn, down }) {
+    if (!this._connected || !this.ws || !to) return false;
+    try { this.ws.send(encode(makeInput({ to, player, btn, down }))); return true; }
+    catch { return false; }
+  }
+
+  // A remote player's input arrived (we're the host). Record for debug and hand
+  // it to main.js to inject into the core.
+  _applyGameInput(msg) {
+    const ev = { from: msg.from || null, player: msg.player, btn: msg.btn, down: msg.down };
+    this._recvInputs.push(ev);
+    if (this._recvInputs.length > 64) this._recvInputs.shift();
+    if (this._onGameInput) {
+      try { this._onGameInput(ev); } catch (e) { console.warn('[net] onGameInput', e); }
+    }
+  }
+
   connect() {
     const sep = this.serverUrl.includes('?') ? '&' : '?';
     const url = `${this.serverUrl}${sep}room=${encodeURIComponent(this.room)}`;
@@ -120,6 +148,7 @@ export class NetMgr {
       if (!msg) return;
       if (msg.type === MSG.SIGNAL) this.voice.handleSignal(msg);      // voice negotiation
       else if (msg.type === MSG.STATE) this._applyState(msg);         // room-object sync
+      else if (msg.type === MSG.INPUT) this._applyGameInput(msg);     // game sync (host side)
       else this.presence.apply(msg, this._now());                    // roster + poses
     });
     ws.addEventListener('close', () => { this._connected = false; });
@@ -181,6 +210,9 @@ export class NetMgr {
       objectState: (key) => this.objects.get(key),
       objectEntries: () => this.objects.entries(),
       setObjectState: (key, value) => this.setObjectState(key, value),
+      // M1 game sync
+      sendGameInput: (m) => this.sendGameInput(m),
+      recvInputs: () => this._recvInputs.slice(),
     };
   }
 }

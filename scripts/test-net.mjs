@@ -4,7 +4,7 @@
 
 import {
   MSG, POSE_LEN, SIGNAL_KINDS, isValidPart, roundPart, makePose, makeJoin, makeHello,
-  makeLeave, makeSignal, makeState, validate, encode, decode,
+  makeLeave, makeSignal, makeState, makeInput, validate, encode, decode,
 } from '../src/net/NetProtocol.js';
 import { PresenceState } from '../src/net/PresenceState.js';
 import { RoomObjects } from '../src/net/RoomObjects.js';
@@ -297,6 +297,33 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   const snap = hub.connect('r', 'c').state;
   const keys = snap.map((m) => m.key).sort();
   ok(keys.length === 2 && keys[0] === 'hold:snake.gb' && keys[1] === 'tv', 'tv + b\'s hold persist; a\'s hold is gone');
+}
+
+// === NetProtocol: INPUT (game sync) builder + validation ===================
+{
+  const i = makeInput({ to: 'host', player: 2, btn: 'faceA', down: true, seq: 5 });
+  ok(i.type === MSG.INPUT && i.to === 'host' && i.player === 2 && i.btn === 'faceA' && i.down === true, 'makeInput builds an input');
+  ok(i.seq === 5, 'makeInput carries an optional seq');
+  ok(validate(i).ok, 'INPUT validates');
+  ok(validate(makeInput({ to: 'h', player: 1, btn: 'Up', down: false })).ok, 'a button-release INPUT validates');
+  ok(!validate({ type: MSG.INPUT, player: 1, btn: 'Up', down: true }).ok, 'INPUT without `to` rejected');
+  ok(!validate({ type: MSG.INPUT, to: 'h', btn: 'Up', down: true }).ok, 'INPUT without player rejected');
+  ok(!validate({ type: MSG.INPUT, to: 'h', player: 1, btn: '', down: true }).ok, 'INPUT with empty btn rejected');
+  ok(!validate({ type: MSG.INPUT, to: 'h', player: 1, btn: 'Up' }).ok, 'INPUT without down rejected');
+  const back = decode(encode(makeInput({ to: 'h', player: 3, btn: 'Left', down: true })));
+  ok(back && back.player === 3 && back.btn === 'Left', 'INPUT round-trips through encode/decode');
+}
+
+// === Hub: input is a DIRECTED relay to the host, sender-id stamped ==========
+{
+  const hub = new Hub();
+  hub.connect('r', 'client');
+  hub.connect('r', 'host');
+  const { direct } = hub.input('r', 'client', makeInput({ to: 'host', player: 2, btn: 'faceB', down: true }));
+  ok(direct && direct.to === 'host', 'input is routed directly to the host peer');
+  ok(direct.msg.from === 'client' && direct.msg.player === 2 && direct.msg.btn === 'faceB', 'input stamped with the real sender id');
+  ok(hub.input('r', 'client', makeInput({ to: 'ghost', player: 1, btn: 'Up', down: true })).direct === undefined, 'input to an absent host is dropped');
+  ok(hub.input('r', 'x', makeInput({ to: 'host', player: 1, btn: 'Up', down: true })).direct === undefined, 'input from an absent peer is dropped');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

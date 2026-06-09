@@ -21,6 +21,7 @@ export const MSG = Object.freeze({
   POSE: 'pose',
   SIGNAL: 'signal', // M0.4 voice: WebRTC offer/answer/ICE, relayed peer→peer
   STATE: 'state',   // M0.5 room-object sync: a shared key→value (e.g. the loaded game)
+  INPUT: 'input',   // M1 game sync: a remote player's RetroPad button, directed to the host
 });
 
 // WebRTC signaling kinds carried inside a SIGNAL message.
@@ -112,6 +113,21 @@ export function makeState({ key, value = null, id } = {}) {
 }
 
 /**
+ * Build an INPUT message (M1 host-authoritative game sync). Carries one logical
+ * RetroPad button transition for `player` (a console port slot, 1-based) as
+ * pressed/released, addressed to the host peer `to`. The server relays it
+ * directly to that peer (like SIGNAL) and stamps `from` with the real sender id,
+ * so the host can trust who an input came from. The host resolves `btn` to that
+ * player's key codes and feeds its core — non-deterministic-core friendly.
+ */
+export function makeInput({ to, player, btn, down = false, seq, from } = {}) {
+  const msg = { type: MSG.INPUT, to: String(to), player: Number(player), btn: String(btn), down: !!down };
+  if (seq != null) msg.seq = Number(seq);
+  if (from != null) msg.from = String(from);
+  return msg;
+}
+
+/**
  * Validate a decoded message. Returns { ok:true } or { ok:false, error }.
  * Keeps the server/client from acting on malformed packets.
  */
@@ -141,6 +157,12 @@ export function validate(msg) {
     case MSG.STATE:
       if (typeof msg.key !== 'string' || msg.key === '') return { ok: false, error: 'state.key' };
       if (!('value' in msg)) return { ok: false, error: 'state.value' };
+      return { ok: true };
+    case MSG.INPUT:
+      if (typeof msg.to !== 'string') return { ok: false, error: 'input.to' };
+      if (typeof msg.player !== 'number' || !Number.isFinite(msg.player)) return { ok: false, error: 'input.player' };
+      if (typeof msg.btn !== 'string' || msg.btn === '') return { ok: false, error: 'input.btn' };
+      if (typeof msg.down !== 'boolean') return { ok: false, error: 'input.down' };
       return { ok: true };
     default:
       return { ok: false, error: `unknown type: ${msg && msg.type}` };

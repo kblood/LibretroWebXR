@@ -66,6 +66,10 @@ wss.on('connection', (ws, req) => {
       const { direct } = hub.signal(roomId, peerId, msg);
       if (direct) sendTo(direct.to, direct.msg);
     } else if (msg.type === MSG.STATE) broadcast(roomId, hub.setState(roomId, peerId, msg).broadcast);
+    else if (msg.type === MSG.INPUT) {
+      const { direct } = hub.input(roomId, peerId, msg);
+      if (direct) sendTo(direct.to, direct.msg);
+    }
   });
 
   ws.on('close', () => {

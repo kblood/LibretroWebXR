@@ -49,7 +49,19 @@ files to `/opt/libretrowebxr-room/{server,src/net}/` and
 **M0 remaining (hardening/polish, not new capability):** a TURN relay (only for
 symmetric NAT — STUN covers same-LAN/most NATs); an **in-VR** voice/menu
 affordance (the 🎤 button is desktop-only); and a real **two-headset** smoke test.
-**Next big step is M1** (host-authoritative game sync) — see `docs/ROADMAP.md`.
+
+**Phase M1 (host-authoritative game sync) — STARTED.** Same build pattern:
+transport spine first.
+- **M1.0 ✅ done + DEPLOYED** — remote-input transport: a directed `INPUT`
+  message (`NetProtocol.makeInput`) relayed client→host over the room socket
+  (`Hub.input`, sender-id stamped); `NetMgr.sendGameInput`/`onGameInput` + a debug
+  recv ring. Carries one logical RetroPad button (`{player,btn,down}`) so the host
+  resolves it per-player and feeds its core. Smoke: `scripts/smoke-gameinput.mjs`
+  (directed delivery, id-stamping, no broadcast leak), live-verified.
+- **M1.1 ← next** — wire it: a non-host captures its controller as a networked
+  player and sends `INPUT`; the host injects via `GameInputMgr` `codesFor`→
+  `client.sendInput` (host = `tv`-state owner). Then **M1.2** host video stream
+  (`canvas.captureStream()` over a host↔client WebRTC track). See `docs/ROADMAP.md`.
 
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
@@ -445,8 +457,9 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
     (a new portal also joins the live nav list). *Collections-to-shelves still
     deferred* (live shelf rebuild + `GrabMgr.removeGrabbable`).
 - **Phase M — IN PROGRESS** — multiplayer (`docs/MULTIPLAYER.md`): **M0
-  presence/avatars/voice/room-object sync ✅ done + DEPLOYED**; **M1 ← NEXT**
-  (host-authoritative game sync), M2 rollback, M3 crossplay.
+  presence/avatars/voice/room-object sync ✅ done + DEPLOYED**; **M1 in progress**
+  (M1.0 remote-input transport ✅ done + deployed; **M1.1 ← next** = host core
+  injection; M1.2 = host video stream), M2 rollback, M3 crossplay.
 - **Phase C** — open prop package schema, community gallery, BIOS-needing
   systems (PSX/N64), PWA.
 
@@ -497,9 +510,10 @@ presence) is complete and deployed** — `main @ 774a295` is **live as of
    the top of this doc; the slice details are in `docs/ROADMAP.md` (M0.1–M0.6).
    **M0 remaining is hardening/polish only:** a TURN relay (symmetric NAT —
    same-LAN/most NATs work on STUN); an **in-VR** voice/menu affordance (the 🎤
-   button is desktop-only); a real **two-headset** smoke test. **The next real
-   step is M1** — host-authoritative game sync (input + video stream) for
-   2-player; see `docs/MULTIPLAYER.md` / `docs/ROADMAP.md`.
+   button is desktop-only); a real **two-headset** smoke test. **M1 is underway** —
+   M1.0 (remote-input transport) is done + deployed; **M1.1 (host core injection)
+   is the next step**, then M1.2 (host video stream). See the Phase M1 block above
+   and `docs/MULTIPLAYER.md` / `docs/ROADMAP.md`.
 3. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
    a `manualChunks`/dynamic-import pass would help Quest load time if it bites.
 

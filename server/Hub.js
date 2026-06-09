@@ -115,6 +115,17 @@ export class Hub {
     return { broadcast: { msg: makeLeave({ id: peerId }), exclude: peerId }, stateClears };
   }
 
+  /**
+   * Peer sent an INPUT (M1 game sync). Stamp the real sender id and return
+   * { direct: { to, msg } } — a DIRECTED relay to the host peer (not a
+   * broadcast). Dropped if sender or target isn't in the room. Mirrors signal().
+   */
+  input(roomId, fromPeerId, msg) {
+    const room = this.rooms.get(roomId);
+    if (!room || !room.has(fromPeerId) || !room.has(msg.to)) return {};
+    return { direct: { to: msg.to, msg: { ...msg, from: fromPeerId } } };
+  }
+
   /** Peer ids currently in a room (for the adapter's broadcast loop). */
   peerIds(roomId) {
     const room = this.rooms.get(roomId);
