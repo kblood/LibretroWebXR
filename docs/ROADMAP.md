@@ -230,9 +230,22 @@ players. **VR controller routing still needs a real-headset smoke test; not yet
 redeployed.** Follow-ons: physical USB-gamepad routing, per-pad mesh animation +
 DebugHud for players 2-4, in-VR port retargeting.
 
-## Phase M — Multiplayer, networked (see `docs/MULTIPLAYER.md`)
+## Phase M — Multiplayer, networked (see `docs/MULTIPLAYER.md`)  ← in progress
 - **M0:** shared room presence — avatars + voice + room-object sync (works for
   all cores). Signaling/matchmaking server + TURN.
+  - **M0.1 ✅ done** — pure wire protocol + peer registry (`src/net/NetProtocol.js`,
+    `src/net/PresenceState.js`); unit-tested in `scripts/test-net.mjs`.
+  - **M0.2 ✅ done** — avatars (`src/net/Avatar.js` head+hands+nameplate,
+    `src/net/AvatarMgr.js` reconciles the peer list into scene objects).
+  - **M0.3 ✅ done** — WebSocket transport: pure `server/Hub.js` + thin
+    `server/room-server.mjs` (`ws`) relay; `src/net/NetMgr.js` browser client,
+    opt-in via `?session=<room>`. Verified by `server/smoke.mjs` (two-client
+    relay) and `scripts/smoke-presence.mjs` (real Chrome sees a peer + renders
+    its avatar). **Not yet deployed** — needs the room server stood up behind an
+    Apache `/ws/` proxy on dionysus.dk (see `server/README.md`).
+  - **M0.4 ← next** — voice: WebRTC mesh signaled over the same WS; mic →
+    positional audio on each avatar head. Plus room-object sync (who grabbed
+    which cartridge, TV/game state) over the presence channel.
 - **M1:** host-authoritative game sync (input + video stream) for 2-player.
 - **M2:** rollback game sync for deterministic cores (adapt netplayjs +
   `SaveState`).

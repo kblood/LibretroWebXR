@@ -447,9 +447,18 @@ collections-to-shelves (Change mode) — and `main` is **deployed live as of
    The deploy/network path itself is verified headlessly: `node scripts/debug.js
    --url=<live> --boot=nes --screenshot=…` boots a game over the wire (COOP/COEP,
    core fetch, real pixels) — re-run after any deploy.
-2. **Start Phase M (networked multiplayer)** — see `docs/MULTIPLAYER.md`; M0 is
-   presence/avatars/voice + room-object sync. Build on the now-verified editor +
-   input foundation.
+2. **Phase M (networked multiplayer) — IN PROGRESS.** M0 shared-room presence
+   is built and verified locally: pure protocol + peer registry (`src/net/
+   NetProtocol.js`, `PresenceState.js`), avatars (`Avatar.js`/`AvatarMgr.js`), a
+   WebSocket relay (`server/` — pure `Hub.js` + `room-server.mjs`), and the
+   browser client `src/net/NetMgr.js` (opt-in via `?session=<room>`). Covered by
+   `npm test` (235), `server/smoke.mjs` (two-client relay, 7/7), and
+   `scripts/smoke-presence.mjs` (real Chrome renders a peer avatar, 4/4).
+   **Remaining for M0:** (a) **deploy the room server** behind an Apache `/ws/`
+   proxy on dionysus.dk (`server/README.md` has the systemd + proxy config) so
+   presence works between real headsets; (b) **M0.4 voice** (WebRTC mesh signaled
+   over the same WS → positional audio per avatar) + room-object sync (grabbed
+   cartridge / TV / inserted game). Then M1 host-authoritative game sync.
 3. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
    a `manualChunks`/dynamic-import pass would help Quest load time if it bites.
 
