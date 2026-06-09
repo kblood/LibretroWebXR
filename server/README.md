@@ -73,5 +73,9 @@ Enable `mod_proxy` + `mod_proxy_wstunnel`, then `a2enmod proxy proxy_wstunnel`
 and reload. Verify: open the app with `?session=test` in two tabs — each should
 see the other's avatar.
 
-> **Not yet deployed.** M0 is verified locally (unit + two smokes). Standing up
-> the proxied server on dionysus.dk is the remaining step to make presence live.
+> **Deployed on dionysus.dk (2026-06-09).** The room server runs as the systemd
+> unit `libretrowebxr-room` from `/opt/libretrowebxr-room` (port 8787); Apache
+> proxies `/ws/` to it via the `libretrowebxr-room` conf. The committed templates
+> are `deploy/libretrowebxr-room.service` and `deploy/libretrowebxr-room.conf`.
+> Verified live: `node scripts/smoke-presence.mjs --app=https://dionysus.dk/webxr/libretrowebxr2/ --ws=wss://dionysus.dk/ws/`
+> connects through the proxy and renders a peer avatar.

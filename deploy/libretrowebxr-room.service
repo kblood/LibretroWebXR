@@ -1,0 +1,29 @@
+# systemd unit for the M0 presence room server. Runs server/room-server.mjs as a
+# long-lived process; Apache reverse-proxies /ws/ to it (deploy/libretrowebxr-room.conf).
+#
+# Install (the app lives at /opt/libretrowebxr-room/{server,src/net} — see
+# server/README.md for the file layout + npm install step):
+#   sudo cp deploy/libretrowebxr-room.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now libretrowebxr-room
+#   systemctl status libretrowebxr-room
+#
+# Installed on dionysus.dk 2026-06-09 (active; PORT=8787; User=kaspersolesen).
+# Adjust User/paths for a different host. Node path: `command -v node`.
+
+[Unit]
+Description=LibretroWebXR M0 presence room server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/libretrowebxr-room/server
+ExecStart=/usr/local/bin/node room-server.mjs
+Environment=PORT=8787
+Restart=always
+RestartSec=2
+User=kaspersolesen
+Group=kaspersolesen
+
+[Install]
+WantedBy=multi-user.target

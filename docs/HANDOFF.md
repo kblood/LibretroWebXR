@@ -454,11 +454,15 @@ collections-to-shelves (Change mode) — and `main` is **deployed live as of
    browser client `src/net/NetMgr.js` (opt-in via `?session=<room>`). Covered by
    `npm test` (235), `server/smoke.mjs` (two-client relay, 7/7), and
    `scripts/smoke-presence.mjs` (real Chrome renders a peer avatar, 4/4).
-   **Remaining for M0:** (a) **deploy the room server** behind an Apache `/ws/`
-   proxy on dionysus.dk (`server/README.md` has the systemd + proxy config) so
-   presence works between real headsets; (b) **M0.4 voice** (WebRTC mesh signaled
-   over the same WS → positional audio per avatar) + room-object sync (grabbed
-   cartridge / TV / inserted game). Then M1 host-authoritative game sync.
+   **The room server is now DEPLOYED** on dionysus.dk (2026-06-09): systemd unit
+   `libretrowebxr-room` from `/opt/libretrowebxr-room` (port 8787) + Apache `/ws/`
+   proxy; templates committed at `deploy/libretrowebxr-room.{service,conf}`. The
+   live build includes the client, so `https://dionysus.dk/webxr/libretrowebxr2/?session=<room>`
+   joins a shared room — verified by the production smoke against `wss://dionysus.dk/ws/`.
+   **Remaining for M0:** **M0.4 voice** (WebRTC mesh signaled over the same WS →
+   positional audio per avatar) + room-object sync (who grabbed which cartridge /
+   TV / inserted game) over the presence channel. Then M1 host-authoritative game
+   sync. (Still worth a real two-headset smoke test when convenient.)
 3. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
    a `manualChunks`/dynamic-import pass would help Quest load time if it bites.
 

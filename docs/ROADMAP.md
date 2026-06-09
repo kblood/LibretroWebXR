@@ -237,12 +237,13 @@ DebugHud for players 2-4, in-VR port retargeting.
     `src/net/PresenceState.js`); unit-tested in `scripts/test-net.mjs`.
   - **M0.2 ✅ done** — avatars (`src/net/Avatar.js` head+hands+nameplate,
     `src/net/AvatarMgr.js` reconciles the peer list into scene objects).
-  - **M0.3 ✅ done** — WebSocket transport: pure `server/Hub.js` + thin
-    `server/room-server.mjs` (`ws`) relay; `src/net/NetMgr.js` browser client,
-    opt-in via `?session=<room>`. Verified by `server/smoke.mjs` (two-client
-    relay) and `scripts/smoke-presence.mjs` (real Chrome sees a peer + renders
-    its avatar). **Not yet deployed** — needs the room server stood up behind an
-    Apache `/ws/` proxy on dionysus.dk (see `server/README.md`).
+  - **M0.3 ✅ done + DEPLOYED** — WebSocket transport: pure `server/Hub.js` +
+    thin `server/room-server.mjs` (`ws`) relay; `src/net/NetMgr.js` browser
+    client, opt-in via `?session=<room>`. Verified by `server/smoke.mjs`
+    (two-client relay) and `scripts/smoke-presence.mjs` (real Chrome sees a peer
+    + renders its avatar). **Live on dionysus.dk (2026-06-09):** systemd unit
+    `libretrowebxr-room` (port 8787) + Apache `/ws/` proxy; the production smoke
+    against `wss://dionysus.dk/ws/` passes. Templates: `deploy/libretrowebxr-room.{service,conf}`.
   - **M0.4 ← next** — voice: WebRTC mesh signaled over the same WS; mic →
     positional audio on each avatar head. Plus room-object sync (who grabbed
     which cartridge, TV/game state) over the presence channel.
