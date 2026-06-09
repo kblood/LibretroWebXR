@@ -15,7 +15,8 @@
 import * as THREE from 'three';
 import { PresenceState } from './PresenceState.js';
 import { AvatarMgr } from './AvatarMgr.js';
-import { makeJoin, makePose, encode, decode } from './NetProtocol.js';
+import { VoiceMgr } from './VoiceMgr.js';
+import { MSG, makeJoin, makePose, makeSignal, encode, decode } from './NetProtocol.js';
 
 const _p = new THREE.Vector3();
 const _q = new THREE.Quaternion();
@@ -47,6 +48,25 @@ export class NetMgr {
     this.ws = null;
     this._connected = false;
     this._acc = 0;
+
+    // M0.4 voice: WebRTC mesh signaled over this same socket. Constructed eagerly
+    // (cheap) but inert until enableVoice() grabs the mic on a user gesture.
+    this.voice = new VoiceMgr({
+      scene,
+      avatars: this.avatars,
+      getSelfId: () => this.presence.selfId,
+      send: ({ to, kind, data }) => {
+        if (this._connected && this.ws) {
+          try { this.ws.send(encode(makeSignal({ to, kind, data }))); } catch { /* mid-close */ }
+        }
+      },
+    });
+  }
+
+  async enableVoice() {
+    const ok = await this.voice.enable();
+    if (ok) this.voice.syncPeers(this.presence.peers().map((p) => p.id));
+    return ok;
   }
 
   connect() {
@@ -62,7 +82,9 @@ export class NetMgr {
     });
     ws.addEventListener('message', (e) => {
       const msg = decode(typeof e.data === 'string' ? e.data : '');
-      if (msg) this.presence.apply(msg, this._now());
+      if (!msg) return;
+      if (msg.type === MSG.SIGNAL) this.voice.handleSignal(msg); // voice negotiation
+      else this.presence.apply(msg, this._now());                // roster + poses
     });
     ws.addEventListener('close', () => { this._connected = false; });
     ws.addEventListener('error', () => { /* close follows */ });
@@ -84,8 +106,11 @@ export class NetMgr {
   tick(dtMs = 16) {
     // Reflect remote peers into the scene (prune stale → sync meshes → ease).
     this.presence.prune(this._now());
-    this.avatars.sync(this.presence.peers());
+    const peers = this.presence.peers();
+    this.avatars.sync(peers);
     this.avatars.tick(dtMs);
+    // Keep the voice mesh in step with the roster (no-op until voice enabled).
+    if (this.voice.enabled) this.voice.syncPeers(peers.map((p) => p.id));
 
     // Throttle the local pose out.
     if (!this._connected || !this.ws) return;
@@ -100,6 +125,7 @@ export class NetMgr {
   disconnect() {
     try { this.ws?.close(); } catch { /* already closing */ }
     this._connected = false;
+    this.voice.disable();
     this.avatars.removeAll();
   }
 
@@ -111,6 +137,9 @@ export class NetMgr {
       avatarCount: () => this.avatars.count,
       peers: () => this.presence.peers().map((p) => ({ id: p.id, nick: p.nick })),
       sampleLocalPose: () => this._sampleLocalPose(),
+      enableVoice: () => this.enableVoice(),
+      toggleMute: () => this.voice.toggleMute(),
+      voice: this.voice.debugApi(),
     };
   }
 }

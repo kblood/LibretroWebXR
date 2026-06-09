@@ -56,6 +56,17 @@ export class Hub {
     return { broadcast: { msg, exclude: peerId } };
   }
 
+  /**
+   * Peer sent a SIGNAL (M0.4 voice). Stamp the real sender id and return
+   * { direct: { to, msg } } — a DIRECTED relay to a single peer (not a
+   * broadcast). Dropped if sender or target isn't in the room.
+   */
+  signal(roomId, fromPeerId, msg) {
+    const room = this.rooms.get(roomId);
+    if (!room || !room.has(fromPeerId) || !room.has(msg.to)) return {};
+    return { direct: { to: msg.to, msg: { ...msg, from: fromPeerId } } };
+  }
+
   /** Peer's socket closed. Drop it (and the room if now empty) and LEAVE-broadcast. */
   disconnect(roomId, peerId) {
     const room = this.rooms.get(roomId);

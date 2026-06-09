@@ -59,6 +59,10 @@ wss.on('connection', (ws, req) => {
     if (!msg) return;
     if (msg.type === MSG.JOIN) broadcast(roomId, hub.identify(roomId, peerId, msg).broadcast);
     else if (msg.type === MSG.POSE) broadcast(roomId, hub.pose(roomId, peerId, msg).broadcast);
+    else if (msg.type === MSG.SIGNAL) {
+      const { direct } = hub.signal(roomId, peerId, msg);
+      if (direct) sendTo(direct.to, direct.msg);
+    }
   });
 
   ws.on('close', () => {

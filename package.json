@@ -22,6 +22,7 @@
     "debug": "node scripts/debug.js",
     "smoke-room": "node server/smoke.mjs",
     "smoke-presence": "node scripts/smoke-presence.mjs",
+    "smoke-voice": "node scripts/smoke-voice.mjs",
     "deploy": "pwsh scripts/deploy.ps1"
   },
   "devDependencies": {

@@ -3,8 +3,8 @@
 // socket, so this runs in `npm test`.
 
 import {
-  MSG, POSE_LEN, isValidPart, roundPart, makePose, makeJoin, makeHello,
-  makeLeave, validate, encode, decode,
+  MSG, POSE_LEN, SIGNAL_KINDS, isValidPart, roundPart, makePose, makeJoin, makeHello,
+  makeLeave, makeSignal, validate, encode, decode,
 } from '../src/net/NetProtocol.js';
 import { PresenceState } from '../src/net/PresenceState.js';
 import { Hub } from '../server/Hub.js';
@@ -152,6 +152,31 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   ok(broadcast.msg.type === MSG.POSE && broadcast.msg.id === 'a', 'pose id is forced to the real sender (spoof rejected)');
   ok(broadcast.exclude === 'a', 'sender excluded from its own pose broadcast');
   ok(hub.pose('r', 'ghost', makePose({ head: HEAD })).broadcast === undefined, 'pose from an unknown peer is dropped');
+}
+
+// === NetProtocol: SIGNAL (voice) builder + validation ======================
+{
+  const offer = makeSignal({ to: 'b', kind: 'offer', data: { sdp: 'v=0...', type: 'offer' } });
+  ok(offer.type === MSG.SIGNAL && offer.to === 'b' && offer.kind === 'offer', 'makeSignal builds an offer');
+  ok(validate(offer).ok, 'SIGNAL validates');
+  ok(SIGNAL_KINDS.includes('ice') && SIGNAL_KINDS.length === 3, 'three signal kinds');
+  ok(!validate({ type: MSG.SIGNAL, to: 'b', kind: 'bogus', data: {} }).ok, 'bad signal kind rejected');
+  ok(!validate({ type: MSG.SIGNAL, kind: 'offer', data: {} }).ok, 'signal without `to` rejected');
+  ok(!validate({ type: MSG.SIGNAL, to: 'b', kind: 'offer' }).ok, 'signal without data rejected');
+  const back = decode(encode(makeSignal({ to: 'b', kind: 'ice', data: { candidate: 'x' } })));
+  ok(back && back.kind === 'ice' && back.data.candidate === 'x', 'SIGNAL round-trips through encode/decode');
+}
+
+// === Hub: signal is a DIRECTED relay, sender-id stamped ====================
+{
+  const hub = new Hub();
+  hub.connect('r', 'a');
+  hub.connect('r', 'b');
+  const { direct } = hub.signal('r', 'a', makeSignal({ to: 'b', kind: 'offer', data: { sdp: 's' } }));
+  ok(direct && direct.to === 'b', 'signal is routed directly to the target peer');
+  ok(direct.msg.from === 'a', 'signal is stamped with the real sender id (anti-spoof)');
+  ok(hub.signal('r', 'a', makeSignal({ to: 'ghost', kind: 'offer', data: {} })).direct === undefined, 'signal to an absent peer is dropped');
+  ok(hub.signal('r', 'x', makeSignal({ to: 'b', kind: 'offer', data: {} })).direct === undefined, 'signal from an absent peer is dropped');
 }
 
 // === Hub: disconnect broadcasts LEAVE and reaps empty rooms ================

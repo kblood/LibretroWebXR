@@ -112,6 +112,26 @@ if (sessionRoom) {
   net.connect();
   scene.addTickCallback((dt) => net.tick(dt));
   window.__net = net.debugApi();
+
+  // Voice button: first click grabs the mic + joins the WebRTC mesh; later
+  // clicks toggle mute. getUserMedia needs this user gesture. Shown only in a
+  // session; in VR a menu item would mirror it (deferred).
+  const voiceBtn = document.getElementById('voice-btn');
+  if (voiceBtn) {
+    voiceBtn.hidden = false;
+    voiceBtn.addEventListener('click', async () => {
+      if (!net.voice.enabled) {
+        voiceBtn.disabled = true;
+        const ok = await net.enableVoice();
+        voiceBtn.disabled = false;
+        voiceBtn.textContent = ok ? '🎤 Mute' : '🎤 (no mic)';
+        if (!ok) voiceBtn.title = 'Microphone unavailable or denied';
+      } else {
+        const muted = net.voice.toggleMute();
+        voiceBtn.textContent = muted ? '🔇 Unmute' : '🎤 Mute';
+      }
+    });
+  }
 }
 
 // --- Build the VR cartridge world ----------------------------------------

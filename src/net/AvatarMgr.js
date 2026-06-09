@@ -41,6 +41,12 @@ export class AvatarMgr {
     for (const av of this._avatars.values()) av.tick(dtMs);
   }
 
+  /** The head Object3D for a peer (for VoiceMgr's positional audio), or null. */
+  getHead(peerId) {
+    const av = this._avatars.get(peerId);
+    return av ? av.head : null;
+  }
+
   _remove(id, av) {
     this.scene.removeObject(av.group);
     av.dispose();

@@ -19,7 +19,11 @@ export const MSG = Object.freeze({
   JOIN: 'join',
   LEAVE: 'leave',
   POSE: 'pose',
+  SIGNAL: 'signal', // M0.4 voice: WebRTC offer/answer/ICE, relayed peer→peer
 });
+
+// WebRTC signaling kinds carried inside a SIGNAL message.
+export const SIGNAL_KINDS = Object.freeze(['offer', 'answer', 'ice']);
 
 // A pose part (head / left hand / right hand) is either null (not tracked —
 // e.g. a controller that isn't connected) or [px,py,pz, qx,qy,qz,qw]:
@@ -81,6 +85,19 @@ export function makeLeave({ id } = {}) {
 }
 
 /**
+ * Build a SIGNAL message (M0.4 voice). Carries one WebRTC negotiation step
+ * (`offer`/`answer`/`ice`) addressed to a single peer `to`. The server relays it
+ * directly to that peer and stamps `from` with the real sender id (so a client
+ * can't forge who an offer came from). `data` is the SDP description or ICE
+ * candidate, passed through verbatim.
+ */
+export function makeSignal({ from, to, kind, data } = {}) {
+  const msg = { type: MSG.SIGNAL, to: String(to), kind, data };
+  if (from != null) msg.from = String(from);
+  return msg;
+}
+
+/**
  * Validate a decoded message. Returns { ok:true } or { ok:false, error }.
  * Keeps the server/client from acting on malformed packets.
  */
@@ -101,6 +118,11 @@ export function validate(msg) {
       if (!isValidPart(msg.head) || !isValidPart(msg.left) || !isValidPart(msg.right)) {
         return { ok: false, error: 'pose part' };
       }
+      return { ok: true };
+    case MSG.SIGNAL:
+      if (typeof msg.to !== 'string') return { ok: false, error: 'signal.to' };
+      if (!SIGNAL_KINDS.includes(msg.kind)) return { ok: false, error: 'signal.kind' };
+      if (msg.data == null || typeof msg.data !== 'object') return { ok: false, error: 'signal.data' };
       return { ok: true };
     default:
       return { ok: false, error: `unknown type: ${msg && msg.type}` };
