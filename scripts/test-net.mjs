@@ -7,6 +7,7 @@ import {
   makeLeave, validate, encode, decode,
 } from '../src/net/NetProtocol.js';
 import { PresenceState } from '../src/net/PresenceState.js';
+import { Hub } from '../server/Hub.js';
 
 let passed = 0;
 let failed = 0;
@@ -116,6 +117,54 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   // A fresh pose resets the clock so it survives the next prune.
   ps.apply(makePose({ id: 'b', head: HEAD }), 7000);
   ok(ps.prune(8000).length === 0, 'a recent pose keeps a peer alive');
+}
+
+// === Hub (server relay logic): connect / hello roster ======================
+{
+  const hub = new Hub();
+  const r1 = hub.connect('room1', 'p1');
+  ok(r1.hello.type === MSG.HELLO && r1.hello.selfId === 'p1', 'connect returns HELLO with selfId');
+  ok(r1.hello.peers.length === 0, 'first peer sees an empty roster');
+
+  const r2 = hub.connect('room1', 'p2');
+  ok(r2.hello.peers.length === 1 && r2.hello.peers[0].id === 'p1', 'second peer sees the first in its roster');
+  ok(hub.size('room1') === 2, 'room has two peers');
+}
+
+// === Hub: identify broadcasts a JOIN to others (not self) ==================
+{
+  const hub = new Hub();
+  hub.connect('r', 'a');
+  hub.connect('r', 'b');
+  const { broadcast } = hub.identify('r', 'a', { nick: 'Alice', color: '#0f0' });
+  ok(broadcast.msg.type === MSG.JOIN && broadcast.msg.id === 'a', 'identify broadcasts a JOIN stamped with the peer id');
+  ok(broadcast.msg.nick === 'Alice' && broadcast.msg.color === '#0f0', 'identify carries nick/color');
+  ok(broadcast.exclude === 'a', 'the joining peer is excluded from its own JOIN broadcast');
+}
+
+// === Hub: pose is stamped with the server-side id (anti-spoof) =============
+{
+  const hub = new Hub();
+  hub.connect('r', 'a');
+  hub.connect('r', 'b');
+  // 'a' tries to send a pose claiming to be 'b' — server must overwrite the id.
+  const { broadcast } = hub.pose('r', 'a', makePose({ id: 'b', head: HEAD }));
+  ok(broadcast.msg.type === MSG.POSE && broadcast.msg.id === 'a', 'pose id is forced to the real sender (spoof rejected)');
+  ok(broadcast.exclude === 'a', 'sender excluded from its own pose broadcast');
+  ok(hub.pose('r', 'ghost', makePose({ head: HEAD })).broadcast === undefined, 'pose from an unknown peer is dropped');
+}
+
+// === Hub: disconnect broadcasts LEAVE and reaps empty rooms ================
+{
+  const hub = new Hub();
+  hub.connect('r', 'a');
+  hub.connect('r', 'b');
+  const { broadcast } = hub.disconnect('r', 'a');
+  ok(broadcast.msg.type === MSG.LEAVE && broadcast.msg.id === 'a', 'disconnect broadcasts a LEAVE for the peer');
+  ok(hub.size('r') === 1, 'peer removed from room');
+  ok(hub.roomCount() === 1, 'room still exists while one peer remains');
+  hub.disconnect('r', 'b');
+  ok(hub.roomCount() === 0, 'empty room is reaped');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

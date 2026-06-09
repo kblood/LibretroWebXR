@@ -20,6 +20,8 @@
     "make-vb-demo": "node scripts/make-vb-demo.mjs",
     "test": "node scripts/test-collection.mjs && node scripts/test-multiplayer.mjs && node scripts/test-net.mjs",
     "debug": "node scripts/debug.js",
+    "smoke-room": "node server/smoke.mjs",
+    "smoke-presence": "node scripts/smoke-presence.mjs",
     "deploy": "pwsh scripts/deploy.ps1"
   },
   "devDependencies": {

@@ -20,6 +20,7 @@ import { MenuMgr } from './MenuMgr.js';
 import { CORES, coreForFile, portsForSystem } from './systems.js';
 import { CableMgr } from './CableMgr.js';
 import { computeRouting as routeControllers } from './Routing.js';
+import { NetMgr } from './net/NetMgr.js';
 import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
 import { parseRoom, defaultRoom, roomCollectionRefs } from './RoomLoader.js';
@@ -89,6 +90,29 @@ installXRRafShim(scene.renderer);
 installSpatialAudio({ listener: scene.audioListener, sourceObject: scene.tvGroup });
 window.__scene = scene;
 window.__client = client;
+
+// --- M0 shared-room presence (opt-in via ?session=<room>) ----------------
+// Avatars + (later) voice for everyone in the same named room. Wired here at
+// module scope — BEFORE buildCartridgeWorld()'s buildMemoryCards await (which
+// stalls headless) — so presence works regardless of that path. Single-player
+// (no ?session) constructs nothing: no socket, no avatars. See src/net/.
+let net = null;
+const sessionRoom = urlParams.get('session');
+if (sessionRoom) {
+  const palette = ['#88aaff', '#ff8866', '#66dd99', '#ffd166', '#cc88ff', '#66ccee'];
+  const nick = urlParams.get('nick') || `Player-${Math.random().toString(36).slice(2, 6)}`;
+  const color = urlParams.get('color') || palette[Math.floor(Math.random() * palette.length)];
+  net = new NetMgr({
+    scene,
+    room: sessionRoom,
+    serverUrl: urlParams.get('server') || undefined, // default: wss://<host>/ws/
+    nick,
+    color,
+  });
+  net.connect();
+  scene.addTickCallback((dt) => net.tick(dt));
+  window.__net = net.debugApi();
+}
 
 // --- Build the VR cartridge world ----------------------------------------
 //

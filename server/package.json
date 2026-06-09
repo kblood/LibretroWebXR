@@ -1,0 +1,13 @@
+{
+  "name": "libretrowebxr-room-server",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "M0 presence relay (WebSocket) for LibretroWebXR shared rooms.",
+  "scripts": {
+    "start": "node room-server.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
