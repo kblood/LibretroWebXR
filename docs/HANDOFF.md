@@ -1,15 +1,55 @@
 # Handoff
 
-Single orientation doc for picking this project up cold. Last updated 2026-06-09
-when `feat/edit-modes-and-desktop-controls` was merged to `main` and **deployed
-live** — the edit modes, desktop controls, and local multiplayer below are now the
-running build (real-VR smoke test still pending). Built on the **three in-VR edit
-modes (Move / Change / Add)** restructure — on top of
-local multiplayer (couch co-op), Phase E.3 (create props/portals in-VR), E.2
-(in-VR look editing), E.1 (move props + export) + its gamepad fix + first deploy,
-Phase R (R.1 JSON collection layer, R.2 RomResolver, R.3 rooms as JSON), the CC0
-test-game library, and the classic-core render fix (all below). Phase R is
-complete.
+Single orientation doc for picking this project up cold. Last updated 2026-06-09.
+**Current focus: networked multiplayer (Phase M). M0 — shared-room presence — is
+functionally complete and live** (avatars + spatial voice + shared TV/loaded-game
++ held-object ghosts). Built on top of the **three in-VR edit modes
+(Move / Change / Add)** + desktop controls + **local multiplayer (couch co-op)**
+merge (all live), Phase E.3 (create props/portals in-VR), E.2 (in-VR look
+editing), E.1 (move props + export), Phase R (R.1 JSON collection layer, R.2
+RomResolver, R.3 rooms as JSON), the CC0 test-game library, and the classic-core
+render fix (all below). Phases R and E are complete.
+
+**Networked multiplayer (Phase M) — M0 done + DEPLOYED (2026-06-09).** Open the
+live build with `?session=<room>` (optionally `&nick=`, `&color=`) and everyone in
+that room shares it. Architecture mirrors the project's pure/imperative split —
+all wire logic is pure and unit-tested (`npm test`), the THREE/socket sides just
+reflect it; each piece has a headless smoke that also runs live against
+`wss://dionysus.dk/ws/`. The slices:
+- **M0.1–0.3 presence** — pure protocol + peer registry (`src/net/NetProtocol.js`,
+  `PresenceState.js`), avatars head+hands+nameplate (`Avatar.js`/`AvatarMgr.js`),
+  and a WebSocket relay (`server/` — pure `Hub.js` + thin `room-server.mjs`) with
+  the browser client `src/net/NetMgr.js` (opt-in via `?session=`). Server is
+  authoritative over peer ids (anti-spoof). Smoke: `scripts/smoke-presence.mjs`.
+- **M0.4 voice** — WebRTC mesh (`src/net/VoiceMgr.js`) signaled over the same WS
+  (`SIGNAL` messages, directed relay in `Hub.js`); each remote mic →
+  `THREE.PositionalAudio` on that peer's avatar head; desktop "🎤 Voice" button.
+  STUN-only. Smoke: `scripts/smoke-voice.mjs` (two browsers + fake mics).
+- **M0.5 room-object sync** — generic shared key→value `STATE` channel
+  (`NetProtocol.makeState`, pure registry `src/net/RoomObjects.js`) persisted
+  per-room last-writer-wins in `Hub.js` and **snapshotted to late joiners**. First
+  consumer: the **TV / loaded game** — booting a cartridge converges the room's
+  TVs (`applyRemoteTv` in main.js; reflected loads use `echo:false` to avoid
+  rebroadcast loops). Smoke: `scripts/smoke-object-sync.mjs`.
+- **M0.6 held-object sync** — grabbing a cart broadcasts `hold:<file>` =
+  `{holder,hand}` (`GrabMgr` `onCartridgeGrabbed`/`onCartridgeReleased`); peers
+  hide their copy and show a **ghost cart in the holder's avatar hand**
+  (`src/GhostCartMgr.js`, pure rules in `src/net/HoldState.js`). `hold:` keys are
+  owner-scoped: `Hub.disconnect` clears a departed peer's holds. Smoke:
+  `scripts/smoke-held.mjs`.
+
+**Room server deploy:** systemd unit `libretrowebxr-room` from
+`/opt/libretrowebxr-room` (port 8787) + Apache `/ws/` reverse-proxy
+(`mod_proxy_wstunnel`). Templates: `deploy/libretrowebxr-room.{service,conf}`.
+After changing anything under `server/` or `src/net/NetProtocol.js`, scp those
+files to `/opt/libretrowebxr-room/{server,src/net}/` and
+`sudo systemctl restart libretrowebxr-room` (the static app deploys separately via
+`npm run deploy`). See `server/README.md`.
+
+**M0 remaining (hardening/polish, not new capability):** a TURN relay (only for
+symmetric NAT — STUN covers same-LAN/most NATs); an **in-VR** voice/menu
+affordance (the 🎤 button is desktop-only); and a real **two-headset** smoke test.
+**Next big step is M1** (host-authoritative game sync) — see `docs/ROADMAP.md`.
 
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
@@ -54,8 +94,9 @@ forward-set.** Crosshair + control hint live in `index.html`. Verified headless
 (movement + room-clamp + synthetic grab/release of a prop) + screenshot.
 
 **Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, **current
-`main` @ e5b9f9f, deployed 2026-06-09** — edit modes, desktop controls, and local
-multiplayer are all live; COOP/COEP verified). The original
+`main` @ 774a295, deployed 2026-06-09** — edit modes, desktop controls, local
+multiplayer, AND networked Phase M0 (presence/voice/TV/held-object sync) are all
+live; COOP/COEP verified). The original
 https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and is left
 untouched — `libretrowebxr2` is a deliberate separate folder. User confirmed E.1
 works in VR; the gamepad-pickup regression below is fixed + redeployed.
@@ -403,8 +444,9 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
     `currentRoom`, and register it editable via `RoomEditor.registerPlaced`
     (a new portal also joins the live nav list). *Collections-to-shelves still
     deferred* (live shelf rebuild + `GrabMgr.removeGrabbable`).
-- **Phase M ← NEXT** — multiplayer (`docs/MULTIPLAYER.md`): M0 presence/avatars/voice,
-  M1 host-authoritative game sync, M2 rollback, M3 crossplay.
+- **Phase M — IN PROGRESS** — multiplayer (`docs/MULTIPLAYER.md`): **M0
+  presence/avatars/voice/room-object sync ✅ done + DEPLOYED**; **M1 ← NEXT**
+  (host-authoritative game sync), M2 rollback, M3 crossplay.
 - **Phase C** — open prop package schema, community gallery, BIOS-needing
   systems (PSX/N64), PWA.
 
@@ -433,10 +475,10 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   (`window.__editor`/`__grab` are deliberately exposed *before* the await as a
   headless probe workaround — that's a patch, not the fix.)
 
-## Immediate next actions (Phase E is done + deployed)
+## Immediate next actions (Phase E done; Phase M0 done + deployed)
 
-Phase E (in-VR editor) is complete — including the formerly-deferred
-collections-to-shelves (Change mode) — and `main` is **deployed live as of
+Phase E (in-VR editor) is complete and **Phase M0 (networked shared-room
+presence) is complete and deployed** — `main @ 774a295` is **live as of
 2026-06-09** (COOP/COEP verified). Sensible next steps, in rough priority order:
 
 1. **Real-VR smoke test on a Quest** — now scoped down to only what can't be
@@ -447,51 +489,17 @@ collections-to-shelves (Change mode) — and `main` is **deployed live as of
    The deploy/network path itself is verified headlessly: `node scripts/debug.js
    --url=<live> --boot=nes --screenshot=…` boots a game over the wire (COOP/COEP,
    core fetch, real pixels) — re-run after any deploy.
-2. **Phase M (networked multiplayer) — IN PROGRESS.** M0 shared-room presence
-   is built and verified locally: pure protocol + peer registry (`src/net/
-   NetProtocol.js`, `PresenceState.js`), avatars (`Avatar.js`/`AvatarMgr.js`), a
-   WebSocket relay (`server/` — pure `Hub.js` + `room-server.mjs`), and the
-   browser client `src/net/NetMgr.js` (opt-in via `?session=<room>`). Covered by
-   `npm test` (235), `server/smoke.mjs` (two-client relay, 7/7), and
-   `scripts/smoke-presence.mjs` (real Chrome renders a peer avatar, 4/4).
-   **The room server is now DEPLOYED** on dionysus.dk (2026-06-09): systemd unit
-   `libretrowebxr-room` from `/opt/libretrowebxr-room` (port 8787) + Apache `/ws/`
-   proxy; templates committed at `deploy/libretrowebxr-room.{service,conf}`. The
-   live build includes the client, so `https://dionysus.dk/webxr/libretrowebxr2/?session=<room>`
-   joins a shared room — verified by the production smoke against `wss://dionysus.dk/ws/`.
-   **M0.4 voice is now done + DEPLOYED too:** spatial voice over a WebRTC mesh
-   (`src/net/VoiceMgr.js`) signaled on the same WS (`SIGNAL` messages, directed
-   relay in `server/Hub.js`); each remote mic → `THREE.PositionalAudio` on that
-   peer's avatar head; a header "🎤 Voice" button enables/mutes. Verified by
-   `scripts/smoke-voice.mjs` (two headless Chrome + fake mics reach ice=connected
-   with the remote track attached) locally AND live against `wss://dionysus.dk/ws/`.
-   STUN-only.
-   **M0.5 room-object sync is now done + DEPLOYED too:** a generic shared
-   key→value `STATE` channel (`src/net/NetProtocol.js` `makeState`, pure registry
-   `src/net/RoomObjects.js`) persisted per-room in `server/Hub.js`
-   (last-writer-wins) and **snapshotted to late joiners** on connect. First
-   consumer is the **TV / loaded game**: when any peer boots a cartridge, the
-   whole room's TV converges on it (nothing-running / same-core peers boot it
-   seamlessly via `applyRemoteTv` in main.js; a peer mid-game on a different core
-   is told, not reloaded). Reflected loads pass `echo:false` so they never bounce
-   a stale value back. Verified by `scripts/test-net.mjs` (85) and
-   `scripts/smoke-object-sync.mjs` (two + a late Chrome peer: live propagation,
-   last-writer-wins, snapshot convergence, clear) locally AND live against
-   `wss://dionysus.dk/ws/`.
-   **M0.6 held-object sync is now done + DEPLOYED too:** grabbing a cartridge
-   broadcasts `hold:<file>` = `{holder,hand}` on the same `STATE` channel
-   (`GrabMgr` `onCartridgeGrabbed`/`onCartridgeReleased`); remote peers hide their
-   own copy and show a **ghost cartridge in the holder's avatar hand**
-   (`src/GhostCartMgr.js`, reconciled each frame from pure `src/net/HoldState.js`;
-   `AvatarMgr.getHand`). `hold:` keys are owner-scoped — `server/Hub.js` clears a
-   leaving peer's holds so a cart can't stay stuck in a departed hand; `tv` state
-   persists. Verified by `scripts/test-net.mjs` (93) and `scripts/smoke-held.mjs`
-   (ghost appear/hide, release, late-join snapshot, holder-disconnect cleanup —
-   14/14) locally AND live against `wss://dionysus.dk/ws/`.
-   **Remaining for M0 (hardening/polish — M0 is functionally complete):** a TURN
-   relay (symmetric NAT — same-LAN/most NATs work on STUN); an in-VR voice/menu
-   affordance (the button is desktop-only today); a real two-headset smoke test.
-   Then M1 host-authoritative game sync.
+2. **Phase M (networked multiplayer) — M0 COMPLETE + DEPLOYED.** Presence,
+   spatial voice, shared TV/loaded-game, and held-object ghosts are all built,
+   unit-tested (`npm test` — `scripts/test-net.mjs` 93 + `test-multiplayer.mjs`),
+   smoke-verified (`smoke-room`/`presence`/`voice`/`object-sync`/`held`), and live.
+   The full breakdown is in the **"Networked multiplayer (Phase M)"** block near
+   the top of this doc; the slice details are in `docs/ROADMAP.md` (M0.1–M0.6).
+   **M0 remaining is hardening/polish only:** a TURN relay (symmetric NAT —
+   same-LAN/most NATs work on STUN); an **in-VR** voice/menu affordance (the 🎤
+   button is desktop-only); a real **two-headset** smoke test. **The next real
+   step is M1** — host-authoritative game sync (input + video stream) for
+   2-player; see `docs/MULTIPLAYER.md` / `docs/ROADMAP.md`.
 3. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
    a `manualChunks`/dynamic-import pass would help Quest load time if it bites.
 
