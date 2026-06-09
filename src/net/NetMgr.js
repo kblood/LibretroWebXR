@@ -14,9 +14,10 @@
 
 import * as THREE from 'three';
 import { PresenceState } from './PresenceState.js';
+import { RoomObjects } from './RoomObjects.js';
 import { AvatarMgr } from './AvatarMgr.js';
 import { VoiceMgr } from './VoiceMgr.js';
-import { MSG, makeJoin, makePose, makeSignal, encode, decode } from './NetProtocol.js';
+import { MSG, makeJoin, makePose, makeSignal, makeState, encode, decode } from './NetProtocol.js';
 
 const _p = new THREE.Vector3();
 const _q = new THREE.Quaternion();
@@ -34,7 +35,7 @@ function defaultServerUrl() {
 }
 
 export class NetMgr {
-  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, now = () => performance.now() }) {
+  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, now = () => performance.now() }) {
     this.scene = scene;
     this.room = room || 'lobby';
     this.nick = nick || 'Player';
@@ -44,6 +45,11 @@ export class NetMgr {
     this._now = now;
 
     this.presence = new PresenceState({ ttlMs: 5000 });
+    // M0.5 room-object sync: shared key→value state (the loaded game, etc.).
+    // onObjectState(key, value, id) is invoked when a remote change arrives so
+    // main.js can reflect it into the scene (e.g. boot the same game on the TV).
+    this.objects = new RoomObjects();
+    this._onObjectState = onObjectState;
     this.avatars = new AvatarMgr({ scene });
     this.ws = null;
     this._connected = false;
@@ -69,6 +75,35 @@ export class NetMgr {
     return ok;
   }
 
+  // --- M0.5 room-object sync ------------------------------------------------
+
+  // Apply an incoming STATE message and notify main.js only when it actually
+  // changed (the registry dedups echoes / idempotent late-join replays).
+  _applyState(msg) {
+    const r = this.objects.apply(msg);
+    if (r && r.changed && this._onObjectState) {
+      try { this._onObjectState(r.key, r.value, r.id); } catch (e) { console.warn('[net] onObjectState', e); }
+    }
+  }
+
+  /**
+   * Broadcast a shared room-object value (e.g. setObjectState('tv', {file,…})).
+   * Updates the local registry immediately so our own get() is consistent, then
+   * sends it; the server persists it and relays to the rest of the room. A null
+   * value clears the key. No-ops (unchanged value) are not re-sent.
+   */
+  setObjectState(key, value = null) {
+    const cur = this.objects.get(key);
+    if (JSON.stringify(cur) === JSON.stringify(value ?? null)) return false;
+    this.objects.apply(makeState({ key, value, id: this.presence.selfId }));
+    if (this._connected && this.ws) {
+      try { this.ws.send(encode(makeState({ key, value }))); } catch { /* mid-close */ }
+    }
+    return true;
+  }
+
+  getObjectState(key) { return this.objects.get(key); }
+
   connect() {
     const sep = this.serverUrl.includes('?') ? '&' : '?';
     const url = `${this.serverUrl}${sep}room=${encodeURIComponent(this.room)}`;
@@ -83,8 +118,9 @@ export class NetMgr {
     ws.addEventListener('message', (e) => {
       const msg = decode(typeof e.data === 'string' ? e.data : '');
       if (!msg) return;
-      if (msg.type === MSG.SIGNAL) this.voice.handleSignal(msg); // voice negotiation
-      else this.presence.apply(msg, this._now());                // roster + poses
+      if (msg.type === MSG.SIGNAL) this.voice.handleSignal(msg);      // voice negotiation
+      else if (msg.type === MSG.STATE) this._applyState(msg);         // room-object sync
+      else this.presence.apply(msg, this._now());                    // roster + poses
     });
     ws.addEventListener('close', () => { this._connected = false; });
     ws.addEventListener('error', () => { /* close follows */ });
@@ -140,6 +176,10 @@ export class NetMgr {
       enableVoice: () => this.enableVoice(),
       toggleMute: () => this.voice.toggleMute(),
       voice: this.voice.debugApi(),
+      // M0.5 room-object sync
+      objectState: (key) => this.objects.get(key),
+      objectEntries: () => this.objects.entries(),
+      setObjectState: (key, value) => this.setObjectState(key, value),
     };
   }
 }

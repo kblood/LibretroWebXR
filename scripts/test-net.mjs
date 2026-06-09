@@ -4,9 +4,10 @@
 
 import {
   MSG, POSE_LEN, SIGNAL_KINDS, isValidPart, roundPart, makePose, makeJoin, makeHello,
-  makeLeave, makeSignal, validate, encode, decode,
+  makeLeave, makeSignal, makeState, validate, encode, decode,
 } from '../src/net/NetProtocol.js';
 import { PresenceState } from '../src/net/PresenceState.js';
+import { RoomObjects } from '../src/net/RoomObjects.js';
 import { Hub } from '../server/Hub.js';
 
 let passed = 0;
@@ -190,6 +191,72 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   ok(hub.roomCount() === 1, 'room still exists while one peer remains');
   hub.disconnect('r', 'b');
   ok(hub.roomCount() === 0, 'empty room is reaped');
+}
+
+// === NetProtocol: STATE (room-object sync) builder + validation ============
+{
+  const tv = makeState({ key: 'tv', value: { file: 'pong.nes', core: 'nestopia' } });
+  ok(tv.type === MSG.STATE && tv.key === 'tv' && tv.value.file === 'pong.nes', 'makeState builds a STATE entry');
+  ok(validate(tv).ok, 'STATE validates');
+  ok(validate(makeState({ key: 'tv', value: null })).ok, 'STATE with a null value (clear) validates');
+  ok(!validate({ type: MSG.STATE, key: '', value: 1 }).ok, 'STATE with an empty key rejected');
+  ok(!validate({ type: MSG.STATE, key: 'tv' }).ok, 'STATE without a value field rejected');
+  const back = decode(encode(makeState({ key: 'hold:c1', value: { holder: 'a' }, id: 'a' })));
+  ok(back && back.key === 'hold:c1' && back.value.holder === 'a' && back.id === 'a', 'STATE round-trips through encode/decode');
+}
+
+// === RoomObjects: apply / changed / clear ==================================
+{
+  const ro = new RoomObjects();
+  const r1 = ro.apply(makeState({ key: 'tv', value: { file: 'a.nes' }, id: 'p1' }));
+  ok(r1.changed && ro.get('tv').file === 'a.nes', 'first STATE sets the value and reports changed');
+  ok(ro.ownerOf('tv') === 'p1', 'owner (setter id) recorded');
+
+  const r2 = ro.apply(makeState({ key: 'tv', value: { file: 'a.nes' }, id: 'p1' }));
+  ok(!r2.changed, 'an identical STATE is not flagged as changed (echo/replay dedup)');
+
+  const r3 = ro.apply(makeState({ key: 'tv', value: { file: 'b.nes' }, id: 'p2' }));
+  ok(r3.changed && ro.get('tv').file === 'b.nes', 'last-writer-wins overwrite reported as changed');
+
+  const r4 = ro.apply(makeState({ key: 'tv', value: null }));
+  ok(r4.changed && ro.get('tv') === null && !ro.has('tv'), 'a null value clears the key');
+  ok(ro.size === 0, 'cleared key removed from the registry');
+}
+
+// === Hub: setState persists, broadcasts, and snapshots to late joiners ======
+{
+  const hub = new Hub();
+  hub.connect('r', 'a');
+  hub.connect('r', 'b');
+  const { broadcast } = hub.setState('r', 'a', { key: 'tv', value: { file: 'pong.nes' } });
+  ok(broadcast.msg.type === MSG.STATE && broadcast.msg.key === 'tv', 'setState broadcasts a STATE');
+  ok(broadcast.msg.id === 'a', 'STATE stamped with the real setter id');
+  ok(broadcast.exclude === 'a', 'setter excluded from its own STATE broadcast');
+
+  // A peer joining now must receive the current state as a snapshot.
+  const r3 = hub.connect('r', 'c');
+  ok(Array.isArray(r3.state) && r3.state.length === 1, 'connect returns a state snapshot');
+  ok(r3.state[0].key === 'tv' && r3.state[0].value.file === 'pong.nes' && r3.state[0].id === 'a',
+    'snapshot carries the current value + owner');
+
+  // Clearing removes it from future snapshots.
+  hub.setState('r', 'a', { key: 'tv', value: null });
+  ok(hub.connect('r', 'd').state.length === 0, 'a cleared key drops out of the snapshot');
+
+  // Anti-spoof / membership.
+  ok(hub.setState('r', 'ghost', { key: 'tv', value: 1 }).broadcast === undefined, 'setState from an unknown peer is dropped');
+
+  // First peer in a fresh room sees no snapshot.
+  ok(hub.connect('fresh', 'x').state.length === 0, 'first peer in a room gets an empty snapshot');
+}
+
+// === Hub: room state is reaped when the room empties ========================
+{
+  const hub = new Hub();
+  hub.connect('r', 'a');
+  hub.setState('r', 'a', { key: 'tv', value: { file: 'g.nes' } });
+  hub.disconnect('r', 'a'); // room now empty
+  ok(hub.connect('r', 'a2').state.length === 0, 'state does not leak across an empty-room reset');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

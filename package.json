@@ -23,6 +23,7 @@
     "smoke-room": "node server/smoke.mjs",
     "smoke-presence": "node scripts/smoke-presence.mjs",
     "smoke-voice": "node scripts/smoke-voice.mjs",
+    "smoke-object-sync": "node scripts/smoke-object-sync.mjs",
     "deploy": "pwsh scripts/deploy.ps1"
   },
   "devDependencies": {

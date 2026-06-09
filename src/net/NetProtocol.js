@@ -20,6 +20,7 @@ export const MSG = Object.freeze({
   LEAVE: 'leave',
   POSE: 'pose',
   SIGNAL: 'signal', // M0.4 voice: WebRTC offer/answer/ICE, relayed peer→peer
+  STATE: 'state',   // M0.5 room-object sync: a shared key→value (e.g. the loaded game)
 });
 
 // WebRTC signaling kinds carried inside a SIGNAL message.
@@ -98,6 +99,19 @@ export function makeSignal({ from, to, kind, data } = {}) {
 }
 
 /**
+ * Build a STATE message (M0.5 room-object sync). Sets a shared room key to a
+ * value everyone in the room sees — e.g. `key:'tv'` → the loaded game descriptor,
+ * or `key:'hold:<cartId>'` → who is holding a cartridge. `value:null` clears the
+ * key. The server persists the latest value per room (last-writer-wins) and
+ * replays it to late joiners, then stamps `id` (the setter) on rebroadcast.
+ */
+export function makeState({ key, value = null, id } = {}) {
+  const msg = { type: MSG.STATE, key: String(key), value: value ?? null };
+  if (id != null) msg.id = String(id);
+  return msg;
+}
+
+/**
  * Validate a decoded message. Returns { ok:true } or { ok:false, error }.
  * Keeps the server/client from acting on malformed packets.
  */
@@ -123,6 +137,10 @@ export function validate(msg) {
       if (typeof msg.to !== 'string') return { ok: false, error: 'signal.to' };
       if (!SIGNAL_KINDS.includes(msg.kind)) return { ok: false, error: 'signal.kind' };
       if (msg.data == null || typeof msg.data !== 'object') return { ok: false, error: 'signal.data' };
+      return { ok: true };
+    case MSG.STATE:
+      if (typeof msg.key !== 'string' || msg.key === '') return { ok: false, error: 'state.key' };
+      if (!('value' in msg)) return { ok: false, error: 'state.value' };
       return { ok: true };
     default:
       return { ok: false, error: `unknown type: ${msg && msg.type}` };

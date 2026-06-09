@@ -48,8 +48,11 @@ wss.on('connection', (ws, req) => {
   ws.isAlive = true;
   sockets.set(peerId, ws);
 
-  const { hello } = hub.connect(roomId, peerId);
+  const { hello, state } = hub.connect(roomId, peerId);
   ws.send(encode(hello));
+  // M0.5: replay the room's current shared object state so a late joiner
+  // converges (e.g. boots the game already on the TV).
+  for (const msg of state || []) ws.send(encode(msg));
   console.log(`[room-server] + ${peerId.slice(0, 8)} → "${roomId}" (${hub.size(roomId)} in room)`);
 
   ws.on('pong', () => { ws.isAlive = true; });
@@ -62,7 +65,7 @@ wss.on('connection', (ws, req) => {
     else if (msg.type === MSG.SIGNAL) {
       const { direct } = hub.signal(roomId, peerId, msg);
       if (direct) sendTo(direct.to, direct.msg);
-    }
+    } else if (msg.type === MSG.STATE) broadcast(roomId, hub.setState(roomId, peerId, msg).broadcast);
   });
 
   ws.on('close', () => {

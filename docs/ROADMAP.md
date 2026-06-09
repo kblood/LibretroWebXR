@@ -252,8 +252,22 @@ DebugHud for players 2-4, in-VR port retargeting.
     attached) locally AND live against `wss://dionysus.dk/ws/`. STUN-only —
     **TURN is a follow-on** (needed for peers behind symmetric NAT; same-LAN /
     most NATs work on STUN).
-  - **M0 remaining:** room-object sync (who grabbed which cartridge, TV / inserted
-    game) over the presence channel; a TURN relay; an in-VR voice/menu affordance
+  - **M0.5 ✅ done + DEPLOYED** — room-object sync: a generic shared key→value
+    `STATE` channel (`src/net/NetProtocol.js` `makeState`, pure registry
+    `src/net/RoomObjects.js`) persisted per-room in `server/Hub.js`
+    (last-writer-wins) and **snapshotted to late joiners** on connect. First
+    consumer: the **TV / loaded game** — when any peer boots a cartridge,
+    everyone's TV converges on it (a peer with nothing running, or on the same
+    core, boots it seamlessly; one mid-game on a *different* core is told, not
+    yanked into a reload). Reflected loads run with `echo:false` so they can't
+    bounce a stale value back. Verified by `scripts/test-net.mjs` (now 85; STATE
+    builder/validate, `RoomObjects` apply/dedup/clear, `Hub.setState` +
+    snapshot + empty-room reset) and `scripts/smoke-object-sync.mjs` (two+late
+    Chrome peers: live propagation, last-writer-wins, snapshot convergence,
+    clear), locally AND live against `wss://dionysus.dk/ws/`.
+  - **M0 remaining:** held-object sync (which cartridge a peer is holding, as a
+    ghost in their avatar hand — the `STATE` channel already supports it, only the
+    hand-attach visual is left); a TURN relay; an in-VR voice/menu affordance
     (the button is desktop-only today); a real two-headset smoke test.
 - **M1:** host-authoritative game sync (input + video stream) for 2-player.
 - **M2:** rollback game sync for deterministic cores (adapt netplayjs +

@@ -108,6 +108,8 @@ if (sessionRoom) {
     serverUrl: urlParams.get('server') || undefined, // default: wss://<host>/ws/
     nick,
     color,
+    // M0.5 room-object sync: reflect a remote peer's shared state into our scene.
+    onObjectState: (key, value) => { if (key === 'tv') applyRemoteTv(value); },
   });
   net.connect();
   scene.addTickCallback((dt) => net.tick(dt));
@@ -785,7 +787,12 @@ function updateControlsPanel() {
 
 const PENDING_KEY = 'libretrowebxr.pending';
 
-function handleCartridgeInserted(meta) {
+// `echo` controls whether a successful load re-announces the TV state to the
+// room (M0.5). Local inserts echo (true, default); a load that is itself
+// *reflecting* a remote peer's state passes echo:false so it never bounces the
+// value back — otherwise a slow async load can re-broadcast a now-stale game on
+// top of a newer overwrite.
+function handleCartridgeInserted(meta, { echo = true } = {}) {
   if (!CORES[meta.core]) {
     setStatus(`unknown core ${meta.core}`);
     return;
@@ -802,10 +809,10 @@ function handleCartridgeInserted(meta) {
     location.reload();
     return;
   }
-  loadCartridge(meta);
+  loadCartridge(meta, { echo });
 }
 
-async function loadCartridge(meta) {
+async function loadCartridge(meta, { echo = true } = {}) {
   setStatus(`loading ${meta.title}…`);
   try {
     // RomResolver (Phase R.2) turns the entry into bytes from url / local
@@ -820,11 +827,33 @@ async function loadCartridge(meta) {
     consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
     setSystemLabel(meta.core);
     updateControlsPanel();
+    // M0.5: tell the shared room which game is now on the TV. Suppressed when
+    // this load is reflecting a remote peer's state (echo:false) so it can't
+    // bounce a stale value back over a newer overwrite.
+    if (echo) net?.setObjectState('tv', { file: meta.file, core: meta.core, system: meta.system, title: meta.title });
   } catch (e) {
     setStatus(`error: ${e.message || e}`);
   }
 }
 window.__loadCartridge = loadCartridge; // debug hook: boot a game via RomResolver
+
+// M0.5: a remote peer loaded a game — reflect it onto our TV. A peer with
+// nothing running (or running the same core) boots it seamlessly; we deliberately
+// do NOT yank a player who's mid-game on a *different* core into a page reload —
+// we just surface it. Late joiners (nothing running) always converge via the
+// server's state snapshot. Loop-safe: the reflected load runs with echo:false so
+// it never re-announces the value back to the room.
+function applyRemoteTv(value) {
+  if (!value || !value.file || !value.core || !CORES[value.core]) return;
+  if (currentMeta && currentMeta.file === value.file && currentCore === value.core) return;
+  if (currentCore && currentCore !== value.core) {
+    setStatus(`${value.title || 'A game'} is playing in this room — insert it to join (different system)`);
+    return;
+  }
+  handleCartridgeInserted({ file: value.file, core: value.core, system: value.system, title: value.title }, { echo: false });
+  const cart = cartridges.find((c) => c.userData.file === value.file);
+  if (cart && grabMgr) grabMgr.setInsertedCart(cart);
+}
 
 async function resumePendingLoad() {
   const raw = sessionStorage.getItem(PENDING_KEY);

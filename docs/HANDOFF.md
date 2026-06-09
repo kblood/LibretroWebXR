@@ -466,11 +466,23 @@ collections-to-shelves (Change mode) — and `main` is **deployed live as of
    `scripts/smoke-voice.mjs` (two headless Chrome + fake mics reach ice=connected
    with the remote track attached) locally AND live against `wss://dionysus.dk/ws/`.
    STUN-only.
-   **Remaining for M0:** room-object sync (who grabbed which cartridge / TV /
-   inserted game) over the presence channel; a TURN relay (symmetric NAT —
-   same-LAN/most NATs work on STUN); an in-VR voice/menu affordance (the button is
-   desktop-only today); a real two-headset smoke test. Then M1 host-authoritative
-   game sync.
+   **M0.5 room-object sync is now done + DEPLOYED too:** a generic shared
+   key→value `STATE` channel (`src/net/NetProtocol.js` `makeState`, pure registry
+   `src/net/RoomObjects.js`) persisted per-room in `server/Hub.js`
+   (last-writer-wins) and **snapshotted to late joiners** on connect. First
+   consumer is the **TV / loaded game**: when any peer boots a cartridge, the
+   whole room's TV converges on it (nothing-running / same-core peers boot it
+   seamlessly via `applyRemoteTv` in main.js; a peer mid-game on a different core
+   is told, not reloaded). Reflected loads pass `echo:false` so they never bounce
+   a stale value back. Verified by `scripts/test-net.mjs` (85) and
+   `scripts/smoke-object-sync.mjs` (two + a late Chrome peer: live propagation,
+   last-writer-wins, snapshot convergence, clear) locally AND live against
+   `wss://dionysus.dk/ws/`.
+   **Remaining for M0:** held-object sync (a peer's held cartridge as a ghost in
+   their avatar hand — the `STATE` channel already carries it, only the hand
+   visual is left); a TURN relay (symmetric NAT — same-LAN/most NATs work on
+   STUN); an in-VR voice/menu affordance (the button is desktop-only today); a
+   real two-headset smoke test. Then M1 host-authoritative game sync.
 3. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
    a `manualChunks`/dynamic-import pass would help Quest load time if it bites.
 
