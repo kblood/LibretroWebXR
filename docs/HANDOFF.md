@@ -31,11 +31,15 @@ same as E.1/E.2/E.3).
 of the console port it's plugged into — `src/CableMgr.js`, per-player
 `GameInputMgr` dispatch, P1..P4 console ports; *local couch co-op, distinct from
 the networked Phase M in `docs/MULTIPLAYER.md`*). Tests + headless + screenshot
-green; **deployed live 2026-06-09, but VR controller routing still needs a
-real-headset smoke test** (headless has no XR gamepads). **Next roadmap step:
-real-VR verify the edit modes + multiplayer routing on a Quest, then start Phase M
-(networked multiplayer).** The deferred collections-to-shelves is now done (Change
-mode, above).
+green; **deployed live 2026-06-09.** The **routing logic** (gamepad→port→player→
+keycode, incl. no-crosstalk between pads) is now covered headlessly by
+`scripts/test-multiplayer.mjs` (the policy was extracted to the pure
+`src/Routing.js`, which `npm test` exercises with mock controllers + a recording
+client). **What still needs a real headset:** that the Quest exposes one live XR
+`inputSource.gamepad` per held controller, plus the raycast menus — neither is
+scriptable. **Next roadmap step: that real-VR smoke test when a headset is free,
+or start Phase M (networked multiplayer) now** since the input foundation is
+logic-verified. The deferred collections-to-shelves is done (Change mode, above).
 
 **Desktop (non-VR) play & edit is done.** `src/DesktopControls.js` makes the flat
 screen fully interactive: **click to capture the mouse, mouse-look + WASD to walk,
@@ -435,10 +439,14 @@ Phase E (in-VR editor) is complete — including the formerly-deferred
 collections-to-shelves (Change mode) — and `main` is **deployed live as of
 2026-06-09** (COOP/COEP verified). Sensible next steps, in rough priority order:
 
-1. **Real-VR smoke test on a Quest** (the one thing that can't be done headlessly,
-   deferred repeatedly): exercise the Play/Move/Change/Add edit-mode menus
-   (raycast-only) and confirm **local multiplayer controller routing by console
-   port** (headless has no XR gamepads). If anything is off, fix → `npm run deploy`.
+1. **Real-VR smoke test on a Quest** — now scoped down to only what can't be
+   scripted: the Play/Move/Change/Add edit-mode **raycast menus**, and that the
+   Quest hands one live `inputSource.gamepad` per held controller (the routing
+   *logic* on top of that is already covered by `npm test` /
+   `scripts/test-multiplayer.mjs`). If anything is off, fix → `npm run deploy`.
+   The deploy/network path itself is verified headlessly: `node scripts/debug.js
+   --url=<live> --boot=nes --screenshot=…` boots a game over the wire (COOP/COEP,
+   core fetch, real pixels) — re-run after any deploy.
 2. **Start Phase M (networked multiplayer)** — see `docs/MULTIPLAYER.md`; M0 is
    presence/avatars/voice + room-object sync. Build on the now-verified editor +
    input foundation.
