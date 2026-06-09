@@ -1,7 +1,10 @@
 # Handoff
 
-Single orientation doc for picking this project up cold. Last updated 2026-06-03
-after the **three in-VR edit modes (Move / Change / Add)** restructure — on top of
+Single orientation doc for picking this project up cold. Last updated 2026-06-09
+when `feat/edit-modes-and-desktop-controls` was merged to `main` and **deployed
+live** — the edit modes, desktop controls, and local multiplayer below are now the
+running build (real-VR smoke test still pending). Built on the **three in-VR edit
+modes (Move / Change / Add)** restructure — on top of
 local multiplayer (couch co-op), Phase E.3 (create props/portals in-VR), E.2
 (in-VR look editing), E.1 (move props + export) + its gamepad fix + first deploy,
 Phase R (R.1 JSON collection layer, R.2 RomResolver, R.3 rooms as JSON), the CC0
@@ -20,16 +23,19 @@ deferred "assign collections to shelves"** — Change mode does it via
 shelf object live (`GrabMgr.removeGrabbable`, `SceneMgr.removeObject`,
 `RoomEditor.removePlaced`). All edits ride out through Export Room (verified: unit
 tests + headless probe — furniture spawns/serialize, shelf cycle manifest→snes
-rebuild + export round-trip). **Real-VR smoke test of the modes + redeploy are
-pending** (menu is raycast-only; can't be exercised headlessly, same as E.1/E.2/E.3).
+rebuild + export round-trip). **Deployed live 2026-06-09; the real-VR smoke test of
+the modes is still pending** (menu is raycast-only; can't be exercised headlessly,
+same as E.1/E.2/E.3).
 
 **Local multiplayer is done** (route a controller's input to the player
 of the console port it's plugged into — `src/CableMgr.js`, per-player
 `GameInputMgr` dispatch, P1..P4 console ports; *local couch co-op, distinct from
 the networked Phase M in `docs/MULTIPLAYER.md`*). Tests + headless + screenshot
-green; **VR controller routing still needs a real-headset smoke test, and it's
-not yet redeployed** (live build is E.3). **Next roadmap step: real-VR verify +
-redeploy the multiplayer build, or close out the deferred collections-to-shelves.**
+green; **deployed live 2026-06-09, but VR controller routing still needs a
+real-headset smoke test** (headless has no XR gamepads). **Next roadmap step:
+real-VR verify the edit modes + multiplayer routing on a Quest, then start Phase M
+(networked multiplayer).** The deferred collections-to-shelves is now done (Change
+mode, above).
 
 **Desktop (non-VR) play & edit is done.** `src/DesktopControls.js` makes the flat
 screen fully interactive: **click to capture the mouse, mouse-look + WASD to walk,
@@ -43,11 +49,12 @@ forwards arrows/Enter/Space/H/G/Y/T/E/P/R/O); **WASD is safe because it's not in
 forward-set.** Crosshair + control hint live in `index.html`. Verified headless
 (movement + room-clamp + synthetic grab/release of a prop) + screenshot.
 
-**Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, Phase E.3,
-deployed 2026-06-03; local multiplayer is committed but NOT yet deployed).
-The original https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and
-is left untouched — `libretrowebxr2` is a deliberate separate folder. User
-confirmed E.1 works in VR; the gamepad-pickup regression below is fixed + redeployed.
+**Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, **current
+`main` @ e5b9f9f, deployed 2026-06-09** — edit modes, desktop controls, and local
+multiplayer are all live; COOP/COEP verified). The original
+https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and is left
+untouched — `libretrowebxr2` is a deliberate separate folder. User confirmed E.1
+works in VR; the gamepad-pickup regression below is fixed + redeployed.
 
 ## What this is
 
@@ -422,22 +429,21 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   (`window.__editor`/`__grab` are deliberately exposed *before* the await as a
   headless probe workaround — that's a patch, not the fix.)
 
-## Immediate next actions (Phase E is done — pick one)
+## Immediate next actions (Phase E is done + deployed)
 
-Phase E (in-VR editor) is complete bar the one deferred clause. Sensible next
-steps, in rough priority order:
+Phase E (in-VR editor) is complete — including the formerly-deferred
+collections-to-shelves (Change mode) — and `main` is **deployed live as of
+2026-06-09** (COOP/COEP verified). Sensible next steps, in rough priority order:
 
-1. **Deploy E.2 + E.3.** The live build at `/webxr/libretrowebxr2/` is still
-   Phase E.1. Run `npm run deploy` and re-verify COOP/COEP + a real-VR smoke
-   test (the Add-* buttons + look editing have only been desktop/headless-tested).
-2. **Close out "assign collections to shelves" in-VR** (the last deferred E.2/E.3
-   clause): add `GrabMgr.removeGrabbable`, then rebuild a shelf's cartridges in
-   place when its `collection`/`filter`/`half` changes. The descriptor +
-   serializer already support it (and E.3's `buildProp` now builds a shelf
-   standalone — so a rebuild is "removeGrabbable the old carts + buildProp the new
-   shelf"). This is the natural finish to the editor.
-3. **Start Phase M (multiplayer)** — see `docs/MULTIPLAYER.md`; M0 is
-   presence/avatars/voice + room-object sync.
+1. **Real-VR smoke test on a Quest** (the one thing that can't be done headlessly,
+   deferred repeatedly): exercise the Play/Move/Change/Add edit-mode menus
+   (raycast-only) and confirm **local multiplayer controller routing by console
+   port** (headless has no XR gamepads). If anything is off, fix → `npm run deploy`.
+2. **Start Phase M (networked multiplayer)** — see `docs/MULTIPLAYER.md`; M0 is
+   presence/avatars/voice + room-object sync. Build on the now-verified editor +
+   input foundation.
+3. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
+   a `manualChunks`/dynamic-import pass would help Quest load time if it bites.
 
 E.3 specifics worth knowing for whoever extends it:
 - `window.__add.{shelf,console,gamepad,poster,portal}()` drive prop creation
