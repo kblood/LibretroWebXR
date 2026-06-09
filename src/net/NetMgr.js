@@ -169,6 +169,7 @@ export class NetMgr {
   debugApi() {
     return {
       connected: () => this._connected,
+      selfId: () => this.presence.selfId,
       peerCount: () => this.presence.size,
       avatarCount: () => this.avatars.count,
       peers: () => this.presence.peers().map((p) => ({ id: p.id, nick: p.nick })),

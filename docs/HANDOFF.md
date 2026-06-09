@@ -478,11 +478,20 @@ collections-to-shelves (Change mode) — and `main` is **deployed live as of
    `scripts/smoke-object-sync.mjs` (two + a late Chrome peer: live propagation,
    last-writer-wins, snapshot convergence, clear) locally AND live against
    `wss://dionysus.dk/ws/`.
-   **Remaining for M0:** held-object sync (a peer's held cartridge as a ghost in
-   their avatar hand — the `STATE` channel already carries it, only the hand
-   visual is left); a TURN relay (symmetric NAT — same-LAN/most NATs work on
-   STUN); an in-VR voice/menu affordance (the button is desktop-only today); a
-   real two-headset smoke test. Then M1 host-authoritative game sync.
+   **M0.6 held-object sync is now done + DEPLOYED too:** grabbing a cartridge
+   broadcasts `hold:<file>` = `{holder,hand}` on the same `STATE` channel
+   (`GrabMgr` `onCartridgeGrabbed`/`onCartridgeReleased`); remote peers hide their
+   own copy and show a **ghost cartridge in the holder's avatar hand**
+   (`src/GhostCartMgr.js`, reconciled each frame from pure `src/net/HoldState.js`;
+   `AvatarMgr.getHand`). `hold:` keys are owner-scoped — `server/Hub.js` clears a
+   leaving peer's holds so a cart can't stay stuck in a departed hand; `tv` state
+   persists. Verified by `scripts/test-net.mjs` (93) and `scripts/smoke-held.mjs`
+   (ghost appear/hide, release, late-join snapshot, holder-disconnect cleanup —
+   14/14) locally AND live against `wss://dionysus.dk/ws/`.
+   **Remaining for M0 (hardening/polish — M0 is functionally complete):** a TURN
+   relay (symmetric NAT — same-LAN/most NATs work on STUN); an in-VR voice/menu
+   affordance (the button is desktop-only today); a real two-headset smoke test.
+   Then M1 host-authoritative game sync.
 3. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
    a `manualChunks`/dynamic-import pass would help Quest load time if it bites.
 

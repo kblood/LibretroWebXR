@@ -26,7 +26,7 @@ const LASER_IDLE = 0x88aaff;
 const LASER_HOVER = 0xffd060;
 
 export class GrabMgr {
-  constructor({ scene, controllers, console: consoleObj, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, isEditMode, onEditRelease, getMode, onSelectProp }) {
+  constructor({ scene, controllers, console: consoleObj, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased }) {
     this.scene = scene;
     this.controllers = controllers;
     this.console = consoleObj;
@@ -49,6 +49,11 @@ export class GrabMgr {
     // of attaching/moving it — the menu then cycles the selected prop's options.
     this.getMode = getMode || (() => (this.isEditMode() ? 'move' : 'off'));
     this.onSelectProp = onSelectProp || (() => {});
+    // Held-object sync (M0): fired when a cartridge is picked up / put down so
+    // main.js can broadcast who is holding it. onCartridgeGrabbed gets
+    // (cartObject, hand) where hand is 'left'|'right'|null (null = desktop).
+    this.onCartridgeGrabbed = onCartridgeGrabbed || (() => {});
+    this.onCartridgeReleased = onCartridgeReleased || (() => {});
     this.grabbables = [];
     this.held = new Map();              // controller -> Object3D
     this._hover = new Map();            // controller -> Object3D (or null)
@@ -222,7 +227,15 @@ export class GrabMgr {
       }
       target.userData.setHeld?.(true);
       this.onGamepadHeldChanged(true);
+    } else if (target.userData?.kind === 'cartridge') {
+      this.onCartridgeGrabbed(target, this._handFor(ctrl));
     }
+  }
+
+  // 'left'|'right' for the two XR controllers; null for the synthetic desktop one.
+  _handFor(ctrl) {
+    const i = this.controllers.indexOf(ctrl);
+    return i === 0 ? 'left' : i === 1 ? 'right' : null;
   }
 
   _release(ctrl) {
@@ -254,6 +267,10 @@ export class GrabMgr {
       obj.userData.setHeld?.(false);
       this.onGamepadHeldChanged(false);
     }
+
+    // Held-object sync: a cartridge is no longer in hand (it snapped home, was
+    // inserted, or was left in place) — clear our hold so peers drop the ghost.
+    if (kind === 'cartridge') this.onCartridgeReleased(obj);
   }
 
   _handleCartridgeRelease(cart) {

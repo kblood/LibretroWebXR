@@ -265,10 +265,24 @@ DebugHud for players 2-4, in-VR port retargeting.
     snapshot + empty-room reset) and `scripts/smoke-object-sync.mjs` (two+late
     Chrome peers: live propagation, last-writer-wins, snapshot convergence,
     clear), locally AND live against `wss://dionysus.dk/ws/`.
-  - **M0 remaining:** held-object sync (which cartridge a peer is holding, as a
-    ghost in their avatar hand — the `STATE` channel already supports it, only the
-    hand-attach visual is left); a TURN relay; an in-VR voice/menu affordance
-    (the button is desktop-only today); a real two-headset smoke test.
+  - **M0.6 ✅ done + DEPLOYED** — held-object sync: grabbing a cartridge
+    broadcasts `hold:<file>` = `{holder,hand}` on the same `STATE` channel
+    (`GrabMgr` `onCartridgeGrabbed`/`onCartridgeReleased`); remote peers hide
+    their own copy and show a **ghost cartridge in the holder's avatar hand**
+    (`src/GhostCartMgr.js`, reconciled each frame from pure
+    `src/net/HoldState.js`; `AvatarMgr.getHand`). `hold:` keys are owner-scoped —
+    `server/Hub.js` clears a leaving peer's holds (replayed to the room) so a cart
+    can't stay stuck in a departed hand; persistent `tv` state is untouched.
+    Verified by `scripts/test-net.mjs` (now 93; `parseHolds` filtering +
+    disconnect-clears) and `scripts/smoke-held.mjs` (ghost appears/hides, release,
+    late-join snapshot, holder-disconnect cleanup — 14/14) locally AND live
+    against `wss://dionysus.dk/ws/`. Desktop holders attach the ghost to the head
+    (no tracked hand); file-keyed identity aliases if two shelves host the same
+    file (acceptable pre-authority).
+  - **M0 remaining:** a TURN relay (symmetric NAT); an in-VR voice/menu
+    affordance (the button is desktop-only today); a real two-headset smoke test.
+    With presence + voice + TV + held-object sync all live, M0 is functionally
+    complete — these three are hardening/polish before M1.
 - **M1:** host-authoritative game sync (input + video stream) for 2-player.
 - **M2:** rollback game sync for deterministic cores (adapt netplayjs +
   `SaveState`).

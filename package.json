@@ -24,6 +24,7 @@
     "smoke-presence": "node scripts/smoke-presence.mjs",
     "smoke-voice": "node scripts/smoke-voice.mjs",
     "smoke-object-sync": "node scripts/smoke-object-sync.mjs",
+    "smoke-held": "node scripts/smoke-held.mjs",
     "deploy": "pwsh scripts/deploy.ps1"
   },
   "devDependencies": {

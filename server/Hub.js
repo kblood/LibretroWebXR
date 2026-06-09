@@ -90,13 +90,29 @@ export class Hub {
     return { broadcast: { msg: makeState({ key, value: value ?? null, id: peerId }), exclude: peerId } };
   }
 
-  /** Peer's socket closed. Drop it (and the room if now empty) and LEAVE-broadcast. */
+  /**
+   * Peer's socket closed. Drop it (and the room if now empty), and return a
+   * LEAVE broadcast plus `stateClears` — STATE-null messages for every
+   * owner-scoped key the peer set (the `hold:` namespace), so a held object
+   * can't stay stuck in a departed player's hand. Persistent room state (e.g.
+   * the loaded game on `tv`) is deliberately left in place.
+   */
   disconnect(roomId, peerId) {
     const room = this.rooms.get(roomId);
     if (!room || !room.has(peerId)) return {};
     room.delete(peerId);
+    const stateClears = [];
+    const state = this.roomState.get(roomId);
+    if (state) {
+      for (const [key, s] of [...state]) {
+        if (s.id === peerId && key.startsWith('hold:')) {
+          state.delete(key);
+          stateClears.push(makeState({ key, value: null, id: peerId }));
+        }
+      }
+    }
     if (room.size === 0) { this.rooms.delete(roomId); this.roomState.delete(roomId); }
-    return { broadcast: { msg: makeLeave({ id: peerId }), exclude: peerId } };
+    return { broadcast: { msg: makeLeave({ id: peerId }), exclude: peerId }, stateClears };
   }
 
   /** Peer ids currently in a room (for the adapter's broadcast loop). */

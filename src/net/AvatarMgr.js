@@ -47,6 +47,18 @@ export class AvatarMgr {
     return av ? av.head : null;
   }
 
+  /**
+   * A hand Object3D for a peer ('left'|'right'), for attaching a held-object
+   * ghost ([[src/GhostCartMgr.js]]). Returns null if the avatar or that hand
+   * isn't present. The hand is only *visible* when its pose is tracked (a VR
+   * controller); on desktop callers fall back to getHead().
+   */
+  getHand(peerId, which) {
+    const av = this._avatars.get(peerId);
+    if (!av) return null;
+    return which === 'right' ? av.rightHand : which === 'left' ? av.leftHand : null;
+  }
+
   _remove(id, av) {
     this.scene.removeObject(av.group);
     av.dispose();

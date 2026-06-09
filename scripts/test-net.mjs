@@ -8,6 +8,7 @@ import {
 } from '../src/net/NetProtocol.js';
 import { PresenceState } from '../src/net/PresenceState.js';
 import { RoomObjects } from '../src/net/RoomObjects.js';
+import { makeHoldKey, isHoldKey, parseHolds } from '../src/net/HoldState.js';
 import { Hub } from '../server/Hub.js';
 
 let passed = 0;
@@ -257,6 +258,45 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   hub.setState('r', 'a', { key: 'tv', value: { file: 'g.nes' } });
   hub.disconnect('r', 'a'); // room now empty
   ok(hub.connect('r', 'a2').state.length === 0, 'state does not leak across an empty-room reset');
+}
+
+// === HoldState: hold keys + parseHolds filtering ===========================
+{
+  ok(makeHoldKey('pong.nes') === 'hold:pong.nes', 'makeHoldKey namespaces the object id');
+  ok(isHoldKey('hold:x') && !isHoldKey('tv') && !isHoldKey(null), 'isHoldKey matches only the hold namespace');
+
+  const entries = [
+    ['tv', { file: 'g.nes' }],                              // not a hold → ignored
+    ['hold:pong.nes', { holder: 'a', hand: 'left' }],
+    ['hold:snake.gb', { holder: 'me', hand: 'right' }],     // our own → ignored
+    ['hold:ghost.sfc', { holder: 'gone', hand: null }],     // holder absent → ignored when filtered
+    ['hold:bad.nes', null],                                 // cleared → ignored
+  ];
+  const all = parseHolds(entries, { selfId: 'me' });
+  ok(all.length === 2, 'parseHolds keeps holds, drops tv/self/cleared');
+  ok(all.some((h) => h.objId === 'pong.nes' && h.holder === 'a' && h.hand === 'left'), 'parseHolds yields objId/holder/hand');
+
+  const present = parseHolds(entries, { selfId: 'me', presentIds: new Set(['a']) });
+  ok(present.length === 1 && present[0].objId === 'pong.nes', 'parseHolds drops holders not in presentIds');
+}
+
+// === Hub: disconnect clears the leaving peer's hold:* state (not tv) ========
+{
+  const hub = new Hub();
+  hub.connect('r', 'a');
+  hub.connect('r', 'b');
+  hub.setState('r', 'a', { key: 'tv', value: { file: 'g.nes' } });        // persistent
+  hub.setState('r', 'a', { key: 'hold:pong.nes', value: { holder: 'a' } }); // owner-scoped
+  hub.setState('r', 'b', { key: 'hold:snake.gb', value: { holder: 'b' } }); // b's, must survive a's leave
+
+  const res = hub.disconnect('r', 'a');
+  ok(Array.isArray(res.stateClears) && res.stateClears.length === 1, 'disconnect returns one state-clear (a\'s hold)');
+  ok(res.stateClears[0].key === 'hold:pong.nes' && res.stateClears[0].value === null, 'the clear nulls a\'s held cart');
+
+  // tv (persistent) and b's hold both survive — visible in a fresh joiner's snapshot.
+  const snap = hub.connect('r', 'c').state;
+  const keys = snap.map((m) => m.key).sort();
+  ok(keys.length === 2 && keys[0] === 'hold:snake.gb' && keys[1] === 'tv', 'tv + b\'s hold persist; a\'s hold is gone');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -21,6 +21,8 @@ import { CORES, coreForFile, portsForSystem } from './systems.js';
 import { CableMgr } from './CableMgr.js';
 import { computeRouting as routeControllers } from './Routing.js';
 import { NetMgr } from './net/NetMgr.js';
+import { GhostCartMgr } from './GhostCartMgr.js';
+import { makeHoldKey, parseHolds } from './net/HoldState.js';
 import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
 import { parseRoom, defaultRoom, roomCollectionRefs } from './RoomLoader.js';
@@ -320,6 +322,15 @@ async function buildCartridgeWorld() {
     // it; the menu then cycles the selected prop's options.
     getMode: () => editor?.getMode() || 'off',
     onSelectProp: (obj) => editor?.select(obj),
+    // Held-object sync (M0): announce/clear which cartridge we're holding so
+    // peers can show it as a ghost in our avatar's hand. No-op outside a session.
+    onCartridgeGrabbed: (cart, hand) => {
+      const id = net?.presence?.selfId;
+      if (net && id) net.setObjectState(makeHoldKey(cart.userData.file), { holder: id, hand });
+    },
+    onCartridgeReleased: (cart) => {
+      if (net) net.setObjectState(makeHoldKey(cart.userData.file), null);
+    },
   });
   cartridges.forEach((c) => grabMgr.addGrabbable(c));
   grabMgr.addGrabbable(gamepadObj);
@@ -350,6 +361,23 @@ async function buildCartridgeWorld() {
   // cycles the currently-selected prop's options (poster art / shelf collection).
   window.__mode = (m) => editor.setMode(m);
   window.__change = () => cycleSelected();
+
+  // Held-object sync (M0): show a ghost cartridge in a remote peer's hand (and
+  // hide our copy) for each cart they're holding. Reconciles each frame from the
+  // shared STATE channel. Only in a session; exposed early for headless smokes.
+  if (net) {
+    const getCartByObjId = (objId) => cartridges.find((c) => c.userData.file === objId) || null;
+    const ghostMgr = new GhostCartMgr({ avatars: net.avatars, getCartByObjId });
+    scene.addTickCallback(() => {
+      const presentIds = new Set(net.presence.peers().map((p) => p.id));
+      ghostMgr.sync(parseHolds(net.objects.entries(), { selfId: net.presence.selfId, presentIds }));
+    });
+    window.__ghost = {
+      count: () => ghostMgr.ghostCount,
+      hidden: () => ghostMgr.hiddenCount,
+      has: (file) => ghostMgr.hasGhost(file),
+    };
+  }
 
   // Flat-screen controls: mouse-look + WASD + click-to-interact, so the in-VR
   // features are usable on a desktop. Inert while presenting (XR controllers win).

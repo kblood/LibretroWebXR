@@ -70,7 +70,10 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     sockets.delete(peerId);
-    broadcast(roomId, hub.disconnect(roomId, peerId).broadcast);
+    const res = hub.disconnect(roomId, peerId);
+    broadcast(roomId, res.broadcast);
+    // Clear any objects the peer was holding so their ghosts disappear for others.
+    for (const msg of res.stateClears || []) broadcast(roomId, { msg, exclude: peerId });
     console.log(`[room-server] - ${peerId.slice(0, 8)} ← "${roomId}" (${hub.size(roomId)} left)`);
   });
 
