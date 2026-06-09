@@ -244,9 +244,17 @@ DebugHud for players 2-4, in-VR port retargeting.
     + renders its avatar). **Live on dionysus.dk (2026-06-09):** systemd unit
     `libretrowebxr-room` (port 8787) + Apache `/ws/` proxy; the production smoke
     against `wss://dionysus.dk/ws/` passes. Templates: `deploy/libretrowebxr-room.{service,conf}`.
-  - **M0.4 ← next** — voice: WebRTC mesh signaled over the same WS; mic →
-    positional audio on each avatar head. Plus room-object sync (who grabbed
-    which cartridge, TV/game state) over the presence channel.
+  - **M0.4 ✅ done + DEPLOYED** — spatial voice: WebRTC mesh (`src/net/VoiceMgr.js`)
+    signaled over the same WS (`SIGNAL` messages, directed relay in `server/Hub.js`);
+    each remote mic → `THREE.PositionalAudio` on that peer's avatar head; a
+    header "🎤 Voice" button enables/mutes. Verified by `scripts/smoke-voice.mjs`
+    (two headless Chrome + fake mics reach ice=connected with the remote track
+    attached) locally AND live against `wss://dionysus.dk/ws/`. STUN-only —
+    **TURN is a follow-on** (needed for peers behind symmetric NAT; same-LAN /
+    most NATs work on STUN).
+  - **M0 remaining:** room-object sync (who grabbed which cartridge, TV / inserted
+    game) over the presence channel; a TURN relay; an in-VR voice/menu affordance
+    (the button is desktop-only today); a real two-headset smoke test.
 - **M1:** host-authoritative game sync (input + video stream) for 2-player.
 - **M2:** rollback game sync for deterministic cores (adapt netplayjs +
   `SaveState`).

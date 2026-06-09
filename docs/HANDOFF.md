@@ -459,10 +459,18 @@ collections-to-shelves (Change mode) — and `main` is **deployed live as of
    proxy; templates committed at `deploy/libretrowebxr-room.{service,conf}`. The
    live build includes the client, so `https://dionysus.dk/webxr/libretrowebxr2/?session=<room>`
    joins a shared room — verified by the production smoke against `wss://dionysus.dk/ws/`.
-   **Remaining for M0:** **M0.4 voice** (WebRTC mesh signaled over the same WS →
-   positional audio per avatar) + room-object sync (who grabbed which cartridge /
-   TV / inserted game) over the presence channel. Then M1 host-authoritative game
-   sync. (Still worth a real two-headset smoke test when convenient.)
+   **M0.4 voice is now done + DEPLOYED too:** spatial voice over a WebRTC mesh
+   (`src/net/VoiceMgr.js`) signaled on the same WS (`SIGNAL` messages, directed
+   relay in `server/Hub.js`); each remote mic → `THREE.PositionalAudio` on that
+   peer's avatar head; a header "🎤 Voice" button enables/mutes. Verified by
+   `scripts/smoke-voice.mjs` (two headless Chrome + fake mics reach ice=connected
+   with the remote track attached) locally AND live against `wss://dionysus.dk/ws/`.
+   STUN-only.
+   **Remaining for M0:** room-object sync (who grabbed which cartridge / TV /
+   inserted game) over the presence channel; a TURN relay (symmetric NAT —
+   same-LAN/most NATs work on STUN); an in-VR voice/menu affordance (the button is
+   desktop-only today); a real two-headset smoke test. Then M1 host-authoritative
+   game sync.
 3. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
    a `manualChunks`/dynamic-import pass would help Quest load time if it bites.
 
