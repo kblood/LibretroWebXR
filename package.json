@@ -18,7 +18,7 @@
     "make-snes-demo": "node scripts/make-snes-demo.mjs",
     "make-gba-paint": "node scripts/make-gba-paint.mjs",
     "make-vb-demo": "node scripts/make-vb-demo.mjs",
-    "test": "node scripts/test-collection.mjs",
+    "test": "node scripts/test-collection.mjs && node scripts/test-multiplayer.mjs",
     "debug": "node scripts/debug.js",
     "deploy": "pwsh scripts/deploy.ps1"
   },

@@ -19,6 +19,7 @@ import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
 import { CORES, coreForFile, portsForSystem } from './systems.js';
 import { CableMgr } from './CableMgr.js';
+import { computeRouting as routeControllers } from './Routing.js';
 import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
 import { parseRoom, defaultRoom, roomCollectionRefs } from './RoomLoader.js';
@@ -119,26 +120,14 @@ const registerGamepad = (obj) => {
 // held gamepads → each holding hand drives only its own gamepad's player.
 function computeRouting() {
   if (!grabMgr) return [];
-  const held = [];
-  for (const ctrl of scene.controllers) {
-    const obj = grabMgr.heldObject(ctrl);
-    if (obj?.userData?.kind === 'gamepad') held.push({ ctrl, obj });
-  }
-  if (held.length === 0) return [];
-  if (held.length === 1) {
-    const { ctrl: holdCtrl, obj } = held[0];
-    const player = cable.playerOf(obj.userData.cableId);
-    const routing = [{ ctrl: holdCtrl, player, hand: 'holding' }];
-    for (const ctrl of scene.controllers) {
-      if (ctrl !== holdCtrl && grabMgr.isControllerFree(ctrl)) {
-        routing.push({ ctrl, player, hand: 'free' });
-      }
-    }
-    return routing;
-  }
-  return held.map(({ ctrl, obj }) => ({
-    ctrl, player: cable.playerOf(obj.userData.cableId), hand: 'holding',
-  }));
+  // The policy lives in [[src/Routing.js]] (pure, unit-tested); here we just
+  // bind it to live grab + cable state.
+  return routeControllers({
+    controllers: scene.controllers,
+    heldObject: (ctrl) => grabMgr.heldObject(ctrl),
+    isControllerFree: (ctrl) => grabMgr.isControllerFree(ctrl),
+    playerOf: (cableId) => cable.playerOf(cableId),
+  });
 }
 let debugHud = null;
 let editor = null;       // Phase E.1 in-VR room editor (set in buildCartridgeWorld)
