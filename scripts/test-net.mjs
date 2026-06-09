@@ -1,0 +1,122 @@
+// Unit tests for the M0 presence layer — pure protocol + peer registry
+// ([[src/net/NetProtocol.js]], [[src/net/PresenceState.js]]). No THREE / no
+// socket, so this runs in `npm test`.
+
+import {
+  MSG, POSE_LEN, isValidPart, roundPart, makePose, makeJoin, makeHello,
+  makeLeave, validate, encode, decode,
+} from '../src/net/NetProtocol.js';
+import { PresenceState } from '../src/net/PresenceState.js';
+
+let passed = 0;
+let failed = 0;
+const ok = (cond, msg) => { if (cond) { passed++; } else { failed++; console.error(`  FAIL: ${msg}`); } };
+
+const HEAD = [1, 1.6, -2, 0, 0, 0, 1];
+const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
+
+// === NetProtocol: pose parts ===============================================
+{
+  ok(isValidPart(null), 'null is a valid (untracked) part');
+  ok(isValidPart(HEAD), 'a 7-tuple is a valid part');
+  ok(!isValidPart([1, 2, 3]), 'a short tuple is invalid');
+  ok(!isValidPart([0, 0, 0, 0, 0, 0, NaN]), 'NaN in a part is invalid');
+  ok(!isValidPart('nope'), 'a string is not a part');
+  ok(POSE_LEN === 7, 'pose length is 7');
+}
+
+// === NetProtocol: rounding keeps packets small =============================
+{
+  const r = roundPart([1.23456, 0, 0, 0, 0, 0, 1], 3);
+  ok(r[0] === 1.235, 'roundPart rounds to 3 decimals');
+  ok(roundPart(null) === null, 'roundPart passes null through');
+  const p = makePose({ head: [1.111111, 2.222222, 3.333333, 0, 0, 0, 1], decimals: 2 });
+  ok(p.head[0] === 1.11 && p.head[1] === 2.22, 'makePose rounds at the requested precision');
+  ok(p.left === null && p.right === null, 'makePose defaults untracked hands to null');
+  ok(p.type === MSG.POSE, 'makePose stamps the POSE type');
+}
+
+// === NetProtocol: builders + validation ====================================
+{
+  ok(validate(makeJoin({ id: 'a', nick: 'Kasper', color: '#f00' })).ok, 'JOIN validates');
+  ok(validate(makeLeave({ id: 'a' })).ok, 'LEAVE validates');
+  ok(validate(makeHello({ selfId: 'a', peers: [{ id: 'b', nick: 'B' }] })).ok, 'HELLO validates');
+  ok(validate(makePose({ head: HEAD, left: HAND })).ok, 'POSE validates');
+
+  ok(!validate({ type: 'bogus' }).ok, 'unknown type rejected');
+  ok(!validate(null).ok, 'null rejected');
+  ok(!validate({ type: MSG.POSE, head: [1, 2] }).ok, 'POSE with a bad part rejected');
+  ok(!validate({ type: MSG.LEAVE }).ok, 'LEAVE without id rejected');
+
+  // makeHello/makeJoin coerce defaults so the wire shape is always complete.
+  const h = makeHello({ selfId: 7, peers: [{ id: 9 }] });
+  ok(h.selfId === '7' && h.peers[0].id === '9', 'makeHello stringifies ids');
+  ok(h.peers[0].nick === 'Player' && h.peers[0].color === '#88aaff', 'makeHello fills nick/color defaults');
+}
+
+// === NetProtocol: encode/decode round-trip + bad input =====================
+{
+  const msg = makePose({ head: HEAD, left: HAND, id: 'x', t: 123 });
+  const back = decode(encode(msg));
+  ok(back && back.id === 'x' && back.head[0] === HEAD[0], 'encode→decode round-trips a POSE');
+  ok(decode('{not json') === null, 'decode returns null on bad JSON');
+  ok(decode(encode({ type: 'bogus' })) === null, 'decode returns null on invalid shape');
+}
+
+// === PresenceState: join / leave / self-exclusion ==========================
+{
+  const ps = new PresenceState({ selfId: 'me' });
+  ps.apply(makeJoin({ id: 'me', nick: 'Me' }), 0);  // self must be ignored
+  ok(ps.size === 0, 'a JOIN for self is ignored');
+
+  ps.apply(makeJoin({ id: 'a', nick: 'Alice', color: '#0f0' }), 0);
+  ps.apply(makeJoin({ id: 'b', nick: 'Bob' }), 0);
+  ok(ps.size === 2, 'two remote peers tracked');
+  ok(ps.get('a').nick === 'Alice' && ps.get('a').color === '#0f0', 'peer nick/color recorded');
+
+  ps.apply(makeLeave({ id: 'a' }), 0);
+  ok(ps.size === 1 && !ps.get('a'), 'LEAVE removes the peer');
+}
+
+// === PresenceState: HELLO seeds the roster and self id =====================
+{
+  const ps = new PresenceState();
+  ps.apply(makeHello({ selfId: 'me', peers: [{ id: 'a', nick: 'A' }, { id: 'me', nick: 'self?' }] }), 0);
+  ok(ps.selfId === 'me', 'HELLO sets selfId');
+  ok(ps.size === 1 && !!ps.get('a'), 'HELLO seeds peers but excludes self');
+}
+
+// === PresenceState: pose updates ===========================================
+{
+  const ps = new PresenceState({ selfId: 'me' });
+  ps.apply(makePose({ id: 'a', head: HEAD, left: HAND }), 100);
+  const a = ps.get('a');
+  ok(!!a, 'POSE from an unknown peer auto-creates it');
+  ok(a.pose.head[1] === HEAD[1] && a.pose.left[0] === HAND[0], 'pose head+left stored');
+  ok(a.pose.right === null, 'untracked right hand stays null');
+  ok(a.lastSeen === 100, 'lastSeen stamped from nowMs');
+
+  ps.apply(makePose({ id: 'me', head: HEAD }), 200); // our own pose echoed back
+  ok(ps.size === 1, 'a POSE for self is ignored (we never render our own avatar)');
+}
+
+// === PresenceState: prune stale peers ======================================
+{
+  const ps = new PresenceState({ selfId: 'me', ttlMs: 5000 });
+  ps.apply(makePose({ id: 'a', head: HEAD }), 0);
+  ps.apply(makePose({ id: 'b', head: HEAD }), 4000);
+
+  let removed = ps.prune(4000);
+  ok(removed.length === 0 && ps.size === 2, 'nothing pruned within ttl');
+
+  removed = ps.prune(6000); // a last seen at 0 → 6000ms stale > 5000; b at 4000 → 2000ms fresh
+  ok(removed.length === 1 && removed[0] === 'a', 'prune drops only the peer past ttl');
+  ok(ps.size === 1 && !!ps.get('b'), 'fresh peer survives prune');
+
+  // A fresh pose resets the clock so it survives the next prune.
+  ps.apply(makePose({ id: 'b', head: HEAD }), 7000);
+  ok(ps.prune(8000).length === 0, 'a recent pose keeps a peer alive');
+}
+
+console.log(`\n${passed} passed, ${failed} failed`);
+process.exit(failed ? 1 : 0);
