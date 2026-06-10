@@ -128,6 +128,19 @@ export function makeInput({ to, player, btn, down = false, seq, from } = {}) {
 }
 
 /**
+ * M1.1 host-routing decision (pure): who, if anyone, a peer should forward its
+ * captured game input to. The host is the owner of the shared `tv` state. Returns
+ * the host id to send to, or null when there is no host yet, or when THIS peer is
+ * the host (it drives its own core locally — no self-send). Kept here, pure, so
+ * the client/host split is unit-tested rather than buried in main.js wiring.
+ */
+export function hostInputTarget({ hostId, selfId } = {}) {
+  if (!hostId) return null;
+  if (selfId != null && String(hostId) === String(selfId)) return null;
+  return String(hostId);
+}
+
+/**
  * Validate a decoded message. Returns { ok:true } or { ok:false, error }.
  * Keeps the server/client from acting on malformed packets.
  */

@@ -63,12 +63,21 @@ function codesFor(player, btn) {
 }
 
 export class GameInputMgr {
-  constructor({ controllers, client, isControllerHoldingGamepad, isGamepadHeld, getRouting, onKeyDown }) {
+  constructor({ controllers, client, isControllerHoldingGamepad, isGamepadHeld, getRouting, onKeyDown, onLogicalInput }) {
     this.controllers = controllers;
     this.client = client;
     this.isControllerHoldingGamepad = isControllerHoldingGamepad;
     this.isGamepadHeld = isGamepadHeld;
     this.onKeyDown = onKeyDown || (() => {});
+    // M1.1 (networked client): fired with { player, btn, down } on each logical
+    // RetroPad button transition of a routed controller — BEFORE keycode mapping,
+    // so the host can resolve it for its own core. main.js forwards these to the
+    // host peer over the room socket. null on a single-player / host peer.
+    this._onLogicalInput = onLogicalInput || null;
+    this._logicalState = new Map(); // `${player}\0${btn}` -> { player, btn } held last frame
+    // M1.1 (networked host): key codes a remote player currently holds, merged
+    // into each tick()'s dispatch (see setRemoteButton).
+    this._remoteDesired = new Set();
     // getRouting() → [{ ctrl, player, hand:'holding'|'free' }] : which player
     // each active controller drives this frame (main.js derives it from grab +
     // cable state). Default reproduces the original single-player behaviour:
@@ -96,16 +105,25 @@ export class GameInputMgr {
   tick() {
     const desired = new Set();
     const map = this._systemMap;
+    // Logical (player, RetroPad-button) pairs pressed this frame by local
+    // controllers — gathered before keycode mapping so a networked client can
+    // forward the logical transitions to the host (the host re-resolves codes
+    // for its own core). Keyed by `${player}\0${btn}` for cheap diffing.
+    const logical = new Map();
 
     // Each routed controller drives its player's keys, using the holding/free
     // half of the system map. addRetro resolves the logical button to that
-    // player's code(s).
+    // player's code(s) AND records the logical pair for the host forward.
     for (const { ctrl, player, hand } of this.getRouting()) {
       const handMap = map[hand] || map.holding;
       const gp = ctrl.userData.inputSource?.gamepad;
       if (!gp || !gp.buttons || !gp.axes) continue;
 
-      const addRetro = (btn) => { for (const c of codesFor(player, btn)) desired.add(c); };
+      const addRetro = (btn) => {
+        if (!btn) return;
+        logical.set(`${player}\0${btn}`, { player, btn });
+        for (const c of codesFor(player, btn)) desired.add(c);
+      };
 
       if (gp.buttons[0]?.pressed) addRetro(handMap.trigger);
       if (gp.buttons[3]?.pressed) addRetro(handMap.stickClick);
@@ -119,6 +137,23 @@ export class GameInputMgr {
       if (sx <= -STICK_THRESHOLD) addRetro('Left');
       if (sx >=  STICK_THRESHOLD) addRetro('Right');
     }
+
+    // M1.1 client→host: emit one message per logical transition (diff vs last
+    // frame). Done before code-mapping so the host owns the keycode resolution.
+    if (this._onLogicalInput) {
+      for (const [k, v] of logical) {
+        if (!this._logicalState.has(k)) this._onLogicalInput({ player: v.player, btn: v.btn, down: true });
+      }
+      for (const [k, v] of this._logicalState) {
+        if (!logical.has(k)) this._onLogicalInput({ player: v.player, btn: v.btn, down: false });
+      }
+      this._logicalState = logical;
+    }
+
+    // M1.1 host: merge remote players' held codes so the unified press/release
+    // sweep below drives them into the core exactly like a local press — and the
+    // keyup sweep won't lift a remote key that is still held.
+    for (const c of this._remoteDesired) desired.add(c);
 
     // Emit keydown for newly-pressed codes.
     for (const code of desired) {
@@ -150,6 +185,24 @@ export class GameInputMgr {
       this.client.sendInput('keyup', m.code, m.key, m.keyCode, m.location);
     }
   }
+
+  // M1.1 host side: record a remote networked player's logical button as held
+  // or released. `player` is a console-port slot (1..4), `btn` a RetroPad button
+  // name (A/B/X/Y/L/R/Start/Select/Up/Down/Left/Right — the keys of
+  // [[src/ControllerMaps.js]]'s RETROPAD_KEYS / EXTRA_PLAYER_KEYS). The resolved
+  // code(s) join _remoteDesired and dispatch on the next tick(). Safe before the
+  // first tick. Remote codes coexist with local ones because every player's
+  // codes are globally unique (asserted by the no-overlap test).
+  setRemoteButton({ player, btn, down }) {
+    for (const c of codesFor(player, btn)) {
+      if (down) this._remoteDesired.add(c);
+      else this._remoteDesired.delete(c);
+    }
+  }
+
+  // Drop all remote-held keys (e.g. the remote player disconnected). Their
+  // keyups fire on the next tick() via the normal sweep, so nothing latches.
+  clearRemote() { this._remoteDesired.clear(); }
 
   // Per-controller debug snapshot for [[src/DebugHud.js]] and the
   // gamepad mesh's animation. Returns { holdingHand, freeHand } where

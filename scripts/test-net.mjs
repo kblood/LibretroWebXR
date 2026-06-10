@@ -4,7 +4,7 @@
 
 import {
   MSG, POSE_LEN, SIGNAL_KINDS, isValidPart, roundPart, makePose, makeJoin, makeHello,
-  makeLeave, makeSignal, makeState, makeInput, validate, encode, decode,
+  makeLeave, makeSignal, makeState, makeInput, hostInputTarget, validate, encode, decode,
 } from '../src/net/NetProtocol.js';
 import { PresenceState } from '../src/net/PresenceState.js';
 import { RoomObjects } from '../src/net/RoomObjects.js';
@@ -312,6 +312,16 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   ok(!validate({ type: MSG.INPUT, to: 'h', player: 1, btn: 'Up' }).ok, 'INPUT without down rejected');
   const back = decode(encode(makeInput({ to: 'h', player: 3, btn: 'Left', down: true })));
   ok(back && back.player === 3 && back.btn === 'Left', 'INPUT round-trips through encode/decode');
+}
+
+// === M1.1: hostInputTarget — who a peer forwards its captured input to ======
+{
+  ok(hostInputTarget({ hostId: 'h', selfId: 'c' }) === 'h', 'a client forwards to the host');
+  ok(hostInputTarget({ hostId: 'h', selfId: 'h' }) === null, 'the host does NOT forward to itself');
+  ok(hostInputTarget({ hostId: null, selfId: 'c' }) === null, 'no host yet → nothing to forward');
+  ok(hostInputTarget({ hostId: 'h', selfId: null }) === 'h', 'forwards even before our own id is known');
+  ok(hostInputTarget({ hostId: 5, selfId: 5 }) === null, 'host id compared as a string (no self-send on numeric ids)');
+  ok(hostInputTarget({}) === null, 'empty args → no target');
 }
 
 // === Hub: input is a DIRECTED relay to the host, sender-id stamped ==========

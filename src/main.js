@@ -112,6 +112,10 @@ if (sessionRoom) {
     color,
     // M0.5 room-object sync: reflect a remote peer's shared state into our scene.
     onObjectState: (key, value) => { if (key === 'tv') applyRemoteTv(value); },
+    // M1.1 host-authoritative input: a remote player's RetroPad button reached
+    // us. We inject it into our core ONLY when we're the host (the tv-state
+    // owner running the authoritative game); otherwise it isn't ours to apply.
+    onGameInput: (ev) => { if (net?.isHost()) gameInput?.setRemoteButton(ev); },
   });
   net.connect();
   scene.addTickCallback((dt) => net.tick(dt));
@@ -419,6 +423,12 @@ async function buildCartridgeWorld() {
     // LED pulse for every emulator keydown — visible in-VR feedback that
     // gamepad input is reaching the core.
     onKeyDown: () => consoleObj.userData.pulse?.(0xffffff, 90),
+    // M1.1 networked client: forward each logical RetroPad transition to the
+    // host (no-op when we ARE the host or no game is loaded — see
+    // NetMgr.forwardGameInput → NetProtocol.hostInputTarget). We still dispatch
+    // locally too, so this peer keeps seeing its own game until host video
+    // streaming (M1.2) lands. Inert in single-player (net === null).
+    onLogicalInput: (ev) => net?.forwardGameInput(ev),
   });
 
   scene.addTickCallback((dt) => desktop.tick(dt));

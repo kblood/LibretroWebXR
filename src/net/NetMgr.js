@@ -17,7 +17,7 @@ import { PresenceState } from './PresenceState.js';
 import { RoomObjects } from './RoomObjects.js';
 import { AvatarMgr } from './AvatarMgr.js';
 import { VoiceMgr } from './VoiceMgr.js';
-import { MSG, makeJoin, makePose, makeSignal, makeState, makeInput, encode, decode } from './NetProtocol.js';
+import { MSG, makeJoin, makePose, makeSignal, makeState, makeInput, hostInputTarget, encode, decode } from './NetProtocol.js';
 
 const _p = new THREE.Vector3();
 const _q = new THREE.Quaternion();
@@ -109,6 +109,29 @@ export class NetMgr {
   getObjectState(key) { return this.objects.get(key); }
 
   // --- M1 game sync (host-authoritative input over the relay) ---------------
+
+  // This peer's server-assigned id (null until HELLO arrives).
+  get selfId() { return this.presence.selfId; }
+
+  // The host = the peer that owns the shared `tv` state (whoever last booted the
+  // room's game via setObjectState('tv', …)). null until someone has.
+  hostId() { return this.objects.ownerOf('tv'); }
+
+  // True when WE are the host (we own the tv state) → we run the authoritative
+  // core and inject remote inputs, rather than forwarding our own.
+  isHost() {
+    const self = this.presence.selfId;
+    return !!self && self === this.objects.ownerOf('tv');
+  }
+
+  // Forward one captured local logical input to the host, if there is a remote
+  // one. Pure routing decision lives in NetProtocol.hostInputTarget; no-op when
+  // we're the host or no game is loaded. Returns true if a message was sent.
+  forwardGameInput({ player, btn, down }) {
+    const to = hostInputTarget({ hostId: this.objects.ownerOf('tv'), selfId: this.presence.selfId });
+    if (!to) return false;
+    return this.sendGameInput({ to, player, btn, down });
+  }
 
   /**
    * Send one logical RetroPad button transition to the host peer `to` (the peer
@@ -212,6 +235,9 @@ export class NetMgr {
       setObjectState: (key, value) => this.setObjectState(key, value),
       // M1 game sync
       sendGameInput: (m) => this.sendGameInput(m),
+      forwardGameInput: (m) => this.forwardGameInput(m),
+      hostId: () => this.hostId(),
+      isHost: () => this.isHost(),
       recvInputs: () => this._recvInputs.slice(),
     };
   }

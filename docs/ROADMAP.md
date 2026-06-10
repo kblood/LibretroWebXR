@@ -294,11 +294,24 @@ DebugHud for players 2-4, in-VR port retargeting.
     Verified by `scripts/test-net.mjs` (now 106) and `scripts/smoke-gameinput.mjs`
     (host/client/bystander: directed delivery, id-stamping, no broadcast leak)
     locally AND live against `wss://dionysus.dk/ws/`.
-  - **M1.1 ← next** — wire it end-to-end: a non-host client captures its
-    controller/keyboard as a networked player and sends `INPUT`; the host injects
-    via `GameInputMgr` `codesFor`→`client.sendInput` (host = the `tv`-state owner).
-  - **M1.2** — host video stream over WebRTC (`canvas.captureStream()` → a track
-    on a host↔client peer connection) so non-hosts see the running game on their TV.
+  - **M1.1 ✅ done** — wired end-to-end. The host is resolved from shared state:
+    whoever owns the `tv` key (booted the room's game) is the host
+    (`NetProtocol.hostInputTarget` pure decision; `NetMgr.hostId/isHost/
+    forwardGameInput`). A non-host's `GameInputMgr` now emits each *logical*
+    RetroPad transition (`onLogicalInput`, pre-keycode) which main.js forwards to
+    the host; the host injects via `GameInputMgr.setRemoteButton` (resolves
+    `codesFor(player,btn)` and merges them into the per-frame keydown/keyup sweep,
+    so a still-held remote key isn't lifted and local + remote coexist with no
+    crosstalk). The client still drives its own core locally until M1.2 video.
+    Verified by `scripts/test-multiplayer.mjs` (now 24: logical emit, host inject,
+    no-kill, release, coexist) + `scripts/test-net.mjs` (`hostInputTarget`) and
+    `scripts/smoke-gamesync.mjs` (host auto-resolved from `tv` state; forwarded to
+    the right peer; no self-send; no broadcast leak). *Headless can't drive real
+    XR gamepads, so the controller→logical capture + host injection dispatch are
+    unit-tested, not in the smoke — same caveat as the edit-mode menus.*
+  - **M1.2 ← next** — host video stream over WebRTC (`canvas.captureStream()` → a
+    track on a host↔client peer connection) so non-hosts see the running game on
+    their TV. Then a non-host can drop its local core and watch the host's frames.
 - **M2:** rollback game sync for deterministic cores (adapt netplayjs +
   `SaveState`).
 - **M3:** multiple simultaneous games, mid-session join, VR↔desktop crossplay.

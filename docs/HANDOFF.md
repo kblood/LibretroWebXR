@@ -1,6 +1,6 @@
 # Handoff
 
-Single orientation doc for picking this project up cold. Last updated 2026-06-09.
+Single orientation doc for picking this project up cold. Last updated 2026-06-10.
 **Current focus: networked multiplayer (Phase M). M0 — shared-room presence — is
 functionally complete and live** (avatars + spatial voice + shared TV/loaded-game
 + held-object ghosts). Built on top of the **three in-VR edit modes
@@ -58,10 +58,27 @@ transport spine first.
   recv ring. Carries one logical RetroPad button (`{player,btn,down}`) so the host
   resolves it per-player and feeds its core. Smoke: `scripts/smoke-gameinput.mjs`
   (directed delivery, id-stamping, no broadcast leak), live-verified.
-- **M1.1 ← next** — wire it: a non-host captures its controller as a networked
-  player and sends `INPUT`; the host injects via `GameInputMgr` `codesFor`→
-  `client.sendInput` (host = `tv`-state owner). Then **M1.2** host video stream
-  (`canvas.captureStream()` over a host↔client WebRTC track). See `docs/ROADMAP.md`.
+- **M1.1 ✅ done (not yet deployed)** — wired end-to-end. **Host = the `tv`-state
+  owner** (whoever booted the room's game); the routing decision is pure
+  (`NetProtocol.hostInputTarget`) with `NetMgr.hostId()/isHost()/forwardGameInput()`
+  on top. **Client capture:** `GameInputMgr` now emits each *logical* RetroPad
+  transition via `onLogicalInput` (pre-keycode, diffed per frame) and main.js
+  forwards it to the host. **Host injection:** `onGameInput`→`GameInputMgr.
+  setRemoteButton` resolves `codesFor(player,btn)` and merges the codes into the
+  per-frame keydown/keyup sweep — so a still-held remote key isn't lifted, and a
+  local player + a remote player coexist with no crosstalk (every player's codes
+  are globally unique). The client still drives its OWN core locally (it sees its
+  game until M1.2 video). Verified: `scripts/test-multiplayer.mjs` (24 — logical
+  emit, host inject, no-kill, release, P1+P2 coexist) + `scripts/test-net.mjs`
+  (`hostInputTarget`) + `scripts/smoke-gamesync.mjs` (host auto-resolved from `tv`
+  state, forwarded to the right peer, no self-send, no broadcast leak). *Headless
+  has no XR gamepads, so controller→logical capture and the host dispatch are
+  unit-tested, not in the smoke — same caveat as the edit-mode menus.* **Deferred:
+  on a peer disconnect mid-press its remote keys can latch on the host —
+  `GameInputMgr.clearRemote()` exists but isn't yet wired to a presence-leave.**
+- **M1.2 ← next** — host video stream (`canvas.captureStream()` over a host↔client
+  WebRTC track) so a non-host sees the host's frames and can drop its local core.
+  See `docs/ROADMAP.md`.
 
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
@@ -458,8 +475,9 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
     deferred* (live shelf rebuild + `GrabMgr.removeGrabbable`).
 - **Phase M — IN PROGRESS** — multiplayer (`docs/MULTIPLAYER.md`): **M0
   presence/avatars/voice/room-object sync ✅ done + DEPLOYED**; **M1 in progress**
-  (M1.0 remote-input transport ✅ done + deployed; **M1.1 ← next** = host core
-  injection; M1.2 = host video stream), M2 rollback, M3 crossplay.
+  (M1.0 remote-input transport ✅ done + deployed; M1.1 client capture + host
+  injection ✅ done, not yet deployed; **M1.2 ← next** = host video stream),
+  M2 rollback, M3 crossplay.
 - **Phase C** — open prop package schema, community gallery, BIOS-needing
   systems (PSX/N64), PWA.
 
@@ -511,9 +529,10 @@ presence) is complete and deployed** — `main @ 774a295` is **live as of
    **M0 remaining is hardening/polish only:** a TURN relay (symmetric NAT —
    same-LAN/most NATs work on STUN); an **in-VR** voice/menu affordance (the 🎤
    button is desktop-only); a real **two-headset** smoke test. **M1 is underway** —
-   M1.0 (remote-input transport) is done + deployed; **M1.1 (host core injection)
-   is the next step**, then M1.2 (host video stream). See the Phase M1 block above
-   and `docs/MULTIPLAYER.md` / `docs/ROADMAP.md`.
+   M1.0 (remote-input transport) and **M1.1 (client capture + host injection) are
+   both done** (M1.1 not yet deployed); **M1.2 (host video stream) is the next
+   step**. See the Phase M1 block above and `docs/MULTIPLAYER.md` /
+   `docs/ROADMAP.md`.
 3. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
    a `manualChunks`/dynamic-import pass would help Quest load time if it bites.
 
