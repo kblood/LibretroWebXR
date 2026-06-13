@@ -26,8 +26,8 @@ import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile, systemForFile, portsForSystem } from './systems.js';
-import { CableMgr } from './CableMgr.js';
+import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS } from './systems.js';
+import { Patchbay } from './Patchbay.js';
 import { computeRouting as routeControllers } from './Routing.js';
 import { NetMgr } from './net/NetMgr.js';
 import { buildIceServers } from './net/NetProtocol.js';
@@ -364,10 +364,16 @@ let cartridges = [];
 let shelves = [];    // live shelf objects — used by addLocalRomToShelf()
 let consoleObj = null;
 let gamepadObj = null;
-// Local-multiplayer cable system: which gamepad is plugged into which console
-// port → which player it drives ([[src/CableMgr.js]]). Each gamepad object gets
+// Local-multiplayer patch graph: which gamepad is plugged into which console
+// port → which player it drives ([[src/Patchbay.js]]). Each gamepad object gets
 // a stable userData.cableId; the default one auto-plugs into port 0 (player 1).
-const cable = new CableMgr();
+// Today the rack has one console (CONSOLE_ID, N=1); Patchbay is keyed per
+// console so the multi-console rack drops in without changing this wiring. The
+// console is registered at full MAX_PORTS width — the per-game enabled-port
+// count is applied as a clamp at seat time, never by pruning seated gamepads.
+const CONSOLE_ID = 'console0';
+const cable = new Patchbay();
+cable.addConsole(CONSOLE_ID, { ports: MAX_PORTS });
 let gamepadCount = 0;
 const registerGamepad = (obj) => {
   if (obj && obj.userData.cableId == null) obj.userData.cableId = `gp-${++gamepadCount}`;
@@ -386,7 +392,7 @@ function computeRouting() {
     controllers: scene.controllers,
     heldObject: (ctrl) => grabMgr.heldObject(ctrl),
     isControllerFree: (ctrl) => grabMgr.isControllerFree(ctrl),
-    playerOf: (cableId) => cable.playerOf(cableId),
+    playerOf: (cableId) => cable.playerOf(cableId)?.player ?? 1,
   });
 }
 let debugHud = null;
@@ -534,7 +540,7 @@ async function buildCartridgeWorld() {
   // its rest spot — only explicit re-plugging moves the mesh). This also marks
   // port 0 taken so the first "Add Gamepad" auto-plugs into port 1 (player 2).
   registerGamepad(gamepadObj);
-  cable.plug(gamepadObj.userData.cableId, 0);
+  cable.plugController(gamepadObj.userData.cableId, CONSOLE_ID, 0);
   // Show the controller-port count for the current system (2 until a game loads).
   consoleObj.userData.setPorts?.(portsForSystem(currentMeta?.system));
 
@@ -932,7 +938,7 @@ function addProp(type, opts = {}) {
 function seatGamepadInFreePort(obj) {
   const cu = consoleObj?.userData;
   if (!cu?.portAnchors) return null;
-  const port = cable.firstFreePort(cu.activePorts);
+  const port = cable.firstFreePort(CONSOLE_ID, cu.activePorts);
   if (port == null) return null;
   const anchor = cu.portAnchors[port];
   const p = new THREE.Vector3(), q = new THREE.Quaternion();
@@ -940,7 +946,7 @@ function seatGamepadInFreePort(obj) {
   anchor.getWorldQuaternion(q);
   obj.position.copy(p);
   obj.quaternion.copy(q);
-  cable.plug(obj.userData.cableId, port);
+  cable.plugController(obj.userData.cableId, CONSOLE_ID, port);
   return port;
 }
 
