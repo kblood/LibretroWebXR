@@ -19,6 +19,12 @@
 // style: 'classic' = old-style auto-init against window.Module (legacy WebEmu
 //                    cores). 'module' = MODULARIZE=1 ES-module factory from the
 //                    libretro buildbot, loaded via dynamic import().
+// weight = relative emulation cost, used by the multi-console rack to decide how
+//          many cores can run live at once on a headset (see RackBudget.js). The
+//          Phase-0 spike held ~90fps on a Quest 3 with nes+gb+snes live
+//          (weights 1+1+2 = 4), so DEFAULT_RACK_BUDGET is calibrated to that.
+//          1 = light 8-bit, 2 = 16-bit / heavier, 3+ = would-be heavy cores
+//          (N64/PSX/Saturn) which should be capped to one live instance.
 export const CORES = {
   // Legacy WebEmu core (classic-script auto-init). NOTE: classic cores render
   // black in this loader (they load+map the ROM but never start video — see
@@ -26,22 +32,33 @@ export const CORES = {
   // build and move to the 'module' group when one becomes available. stella2014
   // is the last classic core because the emscripten buildbot ships no Stella
   // build, so Atari 2600 currently cannot render.
-  stella2014:        { url: 'cores/stella2014_libretro.js',        exts: ['a26','bin'],                  label: 'Atari 2600 (stella)',         style: 'classic', license: 'GPLv2' },
+  stella2014:        { url: 'cores/stella2014_libretro.js',        exts: ['a26','bin'],                  label: 'Atari 2600 (stella)',         style: 'classic', license: 'GPLv2', weight: 1 },
 
   // Modern libretro buildbot cores (ES-module factory)
-  snes9x:            { url: 'cores/snes9x_libretro.js',            exts: ['smc','sfc','swc','fig','bs'], label: 'SNES (snes9x)',               style: 'module', license: 'Non-commercial' },
-  nestopia:          { url: 'cores/nestopia_libretro.js',          exts: ['nes','fds','unf','unif'],     label: 'NES (nestopia)',              style: 'module', license: 'GPLv2' },
-  genesis_plus_gx:   { url: 'cores/genesis_plus_gx_libretro.js',   exts: ['md','gen','smd'],             label: 'Genesis (genesis_plus_gx)',   style: 'module', license: 'Non-commercial' },
-  mgba:              { url: 'cores/mgba_libretro.js',              exts: ['gba'],                        label: 'GBA (mGBA)',                  style: 'module', license: 'MPL-2.0' },
-  mednafen_vb:       { url: 'cores/mednafen_vb_libretro.js',       exts: ['vb','vboy'],                  label: 'Virtual Boy (mednafen)',      style: 'module', license: 'GPLv2' },
-  picodrive:         { url: 'cores/picodrive_libretro.js',         exts: ['sms','gg','md','gen','smd','32x','cue','iso'], label: 'Sega multi (picodrive)', style: 'module', license: 'Non-commercial' },
-  gearsystem:        { url: 'cores/gearsystem_libretro.js',        exts: ['sms','gg','sg'],              label: 'SMS/GG (gearsystem)',         style: 'module', license: 'GPLv3' },
-  fceumm:            { url: 'cores/fceumm_libretro.js',            exts: [],                             label: 'NES (fceumm)',                style: 'module', license: 'GPLv2' },
-  gambatte:          { url: 'cores/gambatte_libretro.js',          exts: ['gb','gbc'],                   label: 'Game Boy/Color (gambatte)',   style: 'module', license: 'GPLv2' },
-  mednafen_pce_fast: { url: 'cores/mednafen_pce_fast_libretro.js', exts: ['pce'],                        label: 'PC Engine/TurboGrafx (mednafen_pce_fast)', style: 'module', license: 'GPLv2' },
-  vice_x64:          { url: 'cores/vice_x64_libretro.js',          exts: ['d64','d71','d80','d81','d82','g64','x64','t64','tap','prg','p00','crt'], label: 'C64 (VICE)', style: 'module', license: 'GPLv2' },
-  vice_xvic:         { url: 'cores/vice_xvic_libretro.js',         exts: ['20','40','60','a0','b0','rom'], label: 'VIC-20 (VICE)',             style: 'module', license: 'GPLv2' },
+  snes9x:            { url: 'cores/snes9x_libretro.js',            exts: ['smc','sfc','swc','fig','bs'], label: 'SNES (snes9x)',               style: 'module', license: 'Non-commercial', weight: 2 },
+  nestopia:          { url: 'cores/nestopia_libretro.js',          exts: ['nes','fds','unf','unif'],     label: 'NES (nestopia)',              style: 'module', license: 'GPLv2', weight: 1 },
+  genesis_plus_gx:   { url: 'cores/genesis_plus_gx_libretro.js',   exts: ['md','gen','smd'],             label: 'Genesis (genesis_plus_gx)',   style: 'module', license: 'Non-commercial', weight: 2 },
+  mgba:              { url: 'cores/mgba_libretro.js',              exts: ['gba'],                        label: 'GBA (mGBA)',                  style: 'module', license: 'MPL-2.0', weight: 2 },
+  mednafen_vb:       { url: 'cores/mednafen_vb_libretro.js',       exts: ['vb','vboy'],                  label: 'Virtual Boy (mednafen)',      style: 'module', license: 'GPLv2', weight: 2 },
+  picodrive:         { url: 'cores/picodrive_libretro.js',         exts: ['sms','gg','md','gen','smd','32x','cue','iso'], label: 'Sega multi (picodrive)', style: 'module', license: 'Non-commercial', weight: 2 },
+  gearsystem:        { url: 'cores/gearsystem_libretro.js',        exts: ['sms','gg','sg'],              label: 'SMS/GG (gearsystem)',         style: 'module', license: 'GPLv3', weight: 1 },
+  fceumm:            { url: 'cores/fceumm_libretro.js',            exts: [],                             label: 'NES (fceumm)',                style: 'module', license: 'GPLv2', weight: 1 },
+  gambatte:          { url: 'cores/gambatte_libretro.js',          exts: ['gb','gbc'],                   label: 'Game Boy/Color (gambatte)',   style: 'module', license: 'GPLv2', weight: 1 },
+  mednafen_pce_fast: { url: 'cores/mednafen_pce_fast_libretro.js', exts: ['pce'],                        label: 'PC Engine/TurboGrafx (mednafen_pce_fast)', style: 'module', license: 'GPLv2', weight: 1 },
+  vice_x64:          { url: 'cores/vice_x64_libretro.js',          exts: ['d64','d71','d80','d81','d82','g64','x64','t64','tap','prg','p00','crt'], label: 'C64 (VICE)', style: 'module', license: 'GPLv2', weight: 2 },
+  vice_xvic:         { url: 'cores/vice_xvic_libretro.js',         exts: ['20','40','60','a0','b0','rom'], label: 'VIC-20 (VICE)',             style: 'module', license: 'GPLv2', weight: 2 },
 };
+
+// Rack budget calibration (see RackBudget.js). Tuned to the Phase-0 Quest-3
+// spike: nes+gb+snes (1+1+2 = 4) held ~90fps, so 4 is a proven-safe ceiling.
+export const DEFAULT_CORE_WEIGHT = 1;
+export const DEFAULT_RACK_BUDGET = 4;   // total live weight a standalone headset sustains
+export const DEFAULT_MAX_LIVE = 3;      // hard cap on simultaneously-live cores
+
+/** Relative emulation cost of a core (defaults to 1 for unknown cores). */
+export function coreWeight(name) {
+  return CORES[name]?.weight ?? DEFAULT_CORE_WEIGHT;
+}
 
 // --- Systems (system-first; what the room/collection layer reasons about) --
 // Each system:

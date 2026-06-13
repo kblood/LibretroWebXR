@@ -29,6 +29,8 @@ import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
 import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS } from './systems.js';
 import { Patchbay } from './Patchbay.js';
+import { RackMgr } from './RackMgr.js';
+import { ConsoleRuntime } from './ConsoleRuntime.js';
 import { computeRouting as routeControllers } from './Routing.js';
 import { NetMgr } from './net/NetMgr.js';
 import { buildIceServers } from './net/NetProtocol.js';
@@ -388,6 +390,16 @@ const cableAdapter = {
   isPortFree: (port) => cable.isPortFree(CONSOLE_ID, port),
   plug: (id, port) => cable.plugController(id, CONSOLE_ID, port),
 };
+
+// Multi-core runtime ([[src/RackMgr.js]]): owns each console's ConsoleRuntime
+// and enforces the perf budget (RackBudget). The primary console ADOPTS the
+// existing client/#canvas so today's single-console path is console0 of the
+// rack with no behaviour change and no second WebGL context; spawned consoles
+// add more (Phase 3 gives them their own TVs). applyBudget() is a no-op at N=1.
+const rackMgr = new RackMgr({ logger });
+const primaryRuntime = new ConsoleRuntime({ id: CONSOLE_ID, adopt: { client, canvas: emuCanvas } });
+rackMgr.add(primaryRuntime);
+rackMgr.setFocus(CONSOLE_ID);
 let gamepadCount = 0;
 const registerGamepad = (obj) => {
   if (obj && obj.userData.cableId == null) obj.userData.cableId = `gp-${++gamepadCount}`;
@@ -742,6 +754,7 @@ async function buildCartridgeWorld() {
   window.__editor = editor;
   window.__grab = grabMgr;
   window.__cable = cable; // debug: inspect port↔player↔gamepad assignments
+  window.__rackMgr = rackMgr; // debug: inspect/spawn consoles + budget headlessly
   // Headless hook: exercise addLocalRomToShelf() with a synthetic meta entry.
   // Usage: await window.__addLocalRom({ file:'test.sfc', system:'snes', core:'snes9x', title:'Test' })
   window.__addLocalRom = (meta) => addLocalRomToShelf(meta);
@@ -1949,6 +1962,7 @@ async function loadCartridge(meta, { echo = true } = {}) {
     const buf = await resolveRom(meta);
     const core = CORES[meta.core];
     await client.start(emuCanvas, buf, { coreUrl: core.url, coreName: meta.core, moduleStyle: core.style });
+    primaryRuntime.noteLoaded(meta.core, { system: meta.system, title: meta.title });
     currentCore = meta.core;
     currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system };
     gameInput?.setSystem(meta.system);
@@ -2280,6 +2294,7 @@ romInput.addEventListener('change', async (e) => {
   try {
     const buffer = await file.arrayBuffer();
     await client.start(emuCanvas, buffer, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style });
+    primaryRuntime.noteLoaded(coreInfo.name, { system: meta.system, title });
     currentCore = coreInfo.name;
     currentMeta = { core: coreInfo.name, file: meta.file, title, system: meta.system };
     gameInput?.setSystem(meta.system);
