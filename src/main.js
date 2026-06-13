@@ -724,6 +724,7 @@ async function buildCartridgeWorld() {
     onKeyDown: (code) => {
       consoleObj.userData.pulse?.(0xffffff, 90);
       nowPlayingPanel?.userData.notifyInput(code);
+      logger.event('input', { code });
     },
     // M1.1 networked client: forward each logical RetroPad transition to the
     // host (no-op when we ARE the host or no game is loaded — see
@@ -737,6 +738,27 @@ async function buildCartridgeWorld() {
   scene.addTickCallback((dt) => grabMgr.tick(dt));
   scene.addTickCallback((dt) => locomotion.tick(dt));
   scene.addTickCallback(() => gameInput.tick());
+  // Diagnostic: while a game is loaded, log the input pipeline state whenever it
+  // changes (gamepad held? how many controllers routed to a player? does any XR
+  // controller expose a live gamepad? which system map?). Paired with the
+  // per-key 'input' events above, this lets a "can't control the console"
+  // report be diagnosed entirely from the remote logs (dionysus.dk/logs):
+  //   held:false route:0          → the virtual gamepad isn't grabbed
+  //   held:true  route:1 xr:0     → grabbed, but no live XR gamepad to read
+  //   held:true  route:1 xr:2 + no 'input' events → reading but not dispatching
+  let _lastInputSig = '';
+  scene.addTickCallback(() => {
+    if (!currentMeta) return;
+    let xr = 0;
+    for (const ctrl of scene.controllers) {
+      if (ctrl.userData.inputSource?.gamepad?.buttons?.length) xr++;
+    }
+    const sig = `held:${grabMgr.isGamepadHeld()} route:${computeRouting().length} xr:${xr} sys:${gameInput.currentSystem()}`;
+    if (sig !== _lastInputSig) {
+      _lastInputSig = sig;
+      logger.event('input-state', { sig });
+    }
+  });
   // DebugHud reads from GameInputMgr each frame and redraws its canvas
   // texture. Cheap (~480×360 fill) but throttle if needed.
   scene.addTickCallback(() => debugHud.userData.update(gameInput.getDebugState()));
