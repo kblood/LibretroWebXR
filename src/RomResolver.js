@@ -202,6 +202,30 @@ async function opfsPut(key, buf) {
   await w.close();
 }
 
+/** Lower-case hex SHA-1 of an ArrayBuffer (Web Crypto; needs a secure context). */
+export async function sha1Hex(buf) {
+  const digest = await crypto.subtle.digest('SHA-1', buf);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Stash freshly-obtained ROM bytes (e.g. from a one-off file pick) into the
+ * content-addressed OPFS cache and return their sha1 hex, so a cartridge minted
+ * for the ROM can be re-resolved later via `source:'opfs'` without re-picking
+ * the file. Returns null when OPFS is unavailable — the caller should then keep
+ * `pick` as the fallback source.
+ */
+export async function cacheRom(buf) {
+  if (!opfsSupported()) return null;
+  try {
+    const sha1 = await sha1Hex(buf);
+    await opfsPut(`sha1-${sha1}`, buf);
+    return sha1;
+  } catch {
+    return null;
+  }
+}
+
 // --- Per-source fetchers ----------------------------------------------------
 
 async function fromUrl(meta, { fetchImpl } = {}) {

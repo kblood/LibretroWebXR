@@ -60,8 +60,17 @@ export function createGamepad({ position = new THREE.Vector3(0.6, 0.78, -2.2) } 
   select.group.position.set(-0.012, GP_H / 2 + 0.001, 0);
   group.add(select.group);
 
+  // Cord-exit anchor: where the controller cable leaves the body (top edge,
+  // the +Z "away from player" side, like a real pad). The cord system
+  // ([[src/Cord.js]]) reads this anchor's world position each frame to draw the
+  // rope to the console jack it's plugged into.
+  const cordAnchor = new THREE.Object3D();
+  cordAnchor.position.set(0, GP_H / 2, GP_D / 2);
+  group.add(cordAnchor);
+
   group.userData = {
     kind: 'gamepad',
+    cordAnchor,
     setHeld(held) {
       bodyMat.emissive.setHex(held ? 0x004466 : 0x000000);
     },

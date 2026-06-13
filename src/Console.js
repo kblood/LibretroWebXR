@@ -82,6 +82,7 @@ export function createConsole({ position = new THREE.Vector3(0, 0.74, -2.4) } = 
   // front; setPorts(n) below shows the first n. portUnits[i].group is toggled.
   const portUnits = [];
   const portAnchors = [];
+  const portJacks = [];
   for (let i = 0; i < MAX_PORTS; i++) {
     const x = -CON_W / 2 + PORT_SPACING * (i + 0.5);
     const unit = new THREE.Group();
@@ -93,6 +94,14 @@ export function createConsole({ position = new THREE.Vector3(0, 0.74, -2.4) } = 
     );
     jack.position.set(x, 0, CON_D / 2 + 0.002);
     unit.add(jack);
+
+    // Jack anchor: the world-space point a controller cord plugs INTO (the front
+    // face of the jack). A child of the console group so it tracks the console;
+    // the cord system ([[src/Cord.js]]) reads its world position each frame.
+    const jackAnchor = new THREE.Object3D();
+    jackAnchor.position.set(x, 0, CON_D / 2 + 0.006);
+    group.add(jackAnchor);
+    portJacks.push(jackAnchor);
 
     // P1..P4 label just above the jack, facing forward.
     const label = makeLabel(`P${i + 1}`, 0.020);
@@ -142,6 +151,9 @@ export function createConsole({ position = new THREE.Vector3(0, 0.74, -2.4) } = 
     // port i; portRadius is the plug acceptance distance. activePorts is how
     // many are currently enabled (the current system's controller count).
     portAnchors,
+    // Per-port jack anchors (front face) — where a controller cord visually
+    // plugs in. Parallel to portAnchors (the seats a few cm in front/above).
+    portJacks,
     portRadius: PORT_RADIUS,
     activePorts: MAX_PORTS,
     // Show the first n ports, hide the rest. GrabMgr only plugs into a port

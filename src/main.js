@@ -13,6 +13,7 @@ import { Placeholder } from './Placeholder.js';
 import { SceneMgr } from './SceneMgr.js';
 import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
+import { Cord } from './Cord.js';
 import { GrabMgr } from './GrabMgr.js';
 import { LocomotionMgr } from './LocomotionMgr.js';
 import { DesktopControls } from './DesktopControls.js';
@@ -35,7 +36,7 @@ import { sanitiseRoom, randomRoomSuffix } from './net/SessionUtils.js';
 import { GhostCartMgr } from './GhostCartMgr.js';
 import { makeHoldKey, parseHolds } from './net/HoldState.js';
 import { loadCollection, parseCollection } from './Collection.js';
-import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
+import { resolve as resolveRom, cacheRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
 import {
   pickImagesDirectory, hasImagesDirectory, listImages, entryObjectUrl,
   fileSystemAccessSupported as imgFolderSupported,
@@ -374,11 +375,65 @@ let gamepadObj = null;
 const CONSOLE_ID = 'console0';
 const cable = new Patchbay();
 cable.addConsole(CONSOLE_ID, { ports: MAX_PORTS });
+
+// GrabMgr was written against the old single-console CableMgr API (numeric
+// portOf, plug(id, port), isPortFree(port), unplug(id)). Patchbay generalizes
+// those per console, so we hand GrabMgr a thin adapter bound to CONSOLE_ID
+// rather than rewrite GrabMgr now — keeping the single-console assumption
+// isolated here until the multi-console rack (Phase 2) makes GrabMgr
+// console-aware. Returns a numeric port (or null) exactly like CableMgr did.
+const cableAdapter = {
+  portOf: (id) => cable.portOf(id)?.port ?? null,
+  unplug: (id) => cable.unplugController(id),
+  isPortFree: (port) => cable.isPortFree(CONSOLE_ID, port),
+  plug: (id, port) => cable.plugController(id, CONSOLE_ID, port),
+};
 let gamepadCount = 0;
 const registerGamepad = (obj) => {
   if (obj && obj.userData.cableId == null) obj.userData.cableId = `gp-${++gamepadCount}`;
+  if (obj?.userData.cableId) _gamepadObjs.set(obj.userData.cableId, obj);
   return obj;
 };
+
+// ── Controller cords ────────────────────────────────────────────────────────
+// A visible rope from each gamepad to the console jack it's plugged into, so the
+// controller↔port↔player wiring ([[src/Patchbay.js]]) is legible in VR. Pure
+// curve + tube live in [[src/Cord.js]]; here we keep one Cord per gamepad and
+// reshape it each frame from the gamepad's cord-exit anchor to its port's jack
+// anchor. Per-player colour so you can tell P1/P2/P3/P4 cords apart.
+const PLAYER_CORD_COLORS = [0x33cc55, 0x3388ff, 0xffaa33, 0xcc55dd]; // P1..P4
+const cords = new Map(); // cableId -> Cord
+const _gamepadObjs = new Map(); // cableId -> gamepad Object3D (for cord endpoints)
+
+function cordColorForPlayer(player) {
+  return PLAYER_CORD_COLORS[(player - 1) % PLAYER_CORD_COLORS.length];
+}
+
+// Reshape every cord from its gamepad to its plugged port's jack; hide the cord
+// for any unplugged gamepad. Cheap when nothing moved (Cord.update no-ops).
+const _cordFrom = new THREE.Vector3();
+const _cordTo = new THREE.Vector3();
+function syncCords() {
+  const cu = consoleObj?.userData;
+  for (const [cableId, obj] of _gamepadObjs) {
+    const plug = cable.portOf(cableId);              // { consoleId, port } | null
+    let cord = cords.get(cableId);
+    if (!plug || !cu?.portJacks?.[plug.port]) {
+      cord?.setVisible(false);
+      continue;
+    }
+    if (!cord) {
+      cord = new Cord({ color: cordColorForPlayer(plug.port + 1) });
+      scene.addObject(cord.mesh);
+      cords.set(cableId, cord);
+    }
+    cord.setColor(cordColorForPlayer(plug.port + 1));
+    (obj.userData.cordAnchor || obj).getWorldPosition(_cordFrom);
+    cu.portJacks[plug.port].getWorldPosition(_cordTo);
+    cord.update(_cordFrom, _cordTo);
+    cord.setVisible(true);
+  }
+}
 
 // Which player each hand drives this frame, for GameInputMgr ([[src/
 // GameInputMgr.js]]). Policy: one held gamepad → both hands forward to its
@@ -637,7 +692,7 @@ async function buildCartridgeWorld() {
     scene: scene.scene,
     controllers: scene.controllers,
     console: consoleObj,
-    cable,
+    cable: cableAdapter,
     onCartridgeInserted: handleCartridgeInserted,
     onGamepadHeldChanged: (held) => {
       // When the gamepad is released, flush any still-pressed keys so the
@@ -799,6 +854,7 @@ async function buildCartridgeWorld() {
 
   scene.addTickCallback((dt) => desktop.tick(dt));
   scene.addTickCallback((dt) => grabMgr.tick(dt));
+  scene.addTickCallback(() => syncCords());
   scene.addTickCallback((dt) => locomotion.tick(dt));
   scene.addTickCallback(() => gameInput.tick());
   // Diagnostic: while a game is loaded, log the input pipeline state whenever it
@@ -1567,6 +1623,7 @@ function buildMenuAndControlsPanel() {
     { label: 'Add Cupboard', onActivate: () => addProp('cupboard') },
     { label: 'Add Table',    onActivate: () => addProp('table') },
     { label: 'Add Console',  onActivate: () => addProp('console') },
+    { label: 'Add Gamepad',  onActivate: () => addProp('gamepad') },
     { label: 'Add Poster',   onActivate: () => addProp('poster') },
     { label: 'Add Portal',   onActivate: () => addPortal() },
   ]);
@@ -1865,6 +1922,9 @@ function handleCartridgeInserted(meta, { echo = true } = {}) {
   if (currentCore && currentCore !== meta.core) {
     sessionStorage.setItem(PENDING_KEY, JSON.stringify({
       file: meta.file, core: meta.core, system: meta.system, title: meta.title,
+      // Preserve ROM provenance across the reload so a picked/local cart
+      // re-resolves from its OPFS cache (sha1) rather than a 404ing url fetch.
+      rom: meta.rom,
     }));
     // Goal A: serialize the live room and bridge it across the reload so any
     // in-VR edits (moved shelves, added props, env changes) are not lost.
@@ -2191,9 +2251,11 @@ romInput.addEventListener('change', async (e) => {
   const title = file.name.replace(/\.[^.]+$/, ''); // strip extension
 
   // Build a normalised meta object identical in shape to what handleCartridgeInserted expects.
-  // rom.source='pick' with the ArrayBuffer already in hand is handled by the
-  // inline buffer path below (we bypass RomResolver for the boot step since we
-  // already have the bytes — the file object would be gone after the event).
+  // The first boot uses the ArrayBuffer in hand (the File is gone after this
+  // event); meta.rom is finalised below once we've cached the bytes so the
+  // shelf cartridge can be RE-booted later from the OPFS cache (sha1) instead
+  // of a dead `roms/<file>` url fetch (the cause of the "ROM not installed"
+  // report when re-inserting a picked cart).
   const meta = {
     file: file.name,
     core: coreInfo.name,
@@ -2230,6 +2292,16 @@ romInput.addEventListener('change', async (e) => {
       coreLabel: coreInfo.label,
       title,
     });
+
+    // Cache the bytes (content-addressed) so the shelf cartridge can re-boot
+    // without the original File. On success the cart resolves via OPFS (sha1);
+    // pick stays as a last-resort fallback if OPFS is unavailable.
+    try {
+      const sha1 = await cacheRom(buffer);
+      meta.rom = sha1 ? { sha1, sources: ['opfs', 'pick'] } : { source: 'pick' };
+    } catch (e) {
+      console.warn('[main] cacheRom failed:', e);
+    }
 
     // Goal B: place a grabbable cartridge on a shelf so it exists in the room.
     // Run async; any failure is non-fatal (the game is already booted).

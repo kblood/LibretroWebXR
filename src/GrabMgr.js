@@ -394,6 +394,9 @@ export class GrabMgr {
         system: cart.userData.system,
         core: cart.userData.core,
         title: cart.userData.title,
+        // Carry ROM provenance so RomResolver re-resolves picked/local ROMs from
+        // their real source (OPFS cache / folder), not a 404ing url fetch.
+        rom: cart.userData.rom || undefined,
         cartObject: cart,
       });
       return;

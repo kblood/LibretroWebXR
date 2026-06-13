@@ -74,6 +74,10 @@ export function createCartridge(meta) {
     core: meta.core,
     title: meta.title,
     color: meta.color,
+    // ROM provenance (source/sha1/sources) so re-inserting this cart re-resolves
+    // the right bytes. Without it a picked/local ROM would fall back to a `url`
+    // fetch (roms/<file>) and 404. See [[src/RomResolver.js]].
+    rom: meta.rom || null,
     homePosition: null, // filled in by Shelf — drop-zone returns the cart here on release-without-target
     homeQuaternion: null,
     pinAxis: new THREE.Vector3(0, -1, 0), // local-space direction of the connector pins; console slot aligns to this
