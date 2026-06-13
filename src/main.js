@@ -50,6 +50,7 @@ import {
   saveLastRoom, loadLastRoom, clearLastRoom,
   stashRoomBridge, consumeRoomBridge, looksLikeRoom,
 } from './RoomPersistence.js';
+import { saveRack, loadRack, clearRack } from './RackPersistence.js';
 import { buildRoom, buildProp, buildPortal, applyPosterTexture, FIT_MODES, DEFAULT_FIT_MODE, lockBookcaseHomes } from './RoomBuilder.js';
 import { createShelf, addCartridgeToShelf } from './Shelf.js';
 import { createCartridge } from './Cartridge.js';
@@ -514,6 +515,7 @@ function handlePlugReleased(plugObj) {
     seatVideoPlug(consoleId, hit.id);
   }
   routeVideo();
+  persistRack();
   logger?.event?.('video-repatch', { consoleId, tv: hit?.id || null });
 }
 
@@ -540,7 +542,8 @@ function syncVideoCords() {
 // the Phase 5 spawn menu and Phase 4 cords will drive it from in-VR. Exposed on
 // window.__rack for headless verification. Returns the new console's id.
 let _spawnSeq = 0;
-async function spawnConsole(system, { game } = {}) {
+async function spawnConsole(system, opts = {}) {
+  const { game } = opts;
   const games = window.__games || [];
   const meta = game || games.find((g) => g.system === system) || games[0];
   if (!meta) throw new Error(`spawnConsole: no game available for ${system}`);
@@ -584,8 +587,52 @@ async function spawnConsole(system, { game } = {}) {
   // Admit under the perf budget (may pause an over-budget core; focus stays live).
   rackMgr.applyBudget();
   refreshAudioFocus();
+  // Remember what was spawned (for persistence) unless this spawn is itself a
+  // restore replay (which passes _restore to avoid re-saving mid-restore).
+  if (!opts._restore) {
+    spawnedMetas.push({ system: meta.system, file: meta.file, core: meta.core, title: meta.title });
+    persistRack();
+  }
   logger?.event?.('console-spawned', { consoleId, tvId, system: meta.system, core: meta.core, title: meta.title });
   return consoleId;
+}
+
+// Spawned (non-primary) console metas, in spawn order, for RackPersistence.
+const spawnedMetas = [];
+function persistRack() {
+  try { saveRack(spawnedMetas, cable.tvs().map((tv) => ({ tv, console: cable.sourceOf(tv) }))); }
+  catch (e) { console.warn('[main] persistRack failed:', e); }
+}
+
+// Re-create the saved rack: re-spawn each persisted console (re-booting its core
+// from the matching library game) and replay the video patch edges. Best-effort
+// — a saved game no longer in the library is skipped. Runs after the room build,
+// once window.__games is populated.
+async function restoreRack() {
+  const saved = loadRack();
+  if (!saved || !saved.consoles.length) return;
+  const games = window.__games || [];
+  setStatus(`Restoring ${saved.consoles.length} console(s)…`);
+  for (const c of saved.consoles) {
+    const game = games.find((g) => g.file === c.file) || games.find((g) => g.system === c.system);
+    if (!game) { logger?.event?.('rack-restore-skip', { file: c.file, system: c.system }); continue; }
+    try { await spawnConsole(game.system, { game, _restore: true }); }
+    catch (e) { logger?.event?.('rack-restore-error', { file: c.file, error: String(e?.message || e) }); }
+    // Mirror the live tracking so a later spawn/repatch re-saves the full set.
+    spawnedMetas.push({ system: c.system, file: c.file, core: c.core, title: c.title });
+  }
+  // Replay the saved video mapping over the (deterministically re-created) ids.
+  for (const e of saved.video) {
+    if (!e.console) continue;
+    if (cable.consoles().includes(e.console) && cable.tvs().includes(e.tv)) {
+      cable.connectVideo(e.console, e.tv);
+      seatVideoPlug(e.console, e.tv);
+    }
+  }
+  routeVideo();
+  refreshAudioFocus();
+  persistRack();
+  setStatus('Rack restored');
 }
 
 // Phase 5 spawn menu: spawn a live console for the next system not already
@@ -957,6 +1004,10 @@ async function buildCartridgeWorld() {
   consoleObjs.set(CONSOLE_ID, consoleObj);
   addVideoPlug(CONSOLE_ID, PRIMARY_TV_ID);
 
+  // Phase 5 persistence: re-create any consoles the user spawned in a previous
+  // session (survives the cross-core reload too). Best-effort, fire-and-forget.
+  restoreRack().catch((e) => console.warn('[main] restoreRack failed:', e));
+
   // In-VR room editor (Phase E.1): registers the room's props as editable
   // grabbables (inert until edit mode) and serializes them back on export.
   editor = new RoomEditor({
@@ -979,6 +1030,8 @@ async function buildCartridgeWorld() {
     focus: (id) => { rackMgr.setFocus(id); rackMgr.applyBudget(); refreshAudioFocus(); return rackMgr.focusedId(); },
     focused: () => rackMgr.focusedId(),
     audio: () => audioRouter.branches.map((b) => ({ console: b.consoleId, gain: b.sink.gain.value })),
+    clearSaved: () => { clearRack(); spawnedMetas.length = 0; return 'cleared'; },
+    saved: () => loadRack(),
     tvs: () => scene._tvs.map((t) => ({ id: t.id, source: t.sourceCanvas?.id || null, active: t.isActive() })),
     video: () => scene._tvs.map((t) => ({ tv: t.id, console: cable.sourceOf(t.id) })),
     // Phase 4: drive the video patch cord headlessly. repatch moves a console's
