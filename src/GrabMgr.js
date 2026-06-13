@@ -246,19 +246,33 @@ export class GrabMgr {
 
     const kind = obj.userData?.kind;
 
-    // In edit mode, an editable prop is left exactly where dropped (the editor
-    // may snap it to a grid) — never snapped home or inserted. The gamepad is
-    // editable too, but still needs its held-state reconciled below.
-    if (this.isEditMode() && obj.userData?.editable) {
+    if (kind === 'gamepad') {
+      // The gamepad is dual-purpose (grabbable in both play AND edit mode) so
+      // the plug path must run regardless of which mode is active — the user
+      // should be able to plug into a port even while editing the room.
+      //
+      // Strategy: always attempt the plug first.  _handleGamepadRelease does
+      // nothing if no free port is within DROP_RADIUS (it just returns).
+      // Afterwards, if the gamepad is STILL unplugged (plug didn't happen) and
+      // we are in edit mode, hand it to onEditRelease so the editor can apply
+      // its grid-snap / prop-bookkeeping as it would for any other editable
+      // prop.  If it DID plug, edit-release is skipped (the snap-to-port
+      // position already set the final resting place).
+      const portBefore = this.cable?.portOf(obj.userData.cableId);
+      this._handleGamepadRelease(obj);
+      const plugged = this.cable && this.cable.portOf(obj.userData.cableId) !== portBefore
+                      && this.cable.portOf(obj.userData.cableId) != null;
+      if (!plugged && this.isEditMode() && obj.userData?.editable) {
+        this.onEditRelease(obj);
+      }
+    } else if (this.isEditMode() && obj.userData?.editable) {
+      // In edit mode, a non-gamepad editable prop is left exactly where dropped
+      // (the editor may snap it to a grid) — never snapped home or inserted.
       this.onEditRelease(obj);
     } else if (kind === 'cartridge') {
       this._handleCartridgeRelease(obj);
     } else if (kind === 'memory-card') {
       this._handleCardRelease(obj);
-    } else if (kind === 'gamepad') {
-      // Play mode: dropping a gamepad near a free, enabled port plugs it in
-      // (→ that port's player). Dropped elsewhere it just stays put.
-      this._handleGamepadRelease(obj);
     }
 
     // The gamepad is grabbable in both modes, so always reconcile its held-state
