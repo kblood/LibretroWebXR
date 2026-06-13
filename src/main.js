@@ -745,6 +745,8 @@ async function buildCartridgeWorld() {
   // Headless hook: exercise addLocalRomToShelf() with a synthetic meta entry.
   // Usage: await window.__addLocalRom({ file:'test.sfc', system:'snes', core:'snes9x', title:'Test' })
   window.__addLocalRom = (meta) => addLocalRomToShelf(meta);
+  // Headless hook: exercise the ROM resolver (OPFS cache round-trip etc.).
+  window.__rom = { resolve: resolveRom, cacheRom };
   window.__add = {
     // Basic spawners (used by headless probes + the in-VR Add-mode buttons).
     shelf:    (col) => addProp('shelf',    col ? { collection: col } : {}),
