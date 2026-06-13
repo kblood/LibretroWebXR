@@ -1,23 +1,19 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated 2026-06-13.
-**Current focus: networked multiplayer (Phase M). M0 (shared-room presence) and
-M1 (host-authoritative game sync) are both complete and DEPLOYED + live-verified
-(2026-06-13).** M0 = avatars + spatial voice + shared TV/loaded-game + held-object
-ghosts. M1 = remote input (M1.0) + client capture & host injection (M1.1) + host
-video stream (M1.2) — all live; the M1.1/M1.2 smokes pass against
-`wss://dionysus.dk/ws/`. The **M1.2 follow-up (pause a watching client's local
-core)** is now done too (2026-06-13). **Next: Phase M2 (rollback game sync) — but
-M2 as scoped is BLOCKED by the core architecture** (see the "Phase M2 feasibility"
-note below): our RetroArch-wrapped cores can't frame-step (`retro_run` per frame)
-and only snapshot async (~hundreds of ms via the VFS), so true GGPO/netplayjs
-rollback needs bare-libretro cores + an `EmulatorClient` rewrite — a research spike
-first, not an incremental slice. Built on top of the **three in-VR edit modes
-(Move / Change / Add)** + desktop controls + **local multiplayer (couch co-op)**
-merge (all live), Phase E.3 (create props/portals in-VR), E.2 (in-VR look
-editing), E.1 (move props + export), Phase R (R.1 JSON collection layer, R.2
-RomResolver, R.3 rooms as JSON), the CC0 test-game library, and the classic-core
-render fix (all below). Phases R and E are complete.
+**Current focus: polish + diagnosis. A large batch of quality-of-life work
+(remote logging, room persistence, C64 keyboard, placement snapping, image
+picker, configurable posters, multiplayer join/leave UI, Now Playing panel, and
+Load-ROM fix) was completed and DEPLOYED today (2026-06-13, commit `aad39dd`).**
+The **controls bug** (Quest users sometimes can't control the console after a
+cross-core reload) is **instrumented for remote diagnosis via the new Logger**
+but is NOT confirmed fixed — a headset test is needed. Built on top of networked
+multiplayer Phase M0 + M1 (presence/voice/TV/held-object + host-authoritative
+input + host video stream — all live), the **three in-VR edit modes (Move /
+Change / Add)** + desktop controls + **local multiplayer (couch co-op)**, Phase
+E (E.1/E.2/E.3 in-VR editor), Phase R (JSON collection layer + RomResolver +
+rooms as JSON), the CC0 test-game library, and the classic-core render fix (all
+below). Phases R and E are complete.
 
 **Networked multiplayer (Phase M) — M0 done + DEPLOYED (2026-06-09).** Open the
 live build with `?session=<room>` (optionally `&nick=`, `&color=`) and everyone in
@@ -66,8 +62,8 @@ button (enable/mute via the same `NetMgr` path); *whether the Quest browser gran
 the mic mid-XR is the open question for the real-headset smoke*. **Still pending:**
 a real **two-headset** smoke test (needs hardware).
 
-**Phase M1 (host-authoritative game sync) — STARTED.** Same build pattern:
-transport spine first.
+**Phase M1 (host-authoritative game sync) — ✅ DONE + DEPLOYED (2026-06-13).**
+All three slices live; M1.1/M1.2 smokes pass against `wss://dionysus.dk/ws/`.
 - **M1.0 ✅ done + DEPLOYED** — remote-input transport: a directed `INPUT`
   message (`NetProtocol.makeInput`) relayed client→host over the room socket
   (`Hub.input`, sender-id stamped); `NetMgr.sendGameInput`/`onGameInput` + a debug
@@ -162,18 +158,18 @@ forward-set.** Crosshair + control hint live in `index.html`. Verified headless
 (movement + room-clamp + synthetic grab/release of a prop) + screenshot.
 
 **Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, **code @
-cf1a8b4, re-deployed 2026-06-13** — edit modes, desktop controls, local
-multiplayer, networked Phase M0 (presence/voice/TV/held-object sync) AND the full
-Phase M1 (host-authoritative input + host video stream) are all live, PLUS the
-M1.2 watcher-core pause follow-up, the in-VR Voice menu item, TURN config
-plumbing, and the bundle split; COOP/COEP + `crossOriginIsolated` verified, an NES
-game boots over the wire, and the M1.1/M1.2 smokes pass live against
+`aad39dd`, re-deployed 2026-06-13** — edit modes, desktop controls, local
+multiplayer, networked Phase M0 + M1 (presence/voice/TV/held-object sync, host
+input + video stream), remote logging, room persistence, C64 keyboard, placement
+snapping, configurable posters, image picker, multiplayer join/leave UI, Now
+Playing panel, Load-ROM fix, gamepad-port-plug fix — all live. COOP/COEP +
+`crossOriginIsolated` verified; M1.1/M1.2 smokes pass live against
 `wss://dionysus.dk/ws/`. **The in-headset smoke-test checklist is live at
 `/webxr/libretrowebxr2/headset-test.html`** (linked from the app header — "🧪
-Headset Test"). The original
-https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and is left
-untouched — `libretrowebxr2` is a deliberate separate folder. User confirmed E.1
-works in VR; the gamepad-pickup regression below is fixed + redeployed.
+Headset Test"). Headset logs viewable at **`https://dionysus.dk/logs?session=<room>`**.
+The original https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and
+is left untouched — `libretrowebxr2` is a deliberate separate folder. User
+confirmed E.1 works in VR; the gamepad-pickup regression is fixed + redeployed.
 
 ## What this is
 
@@ -289,7 +285,8 @@ npm install
 npm run fetch-cores     # copies cores into public/cores/ (gitignored). Auto-finds
                         # them in the old scratch workspace; else see the script.
 npm run dev             # http://localhost:5173  (Vite sets COOP/COEP)
-npm test                # 121 pure-logic assertions (…/RoomSerializer/EnvEditor/PropCreator)
+npm test                # 1225 pure-logic assertions (collection/room/serializer/
+                        # env-editor/prop-creator/placement/logger/image-library/…)
 npm run debug           # headless-Chrome health check (see DEBUGGING.md)
 ```
 
@@ -426,16 +423,63 @@ src/
   Cartridge/Shelf/Console/Gamepad/MemoryCard.js  Grabbable 3D prop factories.
                      ★MP Console.js renders a P1..P4 port row + seat anchors;
                      setPorts(n) shows the active count.
+  Logger.js          ★LOG Auto-enables on dionysus.dk (or ?log=<url>); hooks
+                     console + window error/unhandledrejection, buffers structured
+                     JSON entries, POSTs batches to /log with keepalive + backoff.
+                     main.js inits it first so startup errors are captured.
+                     Pure formatEntry/buildBatch helpers are unit-tested.
+  NowPlayingPanel.js ★DBG World-space panel: current system/core/ROM title + a
+                     live "● input" pulse on each RetroPad transition (diagnostic
+                     for the "can't control console" report). Wired via
+                     GameInputMgr.onKeyDown + loadCartridge.
+  Placement.js       ★E New props spawn/snap correctly. Pure room-bounds model +
+                     clampToRoom + snapToSurface: floor props (shelf/bookcase/
+                     console/table/cupboard/gamepad) rest at a per-kind height;
+                     wall props (poster) snap to the nearest inward-facing wall
+                     plane. SceneMgr.getRoomBounds() exposes the inner extents.
+                     GrabMgr.tick shows a ghost preview at the snapped drop point
+                     in Move mode. "Surface Snap" button (default on) toggles.
+                     Unit-tested (71 assertions in scripts/test-placement.mjs).
+  RoomPersistence.js ★PERSIST Pure save/load helpers. The live room is now stashed
+                     before the cross-core location.reload() and restored on resume
+                     (no more "ROM load wipes room edits"). Every Export also
+                     snapshots to localStorage; auto-loads on cold boot (?room=default
+                     clears/bypasses as an escape hatch). Import Room header button
+                     reuses the drag-drop load path.
+  ImageLibrary.js    ★IMG Grant an images folder via File System Access API (handle
+                     persisted in IndexedDB, mirroring RomResolver); lists image
+                     files for the in-VR poster picker. Header "Images folder…"
+                     button. Works in a Quest XR session.
+  PosterFit.js       ★IMG Pure fit-mode UV: contain / cover / stretch + scale
+                     factor (zoom) → THREE repeat/offset. Unit-tested. Poster
+                     descriptor gains fit/scale fields (default contain/1), round-
+                     tripping via RoomSerializer. applyPosterTexture honors these
+                     from the poster's natural pixel size.
+  C64KeyLayout.js    ★C64 Pure C64 keyboard layout + per-key KeyboardEvent mapping
+                     (keyEventFor) + UV hit-test (keyAt). Node-importable, unit-
+                     tested. Uncertain VICE mappings (CTRL/RUN-STOP/RESTORE/C=/
+                     £/up-arrow/=) isolated here for headset tuning.
+  C64Keyboard.js     ★C64 World-space CanvasTexture panel: hover/tap/hold keys with
+                     visual highlight; dispatches via injected sendInput callback
+                     (no coupling to main.js). Auto-shows for c64/vic20 on boot;
+                     a "Keyboard" menu item + header button toggle manually.
   GrabMgr / LocomotionMgr / GameInputMgr / InputMgr / ControllerMaps  Input + VR.
                      ★E.1 GrabMgr gained an isEditMode/onEditRelease seam: edit
                      mode targets only props, play mode only carts/gamepad/cards.
                      ★MP GrabMgr plugs/unplugs a gamepad into a console port on
                      drop/grab (cable); GameInputMgr dispatches per-gamepad,
                      per-player via getRouting(); ControllerMaps adds P2-4 key
-                     tables; InputMgr forwards P2-4 keyboard codes too.
+                     tables; InputMgr forwards P2-4 keyboard codes too. ★FIX
+                     gamepad release now always tries plug-into-port before the
+                     edit-mode prop-reposition path (the old ordering swallowed
+                     the release in edit mode — controllers couldn't be wired).
   MenuMgr / MenuPanel / ControlsPanel / DebugHud  In-VR UI.
   SaveState.js       IndexedDB save-state store (per slot).
   CrtShader / SpatialAudio / Placeholder / XRRafShim  Effects + shims.
+src/net/
+  SessionUtils.js    ★MP Pure helpers: sanitiseRoom / randomRoomSuffix. Powers
+                     the in-app join/leave UI (no more URL-param-only sessions).
+                     Unit-tested (21 assertions).
 scripts/
   debug.js           Puppeteer health harness. `--rom=<path>` injects a ROM via the
                      real file-picker path; `--core=<name>` forces a core (?core=);
@@ -443,6 +487,14 @@ scripts/
                      RomResolver/loadCartridge path (url source) + core start;
                      `--probe-file=<path>` evaluates a JS file in the page + logs
                      its JSON return before the screenshot (poke window.__* hooks).
+                     ★LOG net::ERR_ABORTED on /log flush reclassified as expected
+                     (logger POSTs to /log; the in-flight flush aborts on page tear-
+                     down and used to flip the verdict to FAIL).
+  dummy-player.mjs   ★MP Headless room observer: joins via the presence WebSocket,
+                     logs peer join/leave, poses, STATE/TV-sync, voice/video SIGNAL,
+                     remote INPUT, held-object. CLI: --session/--url/--nick/--color/
+                     --move. `npm run dummy-player -- --session=<room> --move`.
+                     Live-verified against wss://dionysus.dk/ws/.
   fetch-cores.mjs    Populate public/cores/ from a local source (scratch workspace).
   make-c64-demo.mjs  Generate the CC0 C64 BASIC demo .prg.
   lib/cbm-basic.mjs  Shared Commodore BASIC v2 tokenizer (C64 + VIC-20).
@@ -452,6 +504,15 @@ scripts/
                      ROM in games/<sys>/ → public/roms/freeware/. npm run make-games
                      runs the zero-install (pure-Node CBM) trio.
   test-collection.mjs  npm test — pure-logic assertions for the R.1 layer.
+server/
+  log-server.mjs     ★LOG POST /log receiver + GET /logs (auto-refreshing HTML
+                     viewer) + GET /logs.json. Per-session ring buffer + optional
+                     NDJSON append. Mounted by room-server.mjs (port 8788).
+deploy/
+  log-proxy.conf     ★LOG Apache reverse-proxy snippet for /log + /logs + /logs.json.
+                     Note: ProxyPass matches on whole path segments — /logs alone
+                     does NOT cover /logs.json; an explicit rule for /logs.json
+                     must appear before the /logs rule.
 games/               Source for our CC0 games (committed), one dir per system. SDK
                      boilerplate frozen from each toolchain's template; only the game
                      logic is authored. See docs/research/ for per-system recipes.
@@ -466,7 +527,10 @@ docs/                ROADMAP, EMUVR_RESEARCH, ROOM_AND_COLLECTIONS, MULTIPLAYER,
                      LICENSING, PROJECT_HISTORY, HANDOFF (this file),
                      research/ (per-system game-authoring notes + synthesis README).
 ```
-★R.1/★R.2/★R.3 = added in Phase R.1/R.2/R.3; ★E.1/★E.2 = added in Phase E.1/E.2.
+★R.1/★R.2/★R.3 = added in Phase R.1/R.2/R.3; ★E.1/★E.2/★E = added in Phase E;
+★MP = multiplayer; ★LOG = remote logging; ★PERSIST = room persistence;
+★IMG = image picker/poster-fit; ★C64 = C64 keyboard; ★DBG = debug panel;
+★FIX = bug fix.
 
 ## Data model (the project's core idea)
 
@@ -518,16 +582,42 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
     `currentRoom`, and register it editable via `RoomEditor.registerPlaced`
     (a new portal also joins the live nav list). *Collections-to-shelves still
     deferred* (live shelf rebuild + `GrabMgr.removeGrabbable`).
-- **Phase M — IN PROGRESS** — multiplayer (`docs/MULTIPLAYER.md`): **M0
-  presence/avatars/voice/room-object sync ✅ done + DEPLOYED**; **M1 ✅ done +
+- **Phase M — IN PROGRESS** — multiplayer (`docs/MULTIPLAYER.md`): **M0 ✅ done +
+  DEPLOYED** (presence/avatars/voice/TV sync/held-object ghosts); **M1 ✅ done +
   DEPLOYED** (M1.0 remote-input transport, M1.1 client capture + host injection,
-  M1.2 host video stream — all live + smoke-verified against `wss://dionysus.dk/ws/`);
-  **M2 ← next** = rollback game sync; M3 crossplay.
-- **Phase C** — open prop package schema, community gallery, BIOS-needing
-  systems (PSX/N64), PWA.
+  M1.2 host video stream + watcher-core pause — all live + smoke-verified).
+  In-app join/leave UI + roster (header widget + in-VR Multiplayer menu) done.
+  **Two-headset smoke test still needed (hardware).** **M2** = rollback game sync
+  (feasibility spike done: confirmed rewrite, not a slice — keep M1 streaming as
+  shipped default; bare-core NES PoC as an opt-in spike first); **M3** crossplay.
+- **Phase C** — bundle chunking ✅ done; open prop package schema, community
+  gallery, BIOS-needing systems (PSX/N64), PWA.
+- **Controller cords + spawnable screens** — user-deferred; parked at the bottom
+  of `docs/ROADMAP.md`.
 
-## Deferred follow-ups (not blocking Phase E)
+## Deferred follow-ups
 
+- **Controls bug (open item):** Quest users sometimes can't control the console
+  after a cross-core reload. The input pipeline is now **instrumented** (`logger`
+  'input' + 'input-state' events in main.js) but the bug is not confirmed fixed.
+  Diagnose from `https://dionysus.dk/logs?session=<room>` during a headset session:
+  `held:false` → gamepad not grabbed; `held:true xr:0` → no XR gamepad visible;
+  'input-state' reading but no 'input' events → dispatch issue.
+- **Picked poster images are blob: URLs** — don't survive a reload. To fix: store
+  the folder-relative filename in the poster descriptor and re-resolve against the
+  ImageLibrary handle on load. The blob: path is functional for the session.
+- **Held-cart ghosts only wire on the `?session=` path**, not a post-build button
+  join — `GhostCartMgr` is built during `buildCartridgeWorld()`. A runtime join
+  (the new header widget) sees the room but no ghost carts.
+- **Shelf/bookcase cover image (P3)** not done — needs a Furniture front-plane.
+- **Local-file carts are not persisted to the room descriptor** — manually loaded
+  ROMs (via "Load ROM") appear on a shelf for the session but won't survive a reload.
+- **C64/VIC-20 key mappings to verify on a real headset:** CTRL, RUN/STOP,
+  RESTORE, C=, £, up-arrow, = are best-effort VICE mappings isolated in
+  `C64KeyLayout.js` for tuning.
+- **Two-headset multiplayer smoke test** still needs hardware.
+- **TURN / coturn server** not yet provisioned (config is wired, no live relay —
+  same-LAN and most NATs work on STUN).
 - **Verify File System Access on the Quest browser** with a real headset — the
   "ROM folder…" button self-hides where `showDirectoryPicker` is absent, and
   `pick` + `opfs` are the guaranteed fallbacks, but Quest support is unverified.
@@ -538,10 +628,6 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
 - **R.3 specifics:** `tv` prop only toggles the CRT shader (no TV reposition);
   portal targets are room URLs (no local-id registry); no "you don't own this"
   affordance on cartridges whose ROM can't resolve. See `docs/ROADMAP.md`.
-- **E.2: assign collections to shelves in-VR.** Env (look) editing is done;
-  reassigning a shelf's collection live needs a shelf+cartridge rebuild and a
-  `GrabMgr.removeGrabbable` the grab/insert lifecycle doesn't have yet. The
-  descriptor + serializer already support it — only the live rebuild is missing.
 - **Harden `buildMemoryCards()` / input init.** It awaits IndexedDB (`listStates`)
   during `buildCartridgeWorld()`, which *hangs* in headless Chrome — so everything
   after the await (`__locomotion/__gameInput/__menu/__room` exposure, grab/input
@@ -551,57 +637,37 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   (`window.__editor`/`__grab` are deliberately exposed *before* the await as a
   headless probe workaround — that's a patch, not the fix.)
 
-## Immediate next actions (Phase E done; Phase M0 + M1 done + deployed)
+## Immediate next actions (2026-06-13 batch deployed)
 
-Phase E (in-VR editor) is complete and **Phase M0 + M1 are complete and deployed**
-— code @ `40344eb` (M1.2) is **live as of 2026-06-13** (COOP/COEP +
-`crossOriginIsolated` verified; M1.1/M1.2 smokes pass live). Sensible next steps,
-in rough priority order:
+Code @ `aad39dd` is **live as of 2026-06-13** (COOP/COEP + `crossOriginIsolated`
+verified; M1.1/M1.2 smokes pass live). Sensible next steps, in rough priority:
 
-1. **Real-VR smoke test on a Quest** — now scoped down to only what can't be
-   scripted: the Play/Move/Change/Add edit-mode **raycast menus**, and that the
-   Quest hands one live `inputSource.gamepad` per held controller (the routing
-   *logic* on top of that is already covered by `npm test` /
-   `scripts/test-multiplayer.mjs`). If anything is off, fix → `npm run deploy`.
-   The deploy/network path itself is verified headlessly: `node scripts/debug.js
-   --url=<live> --boot=nes --screenshot=…` boots a game over the wire (COOP/COEP,
-   core fetch, real pixels) — re-run after any deploy.
-2. **Phase M (networked multiplayer) — M0 COMPLETE + DEPLOYED.** Presence,
-   spatial voice, shared TV/loaded-game, and held-object ghosts are all built,
-   unit-tested (`npm test` — `scripts/test-net.mjs` 93 + `test-multiplayer.mjs`),
-   smoke-verified (`smoke-room`/`presence`/`voice`/`object-sync`/`held`), and live.
-   The full breakdown is in the **"Networked multiplayer (Phase M)"** block near
-   the top of this doc; the slice details are in `docs/ROADMAP.md` (M0.1–M0.6).
-   **M0 hardening (2026-06-13):** TURN is now config-wired
-   (`NetProtocol.buildIceServers` + `?turn=` + `deploy/coturn.conf.example`;
-   coturn server provisioning + live symmetric-NAT test pending) and the **in-VR
-   voice affordance is done** (a "Voice" menu item mirrors the desktop 🎤 button).
-   Only a real **two-headset** smoke test remains (needs hardware). **M1 is complete +
-   DEPLOYED** — M1.0 remote-input transport, M1.1 client capture + host injection,
-   and M1.2 host video stream are all live and smoke-verified against
-   `wss://dionysus.dk/ws/`. The **M1 follow-up (pause a watching client's local
-   core)** is now DONE — see the M1.2 block above. See `docs/MULTIPLAYER.md` /
-   `docs/ROADMAP.md`.
-3. **Phase M2 — research spike DONE (2026-06-13): `docs/research/M2-rollback-feasibility.md`.**
-   M2 = rollback game sync. True GGPO-style rollback needs two things our cores
-   CANNOT do today: **per-frame stepping** (our RetroArch-wrapped cores drive their
-   own free-running `emscripten_set_main_loop` — we can pause/resume the loop, not
-   single-step `retro_run`) and **synchronous sub-frame savestates** (ours go
-   through RA's async task system → VFS, hundreds of ms). The spike confirms it's
-   **feasible but a genuine rewrite, not a slice**: swap to **bare-libretro cores**
-   compiled to wasm (exporting `retro_run`/`retro_serialize`, driven by a new JS
-   loop — `matthewbauer/retrojs` is an existence proof; RetroArch's own netplay/
-   run-ahead prove the sync-savestate runtime). Est. **~3–6 weeks** for a 2-player
-   NES PoC. **Recommended path (from the report):** keep **M1 host-authoritative
-   streaming as the shipped default for all games**, and do a bare-core spike on
-   **`fceumm` (NES) only** as an opt-in PoC before deciding on full M2 — do NOT
-   convert the whole core library. Read the report before starting M2.
-4. **Polish (Phase C) — bundle chunking DONE (2026-06-13).** The prod bundle was
-   one ~702 kB chunk; `vite.config.js` now splits three.js into its own vendor
-   chunk (`manualChunks`) → app chunk ~134 kB (42 kB gz) + a cache-stable `three`
-   chunk ~597 kB (152 kB gz) that survives app-only deploys. Further wins if needed:
-   dynamic-import the editor/net code paths. Remaining Phase C: open prop-package
-   schema, community gallery, BIOS systems (PSX/N64), PWA.
+1. **Diagnose + fix the controls bug on a real Quest.** The input pipeline is now
+   instrumented — Logger emits 'input' events on every key press and throttled
+   'input-state' (gamepad held? XR gamepad visible? controller count? system map?)
+   on change. Reproduce the bug on a headset, watch `https://dionysus.dk/logs?session=<room>`
+   from a desktop, and read the state log to pin the failure mode. The NowPlayingPanel
+   in-scene input pulse is a secondary visual aid. Fix → `npm run deploy`.
+2. **Resolve the blob: URL poster limitation.** Picked images (from ImageLibrary)
+   are blob: URLs and are lost on reload. Store the folder-relative filename in the
+   poster descriptor (`prop.imageFile`) and re-resolve against the granted
+   ImageLibrary handle on load. The `RoomSerializer` already round-trips `texture`
+   — extend it to carry `imageFile` too.
+3. **Real-VR smoke of edit modes + multiplayer** — still the gating headset test:
+   raycast menus (Play/Move/Change/Add), C64 keyboard point-to-type, in-VR
+   Multiplayer join panel, and one live XR `inputSource.gamepad` per held
+   controller. The underlying logic is all unit-tested; only the headset UX is
+   unverified.
+4. **Two-headset multiplayer smoke test** (needs hardware): join the same
+   `?session=` room from two Quest headsets, verify avatars, voice, TV sync, held
+   carts, and the in-VR roster. Use `npm run dummy-player -- --session=<room>`
+   from a desktop as a lightweight room observer while one headset plays.
+5. **Phase M2 — research spike done.** Confirmed: genuine rewrite, not a slice.
+   Recommendation: keep M1 host-authoritative streaming as the shipped default;
+   do a bare-core spike on `fceumm` (NES only) as an opt-in PoC before deciding
+   on full M2. Read `docs/research/M2-rollback-feasibility.md` first.
+6. **Phase C** — remaining: open prop-package schema, community gallery, BIOS
+   systems (PSX/N64), PWA install. Bundle chunking is already done.
 
 E.3 specifics worth knowing for whoever extends it:
 - `window.__add.{shelf,console,gamepad,poster,portal}()` drive prop creation
@@ -619,6 +685,17 @@ E.3 specifics worth knowing for whoever extends it:
 
 ## Gotchas already hit (so you don't re-hit them)
 
+- **Remote log viewer Apache config:** ProxyPass matches on whole path segments —
+  `/logs` does NOT cover `/logs.json`. The `deploy/log-proxy.conf` snippet now has
+  an explicit `/logs.json` rule placed BEFORE the `/logs` rule. If you re-provision
+  the proxy, keep that order.
+- **Logger flush abort in the headless harness:** `scripts/debug.js` (`npm run debug`)
+  reclassifies a `net::ERR_ABORTED` on a `/log` POST as an expected probe. The
+  logger's keepalive flush is in-flight when the page tears down; it was flipping
+  the verdict to FAIL. Don't remove that reclassification.
+- **Room-server passwordless sudo:** if `sudo systemctl restart libretrowebxr-room`
+  requires a password on the deploy box, the room server update step will stall.
+  Add a `NOPASSWD` sudoers entry for that one command.
 - Box-art 404s against libretro-thumbnails are **expected** (homebrew coverage
   is sparse); the harness reclassifies them as "expected probes". Don't treat
   them as failures.

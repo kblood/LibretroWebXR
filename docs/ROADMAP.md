@@ -18,18 +18,33 @@ This is **not** a greenfield plan; a working app was carried over (see
 - Three.js + WebXR scene with an enclosed 3D room (`SceneMgr`, `CrtShader`).
 - libretro cores driven directly (main-thread `<script>` + dynamic `import()`
   for MODULARIZE cores), rendering onto a CRT/TV mesh (`EmulatorClient`).
-- A VR room: grabbable **cartridges** on a **shelf**, a **console**, a
-  **gamepad**, a **memory card**, with grab + locomotion (`Cartridge`, `Shelf`,
-  `Console`, `Gamepad`, `MemoryCard`, `GrabMgr`, `LocomotionMgr`).
+- A VR room: grabbable **cartridges** on shelves and **bookcases** (up to 15
+  carts), a **console**, a **gamepad**, a **memory card**, with grab + locomotion
+  (`Cartridge`, `Shelf`, `Console`, `Gamepad`, `MemoryCard`, `Furniture`,
+  `GrabMgr`, `LocomotionMgr`).
 - Input across keyboard / gamepad / WebXR controllers with per-core, two-hand
   RetroPad mapping (`InputMgr`, `GameInputMgr`, `ControllerMaps`,
   `ControlsPanel`).
 - Save states (`SaveState`), spatial audio (`SpatialAudio`), in-VR menus
   (`MenuMgr`, `MenuPanel`), a debug HUD, and a `?core=` override.
+- **C64/VIC-20 virtual keyboard** (`C64Keyboard`, `C64KeyLayout`): world-space
+  point-to-type panel, auto-shown for C64/VIC-20, manually toggleable.
+- **In-world Now Playing / input debug panel** (`NowPlayingPanel`): current
+  system/core/ROM + live input pulse diagnostic.
+- **Remote logging** (`Logger`, `server/log-server.mjs`, `deploy/log-proxy.conf`):
+  ships Quest console/error logs to `https://dionysus.dk/logs?session=<room>`.
+- **Room persistence** (`RoomPersistence`): room survives cross-core reload;
+  auto-saves to localStorage on Export; Import Room button.
+- **Poster image picker + fit/scale** (`ImageLibrary`, `PosterFit`): grant an
+  on-Quest images folder; contain/cover/stretch + zoom per poster; in-VR 3×3
+  thumbnail gallery.
+- **Placement preview + snapping** (`Placement`): new props clamp to room bounds
+  and snap to floor or nearest wall; ghost preview in Move mode.
 - ~13 systems wired (SNES, NES, Atari 2600, Genesis/SMS/GG, GBA, Virtual Boy,
-  PC Engine, C64, VIC-20) via the `CORES` map.
+  PC Engine, C64, VIC-20) via the `CORES` map / `systems.js`.
 - COOP/COEP for SharedArrayBuffer (`vite.config.js`, `deploy/`), and a puppeteer
   health-check harness (`scripts/debug.js`, `DEBUGGING.md`).
+- Test suite: **1225 assertions** (`npm test`).
 
 So the foundation EmuVR took years to build (room + emulator-on-a-TV + grabbable
 games) largely exists. The roadmap is about **making it open, declarative, and
@@ -112,13 +127,13 @@ Turn today's imperative scene-building into a declarative layer (no rewrite).
   RomResolver can't fetch them at play time — there's no pre-flight "you don't
   own this" affordance on the cartridge yet.
 
-## Phase E — In-VR room editor  ✅ done
+## Phase E — In-VR room editor  ✅ done (+ 2026-06-13 follow-ups below)
 Place/rotate props, swap wallpaper/floor/posters, assign collections to shelves,
 add **portals** to other rooms — all writing back to `*.room.json`. Export/share
 a room. This is the open, declarative replacement for EmuVR's closed WIGUx mod.
 E.1 (move + export), E.2 (look editing) and E.3 (create props/portals) are all
 done, and the formerly-deferred *assign collections to shelves in-VR* is now
-done too (see **Edit modes** below).
+done too (see **Edit modes** below). See also the Phase E quality work below.
 
 ### Edit modes — Move / Change / Add  ✅ done (2026-06-03)
 The flat E.1/E.2/E.3 menu was reorganized into a **Play / Move / Change / Add**
@@ -216,6 +231,77 @@ buttons in hidden panels).
   live shelf+cartridge rebuild and `GrabMgr.removeGrabbable` the grab/insert
   lifecycle doesn't have yet. The descriptor + serializer already support it.
 
+### Phase E quality / follow-up work  ✅ done (2026-06-13)
+
+#### Placement preview + wall/floor snapping  ✅ done
+New `src/Placement.js` (pure, unit-tested — 71 assertions): room-bounds model,
+`clampToRoom`, and `snapToSurface` — floor props (shelf/bookcase/console/table/
+cupboard/gamepad) rest at a per-kind height; wall props (poster) snap to the
+nearest inward-facing wall plane. `SceneMgr.getRoomBounds()` exposes the inner
+extents. `GrabMgr.tick` shows a translucent ghost at the snapped drop point in
+Move mode. "Surface Snap" button (default on) coexists with the grid-snap toggle
+(surface snap first, then grid rounding). New props no longer spawn outside walls
+or floating mid-air.
+
+#### Room persistence  ✅ done
+`src/RoomPersistence.js` (pure save/load helpers): the live room is stashed before
+the cross-core `location.reload()` and restored on resume, so booting a
+different-core ROM no longer wipes room edits. Every Export also snapshots to
+`localStorage`; auto-loaded on cold boot (`?room=default` clears/bypasses as an
+escape hatch). **Import Room** header button (counterpart to Export) reuses the
+drag-drop load path.
+
+#### Configurable posters + shelf/bookcase ROM collections  ✅ done
+Poster builtin palette expanded 6 → 12 styles. "Set Poster Image…" header button
+sets a custom local-file (object URL) or pasted URL on the selected poster,
+persisted via `prop.texture` (round-trips through `RoomSerializer`). Add
+Shelf / Add Bookcase now cycle available collections so a new prop holds the chosen
+ROMs. Change-mode Cycle Selected re-assigns live (`rebuildBookcase` mirrors
+`rebuildShelf`). Bookcases build up to 15 grabbable carts across 3 rows.
+Follow-up: picked images are blob: URLs (don't survive reload — store
+folder-relative filename + re-resolve instead).
+
+#### On-Quest image picker + poster fit/scale  ✅ done
+`src/ImageLibrary.js`: grant an images folder via File System Access API (handle
+persisted in IndexedDB); works in a Quest XR session. `src/PosterFit.js` (pure,
+unit-tested): contain / cover / stretch + scale (zoom) factor → `THREE`
+repeat/offset. In-VR Change panel gains a 3×3 thumbnail gallery, Fit cycle, and
+Scale+/Scale−. `EnvEditor.cycleFitMode`/`stepScale` (pure, tested). Poster
+descriptor gains `fit`/`scale` fields (default contain/1), round-tripping via
+`RoomSerializer`. +61 tests (1225 total).
+Follow-up: blob: URLs lost on reload; shelf/bookcase cover image not done.
+
+#### C64 virtual keyboard  ✅ done
+`src/C64KeyLayout.js` (pure, Node-importable): full C64 layout + per-key
+`KeyboardEvent` mapping + UV hit-test. `src/C64Keyboard.js`: world-space
+CanvasTexture panel with hover/tap/hold highlight; dispatches via injected
+`sendInput` callback. Wired below the TV: auto-shows for c64/vic20 on boot
+(hides + flushes held keys otherwise); "Keyboard" menu item + header button
+toggle manually for any system. Dedicated raycaster per controller; trigger taps
+the hovered key — gated so it never clashes with the menu raycast. Uncertain VICE
+mappings (CTRL/RUN-STOP/RESTORE/C=/£/up-arrow/=) isolated in `C64KeyLayout.js`
+for headset tuning. +682 test assertions for the module alone.
+
+#### Load-ROM fix (incl. SNES)  ✅ done
+The header "Load ROM" handler previously booted the core but never set
+`currentMeta`/`system`/ports/Now-Playing panel. Now wires all state and, on
+success, mints a cartridge and places it on the least-full shelf (creating a new
+shelf when all are full) via `Shelf.addCartridgeToShelf`, registered grabbable.
+Verified headless with a SNES `.sfc`. Follow-up: local-file carts not persisted
+to the room descriptor.
+
+#### Gamepad port-plug fix  ✅ done
+A gamepad release now always tries plug-into-port before the edit-mode prop-
+reposition path. The old ordering (`isEditMode && editable`) swallowed the release
+when `RoomEditor` marked the gamepad editable — controllers couldn't be wired to a
+console port in edit mode. Grab invariant (gamepad pickable in both modes) preserved.
+
+#### In-world Now Playing / input debug panel  ✅ done
+`src/NowPlayingPanel.js`: world-space panel showing current system/core/ROM title
+and a live "● input" pulse on each RetroPad key transition. Primary diagnostic for
+the "can't control console" report. Wired via `GameInputMgr.onKeyDown` +
+`loadCartridge`.
+
 ## Local multiplayer — couch co-op  ✅ done (2026-06-03)
 Up to 4 *local* players on one console, routed by which port a controller is
 plugged into. **Distinct from networked Phase M below** (this is same-machine
@@ -231,6 +317,46 @@ redeployed.** Follow-ons: physical USB-gamepad routing, per-pad mesh animation +
 DebugHud for players 2-4, in-VR port retargeting.
 
 ## Phase M — Multiplayer, networked (see `docs/MULTIPLAYER.md`)  ← in progress
+
+### Remote logging system  ✅ done (2026-06-13)
+Prerequisite for diagnosing headset-only bugs without a USB cable:
+- `src/Logger.js`: hooks `console` + `window` error/`unhandledrejection`, buffers
+  structured JSON entries (`level/ts/session/nick`), POSTs batches with backoff +
+  keepalive. Auto-enables on `dionysus.dk` or via `?log=<url>`. Pure
+  `formatEntry`/`buildBatch` helpers are unit-tested (+38 assertions).
+- `server/log-server.mjs` (mounted by `room-server.mjs`, port 8788): POST `/log`,
+  GET `/logs` (auto-refreshing HTML viewer), GET `/logs.json`. Per-session ring
+  buffer + optional NDJSON append.
+- `deploy/log-proxy.conf`: Apache reverse-proxy snippet for `/log` + `/logs` +
+  `/logs.json`. Note: `/logs.json` rule must appear before `/logs` (ProxyPass
+  matches on whole segments — see HANDOFF.md Gotchas).
+- Read headset logs at **`https://dionysus.dk/logs?session=<room>`**.
+
+### Input pipeline instrumentation  ✅ done (2026-06-13)
+`main.js` emits Logger `'input'` events on every keydown and throttled
+`'input-state'` events (gamepad held? XR gamepad count? controller count?
+system map?) on change. Together these let a "can't control the console" report
+be diagnosed entirely from the log viewer. **The controls bug is instrumented, NOT
+confirmed fixed — headset test pending.**
+
+### In-app multiplayer join/leave UI + roster  ✅ done (2026-06-13)
+Rooms were joinable only via `?session=`. Added:
+- Header widget: room name / nick / color + Join/Leave buttons + live "room — N
+  players (nicks)" status. Uses `NetMgr.connect()/disconnect()` for runtime join
+  (no reload) — room layout + loaded game survive.
+- In-VR "Multiplayer" menu panel: status, Join, Leave, Copy room name.
+- `src/net/SessionUtils.js` (pure): `sanitiseRoom` / `randomRoomSuffix`. +21 tests.
+- Solo play is unchanged when never joining.
+- Known follow-up: held-cart ghosts only wire on the `?session=` path, not a
+  post-build button join (`GhostCartMgr` is built during `buildCartridgeWorld`).
+
+### Headless dummy multiplayer player  ✅ done (2026-06-13)
+`scripts/dummy-player.mjs`: joins a room over the presence WebSocket and logs
+everything it observes (peer join/leave, poses, STATE/TV-sync, voice/video SIGNAL,
+remote INPUT, held-object). CLI: `--session/--url/--nick/--color/--move`.
+`npm run dummy-player -- --session=<room> --move`. Live-verified against
+`wss://dionysus.dk/ws/`. Useful as a lightweight observer while a headset plays.
+
 - **M0:** shared room presence — avatars + voice + room-object sync (works for
   all cores). Signaling/matchmaking server + TURN.
   - **M0.1 ✅ done** — pure wire protocol + peer registry (`src/net/NetProtocol.js`,
@@ -364,6 +490,11 @@ DebugHud for players 2-4, in-VR port retargeting.
 - Community gallery of room/collection URLs.
 - BIOS-needing systems (PSX/N64) via fetched cores; user-supplied BIOS UX.
 - PWA install; per-headset storage UX; performance passes on Quest.
+
+## Parked (user-deferred, low priority)
+- **Controller cords + spawnable screens** — visual cable between gamepad and
+  console; spawnable secondary TV/screen props. No implementation started.
+  Explicitly deferred by the user; revisit when Phase M and C polish are done.
 
 ## Cross-cutting principles
 - **Ship no ROMs, bundle no cores** (`docs/LICENSING.md`).
