@@ -162,11 +162,15 @@ forward-set.** Crosshair + control hint live in `index.html`. Verified headless
 (movement + room-clamp + synthetic grab/release of a prop) + screenshot.
 
 **Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, **code @
-40344eb (M1.2), deployed 2026-06-13** — edit modes, desktop controls, local
+cf1a8b4, re-deployed 2026-06-13** — edit modes, desktop controls, local
 multiplayer, networked Phase M0 (presence/voice/TV/held-object sync) AND the full
-Phase M1 (host-authoritative input + host video stream) are all live; COOP/COEP +
-`crossOriginIsolated` verified, an NES game boots over the wire, and the M1.1/M1.2
-smokes pass live against `wss://dionysus.dk/ws/`). The original
+Phase M1 (host-authoritative input + host video stream) are all live, PLUS the
+M1.2 watcher-core pause follow-up, the in-VR Voice menu item, TURN config
+plumbing, and the bundle split; COOP/COEP + `crossOriginIsolated` verified, an NES
+game boots over the wire, and the M1.1/M1.2 smokes pass live against
+`wss://dionysus.dk/ws/`. **The in-headset smoke-test checklist is live at
+`/webxr/libretrowebxr2/headset-test.html`** (linked from the app header — "🧪
+Headset Test"). The original
 https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and is left
 untouched — `libretrowebxr2` is a deliberate separate folder. User confirmed E.1
 works in VR; the gamepad-pickup regression below is fixed + redeployed.
