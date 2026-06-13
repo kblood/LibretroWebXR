@@ -18,7 +18,7 @@ import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile, portsForSystem } from './systems.js';
+import { CORES, coreForFile, systemForFile, portsForSystem } from './systems.js';
 import { CableMgr } from './CableMgr.js';
 import { computeRouting as routeControllers } from './Routing.js';
 import { NetMgr } from './net/NetMgr.js';
@@ -33,6 +33,8 @@ import {
   stashRoomBridge, consumeRoomBridge, looksLikeRoom,
 } from './RoomPersistence.js';
 import { buildRoom, buildProp, buildPortal, applyPosterTexture } from './RoomBuilder.js';
+import { createShelf, addCartridgeToShelf } from './Shelf.js';
+import { createCartridge } from './Cartridge.js';
 import { RoomEditor } from './RoomEditor.js';
 import { cycleSurface, cycleTimeOfDay, cyclePosterTexture, cycleShelfCollection } from './EnvEditor.js';
 import {
@@ -178,6 +180,7 @@ if (sessionRoom) {
 let grabMgr = null;
 let gameInput = null;
 let cartridges = [];
+let shelves = [];    // live shelf objects — used by addLocalRomToShelf()
 let consoleObj = null;
 let gamepadObj = null;
 // Local-multiplayer cable system: which gamepad is plugged into which console
@@ -331,6 +334,7 @@ async function buildCartridgeWorld() {
 
   const built = buildRoom({ scene, room, collections });
   cartridges = built.cartridges;
+  shelves = built.shelves;          // track for addLocalRomToShelf()
   consoleObj = built.consoleObj;
   gamepadObj = built.gamepadObj;
   roomPosters = built.placed.filter((e) => e.prop.type === 'poster');
@@ -420,6 +424,9 @@ async function buildCartridgeWorld() {
   window.__editor = editor;
   window.__grab = grabMgr;
   window.__cable = cable; // debug: inspect port↔player↔gamepad assignments
+  // Headless hook: exercise addLocalRomToShelf() with a synthetic meta entry.
+  // Usage: await window.__addLocalRom({ file:'test.sfc', system:'snes', core:'snes9x', title:'Test' })
+  window.__addLocalRom = (meta) => addLocalRomToShelf(meta);
   window.__add = {
     shelf:    () => addProp('shelf'),
     console:  () => addProp('console'),
@@ -630,7 +637,10 @@ function addProp(type) {
   editor.registerPlaced(prop, r.object);
   // A new shelf's cartridges are play-mode grabbables (NOT editable props), like
   // any other cartridge — register them so they can be picked up and inserted.
-  if (r.kind === 'shelf') r.cartridges.forEach((c) => grabMgr.addGrabbable(c));
+  if (r.kind === 'shelf') {
+    shelves.push(r.object); // keep shelves[] in sync for addLocalRomToShelf()
+    r.cartridges.forEach((c) => grabMgr.addGrabbable(c));
+  }
 
   // A new gamepad joins the cable system: register it, make it grabbable, and
   // auto-plug it into the next free port so one tap yields the next player.
@@ -1163,24 +1173,133 @@ client.addEventListener('error', (e) => {
   resetBtn.disabled = true;
 });
 
-// --- Legacy file-picker path (still useful for ad-hoc testing) -----------
+// --- Local ROM file-picker path -------------------------------------------
+//
+// NOTE: <input type=file> opened from INSIDE a WebXR session is unreliable on
+// Quest browsers (the OS file picker may not appear). This path works best from
+// the flat header before entering VR. After picking, the ROM boots normally and
+// a grabbable cartridge is placed on the nearest shelf (or a new shelf if all
+// shelves are full / there are none). The added cart is live-grabbable
+// immediately; it is NOT persisted to the room descriptor (no collection ref for
+// an ad-hoc local file), so it will not survive Export/auto-load.
+
+// Max carts per shelf before we consider it "full" and create a new one.
+// A shelf wider than ~12 carts would clip the walls of the default room.
+const MAX_CARTS_PER_SHELF = 12;
+
+/**
+ * Mint a cartridge for a locally-picked file and place it on the best
+ * available shelf. If every shelf has MAX_CARTS_PER_SHELF or more carts, or
+ * there are no shelves yet, a new shelf is spawned in front of the player.
+ * The cart is registered with grabMgr immediately and is grab-to-insert ready.
+ *
+ * PERSISTENCE NOTE: the cart is NOT added to currentRoom's descriptor because
+ * local-file carts have no URL/collection reference — they live only in the
+ * live scene. Export Room will not include them.
+ */
+async function addLocalRomToShelf(meta) {
+  if (!grabMgr) return null; // world not yet built (shouldn't happen in practice)
+
+  // Pick the shelf with the fewest carts (that still has room).
+  const cartCount = (s) => s.children.filter((c) => c.userData?.kind === 'cartridge').length;
+  const candidates = shelves.filter((s) => cartCount(s) < MAX_CARTS_PER_SHELF);
+  candidates.sort((a, b) => cartCount(a) - cartCount(b));
+
+  let targetShelf = candidates[0] || null;
+
+  // No suitable shelf → create a fresh empty one in front of the player (same
+  // as the "Add Shelf" in-VR menu but without requiring an existing collection).
+  if (!targetShelf) {
+    const t = spawnTransform(1.25); // shelf height
+    const pos = new THREE.Vector3(t.pos[0], t.pos[1], t.pos[2]);
+    const rotY = (t.rot[1] * Math.PI) / 180;
+    // createShelf([]) builds a bare plank; addCartridgeToShelf widens it as needed.
+    targetShelf = createShelf([], { position: pos, rotationY: rotY });
+    targetShelf.userData.kind = 'shelf';
+    scene.addObject(targetShelf);
+    shelves.push(targetShelf);
+    // Register with the editor so Move mode can reposition the new shelf.
+    if (editor && currentRoom) {
+      const syntheticProp = {
+        id: `local-shelf-${Date.now()}`,
+        type: 'shelf',
+        pos: t.pos,
+        rot: t.rot,
+        collection: null,
+      };
+      editor.registerPlaced(syntheticProp, targetShelf);
+    }
+  }
+
+  // Mint the cartridge and append it to the shelf (handles plank resize + homes).
+  const cart = createCartridge(meta);
+  addCartridgeToShelf(targetShelf, cart);
+  cartridges.push(cart);
+  grabMgr.addGrabbable(cart);
+
+  setStatus(`"${meta.title}" added to shelf — grab it to play`);
+  return cart;
+}
 
 romInput.addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
-  const core = detectCore(file.name, coreOverride);
-  if (!core) { setStatus(`no core known for ${file.name}`); return; }
-  // If the file-picker selection requires a different core than what's
-  // already loaded, take the same reload path as a cartridge swap.
-  if (currentCore && currentCore !== core.name) {
-    setStatus(`file-picker swap to ${core.label} requires reload`);
+  // Reset so the same file can be re-picked.
+  romInput.value = '';
+
+  const coreInfo = detectCore(file.name, coreOverride);
+  if (!coreInfo) { setStatus(`no core known for "${file.name}" — check the extension`); return; }
+
+  // Derive system and a display title from the filename.
+  const system = systemForFile(file.name, coreOverride);
+  const title = file.name.replace(/\.[^.]+$/, ''); // strip extension
+
+  // Build a normalised meta object identical in shape to what handleCartridgeInserted expects.
+  // rom.source='pick' with the ArrayBuffer already in hand is handled by the
+  // inline buffer path below (we bypass RomResolver for the boot step since we
+  // already have the bytes — the file object would be gone after the event).
+  const meta = {
+    file: file.name,
+    core: coreInfo.name,
+    system: system || 'unknown',
+    title,
+    rom: { source: 'pick' },
+  };
+
+  // If a different core is already loaded we must reload (libretro cores can't
+  // unload). Local file bytes are lost on reload, so we can't bridge them —
+  // tell the user to reload/refresh the page manually first, then pick again.
+  if (currentCore && currentCore !== coreInfo.name) {
+    setStatus(`"${title}" needs ${coreInfo.label} but ${CORES[currentCore]?.label || currentCore} is loaded. Reload the page, then pick the ROM again.`);
     return;
   }
-  setStatus(`loading ${file.name} on ${core.label}…`);
-  const buffer = await file.arrayBuffer();
-  await client.start(emuCanvas, buffer, { coreUrl: core.url, coreName: core.name, moduleStyle: core.style });
-  currentCore = core.name;
-  setSystemLabel(core.name);
+
+  // Boot the ROM directly from the ArrayBuffer (no resolver round-trip needed
+  // since we already have the bytes from the file-change event).
+  setStatus(`loading "${title}" on ${coreInfo.label}…`);
+  try {
+    const buffer = await file.arrayBuffer();
+    await client.start(emuCanvas, buffer, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style });
+    currentCore = coreInfo.name;
+    currentMeta = { core: coreInfo.name, file: meta.file, title, system: meta.system };
+    gameInput?.setSystem(meta.system);
+    consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
+    setSystemLabel(coreInfo.name);
+    updateControlsPanel();
+    nowPlayingPanel?.userData.setNowPlaying({
+      system:    meta.system,
+      coreLabel: coreInfo.label,
+      title,
+    });
+
+    // Goal B: place a grabbable cartridge on a shelf so it exists in the room.
+    // Run async; any failure is non-fatal (the game is already booted).
+    addLocalRomToShelf(meta).catch((err) => {
+      console.warn('[main] addLocalRomToShelf failed:', err);
+    });
+  } catch (err) {
+    setStatus(`error loading "${title}": ${err.message || err}`);
+  }
 });
 
 resetBtn.addEventListener('click', () => client.reset());

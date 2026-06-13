@@ -62,3 +62,49 @@ export function lockShelfHomes(shelf) {
     cart.userData.homeQuaternion = cart.getWorldQuaternion(new THREE.Quaternion());
   });
 }
+
+/**
+ * Append a cartridge to an existing shelf, reposition the whole row so the
+ * new cart fits, and re-lock all homes. Call lockShelfHomes separately if the
+ * shelf's world transform has changed since it was placed; this helper calls
+ * updateMatrixWorld internally.
+ *
+ * The cartridge is added as a child of the shelf group (same as createShelf),
+ * so `shelf.remove(cart)` / re-parenting is the caller's responsibility if
+ * the cart is later grabbed.
+ *
+ * Returns the cart for convenience.
+ */
+export function addCartridgeToShelf(shelf, cart) {
+  // Collect existing carts so we can reposition the full row.
+  const existing = shelf.children.filter((c) => c.userData?.kind === 'cartridge');
+  const all = [...existing, cart];
+
+  // Widen the plank and bracket to fit the new count (mirrors createShelf).
+  // createShelf adds plank first, then bracket — both are non-cartridge Mesh children.
+  const plankW = Math.max(SLOT_SPACING * all.length + PLANK_PADDING * 2, 0.6);
+  const nonCartMeshes = shelf.children.filter((c) => c.isMesh && !c.userData?.kind);
+  const [plank, bracket] = nonCartMeshes; // plank at index 0, bracket at index 1
+  if (plank) {
+    plank.geometry.dispose();
+    plank.geometry = new THREE.BoxGeometry(plankW, SHELF_THICK, SHELF_DEPTH);
+  }
+  if (bracket) {
+    bracket.geometry.dispose();
+    bracket.geometry = new THREE.BoxGeometry(plankW, SHELF_THICK * 0.6, 0.01);
+  }
+
+  // Re-centre all carts (same slot layout as createShelf).
+  const startX = -(all.length - 1) * SLOT_SPACING / 2;
+  all.forEach((c, i) => {
+    const x = startX + i * SLOT_SPACING;
+    const y = SHELF_THICK / 2 + CARTRIDGE_DIMS.H / 2;
+    c.position.set(x, y, 0);
+    c.quaternion.identity();
+    c.rotation.x = -0.08; // same back-lean as createShelf
+    if (!shelf.children.includes(c)) shelf.add(c);
+  });
+
+  lockShelfHomes(shelf);
+  return cart;
+}
