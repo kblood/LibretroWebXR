@@ -36,16 +36,20 @@ import { GhostCartMgr } from './GhostCartMgr.js';
 import { makeHoldKey, parseHolds } from './net/HoldState.js';
 import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
+import {
+  pickImagesDirectory, hasImagesDirectory, listImages, entryObjectUrl,
+  fileSystemAccessSupported as imgFolderSupported,
+} from './ImageLibrary.js';
 import { parseRoom, defaultRoom, roomCollectionRefs } from './RoomLoader.js';
 import {
   saveLastRoom, loadLastRoom, clearLastRoom,
   stashRoomBridge, consumeRoomBridge, looksLikeRoom,
 } from './RoomPersistence.js';
-import { buildRoom, buildProp, buildPortal, applyPosterTexture, lockBookcaseHomes } from './RoomBuilder.js';
+import { buildRoom, buildProp, buildPortal, applyPosterTexture, FIT_MODES, DEFAULT_FIT_MODE, lockBookcaseHomes } from './RoomBuilder.js';
 import { createShelf, addCartridgeToShelf } from './Shelf.js';
 import { createCartridge } from './Cartridge.js';
 import { RoomEditor } from './RoomEditor.js';
-import { cycleSurface, cycleTimeOfDay, cyclePosterTexture, cycleShelfCollection } from './EnvEditor.js';
+import { cycleSurface, cycleTimeOfDay, cyclePosterTexture, cycleShelfCollection, cycleFitMode, stepScale } from './EnvEditor.js';
 import {
   createProp, createPortal,
   addProp as appendProp, addPortal as appendPortal,
@@ -633,16 +637,27 @@ async function buildCartridgeWorld() {
     cupboard: ()    => addProp('cupboard'),
     table:    ()    => addProp('table'),
     portal:   ()    => addPortal(),
-    // Desktop poster-image affordance driven headlessly (src = URL or data URL).
-    // Use: window.__add.setPosterImage('https://…') after selecting a poster.
+    // Desktop/headless poster-image affordance. src = URL or data URL.
+    // Usage: window.__add.setPosterImage('https://…') after selecting a poster.
     setPosterImage: (src) => {
       const rec = editor?.selectedProp?.();
       if (!rec) return 'no prop selected';
       if (rec.prop.type !== 'poster') return `selected is ${rec.prop.type}, not poster`;
       rec.prop.texture = src;
-      applyPosterTexture(rec.object.material, src);
+      reapplyPosterProp(rec);
       return src;
     },
+    // Headless: cycle fit mode for selected poster. Returns new mode string.
+    cycleFit: () => {
+      const rec = editor?.selectedProp?.();
+      if (!rec || rec.prop.type !== 'poster') return 'no poster selected';
+      const v = cycleFitMode(rec.prop);
+      reapplyPosterProp(rec);
+      return v;
+    },
+    // Headless: step scale up/down for selected poster. Returns new scale.
+    scaleUp:   () => { const rec = editor?.selectedProp?.(); if (!rec || rec.prop.type !== 'poster') return 'no poster selected'; const v = stepScale(rec.prop, 'up'); reapplyPosterProp(rec); return v; },
+    scaleDown: () => { const rec = editor?.selectedProp?.(); if (!rec || rec.prop.type !== 'poster') return 'no poster selected'; const v = stepScale(rec.prop, 'down'); reapplyPosterProp(rec); return v; },
   };
   // Drive the three edit modes headlessly (the menu is raycast-only). __change
   // cycles the currently-selected prop's options (poster art / shelf collection).
@@ -1150,17 +1165,279 @@ function buildMenuAndControlsPanel() {
   };
 
   // Change mode: global look (wallpaper/floor/lighting/all posters) plus
-  // per-prop edits on the grip-selected prop (poster art / shelf collection).
+  // per-prop edits on the grip-selected prop (poster art / shelf collection /
+  // poster image (gallery) / fit mode / scale).
   const changePanel = sub('Change', [
-    { label: 'Wallpaper',      onActivate: () => { const v = cycleSurface(currentRoom, 'wallpaper'); scene.applyEnvironment(currentRoom.environment); setStatus(`Wallpaper: ${short(v)}`); } },
-    { label: 'Floor',          onActivate: () => { const v = cycleSurface(currentRoom, 'floor'); scene.applyEnvironment(currentRoom.environment); setStatus(`Floor: ${short(v)}`); } },
-    { label: 'Lighting',       onActivate: () => { const v = cycleTimeOfDay(currentRoom); scene.applyEnvironment(currentRoom.environment); setStatus(`Lighting: ${v}`); } },
-    { label: 'All Posters',    onActivate: () => cycleAllPosters() },
-    { label: 'Cycle Selected', onActivate: () => cycleSelected() },
-    { label: 'Selected: none', onActivate: () => {} },  // status line, updated on select
+    { label: 'Wallpaper',       onActivate: () => { const v = cycleSurface(currentRoom, 'wallpaper'); scene.applyEnvironment(currentRoom.environment); setStatus(`Wallpaper: ${short(v)}`); } },
+    { label: 'Floor',           onActivate: () => { const v = cycleSurface(currentRoom, 'floor'); scene.applyEnvironment(currentRoom.environment); setStatus(`Floor: ${short(v)}`); } },
+    { label: 'Lighting',        onActivate: () => { const v = cycleTimeOfDay(currentRoom); scene.applyEnvironment(currentRoom.environment); setStatus(`Lighting: ${v}`); } },
+    { label: 'All Posters',     onActivate: () => cycleAllPosters() },
+    { label: 'Cycle Selected',  onActivate: () => cycleSelected() },
+    { label: 'Poster Images…',  onActivate: () => {} },  // wired below (open gallery)
+    { label: 'Fit: contain',    onActivate: () => {} },  // wired below
+    { label: 'Scale+',          onActivate: () => {} },  // wired below
+    { label: 'Scale-',          onActivate: () => {} },  // wired below
+    { label: 'Selected: none',  onActivate: () => {} },  // status line, updated on select
   ]);
-  const selectedLabelBtn = changePanel.userData.buttons[5];
-  editor.onSelect((rec) => selectedLabelBtn.setLabel(rec ? `Sel: ${rec.prop.id}` : 'Selected: none'));
+  const [,,,,,posterGalleryBtn, fitModeBtn, scalePlusBtn, scaleMinusBtn, selectedLabelBtn] = changePanel.userData.buttons;
+  editor.onSelect((rec) => {
+    selectedLabelBtn.setLabel(rec ? `Sel: ${rec.prop.id}` : 'Selected: none');
+    // Update fit/scale button labels to reflect the selected poster's current state.
+    if (rec && rec.prop.type === 'poster') {
+      fitModeBtn.setLabel(`Fit: ${rec.prop.fit || DEFAULT_FIT_MODE}`);
+      scalePlusBtn.setLabel(`Scale+: ${(rec.prop.scale ?? 1).toFixed(2)}`);
+      scaleMinusBtn.setLabel(`Scale-: ${(rec.prop.scale ?? 1).toFixed(2)}`);
+    } else {
+      fitModeBtn.setLabel('Fit: (no poster)');
+      scalePlusBtn.setLabel('Scale+');
+      scaleMinusBtn.setLabel('Scale-');
+    }
+  });
+
+  // Fit mode button: cycle contain → cover → stretch for the selected poster.
+  fitModeBtn.onActivate = () => {
+    const rec = editor?.selectedProp?.();
+    if (!rec || rec.prop.type !== 'poster') { setStatus('Select a poster in Change mode first'); return; }
+    const v = cycleFitMode(rec.prop);
+    reapplyPosterProp(rec);
+    fitModeBtn.setLabel(`Fit: ${v}`);
+    setStatus(`Poster fit: ${v}`);
+  };
+
+  // Scale+: zoom in (increase scale step).
+  scalePlusBtn.onActivate = () => {
+    const rec = editor?.selectedProp?.();
+    if (!rec || rec.prop.type !== 'poster') { setStatus('Select a poster in Change mode first'); return; }
+    const v = stepScale(rec.prop, 'up');
+    reapplyPosterProp(rec);
+    scalePlusBtn.setLabel(`Scale+: ${v.toFixed(2)}`);
+    scaleMinusBtn.setLabel(`Scale-: ${v.toFixed(2)}`);
+    setStatus(`Poster scale: ${v.toFixed(2)}`);
+  };
+
+  // Scale-: zoom out (decrease scale step).
+  scaleMinusBtn.onActivate = () => {
+    const rec = editor?.selectedProp?.();
+    if (!rec || rec.prop.type !== 'poster') { setStatus('Select a poster in Change mode first'); return; }
+    const v = stepScale(rec.prop, 'down');
+    reapplyPosterProp(rec);
+    scalePlusBtn.setLabel(`Scale+: ${v.toFixed(2)}`);
+    scaleMinusBtn.setLabel(`Scale-: ${v.toFixed(2)}`);
+    setStatus(`Poster scale: ${v.toFixed(2)}`);
+  };
+
+  // ─── In-VR Image Gallery ────────────────────────────────────────────────────
+  // A world-space panel that lists images from the granted folder as a grid of
+  // thumbnail buttons. Point a controller at a thumbnail and pull the trigger
+  // to assign it to the currently-selected poster. Only visible when explicitly
+  // opened via the "Poster Images…" Change-panel button; hidden when the
+  // Change panel hides or the user taps anywhere outside it.
+  //
+  // The gallery reuses the MenuMgr raycast path so it integrates cleanly with
+  // the existing controller interaction model. Thumbnail planes carry the same
+  // `kind: 'menu-button'` userData shape as MenuPanel buttons, so MenuMgr's
+  // hover/click logic works without modification.
+  const IMAGE_COLS = 3;    // thumbnails per row
+  const THUMB_W   = 0.18;  // metres
+  const THUMB_H   = 0.14;  // metres
+  const THUMB_GAP = 0.015;
+  const GALLERY_ROWS = 3;  // rows of thumbnails (max 9 images shown at once)
+
+  const galleryGroup = new THREE.Group();
+  galleryGroup.name = 'image-gallery';
+  // Position: same side as the change panel but slightly further forward + wider.
+  galleryGroup.position.set(-2.99, 1.5, -0.25);
+  galleryGroup.rotation.y = Math.PI / 2;
+  galleryGroup.visible = false;
+  scene.addObject(galleryGroup);
+
+  // Background plate for the gallery.
+  const galleryTotalW = IMAGE_COLS * THUMB_W + (IMAGE_COLS - 1) * THUMB_GAP + 0.05;
+  const galleryTitleH = 0.055;
+  const galleryTotalH = GALLERY_ROWS * THUMB_H + (GALLERY_ROWS - 1) * THUMB_GAP + galleryTitleH + 0.06;
+  const galleryBack = new THREE.Mesh(
+    new THREE.PlaneGeometry(galleryTotalW + 0.01, galleryTotalH + 0.01),
+    new THREE.MeshBasicMaterial({ color: 0x000000 }),
+  );
+  galleryBack.position.z = -0.003;
+  galleryGroup.add(galleryBack);
+  const galleryBody = new THREE.Mesh(
+    new THREE.PlaneGeometry(galleryTotalW, galleryTotalH),
+    new THREE.MeshBasicMaterial({ color: 0x111120 }),
+  );
+  galleryBody.position.z = -0.001;
+  galleryGroup.add(galleryBody);
+
+  // Title bar for the gallery.
+  const galTitleCanvas = document.createElement('canvas');
+  galTitleCanvas.width = 512; galTitleCanvas.height = 80;
+  const galTCtx = galTitleCanvas.getContext('2d');
+  galTCtx.fillStyle = '#0a0a18'; galTCtx.fillRect(0, 0, 512, 80);
+  galTCtx.fillStyle = '#ffcc66'; galTCtx.font = 'bold 36px monospace';
+  galTCtx.textAlign = 'center'; galTCtx.textBaseline = 'middle';
+  galTCtx.fillText('Images', 256, 40);
+  const galTitleTex = new THREE.CanvasTexture(galTitleCanvas);
+  const galTitleMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(galleryTotalW - 0.02, galleryTitleH),
+    new THREE.MeshBasicMaterial({ map: galTitleTex }),
+  );
+  galTitleMesh.position.y = galleryTotalH / 2 - 0.03 - galleryTitleH / 2;
+  galleryGroup.add(galTitleMesh);
+
+  // Pool of thumbnail planes (created once, populated per folder load).
+  // We keep a fixed-size pool matching IMAGE_COLS × GALLERY_ROWS so we never
+  // create/destroy THREE objects per load (only textures swap).
+  const MAX_THUMBS = IMAGE_COLS * GALLERY_ROWS;
+  const _galleryThumbMeshes = []; // { mesh, tex, objUrl, setHover, setLabel }
+  const _galleryObjectUrls = [];  // object URLs to revoke on reload
+
+  function _makeGalleryThumb(col, row) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256; canvas.height = 192;
+    const ctx = canvas.getContext('2d');
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearFilter;
+
+    let hovered = false;
+    let label = '';
+
+    const redraw = (img) => {
+      ctx.clearRect(0, 0, 256, 192);
+      ctx.fillStyle = hovered ? '#2a4a7a' : '#1a1a2c';
+      ctx.fillRect(0, 0, 256, 192);
+      if (img) {
+        // Draw image centred/contained inside the canvas.
+        const ar = img.width / img.height;
+        let dw = 256, dh = 192;
+        if (ar > 256 / 192) { dh = Math.round(256 / ar); }
+        else { dw = Math.round(192 * ar); }
+        ctx.drawImage(img, (256 - dw) / 2, (192 - dh) / 2, dw, dh);
+      }
+      ctx.strokeStyle = hovered ? '#ffcc66' : '#333';
+      ctx.lineWidth = hovered ? 5 : 3;
+      ctx.strokeRect(2, 2, 252, 188);
+      if (label) {
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(0, 155, 256, 37);
+        ctx.fillStyle = '#fff';
+        ctx.font = '14px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const short = label.length > 20 ? label.slice(0, 19) + '…' : label;
+        ctx.fillText(short, 128, 173);
+      }
+      tex.needsUpdate = true;
+    };
+    redraw(null);
+
+    const startX = -(IMAGE_COLS - 1) * (THUMB_W + THUMB_GAP) / 2;
+    const startY = galleryTotalH / 2 - 0.03 - galleryTitleH - THUMB_H / 2 - 0.01;
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(THUMB_W, THUMB_H),
+      new THREE.MeshBasicMaterial({ map: tex }),
+    );
+    mesh.position.set(
+      startX + col * (THUMB_W + THUMB_GAP),
+      startY - row * (THUMB_H + THUMB_GAP),
+      0,
+    );
+    mesh.userData.kind = 'menu-button';
+    mesh.userData.setHover = (h) => { if (h !== hovered) { hovered = h; redraw(mesh.userData._img || null); } };
+    mesh.visible = false;
+    galleryGroup.add(mesh);
+
+    return { mesh, tex, redraw, setLabel: (s) => { label = s; redraw(mesh.userData._img || null); } };
+  }
+
+  for (let row = 0; row < GALLERY_ROWS; row++) {
+    for (let col = 0; col < IMAGE_COLS; col++) {
+      _galleryThumbMeshes.push(_makeGalleryThumb(col, row));
+    }
+  }
+
+  // Register gallery thumb meshes with menuMgr so the raycast picks them up.
+  // They are initially invisible so MenuMgr's effVisible check blocks them until
+  // the gallery opens.
+  for (const { mesh } of _galleryThumbMeshes) {
+    menuMgr.addItem(mesh, () => _galleryThumbActivated(mesh));
+  }
+
+  let _galleryEntries = []; // current listing from listImages()
+  let _galleryLoading = false;
+
+  // Assign the chosen image to the currently-selected poster.
+  function _galleryThumbActivated(mesh) {
+    const idx = _galleryThumbMeshes.findIndex((t) => t.mesh === mesh);
+    if (idx < 0 || idx >= _galleryEntries.length) return;
+    const entry = _galleryEntries[idx];
+    if (!entry._objUrl) return; // not yet loaded
+    const rec = editor?.selectedProp?.();
+    if (!rec || rec.prop.type !== 'poster') {
+      setStatus('Gallery: select a poster in Change mode first');
+      return;
+    }
+    rec.prop.texture = entry._objUrl;
+    reapplyPosterProp(rec);
+    setStatus(`Poster: ${entry.name}`);
+  }
+
+  // (Re-)populate the gallery from the current images folder.
+  async function refreshGallery() {
+    if (_galleryLoading) return;
+    _galleryLoading = true;
+    try {
+      // Revoke old object URLs to avoid memory leaks.
+      for (const url of _galleryObjectUrls) try { URL.revokeObjectURL(url); } catch {}
+      _galleryObjectUrls.length = 0;
+
+      // Hide all thumb meshes while loading.
+      for (const { mesh } of _galleryThumbMeshes) { mesh.visible = false; mesh.userData._img = null; }
+
+      const entries = await listImages();
+      _galleryEntries = entries.slice(0, MAX_THUMBS);
+
+      for (let i = 0; i < _galleryThumbMeshes.length; i++) {
+        const thumb = _galleryThumbMeshes[i];
+        const entry = _galleryEntries[i];
+        if (!entry) { thumb.mesh.visible = false; continue; }
+
+        thumb.mesh.visible = true;
+        thumb.setLabel(entry.name);
+        // Load image async: create object URL, decode, then redraw the canvas.
+        entryObjectUrl(entry).then((url) => {
+          entry._objUrl = url;
+          _galleryObjectUrls.push(url);
+          const img = new window.Image();
+          img.onload = () => {
+            thumb.mesh.userData._img = img;
+            thumb.redraw(img);
+          };
+          img.src = url;
+        }).catch(() => { thumb.setLabel(`${entry.name} (err)`); });
+      }
+    } catch (e) {
+      setStatus(`Gallery load failed: ${e.message || e}`);
+    } finally {
+      _galleryLoading = false;
+    }
+  }
+
+  // Toggle the gallery open/closed. Opens → refreshes from the folder.
+  function toggleGallery() {
+    galleryGroup.visible = !galleryGroup.visible;
+    if (galleryGroup.visible) {
+      refreshGallery();
+      setStatus('Point at a thumbnail + trigger to assign it to the selected poster');
+    } else {
+      setStatus('Gallery closed');
+    }
+  }
+
+  // "Poster Images…" Change-panel button wired here (after gallery is built above).
+  posterGalleryBtn.onActivate = () => toggleGallery();
+
+  // Also expose headlessly for testing.
+  window.__gallery = { toggle: toggleGallery, refresh: refreshGallery, get entries() { return _galleryEntries; } };
 
   // Add mode: a furniture/prop catalogue. Each spawns in front of the player,
   // becomes editable-grabbable, and rides out through Export Room.
@@ -1883,6 +2160,41 @@ if (romFolderBtn && fileSystemAccessSupported()) {
   });
 }
 
+// Images folder (poster image source for Quest + desktop):
+// Grant a folder once via File System Access API; the directory handle persists
+// in IndexedDB across sessions (same pattern as the ROM library folder).
+// On Quest: showDirectoryPicker works inside a WebXR session with a user gesture —
+// the OS folder browser appears over the VR compositor. This is the only reliable
+// in-headset way to grant access to many files without removing the headset.
+// On desktop without FSA: the button is hidden; use "Set Poster Image…" instead.
+// After granting, the in-VR "Poster Images…" gallery (Change panel) lists the
+// folder's images as thumbnail buttons the user can point at + trigger to assign.
+const imagesFolderBtn = $('#images-folder-btn');
+if (imagesFolderBtn) {
+  if (imgFolderSupported()) {
+    imagesFolderBtn.hidden = false;
+    imagesFolderBtn.addEventListener('click', async () => {
+      try {
+        await pickImagesDirectory();
+        setStatus('Images folder granted — open Change mode → Poster Images… to browse');
+        // If the gallery is already open, refresh it immediately.
+        if (window.__gallery && typeof window.__gallery.refresh === 'function') {
+          window.__gallery.refresh();
+        }
+      } catch (e) {
+        if (e?.name !== 'AbortError') setStatus(`images folder grant failed: ${e.message || e}`);
+      }
+    });
+    // Check whether we already have a persisted handle and label accordingly.
+    hasImagesDirectory().then((has) => {
+      if (has && imagesFolderBtn) imagesFolderBtn.title += ' (folder already granted)';
+    }).catch(() => {});
+  } else {
+    // FSA unavailable — keep the button hidden (desktop users rely on "Set Poster Image…").
+    imagesFolderBtn.hidden = true;
+  }
+}
+
 // Export the current (possibly edited) room as *.room.json — desktop
 // convenience mirroring the in-VR "Export Room" menu item (Phase E.1).
 const exportRoomBtn = $('#export-room-btn');
@@ -1957,6 +2269,22 @@ function installDragAndDrop() {
 const setPosterBtn   = $('#set-poster-btn');
 const posterImgInput = $('#poster-img-input');
 
+/**
+ * Re-apply a poster prop's current texture + fit + scale to its material.
+ * Called after any of those three fields change (image, fit mode, scale step).
+ * The plane dimensions come from prop.size (default 0.8×1.1 m).
+ */
+function reapplyPosterProp(rec) {
+  if (!rec || rec.prop.type !== 'poster') return;
+  const [planeW, planeH] = Array.isArray(rec.prop.size) ? rec.prop.size : [0.8, 1.1];
+  applyPosterTexture(rec.object.material, rec.prop.texture, {
+    fit:    rec.prop.fit,
+    scale:  rec.prop.scale,
+    planeW,
+    planeH,
+  });
+}
+
 function applyCustomPosterSource(src) {
   // Resolve the currently-selected poster prop.
   const rec = editor?.selectedProp?.();
@@ -1965,8 +2293,9 @@ function applyCustomPosterSource(src) {
 
   // Write the source into the descriptor so it survives Export + auto-load.
   rec.prop.texture = src;
-  // Apply immediately to the live mesh material (same path as in-VR cycle).
-  applyPosterTexture(rec.object.material, src);
+  // Apply immediately to the live mesh material (same path as in-VR cycle),
+  // honouring the prop's current fit mode and scale.
+  reapplyPosterProp(rec);
   setStatus(`Poster image set: ${src.length > 60 ? src.slice(0, 57) + '…' : src}`);
 }
 

@@ -26,9 +26,12 @@ export const CREATABLE_PROP_TYPES = ['shelf', 'console', 'gamepad', 'poster', 'b
 // - bookcase: same fallback; the collection can be changed via Change-mode
 //   (cycleSelected → cycleShelfCollection, same as a shelf prop).
 // - poster: gets a visible built-in texture; custom images set via the
-//   desktop "Set Poster Image…" affordance override prop.texture directly.
+//   desktop "Images folder…" affordance or the in-VR gallery override
+//   prop.texture directly. `fit` (contain/cover/stretch) and `scale` control
+//   how the texture maps onto the plane; both default to RoomBuilder's defaults
+//   when absent so old room files continue to render identically.
 const PROP_DEFAULTS = {
-  poster:   { texture: 'builtin:poster-1', size: [0.8, 1.1] },
+  poster:   { texture: 'builtin:poster-1', size: [0.8, 1.1], fit: 'contain', scale: 1 },
   shelf:    {},
   console:  {},
   gamepad:  {},

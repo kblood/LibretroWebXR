@@ -1,11 +1,11 @@
 // EnvEditor — PURE option-cycling for in-VR environment editing (Phase E.2:
 // swap wallpaper / floor / lighting / posters from the menu). Each function
-// mutates a room descriptor's environment (or a poster prop's texture) to the
-// next option in a fixed palette and returns the new value. The imperative
+// mutates a room descriptor's environment (or a poster prop's texture/fit/scale)
+// to the next option in a fixed palette and returns the new value. The imperative
 // caller (main.js menu buttons) then re-applies it live via
 // [[src/SceneMgr.js]] `applyEnvironment` / [[src/RoomBuilder.js]]
 // `applyPosterTexture`, and the change rides back out through
-// [[src/RoomSerializer.js]] (which echoes `environment` + each prop's `texture`
+// [[src/RoomSerializer.js]] (which echoes `environment` + each prop's fields
 // verbatim) on export — so editing in VR and re-sharing the room Just Works.
 //
 // No THREE, no DOM — so `npm test` covers it in Node, mirroring the pure
@@ -102,4 +102,49 @@ export function cycleShelfCollection(prop, collectionKeys) {
   const next = nextInCycle(prop.collection, keys);
   prop.collection = next;
   return next;
+}
+
+// Fit-mode palette (matches FIT_MODES in RoomBuilder.js — kept in sync here
+// so EnvEditor stays free of THREE/browser imports and remains unit-testable).
+export const FIT_MODE_OPTIONS = ['contain', 'cover', 'stretch'];
+
+// Scale steps for in-VR adjustment (factor applied to the image repeat, so
+// 1.0 = natural fit, 2.0 = zoom in 2×, 0.5 = zoom out 2×).
+const SCALE_STEPS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
+const DEFAULT_SCALE = 1.0;
+
+/**
+ * Cycle a poster prop's `fit` field through contain → cover → stretch.
+ * Writes back to `prop.fit` and returns the new value.
+ * Pure: no THREE/DOM, unit-tested in Node.
+ */
+export function cycleFitMode(prop, options = FIT_MODE_OPTIONS) {
+  if (!prop || typeof prop !== 'object') return undefined;
+  const current = typeof prop.fit === 'string' ? prop.fit : undefined;
+  const next = nextInCycle(current, options);
+  prop.fit = next;
+  return next;
+}
+
+/**
+ * Step the poster's `scale` field to the next value in SCALE_STEPS.
+ * `direction` is 'up' (zoom in → larger value) or 'down' (zoom out → smaller).
+ * Clamps at the ends of the list. Returns the new scale value.
+ * Pure: no THREE/DOM, unit-tested in Node.
+ */
+export function stepScale(prop, direction = 'up', steps = SCALE_STEPS) {
+  if (!prop || typeof prop !== 'object') return DEFAULT_SCALE;
+  const current = typeof prop.scale === 'number' ? prop.scale : DEFAULT_SCALE;
+  let idx = steps.findIndex((s) => s >= current - 1e-6);
+  if (idx < 0) idx = steps.length - 1;
+  if (direction === 'up') {
+    idx = Math.min(idx + 1, steps.length - 1);
+  } else {
+    // When current is already at or above the current step, go to idx-1; else stay.
+    if (Math.abs(steps[idx] - current) < 1e-6 && idx > 0) idx--;
+    else if (idx > 0) idx--;
+    idx = Math.max(idx, 0);
+  }
+  prop.scale = steps[idx];
+  return prop.scale;
 }

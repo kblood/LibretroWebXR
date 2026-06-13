@@ -19,6 +19,13 @@ import {
   createBookcase, createCupboard, createTable,
   bookcaseShelfSurfaceYs, BOOKCASE_W, BOOKCASE_T,
 } from './Furniture.js';
+import { fitModeUV as _fitModeUV, FIT_MODES as _FIT_MODES, DEFAULT_FIT_MODE as _DEFAULT_FIT_MODE } from './PosterFit.js';
+
+// Re-export so callers can import from RoomBuilder (backwards-compatible).
+export const FIT_MODES = _FIT_MODES;
+export const DEFAULT_FIT_MODE = _DEFAULT_FIT_MODE;
+// Re-export the pure function for any callers that want it.
+export { fitModeUV } from './PosterFit.js';
 
 const DEG = Math.PI / 180;
 const v3 = (a) => new THREE.Vector3(a[0], a[1], a[2]);
@@ -84,13 +91,43 @@ function textureUrlOf(spec) {
 }
 
 /**
- * Apply a poster `texture` (a `builtin:` colour or a texture URL) to a material.
- * Flat colour is set immediately; a URL loads async and overrides it on success
- * (the flat colour stays as the fallback). Shared by the initial build and the
- * in-VR env editor's live poster swap ([[src/EnvEditor.js]]), so both paths
- * resolve `builtin:`/URL the same way.
+ * Apply fit-mode UV offsets to a loaded THREE.Texture in place.
+ * Delegates aspect math to PosterFit.fitModeUV (pure, unit-tested).
+ * @param {THREE.Texture} tex
+ * @param {number} imgW   natural pixel width  of the image
+ * @param {number} imgH   natural pixel height of the image
+ * @param {number} planeW plane width  in metres (from prop.size[0])
+ * @param {number} planeH plane height in metres (from prop.size[1])
+ * @param {string} mode   'contain' | 'cover' | 'stretch'
+ * @param {number} scale  overall scale factor (>1 zooms in, <1 zooms out)
  */
-export function applyPosterTexture(material, texture) {
+function applyFitUV(tex, imgW, imgH, planeW, planeH, mode, scale) {
+  const { repeatX, repeatY, offsetX, offsetY } = _fitModeUV(imgW, imgH, planeW, planeH, mode);
+  // `scale` > 1 zooms in (repeats a smaller portion). We divide repeat by
+  // scale so a scale of 2 shows half the image filling the plane.
+  const s = (typeof scale === 'number' && scale > 0) ? scale : 1;
+  tex.repeat.set(repeatX / s, repeatY / s);
+  // Re-centre after scale so the crop stays centred.
+  tex.offset.set(
+    offsetX + (repeatX - repeatX / s) / 2,
+    offsetY + (repeatY - repeatY / s) / 2,
+  );
+  tex.needsUpdate = true;
+}
+
+/**
+ * Apply a poster `texture` (a `builtin:` colour or a texture URL) to a material,
+ * honouring the optional `fit` mode ('contain'|'cover'|'stretch') and `scale`
+ * factor. Flat colour is set immediately; a URL loads async and overrides it on
+ * success (the flat colour stays as the fallback).
+ *
+ * `planeW`/`planeH` are the plane's metre dimensions — needed to compute the
+ * aspect-corrected UV mapping for contain/cover. When absent, stretch is used.
+ *
+ * Shared by the initial build and the in-VR env editor's live poster swap
+ * ([[src/EnvEditor.js]]), so both paths resolve `builtin:`/URL the same way.
+ */
+export function applyPosterTexture(material, texture, { fit, scale, planeW, planeH } = {}) {
   if (!material) return;
   const color = resolveColor(texture) || '#3a2c4a';
   material.map = null;
@@ -100,13 +137,20 @@ export function applyPosterTexture(material, texture) {
   if (url) {
     new THREE.TextureLoader().load(url, (tex) => {
       tex.colorSpace = THREE.SRGBColorSpace;
-      material.map = tex; material.color.set('#ffffff'); material.needsUpdate = true;
+      // Compute fit-mode UVs using the image's natural dimensions.
+      const imgW = tex.image?.naturalWidth  || tex.image?.width  || 0;
+      const imgH = tex.image?.naturalHeight || tex.image?.height || 0;
+      applyFitUV(tex, imgW, imgH, planeW || 0, planeH || 0, fit || DEFAULT_FIT_MODE, scale);
+      material.map = tex;
+      material.color.set('#ffffff');
+      material.needsUpdate = true;
     }, undefined, () => { /* keep flat colour on failure */ });
   }
 }
 
 // A poster/picture on the wall: a thin lit plane. `texture` may be a URL or a
 // `builtin:` colour; `size` is [w,h] metres (default 0.8×1.1 portrait).
+// `fit` and `scale` are optional and default to contain/1 (see applyPosterTexture).
 function buildPoster(prop) {
   const [w, h] = Array.isArray(prop.size) ? prop.size : [0.8, 1.1];
   const mat = new THREE.MeshBasicMaterial({ toneMapped: false });
@@ -114,7 +158,12 @@ function buildPoster(prop) {
   mesh.name = `poster:${prop.id}`;
   mesh.position.copy(v3(prop.pos));
   applyRot(mesh, prop.rot);
-  applyPosterTexture(mat, prop.texture);
+  applyPosterTexture(mat, prop.texture, {
+    fit:    prop.fit,
+    scale:  prop.scale,
+    planeW: w,
+    planeH: h,
+  });
   return mesh;
 }
 
