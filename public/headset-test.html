@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LibretroWebXR — Headset Smoke Test</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: #0c0c1c;
+    color: #e8e8f0;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    font-size: 22px;
+    line-height: 1.55;
+    padding: 28px 20px 120px;
+  }
+  main { max-width: 820px; margin: 0 auto; }
+  h1 { color: #88ddff; font-size: 1.9em; margin: 0 0 6px; }
+  h2 {
+    color: #ffd060; font-size: 1.35em; margin: 1.6em 0 0.4em;
+    border-bottom: 2px solid #334; padding-bottom: 6px;
+  }
+  h3 { color: #88ddff; font-size: 1.1em; margin: 1.1em 0 0.3em; }
+  p.lead { color: #b8b8c8; }
+  a { color: #88ddff; }
+  code, .url {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    background: #1a1a30; color: #aef; padding: 2px 7px; border-radius: 6px;
+    word-break: break-all;
+  }
+  .url { display: inline-block; font-size: 0.85em; }
+  .note { color: #9a9ab0; font-size: 0.9em; }
+  .kbd {
+    display: inline-block; background: #23233f; border: 1px solid #44446a;
+    border-radius: 6px; padding: 0 8px; color: #ffd060; font-weight: 600;
+  }
+  ul.controls { list-style: none; padding-left: 0; }
+  ul.controls li { margin: 8px 0; }
+  /* Checklist items: big tap targets for in-headset use. */
+  ol.checks { list-style: none; padding-left: 0; counter-reset: step; }
+  ol.checks > li {
+    position: relative; margin: 12px 0; padding: 14px 16px 14px 58px;
+    background: #15152a; border: 1px solid #2a2a48; border-radius: 12px;
+    cursor: pointer; user-select: none;
+  }
+  ol.checks > li::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+    width: 30px; height: 30px; border-radius: 50%;
+    background: #2a2a48; color: #cfcfe6; font-size: 0.8em; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  ol.checks > li.done { background: #15301f; border-color: #2f7a4a; }
+  ol.checks > li.done::before {
+    content: "✓"; background: #2f7a4a; color: #fff;
+  }
+  ol.checks > li .pass { color: #7fe0a0; font-weight: 600; }
+  .pill {
+    display: inline-block; font-size: 0.7em; font-weight: 700; vertical-align: middle;
+    padding: 2px 9px; border-radius: 999px; margin-left: 8px;
+  }
+  .pill.m0 { background: #243a5e; color: #9cc7ff; }
+  .pill.m1 { background: #3a2456; color: #cf9cff; }
+  .pill.new { background: #5e3a24; color: #ffc79c; }
+  .pill.opt { background: #333; color: #aaa; }
+  .bar {
+    position: fixed; left: 0; right: 0; bottom: 0; background: #16162c;
+    border-top: 1px solid #2a2a48; padding: 12px 20px; text-align: center;
+    display: flex; gap: 14px; align-items: center; justify-content: center;
+  }
+  .bar #progress { color: #ffd060; font-weight: 700; }
+  button {
+    font-size: 0.8em; background: #2a2a48; color: #e8e8f0; border: 1px solid #44446a;
+    border-radius: 8px; padding: 8px 16px; cursor: pointer;
+  }
+  .box { background: #12122400; border: 1px dashed #44446a; border-radius: 10px; padding: 4px 16px; margin: 12px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>LibretroWebXR — Headset Smoke Test</h1>
+  <p class="lead">The manual VR checks that <strong>can't be scripted headlessly</strong>:
+  the raycast menus, that the Quest exposes one gamepad per controller, in-VR voice
+  (mic grant mid-XR), and two-headset networked multiplayer (presence, voice, shared
+  TV, held-object ghosts, host-authoritative input + video). Tap a step to mark it
+  done — progress is saved on this device.</p>
+
+  <div class="box">
+    <h3>Open these</h3>
+    <p><strong>Single headset (Part A):</strong><br>
+      <span class="url">https://dionysus.dk/webxr/libretrowebxr2/</span></p>
+    <p><strong>Two headsets (Part B)</strong> — both open the <em>same room</em>,
+      different names:<br>
+      <span class="url">https://dionysus.dk/webxr/libretrowebxr2/?session=ROOM&amp;nick=Alice</span><br>
+      <span class="url">https://dionysus.dk/webxr/libretrowebxr2/?session=ROOM&amp;nick=Bob</span></p>
+    <p class="note">Optional: <code>&amp;color=%23ff8866</code> picks your avatar colour.
+      For a cross-network test add <code>&amp;turn=turn:dionysus.dk:3478&amp;turnUser=USER&amp;turnCred=PASS</code>
+      (needs the coturn server provisioned first).</p>
+  </div>
+
+  <div class="box">
+    <h3>Controls (quick reference)</h3>
+    <ul class="controls">
+      <li><span class="kbd">Grip</span> (side squeeze) — grab / release a cartridge, the gamepad, or (in edit mode) a prop. Never sent to the game.</li>
+      <li><span class="kbd">Thumbstick</span> — walk, <em>when you're not holding the gamepad</em>.</li>
+      <li><span class="kbd">Trigger</span> on the wall <strong>Menu</strong> panel (left wall) — click a menu button. Drop the gamepad first, point, and pull.</li>
+      <li><span class="kbd">Hold the gamepad</span> in one hand to play: trigger / face buttons / thumbstick = game input, per the wall <strong>Controls</strong> card.</li>
+    </ul>
+  </div>
+
+  <h2>Part A — Single headset</h2>
+  <ol class="checks">
+    <li><strong>Enter VR.</strong> Open the single-headset URL, tap <em>Enter VR</em>. The 3D room renders — shelves, a console, a CRT TV, wall panels.</li>
+    <li><strong>Boot a game.</strong> Grip a cartridge off a shelf and drop it onto the console. It boots on the TV. <span class="pass">If pixels appear, COOP/COEP + SharedArrayBuffer + the WASM core all work.</span></li>
+    <li><strong>Play it — controller gamepad.</strong> Grip the gamepad, hold it, and play: thumbstick = D-pad, trigger/face buttons act per the Controls card. <span class="pass">Confirms the Quest exposes one live <code>inputSource.gamepad</code> per held controller.</span></li>
+    <li><strong>Menu raycast — modes.</strong> Drop the gamepad. Point at the wall <strong>Menu</strong> panel and pull the trigger to click. Toggle <em>Show Controls</em> and <em>Show Debug</em>.</li>
+    <li><strong>Move mode.</strong> Menu → <em>Move</em>. Grip a shelf or poster, drag it somewhere new, release. It stays put.</li>
+    <li><strong>Change mode.</strong> Menu → <em>Change</em>. Grip-select a poster, then <em>Cycle Selected</em> → its art changes. Grip-select a shelf, <em>Cycle Selected</em> → its game collection swaps. Try <em>Wallpaper</em> / <em>Floor</em> / <em>Lighting</em> — the room repaints live.</li>
+    <li><strong>Add mode.</strong> Menu → <em>Add</em>. Add a Shelf, Console, Poster, and Portal — each spawns in front of you and is immediately grabbable.</li>
+    <li><strong>Portal + Export.</strong> Walk into the portal you added → it navigates to another room. Back in the menu, <em>Export Room</em> downloads / copies the room JSON.</li>
+  </ol>
+
+  <h2>Part B — Two headsets <span class="pill m0">M0</span> <span class="pill m1">M1</span></h2>
+  <p class="lead">Both headsets open the <strong>same</strong> <code>?session=ROOM</code> URL (with different
+    <code>nick</code>). For the basic test put both on the <strong>same Wi-Fi</strong> (STUN covers that;
+    TURN is only for the cross-network case below).</p>
+  <ol class="checks">
+    <li><strong>Presence.</strong> <span class="pill m0">M0</span> Each of you sees the other as an avatar — floating head + two hands + a nameplate. Move your head and hands; the other sees it track.</li>
+    <li><strong>In-VR voice + mic grant.</strong> <span class="pill new">NEW</span> On <em>each</em> headset: Menu → <strong>Voice: Off</strong>. Approve the Quest microphone prompt. The label flips to <em>Voice: On</em>. Talk — you hear each other, and the voice is <strong>spatial</strong> (quieter as you walk apart, panned by direction). Click Voice again → <em>Voice: Muted</em>. <span class="pass">The key new check: does the Quest browser grant the mic during an XR session?</span></li>
+    <li><strong>Shared TV.</strong> <span class="pill m0">M0</span> One player boots a game (grip cart → console). <strong>Both</strong> TVs converge on that game.</li>
+    <li><strong>Held-object ghost.</strong> <span class="pill m0">M0</span> One player grips a cartridge and holds it. The other sees a translucent <strong>ghost cartridge in that player's hand</strong>.</li>
+    <li><strong>Host video stream.</strong> <span class="pill m1">M1.2</span> After the host boots, the other player's TV shows the <strong>host's actual gameplay frames</strong> (a live video of the host's screen), not a separate copy.</li>
+    <li><strong>Host-authoritative input.</strong> <span class="pill m1">M1.1</span> The non-host holds their gamepad and presses buttons → it drives the <strong>host's</strong> game. Both TVs show the host's game reacting to the remote player.</li>
+    <li><strong>Watcher core pauses / resumes.</strong> <span class="pill new">NEW</span> While watching, the non-host runs no game of its own (its TV just mirrors the host). To confirm the resume path: the non-host boots their <em>own</em> game (grip a different cart → console) → they <strong>take over as host</strong>, their core resumes, and the first player now watches them.</li>
+  </ol>
+
+  <h2>Optional / advanced</h2>
+  <ol class="checks">
+    <li><strong>Cross-network (TURN).</strong> <span class="pill opt">OPTIONAL</span> Put the two headsets on <em>different</em> networks (e.g. one on a phone hotspot). Without TURN, voice/video may fail to connect (symmetric NAT). Re-open both with the <code>&amp;turn=…&amp;turnUser=…&amp;turnCred=…</code> params → they should connect via the relay. <span class="note">Requires the coturn server to be set up first (see <code>deploy/coturn.conf.example</code>).</span></li>
+    <li><strong>Local ROM folder.</strong> <span class="pill opt">OPTIONAL</span> Does the <em>“ROM folder…”</em> button appear and work in the Quest browser (File System Access API)? Known unknown — note what happens.</li>
+  </ol>
+
+  <h2>What to report back</h2>
+  <p class="lead">For each failed step: which one, what you saw vs expected. Also note the
+    <strong>headset model + browser version</strong>, and specifically <strong>whether the mic
+    grant worked mid-XR</strong> (step B2) — that's the main open question. A screen recording
+    of any glitch helps a lot.</p>
+</main>
+
+<div class="bar">
+  <span id="progress">0 / 0 done</span>
+  <button id="reset">Reset progress</button>
+</div>
+
+<script>
+  // Tap-to-toggle checklist with per-device persistence. Each <li> gets a stable
+  // id from its position so saved state survives reloads (and re-reads in VR).
+  const items = [...document.querySelectorAll('ol.checks > li')];
+  items.forEach((li, i) => { li.dataset.k = 'lwx-test-' + i; });
+  const progress = document.getElementById('progress');
+
+  function render() {
+    let done = 0;
+    for (const li of items) {
+      const on = localStorage.getItem(li.dataset.k) === '1';
+      li.classList.toggle('done', on);
+      if (on) done++;
+    }
+    progress.textContent = done + ' / ' + items.length + ' done';
+  }
+  for (const li of items) {
+    li.addEventListener('click', () => {
+      const on = localStorage.getItem(li.dataset.k) === '1';
+      if (on) localStorage.removeItem(li.dataset.k);
+      else localStorage.setItem(li.dataset.k, '1');
+      render();
+    });
+  }
+  document.getElementById('reset').addEventListener('click', () => {
+    for (const li of items) localStorage.removeItem(li.dataset.k);
+    render();
+  });
+  render();
+</script>
+</body>
+</html>
