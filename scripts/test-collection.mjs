@@ -22,6 +22,7 @@ import {
   RETROPAD_KEYS, EXTRA_PLAYER_KEYS, EXTRA_KEY_DEFS, RA_KEY_NAME,
 } from '../src/ControllerMaps.js';
 import { DEFAULT_BIND_CODES } from '../src/InputMgr.js';
+import { looksLikeRoom, LAST_ROOM_KEY, ROOM_BRIDGE_KEY } from '../src/RoomPersistence.js';
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -440,6 +441,35 @@ eq('playerForPort 3 → P4', playerForPort(3), 4);
   const BTNS = ['Up', 'Down', 'Left', 'Right', 'A', 'B', 'X', 'Y', 'L', 'R', 'Start', 'Select'];
   ok('P2-4 each map all 12 RetroPad buttons',
      [2, 3, 4].every((p) => BTNS.every((b) => typeof EXTRA_PLAYER_KEYS[p][b] === 'string')));
+}
+
+// --- RoomPersistence (pure guards + key constants) -------------------------
+{
+  // looksLikeRoom: accepts valid room objects, rejects garbage.
+  const validRoom = defaultRoom('roms/manifest.json');
+  ok('looksLikeRoom accepts defaultRoom()', looksLikeRoom(validRoom));
+
+  const parsed = parseRoom({ props: [], schema: 'libretrowebxr/room@1' });
+  ok('looksLikeRoom accepts parseRoom() output', looksLikeRoom(parsed));
+
+  const futureSchema = parseRoom({});
+  futureSchema.schema = 'libretrowebxr/room@99';
+  ok('looksLikeRoom accepts future minor version', looksLikeRoom(futureSchema));
+
+  ok('looksLikeRoom rejects null', !looksLikeRoom(null));
+  ok('looksLikeRoom rejects empty object', !looksLikeRoom({}));
+  ok('looksLikeRoom rejects missing props array', !looksLikeRoom({ schema: 'libretrowebxr/room@1' }));
+  ok('looksLikeRoom rejects wrong schema prefix', !looksLikeRoom({ props: [], schema: 'other/room@1' }));
+  ok('looksLikeRoom rejects collection object', !looksLikeRoom({ games: [], schema: 'other' }));
+
+  // Key constants are stable strings (callers stringify against these).
+  ok('LAST_ROOM_KEY is a non-empty string', typeof LAST_ROOM_KEY === 'string' && LAST_ROOM_KEY.length > 0);
+  ok('ROOM_BRIDGE_KEY is a non-empty string', typeof ROOM_BRIDGE_KEY === 'string' && ROOM_BRIDGE_KEY.length > 0);
+  ok('LAST_ROOM_KEY !== ROOM_BRIDGE_KEY', LAST_ROOM_KEY !== ROOM_BRIDGE_KEY);
+
+  // Round-trip: serialize a room → looksLikeRoom should accept the parsed-back form.
+  const rt = parseRoom(serializeRoom(defaultRoom(), new Map()));
+  ok('serialized+reparsed defaultRoom passes looksLikeRoom', looksLikeRoom(rt));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

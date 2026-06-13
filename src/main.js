@@ -14,6 +14,7 @@ import { installSpatialAudio } from './SpatialAudio.js';
 import { createMemoryCard } from './MemoryCard.js';
 import { saveState, loadState, listStates } from './SaveState.js';
 import { createDebugHud } from './DebugHud.js';
+import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
@@ -27,6 +28,10 @@ import { makeHoldKey, parseHolds } from './net/HoldState.js';
 import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
 import { parseRoom, defaultRoom, roomCollectionRefs } from './RoomLoader.js';
+import {
+  saveLastRoom, loadLastRoom, clearLastRoom,
+  stashRoomBridge, consumeRoomBridge, looksLikeRoom,
+} from './RoomPersistence.js';
 import { buildRoom, buildProp, buildPortal, applyPosterTexture } from './RoomBuilder.js';
 import { RoomEditor } from './RoomEditor.js';
 import { cycleSurface, cycleTimeOfDay, cyclePosterTexture, cycleShelfCollection } from './EnvEditor.js';
@@ -201,6 +206,7 @@ function computeRouting() {
   });
 }
 let debugHud = null;
+let nowPlayingPanel = null; // world-space "Now Playing + Input" panel near the TV
 let editor = null;       // Phase E.1 in-VR room editor (set in buildCartridgeWorld)
 let currentRoom = null;  // the parsed room descriptor we serialize back on export
 let roomPosters = [];    // Phase E.2: { prop, object } for each poster, for live env edits
@@ -246,16 +252,51 @@ function readDroppedWorld() {
 // Decide what to build: a dropped file wins; else ?room=URL loads a full
 // room; else ?collection=URL (or the default manifest) drops a bare
 // collection into the built-in room layout.
+//
+// Goal A: a cross-core ROM swap reloads the page; just before the reload we
+// bridge the live room into sessionStorage (stashRoomBridge). Here we consume
+// that one-shot stash so the room survives the core-swap reload.
+//
+// Goal B: if the user previously exported/saved a room it sits in localStorage.
+// We load it here in lieu of defaultRoom() so the app always boots into the
+// last-known room.  Two escape hatches bypass this:
+//   • ?room=default  — ignores both the bridge and localStorage, boots defaultRoom()
+//     (useful when a corrupt/unwanted save would otherwise brick the app).
+//   • ?room=<URL>    — explicit URL still wins (same as before).
 async function resolveWorld() {
   const dropped = readDroppedWorld();
   if (dropped) return dropped;
 
   const roomUrl = urlParams.get('room');
+
+  // Explicit ?room=default → ignore all saves; boot the hard-coded layout.
+  if (roomUrl === 'default') {
+    clearLastRoom();
+    const collectionUrl = urlParams.get('collection') || 'roms/manifest.json';
+    return { room: defaultRoom(collectionUrl), inline: [] };
+  }
+
+  // Explicit ?room=<URL> → fetch that room (unchanged original behaviour).
   if (roomUrl) {
     const obj = await fetchJson(roomUrl);
     return { room: parseRoom(obj || {}, { sourceLabel: roomUrl }), inline: [] };
   }
 
+  // Goal A: cross-core reload bridge (sessionStorage, one-shot).
+  const bridgeObj = consumeRoomBridge();
+  if (bridgeObj && looksLikeRoom(bridgeObj)) {
+    console.log('[main] restoring room from cross-core bridge');
+    return { room: parseRoom(bridgeObj, { sourceLabel: 'bridge' }), inline: [] };
+  }
+
+  // Goal B: auto-load last saved room from localStorage.
+  const savedObj = loadLastRoom();
+  if (savedObj && looksLikeRoom(savedObj)) {
+    console.log('[main] restoring room from localStorage (last saved)');
+    return { room: parseRoom(savedObj, { sourceLabel: 'lastRoom' }), inline: [] };
+  }
+
+  // Default: the built-in two-shelf layout (original behaviour).
   const collectionUrl = urlParams.get('collection') || 'roms/manifest.json';
   return { room: defaultRoom(collectionUrl), inline: [] };
 }
@@ -320,6 +361,15 @@ async function buildCartridgeWorld() {
   debugHud.position.set(0, 0.30, 0);
   debugHud.rotation.x = -Math.PI / 6;
   gamepadObj.add(debugHud);
+
+  // "Now Playing + Input" panel: fixed world-space, sits just below the TV
+  // bezel so it's visible both in VR and on the flat desktop screen.
+  // TV is at (0, 1.5, -3.6); the panel hangs 0.86 m below that (below the
+  // TV cabinet bottom edge at ~1.5 - 0.825 = 0.675, so y ≈ 0.58 is clear of
+  // the stand which occupies y=0..0.7 at z=-3.6).
+  nowPlayingPanel = createNowPlayingPanel();
+  nowPlayingPanel.position.set(0, 0.58, -3.6);
+  scene.addObject(nowPlayingPanel);
 
   grabMgr = new GrabMgr({
     scene: scene.scene,
@@ -440,8 +490,12 @@ async function buildCartridgeWorld() {
     // Local-multiplayer routing: which player each hand drives this frame.
     getRouting: computeRouting,
     // LED pulse for every emulator keydown — visible in-VR feedback that
-    // gamepad input is reaching the core.
-    onKeyDown: () => consoleObj.userData.pulse?.(0xffffff, 90),
+    // gamepad input is reaching the core. Also forward to the Now Playing
+    // panel so the user can see the specific key code IN the headset.
+    onKeyDown: (code) => {
+      consoleObj.userData.pulse?.(0xffffff, 90);
+      nowPlayingPanel?.userData.notifyInput(code);
+    },
     // M1.1 networked client: forward each logical RetroPad transition to the
     // host (no-op when we ARE the host or no game is loaded — see
     // NetMgr.forwardGameInput → NetProtocol.hostInputTarget). We still dispatch
@@ -884,6 +938,12 @@ function handleCartridgeInserted(meta, { echo = true } = {}) {
     sessionStorage.setItem(PENDING_KEY, JSON.stringify({
       file: meta.file, core: meta.core, system: meta.system, title: meta.title,
     }));
+    // Goal A: serialize the live room and bridge it across the reload so any
+    // in-VR edits (moved shelves, added props, env changes) are not lost.
+    if (editor) {
+      try { stashRoomBridge(JSON.stringify(editor.serialize())); }
+      catch (e) { console.warn('[main] room bridge stash failed:', e); }
+    }
     setStatus(`switching to ${meta.title}…`);
     location.reload();
     return;
@@ -906,6 +966,12 @@ async function loadCartridge(meta, { echo = true } = {}) {
     consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
     setSystemLabel(meta.core);
     updateControlsPanel();
+    // Update the in-VR "Now Playing" panel so the user can see what's running.
+    nowPlayingPanel?.userData.setNowPlaying({
+      system:    meta.system,
+      coreLabel: CORES[meta.core]?.label || meta.core,
+      title:     meta.title,
+    });
     // M0.5: tell the shared room which game is now on the TV. Suppressed when
     // this load is reflecting a remote peer's state (echo:false) so it can't
     // bounce a stale value back over a newer overwrite.
@@ -1140,6 +1206,30 @@ if (romFolderBtn && fileSystemAccessSupported()) {
 const exportRoomBtn = $('#export-room-btn');
 if (exportRoomBtn) {
   exportRoomBtn.addEventListener('click', () => editor?.export());
+}
+
+// Goal C — Import Room: a file picker that reuses the exact same drop path
+// (stash in sessionStorage + location.reload) so import and drag-drop go
+// through a single code path. Supports .room.json and .collection.json.
+const importRoomInput = $('#import-room-input');
+if (importRoomInput) {
+  importRoomInput.addEventListener('change', async () => {
+    const file = importRoomInput.files?.[0];
+    if (!file) return;
+    importRoomInput.value = ''; // reset so the same file can be re-imported
+    try {
+      const text = await file.text();
+      const obj = JSON.parse(text);
+      const isRoom = (typeof obj?.schema === 'string' && obj.schema.includes('room'))
+                   || Array.isArray(obj?.props) || Array.isArray(obj?.portals)
+                   || (obj?.environment != null && !Array.isArray(obj?.games) && !Array.isArray(obj?.cartridges));
+      sessionStorage.setItem(DROP_KEY, JSON.stringify({ kind: isRoom ? 'room' : 'collection', text }));
+      setStatus(`loading ${file.name}…`);
+      location.reload();
+    } catch (err) {
+      setStatus(`bad import: ${err.message || err}`);
+    }
+  });
 }
 
 // Drag-and-drop a *.room.json or *.collection.json onto the page to load it

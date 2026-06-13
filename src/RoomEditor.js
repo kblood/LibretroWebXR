@@ -17,6 +17,7 @@
 // export we read each placed object's transform and hand both to serializeRoom.
 
 import { serializeRoom } from './RoomSerializer.js';
+import { saveLastRoom } from './RoomPersistence.js';
 
 const DEG = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
@@ -234,6 +235,10 @@ export class RoomEditor {
     // Best-effort clipboard copy (requires a user gesture + permission; the
     // download above is the reliable path).
     navigator.clipboard?.writeText?.(json).catch(() => {});
+
+    // Persist to localStorage so the next page load auto-restores this layout
+    // (Goal B). A side-effect of export is always a clean known-good snapshot.
+    saveLastRoom(json);
 
     this.onStatus(`exported ${name}`);
     return json;
