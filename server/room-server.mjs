@@ -12,8 +12,15 @@
 // See server/README.md.
 //
 //   PORT=8787 node server/room-server.mjs      (or: cd server && npm start)
+//
+// Also mounts the HTTP log server (server/log-server.mjs) on LOG_PORT (default
+// 8788) so Quest sessions can POST /log and a developer can GET /logs. See
+// deploy/log-proxy.conf for the Apache reverse-proxy snippet.
 
 import { WebSocketServer } from 'ws';
+// Log server: in-process HTTP companion for remote log ingestion + viewing.
+// Import first so it starts listening before any WebSocket connections arrive.
+import './log-server.mjs';
 import { randomUUID } from 'node:crypto';
 import { Hub } from './Hub.js';
 import { decode, encode, MSG } from '../src/net/NetProtocol.js';

@@ -1,3 +1,11 @@
+// Remote logger: imported first so it can capture startup errors before any
+// other module runs. It chains onto console.* and window error events — the
+// rest of the app is unaware of it.  Remote shipping is opt-in: it activates
+// only when ?log=<url> is in the URL, or when the page is served from the
+// production host (dionysus.dk). Console-only mode is the default elsewhere.
+import { logger } from './Logger.js';
+logger.init();
+
 import * as THREE from 'three';
 import { EmulatorClient } from './EmulatorClient.js';
 import { InputMgr } from './InputMgr.js';
@@ -112,6 +120,10 @@ if (sessionRoom) {
   const palette = ['#88aaff', '#ff8866', '#66dd99', '#ffd166', '#cc88ff', '#66ccee'];
   const nick = urlParams.get('nick') || `Player-${Math.random().toString(36).slice(2, 6)}`;
   const color = urlParams.get('color') || palette[Math.floor(Math.random() * palette.length)];
+  // Tag subsequent log entries with this session + nick so the /logs viewer can
+  // filter per-session (the logger was already active capturing startup).
+  logger._sessionId = sessionRoom;
+  logger._nick = nick;
   // M0 hardening: optional TURN relay for peers behind symmetric NAT (STUN
   // alone fails there). Supplied via ?turn=turn:host:3478&turnUser=…&turnCred=…
   // (or omit for the STUN-only default). Shared by the voice + video meshes.
