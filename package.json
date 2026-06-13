@@ -28,7 +28,8 @@
     "smoke-gameinput": "node scripts/smoke-gameinput.mjs",
     "smoke-gamesync": "node scripts/smoke-gamesync.mjs",
     "smoke-video": "node scripts/smoke-video.mjs",
-    "deploy": "pwsh scripts/deploy.ps1"
+    "deploy": "pwsh scripts/deploy.ps1",
+    "dummy-player": "node scripts/dummy-player.mjs"
   },
   "devDependencies": {
     "puppeteer-core": "^25.0.2",
