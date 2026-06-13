@@ -97,7 +97,15 @@ page.on('pageerror', (e) => {
   log('pageerror', e.message);
 });
 page.on('requestfailed', (r) => {
-  const f = `${r.method()} ${r.url()} — ${r.failure()?.errorText}`;
+  const err = r.failure()?.errorText || '';
+  const f = `${r.method()} ${r.url()} — ${err}`;
+  // The remote logger (src/Logger.js) POSTs batches to /log; an in-flight flush
+  // is routinely aborted when the headless page tears down — not a real failure.
+  if (r.method() === 'POST' && /\/log(\?|$)/.test(r.url()) && err === 'net::ERR_ABORTED') {
+    events.expected.push(f);
+    log('requestfailed(expected logger flush)', f);
+    return;
+  }
   events.requestfailed.push(f);
   log('requestfailed', f);
 });
