@@ -1,7 +1,8 @@
 // Furniture — decorative, movable room props for the in-VR editor's "Add" mode
-// (bookcase / cupboard / table). Unlike a `shelf` (which holds cartridges via
-// [[src/Shelf.js]]), these are plain set-dressing you arrange to furnish a room;
-// wiring a bookcase to actually hold a collection is a noted follow-up.
+// (bookcase / cupboard / table). A bookcase can also hold a collection of
+// grabbable cartridges (one row per internal shelf level) — see
+// [[src/RoomBuilder.js]] `buildBookcaseCarts` + the `collection` descriptor
+// field. Cupboard and table remain decorative (no cart support).
 //
 // Each factory returns a THREE.Group whose ORIGIN sits at the floor-contact
 // point (bottom-centre, geometry built upward from y=0), so a `pos` of
@@ -18,12 +19,35 @@ const METAL = () => new THREE.MeshStandardMaterial({ color: 0x9a9aa2, roughness:
 
 const box = (w, h, d, mat) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
 
+// Bookcase geometry constants — shared with RoomBuilder so it can place
+// cartridges on the correct shelf levels without duplicating these numbers.
+export const BOOKCASE_W  = 0.9;   // outer width
+export const BOOKCASE_H  = 1.8;   // outer height
+export const BOOKCASE_D  = 0.3;   // outer depth
+export const BOOKCASE_T  = 0.03;  // panel thickness
+
+// Y coordinate of the TOP surface of each internal shelf (local space, origin
+// at floor). Levels are at H*i/4 (i=1,2,3); top face = level_y + T/2.
+// RoomBuilder places cartridges with their base on this surface.
+export function bookcaseShelfSurfaceYs() {
+  const levels = 3;
+  const ys = [];
+  for (let i = 1; i <= levels; i++) {
+    ys.push((BOOKCASE_H * i) / 4 + BOOKCASE_T / 2);
+  }
+  return ys; // e.g. [0.465, 0.915, 1.365]
+}
+
 /**
  * A tall open bookcase: two side panels, top/bottom, a thin back, and a few
  * fixed internal shelves. ~0.9 W × 1.8 H × 0.3 D.
+ *
+ * When a `collection` is set on the descriptor, RoomBuilder populates each
+ * shelf level with grabbable cartridges (up to MAX_CARTS_PER_BOOKCASE_ROW per
+ * row). The geometry itself is always the same regardless of collection.
  */
 export function createBookcase({ position = new THREE.Vector3(0, 0, 0), rotationY = 0 } = {}) {
-  const W = 0.9, H = 1.8, D = 0.3, T = 0.03;
+  const W = BOOKCASE_W, H = BOOKCASE_H, D = BOOKCASE_D, T = BOOKCASE_T;
   const group = new THREE.Group();
   group.name = 'bookcase';
   group.position.copy(position);

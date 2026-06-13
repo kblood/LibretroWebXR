@@ -18,11 +18,16 @@ export const SURFACE_OPTIONS = [
   'builtin:crt-grey', 'builtin:wood', 'builtin:dark',
 ];
 
-// Poster palette — the keys RoomBuilder's BUILTIN_COLORS resolves (poster-1/2
-// plus the shared retro tints). Keep in sync with that map.
+// Poster palette — the keys RoomBuilder's BUILTIN_COLORS resolves (poster-1/6
+// plus the shared retro tints). Keep in sync with BUILTIN_COLORS in
+// [[src/RoomBuilder.js]].  Custom URLs (set via the desktop "Set Poster Image…"
+// affordance) are NOT part of this cycle — they are applied directly to the
+// prop's `texture` field and round-trip through RoomSerializer as-is.
 export const POSTER_OPTIONS = [
-  'builtin:poster-1', 'builtin:poster-2', 'builtin:retro-blue',
-  'builtin:retro-green', 'builtin:retro-pink', 'builtin:crt-grey',
+  'builtin:poster-1', 'builtin:poster-2', 'builtin:poster-3',
+  'builtin:poster-4', 'builtin:poster-5', 'builtin:poster-6',
+  'builtin:retro-blue', 'builtin:retro-green', 'builtin:retro-pink',
+  'builtin:crt-grey', 'builtin:neon-purple', 'builtin:warm-amber',
 ];
 
 // Lighting presets SceneMgr's TIME_OF_DAY knows.

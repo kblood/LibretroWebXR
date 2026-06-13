@@ -472,5 +472,113 @@ eq('playerForPort 3 → P4', playerForPort(3), 4);
   ok('serialized+reparsed defaultRoom passes looksLikeRoom', looksLikeRoom(rt));
 }
 
+// --- (A) Configurable posters: expanded palette + custom URL round-trip -------
+{
+  // POSTER_OPTIONS now has 12 entries covering poster-1..6 + surface tints.
+  ok('POSTER_OPTIONS has at least 10 entries (poster-1..6 + tints)', POSTER_OPTIONS.length >= 10);
+  ok('POSTER_OPTIONS includes poster-3', POSTER_OPTIONS.includes('builtin:poster-3'));
+  ok('POSTER_OPTIONS includes poster-6', POSTER_OPTIONS.includes('builtin:poster-6'));
+  ok('POSTER_OPTIONS includes neon-purple', POSTER_OPTIONS.includes('builtin:neon-purple'));
+  ok('POSTER_OPTIONS includes warm-amber',  POSTER_OPTIONS.includes('builtin:warm-amber'));
+
+  // Cycling wraps correctly across the full expanded palette.
+  const poster = { type: 'poster', id: 'p-test', texture: POSTER_OPTIONS.at(-1) };
+  const wrapped = cyclePosterTexture(poster);
+  eq('cyclePosterTexture wraps from last → first', wrapped, POSTER_OPTIONS[0]);
+
+  // Custom URL: set a URL directly on the prop's `texture` field; it must
+  // survive a serialize → parse round-trip (poster.texture is echoed verbatim).
+  const room = parseRoom({
+    id: 'poster-url-test', props: [
+      { type: 'poster', id: 'p-custom', texture: 'https://example.org/img.png',
+        size: [0.8, 1.1], pos: [0, 1.8, -3.94], rot: [0, 0, 0] },
+    ],
+  });
+  const reparsed = parseRoom(serializeRoom(room, new Map()));
+  const p = reparsed.props.find((x) => x.id === 'p-custom');
+  ok('custom poster URL survives parse', !!p);
+  eq('custom poster URL round-trips through serializer', p?.texture, 'https://example.org/img.png');
+
+  // data URL (base64) also round-trips — needed for the file-picker path.
+  const dataUrl = 'data:image/png;base64,iVBORw0KGgo=';
+  const room2 = parseRoom({
+    id: 'poster-data-test', props: [
+      { type: 'poster', id: 'p-data', texture: dataUrl, pos: [0, 1.8, -3.94], rot: [0, 0, 0] },
+    ],
+  });
+  const r2 = parseRoom(serializeRoom(room2, new Map()));
+  eq('data URL round-trips', r2.props[0]?.texture, dataUrl);
+
+  // Ensure cyclePosterTexture does NOT cycle over custom URLs — it only steps
+  // through POSTER_OPTIONS. A custom URL gets replaced with the first palette
+  // entry on the next cycle call. This is intentional: in-VR cycling is for
+  // built-in styles; custom images are set (and cleared) from the desktop.
+  const propWithCustom = { type: 'poster', id: 'p-cc', texture: 'https://custom.org/a.png' };
+  const v = cyclePosterTexture(propWithCustom); // unknown → first in palette
+  eq('cyclePosterTexture on unknown/custom URL → first palette entry', v, POSTER_OPTIONS[0]);
+}
+
+// --- (B) Shelves & bookcases: collection in descriptor + round-trip ----------
+{
+  // A shelf created via createProp with an explicit collection carries it.
+  const room = parseRoom({ id: 'shelf-col', collections: ['a.collection.json', 'b.collection.json'], props: [] });
+  const shelfA = createProp(room, 'shelf', { pos: [0, 1.25, -1.5], rot: [0, 90, 0] });
+  shelfA.collection = 'a.collection.json';
+  addProp(room, shelfA);
+
+  const shelfB = createProp(room, 'shelf', { pos: [1, 1.25, -1.5], rot: [0, 90, 0] });
+  shelfB.collection = 'b.collection.json';
+  addProp(room, shelfB);
+
+  eq('shelf-A collection set', shelfA.collection, 'a.collection.json');
+  eq('shelf-B collection set', shelfB.collection, 'b.collection.json');
+
+  // Both survive a round-trip.
+  const out = serializeRoom(room, new Map());
+  const back = parseRoom(out);
+  const sA = back.props.find((p) => p.id === shelfA.id);
+  const sB = back.props.find((p) => p.id === shelfB.id);
+  eq('shelf-A collection round-trips', sA?.collection, 'a.collection.json');
+  eq('shelf-B collection round-trips', sB?.collection, 'b.collection.json');
+
+  // Cycling a shelf's collection through the ordered key list (same as existing
+  // cycleShelfCollection tests, but now exercised on the persisted descriptor).
+  const keys = roomCollectionRefs(room); // ['a.collection.json', 'b.collection.json']
+  eq('roomCollectionRefs dedupes shelf refs', keys.length, 2);
+  cycleShelfCollection(sA, keys);
+  eq('cycleShelfCollection on persisted descriptor', sA.collection, 'b.collection.json');
+}
+{
+  // Bookcase: same as shelf — collection field in descriptor, round-trips.
+  const room = parseRoom({
+    id: 'bc-col', collections: ['nes.collection.json'],
+    props: [
+      { type: 'bookcase', id: 'bc-1', collection: 'nes.collection.json',
+        pos: [1, 0, -2], rot: [0, 0, 0] },
+    ],
+  });
+  eq('bookcase props accepted by parseRoom', room.props.length, 1);
+  eq('bookcase collection field preserved', room.props[0].collection, 'nes.collection.json');
+
+  const out = serializeRoom(room, new Map());
+  const back = parseRoom(out);
+  eq('bookcase collection round-trips', back.props[0]?.collection, 'nes.collection.json');
+
+  // cycleShelfCollection works on a bookcase prop (it only reads/writes
+  // prop.collection — prop.type is irrelevant to the pure helper).
+  const bc = back.props[0];
+  const keys = ['nes.collection.json', 'snes.collection.json'];
+  const next = cycleShelfCollection(bc, keys);
+  eq('cycleShelfCollection on bookcase prop advances', next, 'snes.collection.json');
+}
+{
+  // createProp for bookcase: no collection default → builder falls back to
+  // room's first collection (same as shelf). Confirm descriptor is clean.
+  const room = parseRoom({ id: 'bc-default', props: [] });
+  const bc = createProp(room, 'bookcase', { pos: [0, 0, -2], rot: [0, 0, 0] });
+  ok('new bookcase has no collection (builder falls back)', bc.collection === undefined);
+  ok('CREATABLE list includes bookcase', CREATABLE_PROP_TYPES.includes('bookcase'));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

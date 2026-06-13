@@ -15,7 +15,10 @@ import { createCartridge } from './Cartridge.js';
 import { createShelf, lockShelfHomes } from './Shelf.js';
 import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
-import { createBookcase, createCupboard, createTable } from './Furniture.js';
+import {
+  createBookcase, createCupboard, createTable,
+  bookcaseShelfSurfaceYs, BOOKCASE_W, BOOKCASE_T,
+} from './Furniture.js';
 
 const DEG = Math.PI / 180;
 const v3 = (a) => new THREE.Vector3(a[0], a[1], a[2]);
@@ -23,13 +26,23 @@ const applyRot = (obj, rot) => obj.rotation.set(rot[0] * DEG, rot[1] * DEG, rot[
 
 // Tiny built-in palette so a room can say `builtin:retro-blue` without
 // shipping a texture. Extend freely; unknown names fall back to mid-grey.
+// When adding a new poster key here, also add it to POSTER_OPTIONS in
+// [[src/EnvEditor.js]] so the in-VR cycle offers it.
 const BUILTIN_COLORS = {
-  'retro-blue':  '#26344f',
-  'retro-green': '#2c4a32',
-  'retro-pink':  '#4a2c3e',
-  'crt-grey':    '#26262e',
-  'poster-1':    '#3a2c4a',
-  'poster-2':    '#2c3a4a',
+  'retro-blue':   '#26344f',
+  'retro-green':  '#2c4a32',
+  'retro-pink':   '#4a2c3e',
+  'crt-grey':     '#26262e',
+  // Poster palette — 6 distinct art-deco-ish tints.
+  'poster-1':     '#3a2c4a',  // deep purple
+  'poster-2':     '#2c3a4a',  // ocean blue
+  'poster-3':     '#4a3a2c',  // warm brown
+  'poster-4':     '#2c4a3a',  // forest green
+  'poster-5':     '#4a2c2c',  // deep red
+  'poster-6':     '#3a4a2c',  // olive
+  // Extra surface tints also usable on posters.
+  'neon-purple':  '#4a1a6a',
+  'warm-amber':   '#5a3a10',
 };
 
 /**
@@ -158,6 +171,68 @@ async function buildModel(prop, scene) {
   }
 }
 
+// Max cartridges per bookcase shelf row. The inner width is ~0.84 m and each
+// cart slot is ~0.16 m, giving 5 slots with comfortable margins. Limit to 5
+// to avoid carts touching the side panels.
+const MAX_CARTS_PER_BOOKCASE_ROW = 5;
+
+/**
+ * Populate a bookcase group with grabbable cartridges drawn from a collection.
+ * Each internal shelf level gets one row of up to MAX_CARTS_PER_BOOKCASE_ROW
+ * carts, spaced across the inner width. Carts stand upright (pins toward +Y
+ * of the shelf surface, same orientation as Shelf.js). Returns the array of
+ * created cartridge groups so the caller can register them as grabbables.
+ *
+ * Limitation: the bookcase has 3 rows × 5 slots = max 15 carts. If the
+ * collection is larger, a slice of the first 15 games is used.
+ */
+function buildBookcaseCarts(bookcaseGroup, games) {
+  const shelfYs = bookcaseShelfSurfaceYs();   // top-surface Y for each level
+  const innerW = BOOKCASE_W - 2 * BOOKCASE_T; // usable width per row
+  const CART_W = 0.12, CART_H = 0.13;         // from Cartridge.js CARTRIDGE_DIMS
+  const SLOT = CART_W + 0.04;                  // same spacing as Shelf.js
+  const BACK_LEAN = -0.08;                     // same back-lean as Shelf.js
+
+  const carts = [];
+  let gameIdx = 0;
+  for (const shelfY of shelfYs) {
+    // How many carts fit on this row? Cap at the constant limit.
+    const remaining = games.length - gameIdx;
+    if (remaining <= 0) break;
+    const count = Math.min(remaining, MAX_CARTS_PER_BOOKCASE_ROW);
+    const startX = -(count - 1) * SLOT / 2;
+
+    for (let i = 0; i < count; i++) {
+      const cart = createCartridge(games[gameIdx++]);
+      cart.position.set(
+        startX + i * SLOT,
+        shelfY + CART_H / 2,  // sit upright on the shelf surface
+        0,
+      );
+      cart.quaternion.identity();
+      cart.rotation.x = BACK_LEAN;
+      // Home positions are set below after the bookcase has been added to the
+      // scene (world matrices finalised by the caller via lockBookcaseHomes).
+      bookcaseGroup.add(cart);
+      carts.push(cart);
+    }
+  }
+  return carts;
+}
+
+/**
+ * Lock each cartridge's homePosition/homeQuaternion after the bookcase is in
+ * the scene (world transforms final). Mirror of Shelf.lockShelfHomes.
+ */
+export function lockBookcaseHomes(bookcaseGroup) {
+  bookcaseGroup.updateMatrixWorld(true);
+  bookcaseGroup.children.forEach((cart) => {
+    if (cart.userData?.kind !== 'cartridge') return;
+    cart.userData.homePosition = cart.getWorldPosition(new THREE.Vector3());
+    cart.userData.homeQuaternion = cart.getWorldQuaternion(new THREE.Quaternion());
+  });
+}
+
 /**
  * Build ONE prop into the scene through its scene factory and return a small
  * record the caller wires up. Shared by `buildRoom` (initial build) and the
@@ -197,12 +272,28 @@ export function buildProp(prop, { scene, collections }) {
       scene.addObject(obj);
       return { object: obj, kind: 'poster' };
     }
-    case 'bookcase':
+    case 'bookcase': {
+      // A bookcase can optionally hold a collection of grabbable cartridges.
+      // Origin is floor-contact (pos=[x,0,z] stands it on the floor).
+      const obj = createBookcase({ position: v3(prop.pos), rotationY: prop.rot[1] * DEG });
+      applyRot(obj, prop.rot);
+      // Populate with carts if a collection is assigned to the prop.
+      let carts = [];
+      if (prop.collection || (collections.list && collections.list.length > 0)) {
+        const games = gamesForShelf(prop, collections);
+        if (games.length > 0) {
+          carts = buildBookcaseCarts(obj, games);
+        }
+      }
+      scene.addObject(obj);
+      lockBookcaseHomes(obj);
+      return { object: obj, kind: 'bookcase', cartridges: carts };
+    }
     case 'cupboard':
     case 'table': {
       // Decorative furniture (no cartridges). Origin is floor-contact, so a
       // `pos` of [x, 0, z] stands it on the floor. See [[src/Furniture.js]].
-      const make = { bookcase: createBookcase, cupboard: createCupboard, table: createTable }[prop.type];
+      const make = { cupboard: createCupboard, table: createTable }[prop.type];
       const obj = make({ position: v3(prop.pos), rotationY: prop.rot[1] * DEG });
       applyRot(obj, prop.rot); // honour full XYZ rotation (rotationY already set; this re-applies all three)
       scene.addObject(obj);
@@ -253,6 +344,9 @@ export function buildRoom({ scene, room, collections }) {
     place(r.object, prop);
     if (r.kind === 'shelf') {
       shelves.push(r.object);
+      cartridges.push(...r.cartridges);
+    } else if (r.kind === 'bookcase' && r.cartridges?.length) {
+      // Bookcase cartridges are grabbable just like shelf carts.
       cartridges.push(...r.cartridges);
     } else if (r.kind === 'console' && !consoleObj) {
       consoleObj = r.object; // first console is the active one

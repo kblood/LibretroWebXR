@@ -41,7 +41,7 @@ import {
   saveLastRoom, loadLastRoom, clearLastRoom,
   stashRoomBridge, consumeRoomBridge, looksLikeRoom,
 } from './RoomPersistence.js';
-import { buildRoom, buildProp, buildPortal, applyPosterTexture } from './RoomBuilder.js';
+import { buildRoom, buildProp, buildPortal, applyPosterTexture, lockBookcaseHomes } from './RoomBuilder.js';
 import { createShelf, addCartridgeToShelf } from './Shelf.js';
 import { createCartridge } from './Cartridge.js';
 import { RoomEditor } from './RoomEditor.js';
@@ -624,14 +624,25 @@ async function buildCartridgeWorld() {
   // Usage: await window.__addLocalRom({ file:'test.sfc', system:'snes', core:'snes9x', title:'Test' })
   window.__addLocalRom = (meta) => addLocalRomToShelf(meta);
   window.__add = {
-    shelf:    () => addProp('shelf'),
-    console:  () => addProp('console'),
-    gamepad:  () => addProp('gamepad'),
-    poster:   () => addProp('poster'),
-    bookcase: () => addProp('bookcase'),
-    cupboard: () => addProp('cupboard'),
-    table:    () => addProp('table'),
-    portal:   () => addPortal(),
+    // Basic spawners (used by headless probes + the in-VR Add-mode buttons).
+    shelf:    (col) => addProp('shelf',    col ? { collection: col } : {}),
+    console:  ()    => addProp('console'),
+    gamepad:  ()    => addProp('gamepad'),
+    poster:   ()    => addProp('poster'),
+    bookcase: (col) => addProp('bookcase', col ? { collection: col } : {}),
+    cupboard: ()    => addProp('cupboard'),
+    table:    ()    => addProp('table'),
+    portal:   ()    => addPortal(),
+    // Desktop poster-image affordance driven headlessly (src = URL or data URL).
+    // Use: window.__add.setPosterImage('https://…') after selecting a poster.
+    setPosterImage: (src) => {
+      const rec = editor?.selectedProp?.();
+      if (!rec) return 'no prop selected';
+      if (rec.prop.type !== 'poster') return `selected is ${rec.prop.type}, not poster`;
+      rec.prop.texture = src;
+      applyPosterTexture(rec.object.material, src);
+      return src;
+    },
   };
   // Drive the three edit modes headlessly (the menu is raycast-only). __change
   // cycles the currently-selected prop's options (poster art / shelf collection).
@@ -832,23 +843,34 @@ function ensureEditMode() {
   applyMode('add');
 }
 
-// Add a new prop of `type` in front of the player. Returns the descriptor (or
-// null if it couldn't be built — e.g. a shelf with no collection to fill it).
-function addProp(type) {
+// Add a new prop of `type` in front of the player. `opts.collection` pre-
+// assigns a collection key to a shelf/bookcase prop so it holds the right
+// ROMs immediately on spawn. Returns the descriptor (or null on failure).
+function addProp(type, opts = {}) {
   if (!editor || !currentRoom) return null;
   const t = spawnTransform(type);
   const prop = createProp(currentRoom, type, t);
   if (!prop) { setStatus(`can't add ${type}`); return null; }
+
+  // Pre-assign collection for shelf/bookcase if the caller requests a specific
+  // one (e.g. from the per-collection "Add Shelf" buttons in the Add panel).
+  if (opts.collection && (prop.type === 'shelf' || prop.type === 'bookcase')) {
+    prop.collection = opts.collection;
+  }
 
   const r = buildProp(prop, { scene, collections: currentCollections });
   if (!r) { setStatus(`add ${type} failed (nothing to build)`); return null; }
 
   appendProp(currentRoom, prop);
   editor.registerPlaced(prop, r.object);
-  // A new shelf's cartridges are play-mode grabbables (NOT editable props), like
-  // any other cartridge — register them so they can be picked up and inserted.
+  // Shelf + bookcase carts are play-mode grabbables (NOT editable props).
   if (r.kind === 'shelf') {
     shelves.push(r.object); // keep shelves[] in sync for addLocalRomToShelf()
+    r.cartridges.forEach((c) => grabMgr.addGrabbable(c));
+  }
+  if (r.kind === 'bookcase' && r.cartridges?.length) {
+    // Bookcase carts registered with grabMgr — each has a home already locked
+    // by lockBookcaseHomes (called inside buildProp → bookcase case).
     r.cartridges.forEach((c) => grabMgr.addGrabbable(c));
   }
 
@@ -955,9 +977,67 @@ function cycleAllPosters() {
   setStatus(`All posters: ${short(last)}`);
 }
 
-// Advance the selected prop's primary property: poster→art, shelf→collection
-// (with a live rebuild). Furniture/console have nothing to cycle. Surfaced as a
-// "Cycle Selected" menu button and the headless window.__change hook.
+// Rebuild a bookcase in place after its `collection` changed. Mirrors
+// rebuildShelf but for bookcases: removes old carts, builds new carts, and
+// re-locks homes. Returns true on success, false if the new collection is empty.
+function rebuildBookcase(rec) {
+  const { prop, object: bookcaseGroup } = rec;
+  // Remove old cartridges from grabMgr and the group.
+  for (const child of [...bookcaseGroup.children]) {
+    if (child.userData?.kind === 'cartridge') {
+      grabMgr.removeGrabbable(child);
+      bookcaseGroup.remove(child);
+    }
+  }
+  // Build new carts from the updated collection on the EXISTING bookcase object.
+  // We don't replace the group (unlike rebuildShelf) since the bookcase geometry
+  // doesn't change — only the carts on the shelves change.
+  const { buildBookcaseCarts: buildCarts } = { buildBookcaseCarts: null }; // avoid circular ref
+  // Call the helper through RoomBuilder via buildProp to get a temp new object,
+  // then steal its cart children. Actually, we import lockBookcaseHomes above;
+  // replicate the logic here directly (same as buildBookcaseCarts but inline):
+  const games = (() => {
+    const col = (prop.collection && currentCollections.byKey.get(prop.collection)) || currentCollections.list[0];
+    return col ? col.games.slice() : [];
+  })();
+  if (!games.length) return false;
+
+  // Reuse the exported function from RoomBuilder — but it's not exported as a
+  // standalone. Rebuild via a throw-away buildProp call: build a temp descriptor
+  // → steal carts → position them into the real bookcaseGroup.
+  // Simpler: rebuild directly using the same geometry constants.
+  const CART_W = 0.12, CART_H = 0.13;
+  const BOOKCASE_W_CONST = 0.9, BOOKCASE_T_CONST = 0.03;
+  const innerW = BOOKCASE_W_CONST - 2 * BOOKCASE_T_CONST;
+  const SLOT = CART_W + 0.04;
+  const BACK_LEAN = -0.08;
+  const MAX_ROW = 5;
+  const shelfYs = [1, 2, 3].map((i) => (1.8 * i) / 4 + BOOKCASE_T_CONST / 2);
+
+  const newCarts = [];
+  let gameIdx = 0;
+  for (const shelfY of shelfYs) {
+    const remaining = games.length - gameIdx;
+    if (remaining <= 0) break;
+    const count = Math.min(remaining, MAX_ROW);
+    const startX = -(count - 1) * SLOT / 2;
+    for (let i = 0; i < count; i++) {
+      const cart = createCartridge(games[gameIdx++]);
+      cart.position.set(startX + i * SLOT, shelfY + CART_H / 2, 0);
+      cart.quaternion.identity();
+      cart.rotation.x = BACK_LEAN;
+      bookcaseGroup.add(cart);
+      newCarts.push(cart);
+    }
+  }
+  lockBookcaseHomes(bookcaseGroup);
+  newCarts.forEach((c) => grabMgr.addGrabbable(c));
+  return true;
+}
+
+// Advance the selected prop's primary property: poster→art, shelf/bookcase→
+// collection (with a live rebuild). Furniture/console have nothing to cycle.
+// Surfaced as a "Cycle Selected" menu button and the headless window.__change.
 function cycleSelected() {
   const rec = editor?.selectedProp();
   if (!rec) { setStatus('Change: grip a prop to select it first'); return; }
@@ -973,6 +1053,13 @@ function cycleSelected() {
     const v = cycleShelfCollection(prop, keys);
     if (!rebuildShelf(rec)) { prop.collection = prev; setStatus(`"${v}" has no games`); return; }
     setStatus(`Shelf collection: ${v}`);
+  } else if (prop.type === 'bookcase') {
+    const keys = collectionKeys();
+    if (keys.length < 2) { setStatus('only one collection loaded'); return; }
+    const prev = prop.collection;
+    const v = cycleShelfCollection(prop, keys);
+    if (!rebuildBookcase(rec)) { prop.collection = prev; setStatus(`"${v}" has no games`); return; }
+    setStatus(`Bookcase collection: ${v}`);
   } else {
     setStatus(`nothing to change for ${prop.type}`);
   }
@@ -1077,15 +1164,53 @@ function buildMenuAndControlsPanel() {
 
   // Add mode: a furniture/prop catalogue. Each spawns in front of the player,
   // becomes editable-grabbable, and rides out through Export Room.
+  //
+  // Shelf + Bookcase collection selection:
+  //   When only one collection is loaded the button just says "Add Shelf" /
+  //   "Add Bookcase" and uses it. When multiple collections are loaded the
+  //   button label shows the active collection and each press cycles to the
+  //   next one, so the user can choose a collection by tapping until they see
+  //   the name they want, then hold (long-press is not available in VR canvas
+  //   menus — they double-tap). Pragmatic design: the collection shown in the
+  //   label is the one that will be used on the NEXT press. After adding, the
+  //   label advances so back-to-back taps add shelves from different collections.
+  //   (In-VR file picking is unreliable on Quest; custom poster images are
+  //    set from the desktop "Set Poster Image…" button in the page header.)
+  const _shelfCollIdx = { shelf: 0, bookcase: 0 }; // per-type collection cursor
+  const _shelfCollBtns = {};   // { shelf: btn, bookcase: btn } filled below
+  const shelfBtnLabel = (kind) => {
+    const keys = collectionKeys();
+    if (!keys.length) return `Add ${kind[0].toUpperCase() + kind.slice(1)}`;
+    const key = keys[_shelfCollIdx[kind] % keys.length];
+    // Show a short name: last segment of URL / id, stripped of extension.
+    const shortName = (key || '').replace(/.*[/\\]/, '').replace(/\.[^.]+$/, '');
+    return keys.length > 1
+      ? `Add ${kind[0].toUpperCase() + kind.slice(1)}: ${shortName}`
+      : `Add ${kind[0].toUpperCase() + kind.slice(1)}`;
+  };
+  const addShelfOrBookcase = (kind) => {
+    const keys = collectionKeys();
+    const col = keys.length ? keys[_shelfCollIdx[kind] % keys.length] : undefined;
+    addProp(kind, col ? { collection: col } : {});
+    // Advance cursor so next tap uses the next collection.
+    if (keys.length > 1) {
+      _shelfCollIdx[kind] = (_shelfCollIdx[kind] + 1) % keys.length;
+      _shelfCollBtns[kind]?.setLabel(shelfBtnLabel(kind));
+    }
+  };
+
   const addPanel = sub('Add', [
-    { label: 'Add Shelf',    onActivate: () => addProp('shelf') },
-    { label: 'Add Bookcase', onActivate: () => addProp('bookcase') },
+    { label: shelfBtnLabel('shelf'),    onActivate: () => addShelfOrBookcase('shelf') },
+    { label: shelfBtnLabel('bookcase'), onActivate: () => addShelfOrBookcase('bookcase') },
     { label: 'Add Cupboard', onActivate: () => addProp('cupboard') },
     { label: 'Add Table',    onActivate: () => addProp('table') },
     { label: 'Add Console',  onActivate: () => addProp('console') },
     { label: 'Add Poster',   onActivate: () => addProp('poster') },
     { label: 'Add Portal',   onActivate: () => addPortal() },
   ]);
+  // Stash button refs for label updates.
+  _shelfCollBtns.shelf    = addPanel.userData.buttons[0];
+  _shelfCollBtns.bookcase = addPanel.userData.buttons[1];
 
   // Mode selector: set editor mode, show the matching sub-panel, mark the
   // active button with a ► . Replaces the module-level applyMode stub so
@@ -1811,6 +1936,72 @@ function installDragAndDrop() {
     } catch (err) {
       setStatus(`bad drop: ${err.message || err}`);
     }
+  });
+}
+
+// --- Set Poster Image (desktop/header affordance) ----------------------------
+//
+// Desktop users can set a custom image on the currently-selected poster prop
+// via a file picker or a URL prompt. This is a desktop-only flow; in-VR file
+// picking is unreliable on Quest — Quest users use Change mode → Cycle Selected
+// to cycle through the built-in poster styles.
+//
+// Usage: enter Change mode (grip a poster prop to select it), then click
+// "Set Poster Image…" in the header. A dialog prompts for a local image file
+// or a URL. The chosen source is applied immediately via applyPosterTexture and
+// written into the poster's `texture` descriptor field so Export Room + the
+// auto-load localStorage path persist it across sessions.
+//
+// NOTE: the object selected in the editor might not be a poster (it could be a
+// shelf or console). In that case the button surfaces a clear status message.
+const setPosterBtn   = $('#set-poster-btn');
+const posterImgInput = $('#poster-img-input');
+
+function applyCustomPosterSource(src) {
+  // Resolve the currently-selected poster prop.
+  const rec = editor?.selectedProp?.();
+  if (!rec) { setStatus('Set Poster: enter Change mode and select a poster first'); return; }
+  if (rec.prop.type !== 'poster') { setStatus(`Set Poster: selected prop is a ${rec.prop.type}, not a poster`); return; }
+
+  // Write the source into the descriptor so it survives Export + auto-load.
+  rec.prop.texture = src;
+  // Apply immediately to the live mesh material (same path as in-VR cycle).
+  applyPosterTexture(rec.object.material, src);
+  setStatus(`Poster image set: ${src.length > 60 ? src.slice(0, 57) + '…' : src}`);
+}
+
+if (setPosterBtn && posterImgInput) {
+  setPosterBtn.addEventListener('click', () => {
+    // Prefer file picker for local images; fall back to URL prompt if cancelled.
+    posterImgInput.click();
+    // If the file input fires 'change', applyCustomPosterSource handles it.
+    // If the user closes the picker without choosing, offer a URL prompt.
+    // We use a one-shot 'cancel' workaround: schedule the URL prompt as a
+    // micro-task after the click event cycle; if the file input fires 'change'
+    // first, we cancel the URL prompt flag.
+    let fileChosen = false;
+    const onFile = (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      fileChosen = true;
+      posterImgInput.value = ''; // reset
+      // Create an object URL so THREE.TextureLoader can load it by URL.
+      const objUrl = URL.createObjectURL(file);
+      applyCustomPosterSource(objUrl);
+    };
+    // One-shot listener — remove after use so repeated clicks don't stack.
+    posterImgInput.addEventListener('change', onFile, { once: true });
+    // After a short delay (enough for the file dialog to have opened and, if
+    // the user cancels immediately, closed), offer a URL prompt as an
+    // alternative. Only shown if no file was chosen.
+    setTimeout(() => {
+      if (fileChosen) return;
+      const url = window.prompt(
+        'Enter a poster image URL (HTTPS or data URL):\n\n' +
+        '(Leave blank to cancel. In VR, use Change → Cycle Selected for built-in styles.)',
+      );
+      if (url && url.trim()) applyCustomPosterSource(url.trim());
+    }, 500);
   });
 }
 

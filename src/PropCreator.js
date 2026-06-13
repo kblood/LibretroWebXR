@@ -20,15 +20,19 @@ import { normalizeProp, normalizePortal } from './RoomLoader.js';
 // no in-VR way to supply yet).
 export const CREATABLE_PROP_TYPES = ['shelf', 'console', 'gamepad', 'poster', 'bookcase', 'cupboard', 'table'];
 
-// Per-type non-spatial defaults baked into a freshly created prop. A shelf with
-// no `collection` falls back to the room's first collection in RoomBuilder, so a
-// new shelf shows content immediately; a poster gets a visible built-in texture.
+// Per-type non-spatial defaults baked into a freshly created prop.
+// - shelf: no `collection` → RoomBuilder falls back to the room's first
+//   collection, so a new shelf shows content immediately.
+// - bookcase: same fallback; the collection can be changed via Change-mode
+//   (cycleSelected → cycleShelfCollection, same as a shelf prop).
+// - poster: gets a visible built-in texture; custom images set via the
+//   desktop "Set Poster Image…" affordance override prop.texture directly.
 const PROP_DEFAULTS = {
   poster:   { texture: 'builtin:poster-1', size: [0.8, 1.1] },
   shelf:    {},
   console:  {},
   gamepad:  {},
-  bookcase: {},
+  bookcase: {},  // collection unset → falls back to first collection in RoomBuilder
   cupboard: {},
   table:    {},
 };
