@@ -17,6 +17,28 @@
       header input[type=file] { display: none; }
       #status { font-size: 12px; color: #888; }
 
+      /* Multiplayer join widget — collapses to a slim status bar when offline */
+      #mp-widget { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; }
+      #mp-widget input[type=text] {
+        font: inherit; background: #1e1e1e; color: #eee;
+        border: 1px solid #3a3a3a; border-radius: 6px;
+        padding: 5px 8px; width: 100px; min-width: 0; box-sizing: border-box;
+      }
+      #mp-widget input[type=text]:focus { outline: 1px solid #556; }
+      #mp-widget input[type=color] {
+        width: 28px; height: 28px; padding: 2px; border: 1px solid #3a3a3a;
+        border-radius: 6px; background: #1e1e1e; cursor: pointer;
+      }
+      #mp-status { font-size: 11px; white-space: nowrap; }
+      #mp-status.online { color: #66dd99; }
+      #mp-status.offline { color: #666; }
+      /* Hide detailed join fields when already connected */
+      .mp-connected #mp-join-fields { display: none; }
+      .mp-disconnected #mp-leave-btn { display: none; }
+      .mp-disconnected #mp-join-btn { display: inline; }
+      /* Label the widget group */
+      #mp-label { font-size: 11px; color: #666; white-space: nowrap; }
+
       /* The Three.js renderer is appended into #stage. It fills the area
          under the header in both desktop and VR mode. */
       #stage { flex: 1; position: relative; width: 100%; min-height: 0; }
@@ -69,6 +91,25 @@
       <button id="voice-btn" hidden title="Enable voice chat with others in this room (?session)">🎤 Voice</button>
       <a id="headset-test-link" href="./headset-test.html" title="Open the in-headset VR smoke-test checklist">🧪 Headset Test</a>
       <span class="sp"></span>
+
+      <!-- Multiplayer join/leave widget. In-app alternative to ?session= URL param.
+           Shows as: [Room input] [Nick input] [Color] [Join] while offline.
+           Collapses to: [Room: name – N players] [Leave] while connected. -->
+      <div id="mp-widget" class="mp-disconnected" title="Multiplayer: join a shared room">
+        <span id="mp-label">MP:</span>
+        <div id="mp-join-fields" style="display:contents">
+          <input id="mp-room-input" type="text" placeholder="room name" maxlength="40"
+                 title="Room name — everyone with the same name shares the room" />
+          <input id="mp-nick-input" type="text" placeholder="nick" maxlength="20"
+                 title="Your display name in the room" />
+          <input id="mp-color-input" type="color" value="#88aaff"
+                 title="Your avatar color" />
+        </div>
+        <button id="mp-join-btn" title="Join the multiplayer room">Join</button>
+        <button id="mp-leave-btn" title="Leave the multiplayer room">Leave</button>
+        <span id="mp-status" class="offline">Offline</span>
+      </div>
+
       <span id="status">idle</span>
     </header>
     <main id="stage">

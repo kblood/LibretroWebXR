@@ -31,6 +31,7 @@ import { CableMgr } from './CableMgr.js';
 import { computeRouting as routeControllers } from './Routing.js';
 import { NetMgr } from './net/NetMgr.js';
 import { buildIceServers } from './net/NetProtocol.js';
+import { sanitiseRoom, randomRoomSuffix } from './net/SessionUtils.js';
 import { GhostCartMgr } from './GhostCartMgr.js';
 import { makeHoldKey, parseHolds } from './net/HoldState.js';
 import { loadCollection, parseCollection } from './Collection.js';
@@ -113,63 +114,217 @@ installSpatialAudio({ listener: scene.audioListener, sourceObject: scene.tvGroup
 window.__scene = scene;
 window.__client = client;
 
-// --- M0 shared-room presence (opt-in via ?session=<room>) ----------------
-// Avatars + (later) voice for everyone in the same named room. Wired here at
-// module scope — BEFORE buildCartridgeWorld()'s buildMemoryCards await (which
-// stalls headless) — so presence works regardless of that path. Single-player
-// (no ?session) constructs nothing: no socket, no avatars. See src/net/.
+// --- M0 shared-room presence (opt-in via ?session=<room> or the in-app MP widget) --
+//
+// Avatars + voice + TV-sync for everyone in the same named room. Single-player
+// (no session) constructs nothing: no socket, no avatars. See src/net/.
+//
+// The module-level tick callback always runs (added once below); it no-ops
+// when `net` is null so the solo experience is completely unchanged.
 let net = null;
-const sessionRoom = urlParams.get('session');
-if (sessionRoom) {
-  const palette = ['#88aaff', '#ff8866', '#66dd99', '#ffd166', '#cc88ff', '#66ccee'];
-  const nick = urlParams.get('nick') || `Player-${Math.random().toString(36).slice(2, 6)}`;
-  const color = urlParams.get('color') || palette[Math.floor(Math.random() * palette.length)];
-  // Tag subsequent log entries with this session + nick so the /logs viewer can
-  // filter per-session (the logger was already active capturing startup).
-  logger._sessionId = sessionRoom;
-  logger._nick = nick;
-  // M0 hardening: optional TURN relay for peers behind symmetric NAT (STUN
-  // alone fails there). Supplied via ?turn=turn:host:3478&turnUser=…&turnCred=…
-  // (or omit for the STUN-only default). Shared by the voice + video meshes.
-  const turn = urlParams.get('turn');
-  const iceServers = turn
-    ? buildIceServers({ turn, turnUsername: urlParams.get('turnUser'), turnCredential: urlParams.get('turnCred') })
-    : undefined;
-  net = new NetMgr({
+
+// TURN/ICE config is fixed from URL params at startup (same as before). We
+// don't expose a UI for it because it's an infrastructure detail; operators
+// who need TURN pass it in the URL.
+const _turn = urlParams.get('turn');
+const _iceServers = _turn
+  ? buildIceServers({ turn: _turn, turnUsername: urlParams.get('turnUser'), turnCredential: urlParams.get('turnCred') })
+  : undefined;
+const _serverUrl = urlParams.get('server') || undefined; // default: wss://<host>/ws/
+
+// Random nick suffix and colour palette (used when none provided).
+const _palette = ['#88aaff', '#ff8866', '#66dd99', '#ffd166', '#cc88ff', '#66ccee'];
+const _defaultNick = `Player-${randomRoomSuffix()}`;
+const _defaultColor = _palette[Math.floor(Math.random() * _palette.length)];
+
+/**
+ * Build and connect a new NetMgr for (room, nick, color). Tears down any
+ * existing session first. Returns the new NetMgr (already connected).
+ * All THREE/voice/video callbacks close over the module-level `net` variable
+ * (indirectly via the arrow functions below), so they always refer to the
+ * current instance after reassignment.
+ */
+function connectToRoom(room, nick, color) {
+  // Tear down any existing session cleanly.
+  if (net) {
+    net.disconnect();
+    net = null;
+    window.__net = null;
+  }
+
+  const newNet = new NetMgr({
     scene,
-    room: sessionRoom,
-    serverUrl: urlParams.get('server') || undefined, // default: wss://<host>/ws/
+    room,
+    serverUrl: _serverUrl,
     nick,
     color,
-    iceServers,
+    iceServers: _iceServers,
     // M0.5 room-object sync: reflect a remote peer's shared state into our scene.
     onObjectState: (key, value) => { if (key === 'tv') applyRemoteTv(value); },
-    // M1.1 host-authoritative input: a remote player's RetroPad button reached
-    // us. We inject it into our core ONLY when we're the host (the tv-state
-    // owner running the authoritative game); otherwise it isn't ours to apply.
+    // M1.1 host-authoritative input: inject remote buttons only when we are host.
     onGameInput: (ev) => { if (net?.isHost()) gameInput?.setRemoteButton(ev); },
-    // M1.2 host video stream: the host captures THIS canvas; a non-host paints
-    // the received frames onto its TV (onHostVideo) and reverts to its own
-    // local canvas when the stream ends (onHostVideoEnded). While watching the
-    // host's frames we PAUSE our own core (M1.2 follow-up) — it isn't authoritative
-    // and we aren't showing it, so emulating it just burns Quest CPU/battery.
-    // The stream ending (host left, or we became the host) resumes it so our TV
-    // shows our local core again.
+    // M1.2 host video: paint the host's frames on the TV; pause our core while
+    // watching (it isn't authoritative). Resume + revert when the stream ends.
     videoCanvas: emuCanvas,
     onHostVideo: (videoEl) => { scene.setScreenVideo(videoEl); client.pause(); },
     onHostVideoEnded: () => { scene.setScreenSource(emuCanvas); client.resume(); },
   });
+  net = newNet;
   net.connect();
-  scene.addTickCallback((dt) => net.tick(dt));
   window.__net = net.debugApi();
 
-  // Voice button: first click grabs the mic + joins the WebRTC mesh; later
-  // clicks toggle mute. getUserMedia needs this user gesture. Shown only in a
-  // session; in VR a menu item would mirror it (deferred).
+  // Tag logger entries with this session for the /logs viewer.
+  logger._sessionId = room;
+  logger._nick = nick;
+
+  return net;
+}
+
+/** Disconnect from the current room and reset all networked state. */
+function disconnectFromRoom() {
+  if (!net) return;
+  // If we were watching a host video, revert the TV to our own canvas and
+  // resume the local core (same as onHostVideoEnded but triggered by leave).
+  scene.setScreenSource?.(emuCanvas);
+  client.resume?.();
+  net.disconnect();
+  net = null;
+  window.__net = null;
+  logger._sessionId = null;
+  logger._nick = null;
+}
+
+// Register the single persistent tick callback. Guards on `net` being non-null
+// so there is zero cost when the user is in solo mode.
+scene.addTickCallback((dt) => net?.tick(dt));
+
+// --- Wire the in-app multiplayer header widget ----------------------------
+//
+// The widget provides Join / Leave and a running status line ("Room: X — N players").
+// It is an alternative to passing ?session= in the URL; the URL param still works
+// and auto-joins on page load exactly as before.
+
+const mpWidget    = document.getElementById('mp-widget');
+const mpRoomInput = document.getElementById('mp-room-input');
+const mpNickInput = document.getElementById('mp-nick-input');
+const mpColorInput = document.getElementById('mp-color-input');
+const mpJoinBtn   = document.getElementById('mp-join-btn');
+const mpLeaveBtn  = document.getElementById('mp-leave-btn');
+const mpStatusEl  = document.getElementById('mp-status');
+
+/** Update the header widget to reflect the current connection state. */
+function updateMpWidget() {
+  const connected = !!net && net._connected;
+  // Class on the widget drives CSS visibility of join fields / leave button.
+  mpWidget.classList.toggle('mp-connected', connected);
+  mpWidget.classList.toggle('mp-disconnected', !connected);
+
+  if (connected) {
+    const peers = net.presence.peers();
+    const n = peers.length; // other peers (self excluded)
+    const total = n + 1;    // including self
+    const names = peers.map((p) => p.nick).slice(0, 3).join(', ');
+    const more = n > 3 ? ` +${n - 3}` : '';
+    mpStatusEl.textContent = `${net.room} — ${total} player${total === 1 ? '' : 's'}${names ? ` (${names}${more})` : ''}`;
+    mpStatusEl.className = 'online';
+    mpStatusEl.title = `Connected to room "${net.room}"`;
+  } else {
+    mpStatusEl.textContent = 'Offline';
+    mpStatusEl.className = 'offline';
+    mpStatusEl.title = '';
+  }
+}
+
+// Join button: sanitise, connect, then update the widget.
+if (mpJoinBtn) {
+  mpJoinBtn.addEventListener('click', () => {
+    const rawRoom = mpRoomInput?.value?.trim() || '';
+    const room = sanitiseRoom(rawRoom) || `room-${randomRoomSuffix()}`;
+    const nick = mpNickInput?.value?.trim() || _defaultNick;
+    const color = mpColorInput?.value || _defaultColor;
+    connectToRoom(room, nick, color);
+    // Show the voice button now that we're in a session.
+    const voiceBtn = document.getElementById('voice-btn');
+    if (voiceBtn) voiceBtn.hidden = false;
+    _ensureMpTick();
+    updateMpWidget();
+    // Sync the in-VR menu button label if the menu has already been built.
+    if (typeof _syncVrMpLabel === 'function') _syncVrMpLabel();
+  });
+}
+
+// Leave button: disconnect and reset.
+if (mpLeaveBtn) {
+  mpLeaveBtn.addEventListener('click', () => {
+    disconnectFromRoom();
+    const voiceBtn = document.getElementById('voice-btn');
+    if (voiceBtn) { voiceBtn.hidden = true; voiceBtn.textContent = '🎤 Voice'; }
+    updateMpWidget();
+    if (typeof _syncVrMpLabel === 'function') _syncVrMpLabel();
+  });
+}
+
+// Stub — overwritten by buildMenuAndControlsPanel() once the VR menu exists.
+let _syncVrMpLabel = null;
+// Guard: register the updateMpWidget tick callback at most once.
+let _mpTickRegistered = false;
+function _ensureMpTick() {
+  if (_mpTickRegistered) return;
+  _mpTickRegistered = true;
+  scene.addTickCallback(updateMpWidget);
+}
+
+// --- Auto-join from ?session= URL param (backwards-compatible) -------------
+{
+  const sessionRoom = urlParams.get('session');
+  if (sessionRoom) {
+    const nick = urlParams.get('nick') || _defaultNick;
+    const color = urlParams.get('color') || _defaultColor;
+    connectToRoom(sessionRoom, nick, color);
+
+    // Pre-fill the widget inputs with the current session so the user can see
+    // what room they're in and adjust nick/color before a manual rejoin.
+    if (mpRoomInput)  mpRoomInput.value  = sessionRoom;
+    if (mpNickInput)  mpNickInput.value  = nick;
+    if (mpColorInput) mpColorInput.value = color;
+
+    // Voice button (the join flow will also show it, but show it eagerly here
+    // for the URL-param path so existing behaviour is unchanged). Mark as wired
+    // so the join-flow block below doesn't add a second listener.
+    const voiceBtn = document.getElementById('voice-btn');
+    if (voiceBtn) {
+      voiceBtn.hidden = false;
+      voiceBtn.dataset.wired = '1';
+      voiceBtn.addEventListener('click', async () => {
+        if (!net?.voice) return;
+        if (!net.voice.enabled) {
+          voiceBtn.disabled = true;
+          const ok = await net.enableVoice();
+          voiceBtn.disabled = false;
+          voiceBtn.textContent = ok ? '🎤 Mute' : '🎤 (no mic)';
+          if (!ok) voiceBtn.title = 'Microphone unavailable or denied';
+        } else {
+          const muted = net.voice.toggleMute();
+          voiceBtn.textContent = muted ? '🔇 Unmute' : '🎤 Mute';
+        }
+      });
+    }
+    // Start updating the roster display. Even if the socket isn't open yet,
+    // updateMpWidget will show "connecting" state; connected → peer count.
+    _ensureMpTick();
+    updateMpWidget();
+  }
+}
+
+// Wire the voice button for the join-flow path too (re-wiring is safe because
+// we add a new listener each join, but the user gesture guard in the callback
+// means only one click ever enables the mic — duplicates are benign).
+if (mpJoinBtn) {
   const voiceBtn = document.getElementById('voice-btn');
-  if (voiceBtn) {
-    voiceBtn.hidden = false;
+  if (voiceBtn && !voiceBtn.dataset.wired) {
+    voiceBtn.dataset.wired = '1';
     voiceBtn.addEventListener('click', async () => {
+      if (!net?.voice) return;
       if (!net.voice.enabled) {
         voiceBtn.disabled = true;
         const ok = await net.enableVoice();
@@ -860,11 +1015,18 @@ function buildMenuAndControlsPanel() {
       // Appended LAST and only in a networked session, so it never shifts the
       // positional button indices the mode selector below relies on.
       ...(net ? [{ label: 'Voice: Off', onActivate: () => {} }] : []),
+      // Multiplayer status + quick-join: always present so Quest users can join
+      // a room without removing the headset to type in the URL bar. Index is
+      // 10 (no session) or 11 (with session, after the Voice button). We read
+      // it by .at(-1) so the index shift is invisible to the mode-selector code.
+      { label: 'Multiplayer', onActivate: () => {} },
     ],
   });
   scene.addObject(menu);
   const [controlsBtn, debugBtn, , , snapBtn, kbdBtn, playBtn, moveBtn, changeBtn, addBtn] = menu.userData.buttons;
   const vrVoiceBtn = net ? menu.userData.buttons[10] : null;
+  // Always the last button regardless of whether Voice is present.
+  const vrMpBtn = menu.userData.buttons.at(-1);
 
   // Build a per-mode action sub-panel (hidden until its mode is active). All its
   // buttons are registered with menuMgr up front; MenuMgr's effVisible check
@@ -996,6 +1158,7 @@ function buildMenuAndControlsPanel() {
   // the open item for the real-headset smoke test.)
   if (vrVoiceBtn) {
     vrVoiceBtn.onActivate = async () => {
+      if (!net?.voice) return;
       if (!net.voice.enabled) {
         const ok = await net.enableVoice();
         vrVoiceBtn.setLabel(ok ? 'Voice: On' : 'Voice: (no mic)');
@@ -1005,6 +1168,86 @@ function buildMenuAndControlsPanel() {
       }
     };
   }
+
+  // In-VR Multiplayer panel: shows current room state + a one-tap quick-join.
+  // Full text-entry in VR is impractical with the canvas-based menu; the primary
+  // join UI is the header widget (desktop). The in-VR affordance covers the common
+  // Quest case: joining a room without removing the headset.
+  //
+  // We build the panel, wire all callbacks FIRST, then register with menuMgr —
+  // so MenuMgr's stored onActivate references are the real implementations, not
+  // the placeholder () => {} stubs that sub() would have captured.
+  const mpPanel = createMenuPanel({
+    title: 'Multiplayer',
+    items: [
+      { label: 'Offline',        onActivate: () => {} },  // status — relabelled each tick
+      { label: 'Join: lobby',    onActivate: () => {} },  // wired below
+      { label: 'Leave room',     onActivate: () => {} },  // wired below
+      { label: 'Copy room name', onActivate: () => {} },  // wired below
+    ],
+    position: new THREE.Vector3(-2.99, 1.5, -1.05),
+  });
+  mpPanel.visible = false;
+  scene.addObject(mpPanel);
+  const [mpStatusVrBtn, mpJoinLobbyBtn, mpLeaveVrBtn, mpCopyBtn] = mpPanel.userData.buttons;
+
+  // Relabel the status line each tick so it reflects the live roster.
+  scene.addTickCallback(() => {
+    if (!mpPanel.visible) return;
+    if (net && net._connected) {
+      const n = net.presence.peers().length + 1;
+      mpStatusVrBtn.setLabel(`${net.room} (${n}p)`);
+    } else if (net) {
+      mpStatusVrBtn.setLabel('Connecting…');
+    } else {
+      mpStatusVrBtn.setLabel('Offline');
+    }
+  });
+
+  // Wire callbacks now, BEFORE registering with menuMgr, so the right function
+  // is stored in menuMgr.items (not the placeholder () => {}).
+  mpJoinLobbyBtn.onActivate = () => {
+    const room = sanitiseRoom(mpRoomInput?.value?.trim() || '') || 'lobby';
+    const nick = mpNickInput?.value?.trim() || _defaultNick;
+    const color = mpColorInput?.value || _defaultColor;
+    connectToRoom(room, nick, color);
+    _ensureMpTick();
+    updateMpWidget();
+    mpJoinLobbyBtn.setLabel(`Join: ${room}`);
+    const voiceBtn = document.getElementById('voice-btn');
+    if (voiceBtn) voiceBtn.hidden = false;
+  };
+  mpLeaveVrBtn.onActivate = () => {
+    disconnectFromRoom();
+    const voiceBtn = document.getElementById('voice-btn');
+    if (voiceBtn) { voiceBtn.hidden = true; voiceBtn.textContent = '🎤 Voice'; }
+    updateMpWidget();
+    mpPanel.visible = false;
+  };
+  mpCopyBtn.onActivate = () => {
+    const room = net?.room || '(not connected)';
+    setStatus(`Room: ${room}`);
+    console.log('[mp] current room:', room);
+    if (mpRoomInput && net?.room) mpRoomInput.value = net.room;
+  };
+  // Register sub-panel buttons with MenuMgr AFTER wiring so the right handlers fire.
+  mpPanel.userData.buttons.forEach((b) => menuMgr.addItem(b.mesh, b.onActivate));
+
+  // Main-panel "Multiplayer" button: toggle the sub-panel and preview join target.
+  vrMpBtn.onActivate = () => {
+    const preview = sanitiseRoom(mpRoomInput?.value?.trim() || '') || 'lobby';
+    mpJoinLobbyBtn.setLabel(`Join: ${preview}`);
+    mpPanel.visible = !mpPanel.visible;
+  };
+
+  // Expose a hook so header Join/Leave buttons keep the VR button label in sync.
+  _syncVrMpLabel = () => {
+    if (net && net._connected) {
+      vrMpBtn.setLabel(`MP: ${net.room}`);
+    } else {
+      vrMpBtn.setLabel('Multiplayer');
+    }
+  };
 
   for (const b of menu.userData.buttons) menuMgr.addItem(b.mesh, b.onActivate);
 
