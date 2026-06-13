@@ -52,6 +52,7 @@ import {
 import {
   clampToRoom, snapToSurface, SURFACE_KIND,
 } from './Placement.js';
+import { C64Keyboard } from './C64Keyboard.js';
 
 // CORES and the system registry now live in src/systems.js (system-first,
 // single source of truth). detectCore() is coreForFile() from there; the
@@ -194,6 +195,12 @@ if (sessionRoom) {
 
 let grabMgr = null;
 let gameInput = null;
+// C64/VIC-20 virtual keyboard — created in buildCartridgeWorld, shown/hidden
+// when a Commodore game boots or via the "Keyboard" menu/header toggle.
+let c64kbd = null;
+// True when the keyboard is in "manual override" mode (user toggled it).
+// Cleared on the next game boot so auto-show/hide resumes from there.
+let _kbdManualOverride = false;
 let cartridges = [];
 let shelves = [];    // live shelf objects — used by addLocalRomToShelf()
 let consoleObj = null;
@@ -389,6 +396,20 @@ async function buildCartridgeWorld() {
   nowPlayingPanel = createNowPlayingPanel();
   nowPlayingPanel.position.set(0, 0.58, -3.6);
   scene.addObject(nowPlayingPanel);
+
+  // C64/VIC-20 virtual keyboard panel.
+  // Positioned ~1 m in front of the user, angled up slightly for comfort.
+  // Hidden by default; shown automatically when a Commodore game boots, or
+  // manually via the "Keyboard" toggle in the menu / header button.
+  c64kbd = new C64Keyboard({
+    sendInput: (type, code, key, keyCode, location) =>
+      client.sendInput(type, code, key, keyCode, location),
+    position: new THREE.Vector3(0, 1.0, -1.8),
+    rotationX: -Math.PI / 8,  // tilt toward user for comfortable reach
+  });
+  c64kbd.object3d.visible = false;
+  scene.addObject(c64kbd.object3d);
+  window.__c64kbd = c64kbd; // debug hook
 
   grabMgr = new GrabMgr({
     scene: scene.scene,
@@ -830,6 +851,7 @@ function buildMenuAndControlsPanel() {
       { label: 'Reset Game',    onActivate: () => client.reset() },
       { label: 'Export Room',   onActivate: () => editor?.export() },
       { label: 'Snap: Off',     onActivate: () => {} },
+      { label: 'Keyboard: Off', onActivate: () => {} },  // C64/VIC-20 keyboard toggle (index 5)
       { label: '► Play',        onActivate: () => {} },  // mode selector
       { label: 'Move',          onActivate: () => {} },
       { label: 'Change',        onActivate: () => {} },
@@ -841,8 +863,8 @@ function buildMenuAndControlsPanel() {
     ],
   });
   scene.addObject(menu);
-  const [controlsBtn, debugBtn, , , snapBtn, playBtn, moveBtn, changeBtn, addBtn] = menu.userData.buttons;
-  const vrVoiceBtn = net ? menu.userData.buttons[9] : null;
+  const [controlsBtn, debugBtn, , , snapBtn, kbdBtn, playBtn, moveBtn, changeBtn, addBtn] = menu.userData.buttons;
+  const vrVoiceBtn = net ? menu.userData.buttons[10] : null;
 
   // Build a per-mode action sub-panel (hidden until its mode is active). All its
   // buttons are registered with menuMgr up front; MenuMgr's effVisible check
@@ -940,6 +962,33 @@ function buildMenuAndControlsPanel() {
     snapBtn.setLabel(on ? 'Snap: On' : 'Snap: Off');
   };
 
+  // C64 keyboard toggle: manual override. Flips visibility for any system;
+  // clears the auto-hide state so the user's choice persists until next boot.
+  kbdBtn.onActivate = () => {
+    if (!c64kbd) return;
+    const nowVisible = !c64kbd.object3d.visible;
+    if (!nowVisible) c64kbd.flushReleases(); // release any held keys before hiding
+    c64kbd.object3d.visible = nowVisible;
+    _kbdManualOverride = true;
+    kbdBtn.setLabel(nowVisible ? 'Keyboard: On' : 'Keyboard: Off');
+    // Sync the header button label if present.
+    const headerKbdBtn = document.getElementById('kbd-toggle-btn');
+    if (headerKbdBtn) headerKbdBtn.textContent = nowVisible ? 'Keyboard: On' : 'Keyboard: Off';
+  };
+  // Wire the header button the same way (visible for desktop users + flat-screen view).
+  const headerKbdBtn = document.getElementById('kbd-toggle-btn');
+  if (headerKbdBtn) {
+    headerKbdBtn.addEventListener('click', () => kbdBtn.onActivate());
+  }
+
+  // Expose a label-sync hook on the keyboard's object3d so setKbdVisibility()
+  // (called from loadCartridge) can update the menu button without a closure.
+  if (c64kbd) {
+    c64kbd.object3d.userData.syncLabel = (visible) => {
+      kbdBtn.setLabel(visible ? 'Keyboard: On' : 'Keyboard: Off');
+    };
+  }
+
   // In-VR voice: first select grabs the mic + joins the WebRTC mesh (the
   // controller select is the user gesture getUserMedia needs); later selects
   // toggle mute. Mirrors the desktop 🎤 button via the same NetMgr path. Only
@@ -960,6 +1009,68 @@ function buildMenuAndControlsPanel() {
   for (const b of menu.userData.buttons) menuMgr.addItem(b.mesh, b.onActivate);
 
   scene.addTickCallback(() => menuMgr.tick());
+
+  // C64 keyboard: per-frame tick (ages tap flashes) + controller hover raycast.
+  // Only raycasts when the keyboard is visible so there's zero cost during normal
+  // gameplay. The raycaster is a separate instance from MenuMgr's — keyboard UVs
+  // need uv hit data that MenuMgr's flow doesn't return.
+  {
+    const _kbdRay = new THREE.Raycaster();
+    const _kbdOrigin = new THREE.Vector3();
+    const _kbdDir = new THREE.Vector3();
+    const _kbdQuat = new THREE.Quaternion();
+    scene.addTickCallback(() => {
+      if (!c64kbd) return;
+      c64kbd.tick();
+      if (!c64kbd.object3d.visible) {
+        c64kbd.clearHover();
+        return;
+      }
+      // Raycast each controller against the keyboard mesh to set hover state.
+      // We check controllers that are NOT holding the gamepad (same policy
+      // as MenuMgr), so in-game trigger presses don't accidentally tap keys.
+      const gamepadHeld = grabMgr?.isGamepadHeld?.() ?? false;
+      if (gamepadHeld) { c64kbd.clearHover(); return; }
+
+      let nearestHit = null;
+      let nearestDist = Infinity;
+      for (const ctrl of scene.controllers) {
+        ctrl.updateMatrixWorld();
+        _kbdOrigin.setFromMatrixPosition(ctrl.matrixWorld);
+        ctrl.getWorldQuaternion(_kbdQuat);
+        _kbdDir.set(0, 0, -1).applyQuaternion(_kbdQuat).normalize();
+        _kbdRay.set(_kbdOrigin, _kbdDir);
+        _kbdRay.far = 8.0;
+        const hits = _kbdRay.intersectObject(c64kbd.mesh, false);
+        if (hits.length && hits[0].distance < nearestDist) {
+          nearestDist = hits[0].distance;
+          nearestHit = hits[0];
+        }
+      }
+      if (nearestHit?.uv) {
+        // Three.js UV.y is bottom-up; flip to top-down for keyAt().
+        c64kbd.setHover(nearestHit.uv.x, 1 - nearestHit.uv.y);
+      } else {
+        c64kbd.clearHover();
+      }
+    });
+
+    // Trigger (selectstart) on any controller: tap the hovered key.
+    // Gated by keyboard visibility AND a hovered key so we don't interfere
+    // with MenuMgr or GrabMgr when the keyboard is not in use. MenuMgr's own
+    // selectstart listener fires independently but will find no keyboard mesh
+    // in its items list, so there's no double-handling conflict.
+    for (const ctrl of scene.controllers) {
+      ctrl.addEventListener('selectstart', () => {
+        if (!c64kbd) return;
+        if (!c64kbd.object3d.visible) return;
+        if (grabMgr?.isGamepadHeld?.()) return;
+        if (!c64kbd.hoveredKey) return; // no key under the laser → don't consume
+        c64kbd.tapHovered();
+      });
+    }
+  }
+
   window.__menu = menuMgr;
   // Debug hooks: drive the Change-mode env edits headlessly (menu is raycast-only).
   window.__env = {
@@ -977,6 +1088,30 @@ function updateControlsPanel() {
     system: currentMeta?.system || null,
     coreLabel: coreInfo ? coreInfo.label : '(no game loaded)',
   });
+}
+
+/**
+ * Show or hide the C64 virtual keyboard and keep the menu/header labels in sync.
+ * Call after updating c64kbd.object3d.visible directly (toggle) OR to apply the
+ * auto-state on game boot. Does NOT flush held keys — callers handle that when
+ * hiding intentionally.
+ *
+ * @param {boolean} visible
+ */
+function setKbdVisibility(visible) {
+  if (!c64kbd) return;
+  if (!visible && c64kbd.object3d.visible) {
+    // Flush any latched keys before hiding.
+    c64kbd.flushReleases();
+  }
+  c64kbd.object3d.visible = visible;
+  // Sync menu button label (the button ref lives inside buildMenuAndControlsPanel
+  // scope; we reach it via a userData hook set on the object3d so we don't need
+  // a closure capture here).
+  c64kbd.object3d.userData.syncLabel?.(visible);
+  // Sync header button.
+  const headerKbdBtn = document.getElementById('kbd-toggle-btn');
+  if (headerKbdBtn) headerKbdBtn.textContent = visible ? 'Keyboard: On' : 'Keyboard: Off';
 }
 
 // --- Cartridge → load wiring ---------------------------------------------
@@ -1029,6 +1164,10 @@ async function loadCartridge(meta, { echo = true } = {}) {
     consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
     setSystemLabel(meta.core);
     updateControlsPanel();
+    // Auto show/hide the C64 keyboard based on system. Manual override is
+    // cleared at every boot so the auto state takes effect again from here.
+    _kbdManualOverride = false;
+    setKbdVisibility(meta.system === 'c64' || meta.system === 'vic20');
     // Update the in-VR "Now Playing" panel so the user can see what's running.
     nowPlayingPanel?.userData.setNowPlaying({
       system:    meta.system,
@@ -1339,6 +1478,9 @@ romInput.addEventListener('change', async (e) => {
     consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
     setSystemLabel(coreInfo.name);
     updateControlsPanel();
+    // Auto show/hide keyboard on local-file boot (same policy as loadCartridge).
+    _kbdManualOverride = false;
+    setKbdVisibility(meta.system === 'c64' || meta.system === 'vic20');
     nowPlayingPanel?.userData.setNowPlaying({
       system:    meta.system,
       coreLabel: coreInfo.label,
