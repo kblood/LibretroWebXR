@@ -519,6 +519,63 @@ async function buildCartridgeWorld() {
   window.__games = allGames; // debug hook: harness boots via these metas
   setStatus(allGames.length ? `${allGames.length} games` : 'no games');
 
+  // Phase-0 de-risk spike (throwaway, behind ?rack=N): expose window.__rackSpike
+  // so scripts/debug.js --rack=N (and the headset) can boot N live module cores
+  // into N canvases and probe multi-instance safety / input isolation / perf.
+  // Each booted core's canvas is textured onto a TV-style quad in front of the
+  // user so the result is visible in VR; perf telemetry ships via logger.event.
+  if (urlParams.has('rack')) {
+    const want = parseInt(urlParams.get('rack') || '2', 10) || 2;
+    // Memoized so auto-boot + an explicit harness call share ONE rack (no
+    // double-boot). The first call wins the core count.
+    let _rackHandle = null;
+    window.__rackSpike = (n) => {
+      if (_rackHandle) return _rackHandle;
+      _rackHandle = (async () => {
+        const { runRackSpike } = await import('./RackSpike.js');
+        return runRackSpike({
+          n: n || want, games: allGames, CORES, resolveRom, EmulatorClient, logger,
+          onCanvas: (i, canvas, meta) => {
+            try { scene.addRackScreen?.(i, canvas, meta); } catch (e) { console.warn('[rack] addRackScreen', e); }
+          },
+        });
+      })();
+      return _rackHandle;
+    };
+    logger?.event?.('rack-spike-ready', { requested: want });
+
+    // Ship periodic frame-rate telemetry so the Quest perf gate can be read from
+    // dionysus.dk/logs?session=<room> without a dev console: every ~3s, log the
+    // mean/min/max XR frame interval + fps, tagged with how many live cores are
+    // mounted and whether we're presenting in XR (the only measurement that
+    // counts — desktop fps is vsync-capped and not the gate).
+    let _f = 0, _sum = 0, _min = Infinity, _max = 0, _since = 0;
+    scene.addTickCallback?.((dtMs) => {
+      if (!Number.isFinite(dtMs) || dtMs <= 0) return;
+      _f++; _sum += dtMs; _since += dtMs;
+      if (dtMs < _min) _min = dtMs;
+      if (dtMs > _max) _max = dtMs;
+      if (_since >= 3000 && _f > 0) {
+        const mean = _sum / _f;
+        logger?.event?.('rack-perf', {
+          cores: scene._rackScreens?.length || 0,
+          xr: !!scene.renderer?.xr?.isPresenting,
+          fps: +(1000 / mean).toFixed(1),
+          meanMs: +mean.toFixed(2), minMs: +_min.toFixed(2), maxMs: +_max.toFixed(2),
+          frames: _f,
+        });
+        _f = 0; _sum = 0; _min = Infinity; _max = 0; _since = 0;
+      }
+    });
+
+    // Auto-boot the rack on load so the user only has to open the ?rack=N URL
+    // (and enter VR) — no console call needed. Errors are logged, not thrown.
+    window.__rackSpike(want).catch((e) => {
+      console.warn('[rack] auto-boot failed', e);
+      logger?.event?.('rack-autoboot-error', { error: String(e?.message || e) });
+    });
+  }
+
   const built = buildRoom({ scene, room, collections });
   cartridges = built.cartridges;
   shelves = built.shelves;          // track for addLocalRomToShelf()

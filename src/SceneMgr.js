@@ -228,6 +228,28 @@ export class SceneMgr {
     this.screenTexture = newTex;
   }
 
+  // Phase-0 rack spike (throwaway, see [[src/RackSpike.js]]): mount an extra
+  // live core's canvas onto its own CRT quad, laid out in a row beside the main
+  // TV so all N cores are visible at once in VR. Each screen's CanvasTexture is
+  // uploaded every frame in _render (the per-TV upload cost is exactly the perf
+  // signal Phase 0 measures). Returns the mesh.
+  addRackScreen(index, canvas, meta) {
+    if (!this._rackScreens) this._rackScreens = [];
+    const w = 1.4, h = 1.05;
+    const tex = this._makeScreenTexture(canvas);
+    const mat = createCrtMaterial(tex);
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+    // Fan the screens out left→right in front of the user, slightly angled in.
+    const cols = (index % 4) - 1.5;       // -1.5, -0.5, 0.5, 1.5
+    mesh.position.set(cols * 1.7, 1.5, -3.4);
+    mesh.rotation.y = -cols * 0.18;
+    this.scene.add(mesh);
+    const label = meta?.system || `core${index}`;
+    mesh.name = `rack-screen-${index}-${label}`;
+    this._rackScreens.push({ index, mesh, tex, mat });
+    return mesh;
+  }
+
   // M1.2: paint a remote host's game video (a <video> backed by a WebRTC track)
   // onto the CRT. A THREE.VideoTexture auto-uploads each frame in the render
   // loop. We clear sourceCanvas so a later setScreenSource(emuCanvas) — the
@@ -426,6 +448,8 @@ export class SceneMgr {
 
   _render() {
     if (this.screenTexture) this.screenTexture.needsUpdate = true;
+    // Phase-0 rack spike: upload each extra core's frame (perf cost measured).
+    if (this._rackScreens) for (const r of this._rackScreens) r.tex.needsUpdate = true;
 
     if (!this.renderer.xr.isPresenting && !this.desktopActive) {
       // Desktop sway so the parallax sells the 3D-ness. Suppressed once the user

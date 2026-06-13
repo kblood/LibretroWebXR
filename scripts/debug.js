@@ -31,6 +31,11 @@ if (args.core) {
   const sep = URL.includes('?') ? '&' : '?';
   URL = `${URL}${sep}core=${encodeURIComponent(args.core)}`;
 }
+// --rack=<N> must also reach the page so main.js registers window.__rackSpike.
+if (args.rack) {
+  const sep = URL.includes('?') ? '&' : '?';
+  URL = `${URL}${sep}rack=${encodeURIComponent(args.rack)}`;
+}
 const TIMEOUT = parseInt(args.timeout || '8000', 10);
 const HEADED = !!args.headed;
 const SCREENSHOT = args.screenshot;
@@ -215,6 +220,34 @@ if (args['hold-key']) {
   const after = await emuChecksum();
   const changed = JSON.stringify(before) !== JSON.stringify(after);
   console.log('# holdkey:', JSON.stringify({ code, target, before, after, changed }));
+}
+
+// --rack=<N> drives the Phase-0 rack spike (requires the page loaded with
+// ?rack=N so window.__rackSpike exists): boots N live module cores into N
+// canvases and reports (a) per-core render (nonblack pixels), (b) an input-
+// isolation matrix — holding ArrowRight on core i must change ONLY core i —
+// and (c) a rough rAF throughput sample. This settles multi-instance safety +
+// input isolation headlessly; Quest perf is read from the remote logs.
+if (args.rack) {
+  const n = parseInt(args.rack, 10) || 2;
+  const result = await page.evaluate(async (n) => {
+    if (typeof window.__rackSpike !== 'function') {
+      return { error: 'window.__rackSpike missing — load the page with ?rack=N' };
+    }
+    const h = await window.__rackSpike(n);
+    const info = h.info();
+    const render = h.render();
+    const idle = await h.idleDrift(1200);
+    const route = [];      // event-level routing proof (deterministic)
+    const isolation = [];  // pixel-level effect (game-dependent)
+    for (let i = 0; i < h.count; i++) route.push({ heldCore: i, dispatch: h.dispatchTrace(i, 'ArrowRight') });
+    for (let i = 0; i < h.count; i++) {
+      isolation.push({ heldCore: i, effects: await h.holdKey(i, 'ArrowRight', 1200) });
+    }
+    const perf = await h.sampleRaf(2000);
+    return { info, render, idle, route, isolation, perf };
+  }, n);
+  console.log('# rack:', JSON.stringify(result, null, 2));
 }
 
 // --probe-file=<path> evaluates a JS file as a function body in the page and
