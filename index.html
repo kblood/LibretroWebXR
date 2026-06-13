@@ -12,8 +12,8 @@
       header { padding: 12px 16px; display: flex; gap: 12px; align-items: center; width: 100%; box-sizing: border-box; background: #1b1b1b; border-bottom: 1px solid #2a2a2a; z-index: 2; }
       header h1 { margin: 0; font-size: 14px; font-weight: 500; letter-spacing: .04em; color: #888; }
       header .sp { flex: 1; }
-      header button, header label { font: inherit; background: #2a2a2a; color: #eee; border: 1px solid #3a3a3a; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
-      header button:hover, header label:hover { background: #333; }
+      header button, header label, header a { font: inherit; background: #2a2a2a; color: #eee; border: 1px solid #3a3a3a; border-radius: 6px; padding: 6px 10px; cursor: pointer; text-decoration: none; }
+      header button:hover, header label:hover, header a:hover { background: #333; }
       header input[type=file] { display: none; }
       #status { font-size: 12px; color: #888; }
 
@@ -64,6 +64,7 @@
       <button id="reset-btn" disabled>Reset</button>
       <button id="export-room-btn" title="Download the current room layout as a *.room.json (also reflects in-VR edits)">Export Room</button>
       <button id="voice-btn" hidden title="Enable voice chat with others in this room (?session)">🎤 Voice</button>
+      <a id="headset-test-link" href="./headset-test.html" title="Open the in-headset VR smoke-test checklist">🧪 Headset Test</a>
       <span class="sp"></span>
       <span id="status">idle</span>
     </header>
