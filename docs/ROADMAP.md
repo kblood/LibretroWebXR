@@ -325,11 +325,24 @@ DebugHud for players 2-4, in-VR port retargeting.
     Verified by `scripts/smoke-video.mjs` (host fans out to 2 clients, both
     receive; voice smoke still green — no regression) + `scripts/test-net.mjs`
     (the `channel` tag). *VideoMgr is WebRTC-heavy so it's smoke-tested, not
-    unit-tested — same split as VoiceMgr.* **Follow-up:** a watching client still
-    runs its own core locally (the TV just shows the host's frames); pausing the
-    client's core to actually save the work is a later optimisation.
+    unit-tested — same split as VoiceMgr.* **Follow-up ✅ done (2026-06-13):** a
+    watching client now PAUSES its own core while showing the host's frames
+    (`EmulatorClient.pause()/resume()` toggle the core's emscripten main loop via
+    `Module.pauseMainLoop/resumeMainLoop`; main.js drives it from
+    `onHostVideo`/`onHostVideoEnded`, and a local boot resumes first so a new host
+    always runs). No point emulating something it isn't authoritative for and isn't
+    displaying — saves Quest CPU/battery. Verified by `scripts/smoke-video.mjs`
+    (now 16: two clients pause while watching, one resumes after becoming host).
 - **M2:** rollback game sync for deterministic cores (adapt netplayjs +
-  `SaveState`).
+  `SaveState`). **⚠ Blocked as scoped — research spike required first.** Our
+  RetroArch-wrapped cores can't frame-step (`retro_run` per frame — they drive
+  their own free-running `emscripten_set_main_loop`; we can pause/resume the loop
+  but not single-step it) and only snapshot asynchronously (RA's task system →
+  Emscripten VFS, ~hundreds of ms), whereas rollback needs synchronous sub-frame
+  savestates + frame stepping. True rollback therefore needs bare-libretro cores
+  (sync `retro_serialize`/`retro_unserialize`) + an `EmulatorClient` rewrite — a
+  large change against "don't rewrite the working core". Spike the bare-core path
+  before building.
 - **M3:** multiple simultaneous games, mid-session join, VR↔desktop crossplay.
 
 ## Phase C — Content & polish

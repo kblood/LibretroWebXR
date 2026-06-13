@@ -101,6 +101,25 @@ try {
   // A client is NOT the host and does not source its own broadcast video.
   ok((await client.evaluate(() => window.__net.video.amHost())) === false, 'client is not the host');
   ok((await client.evaluate(() => window.__net.video.sourcing())) === false, 'client is not sourcing video');
+
+  // M1.2 follow-up: a watcher pauses its OWN core while showing the host's
+  // streamed frames (it isn't authoritative and isn't displayed → no point
+  // burning CPU/battery emulating it). The local core is exposed as
+  // window.__client; .paused reflects the emscripten main-loop pause.
+  ok(await waitFor(client, () => window.__client && window.__client.paused === true),
+    'client paused its local core while watching the host video');
+  ok(await waitFor(cleo, () => window.__client && window.__client.paused === true),
+    'second client also paused its local core');
+
+  // Resume path: when a watcher takes over as host (claims the tv state →
+  // becomes the tv-state owner), the video handover closes its receive PC,
+  // fires onHostVideoEnded, and it resumes its local core to drive its own TV.
+  // Use a DIFFERENT game than the host's so it isn't a no-op (setObjectState
+  // skips an unchanged value), which would leave ownership with the old host.
+  await client.evaluate(() => window.__net.setObjectState('tv', { file: 'lwx-gb-snake.gb', core: 'gambatte', system: 'gb', title: 'Snake' }));
+  ok(await waitFor(client, () => window.__net.video.amHost()), 'client became the new host after claiming tv state');
+  ok(await waitFor(client, () => window.__client && window.__client.paused === false),
+    'client resumed its local core after the host handover');
 } catch (e) {
   failed++; console.error('  FAIL:', e.message);
 }

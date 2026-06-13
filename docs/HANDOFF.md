@@ -6,8 +6,13 @@ M1 (host-authoritative game sync) are both complete and DEPLOYED + live-verified
 (2026-06-13).** M0 = avatars + spatial voice + shared TV/loaded-game + held-object
 ghosts. M1 = remote input (M1.0) + client capture & host injection (M1.1) + host
 video stream (M1.2) — all live; the M1.1/M1.2 smokes pass against
-`wss://dionysus.dk/ws/`. **Next: Phase M2 (rollback game sync for deterministic
-cores).** Built on top of the **three in-VR edit modes
+`wss://dionysus.dk/ws/`. The **M1.2 follow-up (pause a watching client's local
+core)** is now done too (2026-06-13). **Next: Phase M2 (rollback game sync) — but
+M2 as scoped is BLOCKED by the core architecture** (see the "Phase M2 feasibility"
+note below): our RetroArch-wrapped cores can't frame-step (`retro_run` per frame)
+and only snapshot async (~hundreds of ms via the VFS), so true GGPO/netplayjs
+rollback needs bare-libretro cores + an `EmulatorClient` rewrite — a research spike
+first, not an incremental slice. Built on top of the **three in-VR edit modes
 (Move / Change / Add)** + desktop controls + **local multiplayer (couch co-op)**
 merge (all live), Phase E.3 (create props/portals in-VR), E.2 (in-VR look
 editing), E.1 (move props + export), Phase R (R.1 JSON collection layer, R.2
@@ -94,9 +99,18 @@ transport spine first.
   Verified: `scripts/smoke-video.mjs` (host fans its stream out to 2 clients, both
   receive; voice smoke still 8/8 — no regression) + `scripts/test-net.mjs` (the
   `channel` tag). *VideoMgr is WebRTC-heavy → smoke-tested not unit-tested, same
-  split as VoiceMgr.* **Follow-up:** a watching client still runs its own core
-  locally (its TV just shows the host's frames) — pausing the client core is a
-  later optimisation.
+  split as VoiceMgr.* **Follow-up DONE (2026-06-13):** a watching client now
+  PAUSES its own core while showing the host's frames (it isn't authoritative and
+  isn't displayed → no point burning Quest CPU/battery). `EmulatorClient.pause()/
+  resume()` toggle the core's emscripten main loop (`Module.pauseMainLoop/
+  resumeMainLoop`, which the buildbot cores export); the desired state is
+  re-applied after a (re)start so a freshly-booted watcher core doesn't briefly
+  run (`_applyPauseState`). main.js: `onHostVideo`->`client.pause()`,
+  `onHostVideoEnded`->`client.resume()` (host left / handover / we became host),
+  and a local boot (`echo:true`) resumes first so a new host always runs. Verified:
+  `scripts/smoke-video.mjs` (now 16 — two clients pause while watching, one resumes
+  after taking over as host). *A paused watcher also has no game audio — fine, its
+  local audio was never synced to the host's displayed frames anyway.*
 
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
@@ -552,10 +566,25 @@ in rough priority order:
    button is desktop-only); a real **two-headset** smoke test. **M1 is complete +
    DEPLOYED** — M1.0 remote-input transport, M1.1 client capture + host injection,
    and M1.2 host video stream are all live and smoke-verified against
-   `wss://dionysus.dk/ws/`. **Next: Phase M2 (rollback game sync for deterministic
-   cores), or the M1 follow-up of pausing a watching client's local core.** See the
-   Phase M1 block above and `docs/MULTIPLAYER.md` / `docs/ROADMAP.md`.
-3. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
+   `wss://dionysus.dk/ws/`. The **M1 follow-up (pause a watching client's local
+   core)** is now DONE — see the M1.2 block above. See `docs/MULTIPLAYER.md` /
+   `docs/ROADMAP.md`.
+3. **Phase M2 feasibility (do this BEFORE building M2).** M2 = rollback game sync
+   (adapt netplayjs + `SaveState`). True GGPO-style rollback needs two things our
+   cores CANNOT do today: (a) **per-frame stepping** — rollback re-simulates N
+   frames with corrected inputs, but our cores are RetroArch-wrapped emscripten
+   builds that drive their own free-running `emscripten_set_main_loop`
+   (`EmulatorClient.js`), with no `retro_run`-per-frame hook (we can pause/resume
+   the whole loop, not single-step it); and (b) **synchronous sub-frame
+   savestates** — `serializeState()` goes through RA's *async* task system writing
+   to the Emscripten VFS, polled in 33 ms ticks (hundreds of ms), not the <16 ms
+   snapshot rollback needs. So M2 requires swapping to **bare-libretro cores**
+   (synchronous `retro_serialize`/`retro_unserialize` + a frame-step driver) and
+   rewriting EmulatorClient's core-driving model — large + risky, against the
+   "don't rewrite the working core" principle. **Run a research spike first**
+   (can we get a bare snes9x/fceumm core with sync savestate + frame stepping on
+   the main thread?) and write up findings before committing to the rewrite.
+4. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
    a `manualChunks`/dynamic-import pass would help Quest load time if it bites.
 
 E.3 specifics worth knowing for whoever extends it:

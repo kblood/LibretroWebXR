@@ -46,6 +46,12 @@ export class EmulatorClient extends EventTarget {
     this.emuCanvas = null;
     this.ready = false;
     this._coreLoaded = false;
+    // Whether the core's emscripten main loop is intentionally paused. Owned by
+    // the host-video flow (M1.2 follow-up): a peer watching the host's streamed
+    // frames pauses its own core to stop wasting CPU/battery emulating something
+    // it isn't even showing. Re-applied after (re)start so the desired state
+    // survives a fresh callMain / a same-core ROM swap (see _applyPauseState).
+    this.paused = false;
   }
 
   async start(emuCanvas, romBuffer, opts = {}) {
@@ -66,6 +72,7 @@ export class EmulatorClient extends EventTarget {
       // Subsequent calls (same core, different ROM): reset and swap rom.bin.
       this._writeRom(romBuffer);
       this._getModule()._cmd_reset?.();
+      this._applyPauseState();
       this.dispatchEvent(new CustomEvent('ready'));
       return;
     }
@@ -76,6 +83,10 @@ export class EmulatorClient extends EventTarget {
     try {
       this._getModule().callMain(['-c', RA_CFG_PATH, ROM_VFS_PATH]);
       this.ready = true;
+      // callMain installs the core's main loop already running; if a pause was
+      // requested before the loop existed (e.g. host video arrived first), apply
+      // it now so a freshly-booted watcher core doesn't briefly run.
+      this._applyPauseState();
       this.dispatchEvent(new CustomEvent('ready'));
     } catch (e) {
       this._fail(`callMain threw: ${e.message || e}`);
@@ -84,6 +95,38 @@ export class EmulatorClient extends EventTarget {
 
   reset() {
     try { this._getModule()?._cmd_reset?.(); } catch (e) { console.warn(e); }
+  }
+
+  // ---- main-loop pause/resume (M1.2 follow-up) ----
+  //
+  // Halt/restart the core's emscripten main loop via the Browser API methods
+  // the buildbot cores export (Module.pauseMainLoop / resumeMainLoop). This
+  // stops retro_run from being scheduled — no CPU spent emulating — while
+  // leaving the WebGL context and loaded ROM intact, so it's fully reversible.
+  // A peer watching the host's streamed video (M1.2) pauses its own core; it
+  // resumes when the stream ends (host left / it became the host). Cores that
+  // don't export these methods simply keep running (graceful no-op). Note: a
+  // paused watcher also produces no game audio — acceptable, since its local
+  // audio was never synced to the host's displayed frames anyway.
+
+  pause() {
+    if (this.paused) return;
+    this.paused = true;
+    this._applyPauseState();
+  }
+
+  resume() {
+    if (!this.paused) return; // not paused → never double-resume a live loop
+    this.paused = false;
+    try { this._getModule()?.resumeMainLoop?.(); } catch (e) { console.warn(e); }
+  }
+
+  // Re-assert the paused flag against the current main loop. Called after a
+  // (re)start so the desired state survives callMain / a same-core swap. Only
+  // pauses (resuming on start is the caller's job via resume()).
+  _applyPauseState() {
+    if (!this.paused) return;
+    try { this._getModule()?.pauseMainLoop?.(); } catch (e) { console.warn(e); }
   }
 
   // ---- libretro save-state passthrough ----

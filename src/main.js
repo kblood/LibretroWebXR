@@ -118,10 +118,14 @@ if (sessionRoom) {
     onGameInput: (ev) => { if (net?.isHost()) gameInput?.setRemoteButton(ev); },
     // M1.2 host video stream: the host captures THIS canvas; a non-host paints
     // the received frames onto its TV (onHostVideo) and reverts to its own
-    // local canvas when the stream ends (onHostVideoEnded).
+    // local canvas when the stream ends (onHostVideoEnded). While watching the
+    // host's frames we PAUSE our own core (M1.2 follow-up) — it isn't authoritative
+    // and we aren't showing it, so emulating it just burns Quest CPU/battery.
+    // The stream ending (host left, or we became the host) resumes it so our TV
+    // shows our local core again.
     videoCanvas: emuCanvas,
-    onHostVideo: (videoEl) => scene.setScreenVideo(videoEl),
-    onHostVideoEnded: () => scene.setScreenSource(emuCanvas),
+    onHostVideo: (videoEl) => { scene.setScreenVideo(videoEl); client.pause(); },
+    onHostVideoEnded: () => { scene.setScreenSource(emuCanvas); client.resume(); },
   });
   net.connect();
   scene.addTickCallback((dt) => net.tick(dt));
@@ -875,6 +879,10 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // this load is reflecting a remote peer's state (echo:false) so it can't
     // bounce a stale value back over a newer overwrite.
     if (echo) {
+      // Booting a game ourselves makes us the host (tv-state owner). If we were
+      // previously watching another host (core paused, M1.2 follow-up), make sure
+      // our own core is running before we broadcast it.
+      client.resume();
       net?.setObjectState('tv', { file: meta.file, core: meta.core, system: meta.system, title: meta.title });
       // M1.2: booting the game makes us the host (tv-state owner) — start
       // streaming our canvas to the room so non-hosts see it on their TV.
