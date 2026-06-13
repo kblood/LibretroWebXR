@@ -55,9 +55,16 @@ files to `/opt/libretrowebxr-room/{server,src/net}/` and
 `sudo systemctl restart libretrowebxr-room` (the static app deploys separately via
 `npm run deploy`). See `server/README.md`.
 
-**M0 remaining (hardening/polish, not new capability):** a TURN relay (only for
-symmetric NAT — STUN covers same-LAN/most NATs); an **in-VR** voice/menu
-affordance (the 🎤 button is desktop-only); and a real **two-headset** smoke test.
+**M0 hardening (2026-06-13):** **TURN is now config-wired** — `NetProtocol.
+buildIceServers` composes STUN + an optional TURN relay (symmetric NAT; STUN
+covers same-LAN/most NATs), threaded through `NetMgr` into both the voice + video
+meshes, supplied via `?turn=…&turnUser=…&turnCred=…`; a `deploy/coturn.conf.example`
+template + setup notes ship (the coturn **server provisioning + a live symmetric-NAT
+test are still pending** — no TURN server stood up yet). The **in-VR voice
+affordance is done** — a "Voice" item in the main menu mirrors the desktop 🎤
+button (enable/mute via the same `NetMgr` path); *whether the Quest browser grants
+the mic mid-XR is the open question for the real-headset smoke*. **Still pending:**
+a real **two-headset** smoke test (needs hardware).
 
 **Phase M1 (host-authoritative game sync) — STARTED.** Same build pattern:
 transport spine first.
@@ -561,31 +568,36 @@ in rough priority order:
    smoke-verified (`smoke-room`/`presence`/`voice`/`object-sync`/`held`), and live.
    The full breakdown is in the **"Networked multiplayer (Phase M)"** block near
    the top of this doc; the slice details are in `docs/ROADMAP.md` (M0.1–M0.6).
-   **M0 remaining is hardening/polish only:** a TURN relay (symmetric NAT —
-   same-LAN/most NATs work on STUN); an **in-VR** voice/menu affordance (the 🎤
-   button is desktop-only); a real **two-headset** smoke test. **M1 is complete +
+   **M0 hardening (2026-06-13):** TURN is now config-wired
+   (`NetProtocol.buildIceServers` + `?turn=` + `deploy/coturn.conf.example`;
+   coturn server provisioning + live symmetric-NAT test pending) and the **in-VR
+   voice affordance is done** (a "Voice" menu item mirrors the desktop 🎤 button).
+   Only a real **two-headset** smoke test remains (needs hardware). **M1 is complete +
    DEPLOYED** — M1.0 remote-input transport, M1.1 client capture + host injection,
    and M1.2 host video stream are all live and smoke-verified against
    `wss://dionysus.dk/ws/`. The **M1 follow-up (pause a watching client's local
    core)** is now DONE — see the M1.2 block above. See `docs/MULTIPLAYER.md` /
    `docs/ROADMAP.md`.
-3. **Phase M2 feasibility (do this BEFORE building M2).** M2 = rollback game sync
-   (adapt netplayjs + `SaveState`). True GGPO-style rollback needs two things our
-   cores CANNOT do today: (a) **per-frame stepping** — rollback re-simulates N
-   frames with corrected inputs, but our cores are RetroArch-wrapped emscripten
-   builds that drive their own free-running `emscripten_set_main_loop`
-   (`EmulatorClient.js`), with no `retro_run`-per-frame hook (we can pause/resume
-   the whole loop, not single-step it); and (b) **synchronous sub-frame
-   savestates** — `serializeState()` goes through RA's *async* task system writing
-   to the Emscripten VFS, polled in 33 ms ticks (hundreds of ms), not the <16 ms
-   snapshot rollback needs. So M2 requires swapping to **bare-libretro cores**
-   (synchronous `retro_serialize`/`retro_unserialize` + a frame-step driver) and
-   rewriting EmulatorClient's core-driving model — large + risky, against the
-   "don't rewrite the working core" principle. **Run a research spike first**
-   (can we get a bare snes9x/fceumm core with sync savestate + frame stepping on
-   the main thread?) and write up findings before committing to the rewrite.
-4. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
-   a `manualChunks`/dynamic-import pass would help Quest load time if it bites.
+3. **Phase M2 — research spike DONE (2026-06-13): `docs/research/M2-rollback-feasibility.md`.**
+   M2 = rollback game sync. True GGPO-style rollback needs two things our cores
+   CANNOT do today: **per-frame stepping** (our RetroArch-wrapped cores drive their
+   own free-running `emscripten_set_main_loop` — we can pause/resume the loop, not
+   single-step `retro_run`) and **synchronous sub-frame savestates** (ours go
+   through RA's async task system → VFS, hundreds of ms). The spike confirms it's
+   **feasible but a genuine rewrite, not a slice**: swap to **bare-libretro cores**
+   compiled to wasm (exporting `retro_run`/`retro_serialize`, driven by a new JS
+   loop — `matthewbauer/retrojs` is an existence proof; RetroArch's own netplay/
+   run-ahead prove the sync-savestate runtime). Est. **~3–6 weeks** for a 2-player
+   NES PoC. **Recommended path (from the report):** keep **M1 host-authoritative
+   streaming as the shipped default for all games**, and do a bare-core spike on
+   **`fceumm` (NES) only** as an opt-in PoC before deciding on full M2 — do NOT
+   convert the whole core library. Read the report before starting M2.
+4. **Polish (Phase C) — bundle chunking DONE (2026-06-13).** The prod bundle was
+   one ~702 kB chunk; `vite.config.js` now splits three.js into its own vendor
+   chunk (`manualChunks`) → app chunk ~134 kB (42 kB gz) + a cache-stable `three`
+   chunk ~597 kB (152 kB gz) that survives app-only deploys. Further wins if needed:
+   dynamic-import the editor/net code paths. Remaining Phase C: open prop-package
+   schema, community gallery, BIOS systems (PSX/N64), PWA.
 
 E.3 specifics worth knowing for whoever extends it:
 - `window.__add.{shelf,console,gamepad,poster,portal}()` drive prop creation

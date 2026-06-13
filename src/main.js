@@ -21,6 +21,7 @@ import { CORES, coreForFile, portsForSystem } from './systems.js';
 import { CableMgr } from './CableMgr.js';
 import { computeRouting as routeControllers } from './Routing.js';
 import { NetMgr } from './net/NetMgr.js';
+import { buildIceServers } from './net/NetProtocol.js';
 import { GhostCartMgr } from './GhostCartMgr.js';
 import { makeHoldKey, parseHolds } from './net/HoldState.js';
 import { loadCollection, parseCollection } from './Collection.js';
@@ -104,12 +105,20 @@ if (sessionRoom) {
   const palette = ['#88aaff', '#ff8866', '#66dd99', '#ffd166', '#cc88ff', '#66ccee'];
   const nick = urlParams.get('nick') || `Player-${Math.random().toString(36).slice(2, 6)}`;
   const color = urlParams.get('color') || palette[Math.floor(Math.random() * palette.length)];
+  // M0 hardening: optional TURN relay for peers behind symmetric NAT (STUN
+  // alone fails there). Supplied via ?turn=turn:host:3478&turnUser=…&turnCred=…
+  // (or omit for the STUN-only default). Shared by the voice + video meshes.
+  const turn = urlParams.get('turn');
+  const iceServers = turn
+    ? buildIceServers({ turn, turnUsername: urlParams.get('turnUser'), turnCredential: urlParams.get('turnCred') })
+    : undefined;
   net = new NetMgr({
     scene,
     room: sessionRoom,
     serverUrl: urlParams.get('server') || undefined, // default: wss://<host>/ws/
     nick,
     color,
+    iceServers,
     // M0.5 room-object sync: reflect a remote peer's shared state into our scene.
     onObjectState: (key, value) => { if (key === 'tv') applyRemoteTv(value); },
     // M1.1 host-authoritative input: a remote player's RetroPad button reached
@@ -727,10 +736,15 @@ function buildMenuAndControlsPanel() {
       { label: 'Move',          onActivate: () => {} },
       { label: 'Change',        onActivate: () => {} },
       { label: 'Add',           onActivate: () => {} },
+      // M0 hardening: in-VR voice toggle (the 🎤 header button is desktop-only).
+      // Appended LAST and only in a networked session, so it never shifts the
+      // positional button indices the mode selector below relies on.
+      ...(net ? [{ label: 'Voice: Off', onActivate: () => {} }] : []),
     ],
   });
   scene.addObject(menu);
   const [controlsBtn, debugBtn, , , snapBtn, playBtn, moveBtn, changeBtn, addBtn] = menu.userData.buttons;
+  const vrVoiceBtn = net ? menu.userData.buttons[9] : null;
 
   // Build a per-mode action sub-panel (hidden until its mode is active). All its
   // buttons are registered with menuMgr up front; MenuMgr's effVisible check
@@ -808,6 +822,23 @@ function buildMenuAndControlsPanel() {
     const on = editor?.setSnap(!editor?.snapEnabled());
     snapBtn.setLabel(on ? 'Snap: On' : 'Snap: Off');
   };
+
+  // In-VR voice: first select grabs the mic + joins the WebRTC mesh (the
+  // controller select is the user gesture getUserMedia needs); later selects
+  // toggle mute. Mirrors the desktop 🎤 button via the same NetMgr path. Only
+  // present in a session. (Whether the Quest browser grants the mic mid-XR is
+  // the open item for the real-headset smoke test.)
+  if (vrVoiceBtn) {
+    vrVoiceBtn.onActivate = async () => {
+      if (!net.voice.enabled) {
+        const ok = await net.enableVoice();
+        vrVoiceBtn.setLabel(ok ? 'Voice: On' : 'Voice: (no mic)');
+      } else {
+        const muted = net.voice.toggleMute();
+        vrVoiceBtn.setLabel(muted ? 'Voice: Muted' : 'Voice: On');
+      }
+    };
+  }
 
   for (const b of menu.userData.buttons) menuMgr.addItem(b.mesh, b.onActivate);
 

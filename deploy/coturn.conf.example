@@ -1,0 +1,66 @@
+# coturn (TURN/STUN relay) config template — M0 hardening for LibretroWebXR.
+#
+# WHY: the voice (M0.4) + host-video (M1.2) WebRTC meshes are STUN-only by
+# default, which covers same-LAN and most home NATs. Peers behind *symmetric*
+# NAT (some mobile/corporate networks) can't connect P2P and need a TURN relay
+# that forwards their media. This is the one piece M0 was missing.
+#
+# This is a TEMPLATE — copy to /etc/turnserver.conf on the server, fill in the
+# realm/IP/secret, and DO NOT commit the filled-in version (it holds a secret).
+#
+# Install (Debian/Ubuntu, same box as dionysus.dk):
+#   sudo apt-get install coturn
+#   sudo sed -i 's/#TURNSERVER_ENABLED=1/TURNSERVER_ENABLED=1/' /etc/default/coturn
+#   sudo cp coturn.conf.example /etc/turnserver.conf   # then edit it
+#   sudo systemctl enable --now coturn
+#   sudo systemctl restart coturn
+#
+# Firewall: open 3478/tcp + 3478/udp (TURN/STUN) and the relay range below.
+# TLS TURN (turns:) on 5349 is recommended if you have the cert handy (Apache
+# already terminates TLS for dionysus.dk — point cert-file/pkey-file at it).
+#
+# Client wiring: pass it to the app via the session URL, e.g.
+#   ?session=room&turn=turn:dionysus.dk:3478&turnUser=USER&turnCred=PASS
+# (NetProtocol.buildIceServers composes STUN + this TURN; STUN stays preferred
+# and TURN is only used when direct/reflexive candidates fail.)
+
+# The public IP clients should be told to relay through (the server's IP).
+listening-ip=0.0.0.0
+external-ip=YOUR.SERVER.PUBLIC.IP
+
+listening-port=3478
+# tls-listening-port=5349
+
+# Realm — any stable domain you control; must match what clients expect.
+realm=dionysus.dk
+server-name=dionysus.dk
+
+# --- Authentication ---------------------------------------------------------
+# Long-term credentials. Simplest: a single static user (fine for a small
+# friends-and-family deploy). For production, prefer `use-auth-secret` +
+# time-limited HMAC credentials minted by the room server instead of a static
+# username/password baked into the URL.
+lt-cred-mech
+user=USER:PASS
+# use-auth-secret
+# static-auth-secret=CHANGE_ME_LONG_RANDOM_HEX
+
+# --- Relay port range (open these in the firewall too) ----------------------
+min-port=49152
+max-port=65535
+
+# --- Hardening --------------------------------------------------------------
+no-multicast-peers
+no-cli
+# Refuse to relay to private/loopback ranges (prevents abuse as an open relay).
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+
+# --- Optional TLS (reuse the dionysus.dk cert Apache already serves) ---------
+# cert=/etc/letsencrypt/live/dionysus.dk/fullchain.pem
+# pkey=/etc/letsencrypt/live/dionysus.dk/privkey.pem
+
+fingerprint
+log-file=/var/log/turnserver.log

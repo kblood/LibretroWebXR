@@ -5,6 +5,7 @@
 import {
   MSG, POSE_LEN, SIGNAL_KINDS, isValidPart, roundPart, makePose, makeJoin, makeHello,
   makeLeave, makeSignal, makeState, makeInput, hostInputTarget, validate, encode, decode,
+  buildIceServers,
 } from '../src/net/NetProtocol.js';
 import { PresenceState } from '../src/net/PresenceState.js';
 import { RoomObjects } from '../src/net/RoomObjects.js';
@@ -342,6 +343,23 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   ok(direct.msg.from === 'client' && direct.msg.player === 2 && direct.msg.btn === 'faceB', 'input stamped with the real sender id');
   ok(hub.input('r', 'client', makeInput({ to: 'ghost', player: 1, btn: 'Up', down: true })).direct === undefined, 'input to an absent host is dropped');
   ok(hub.input('r', 'x', makeInput({ to: 'host', player: 1, btn: 'Up', down: true })).direct === undefined, 'input from an absent peer is dropped');
+}
+
+// === buildIceServers: STUN default + optional TURN relay (M0 hardening) =====
+{
+  const stunOnly = buildIceServers();
+  ok(stunOnly.length === 1 && stunOnly[0].urls.startsWith('stun:'), 'default is STUN-only (one server)');
+  ok(buildIceServers({}).length === 1, 'empty args → STUN-only too');
+
+  const withTurn = buildIceServers({ turn: 'turn:relay.example:3478', turnUsername: 'u', turnCredential: 'p' });
+  ok(withTurn.length === 2, 'a TURN url appends a second server (keeps STUN)');
+  ok(withTurn[1].urls === 'turn:relay.example:3478' && withTurn[1].username === 'u' && withTurn[1].credential === 'p', 'TURN entry carries url + credentials');
+  ok(withTurn[0].urls.startsWith('stun:'), 'STUN stays first (preferred when it works)');
+
+  const noCreds = buildIceServers({ turn: 'turn:relay.example:3478' });
+  ok(!('username' in noCreds[1]) && !('credential' in noCreds[1]), 'credential fields omitted when not supplied');
+  ok(buildIceServers({ turn: 'turn:relay.example:3478', turnCredential: 0 })[1].credential === '0', 'falsy-but-present credential is coerced to a string, not dropped');
+  ok(buildIceServers({ stun: null, turn: 'turn:relay.example:3478' }).length === 1, 'stun:null drops the STUN entry, leaving TURN only');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

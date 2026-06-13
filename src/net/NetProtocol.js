@@ -199,3 +199,27 @@ export function decode(str) {
   try { msg = JSON.parse(str); } catch { return null; }
   return validate(msg).ok ? msg : null;
 }
+
+/**
+ * Build an RTCConfiguration `iceServers` list (M0 hardening — TURN). Always
+ * includes a STUN server (covers same-LAN / most NATs); appends a TURN relay
+ * only when a `turn` URL is supplied (needed for symmetric NAT, where STUN
+ * alone fails). Pure so it's unit-tested; the WebRTC managers (VoiceMgr/
+ * VideoMgr) take the result as their `iceServers`. Returns the STUN-only list
+ * when no TURN is configured — identical to the managers' built-in default.
+ */
+export function buildIceServers({
+  stun = 'stun:stun.l.google.com:19302',
+  turn = null,
+  turnUsername = null,
+  turnCredential = null,
+} = {}) {
+  const servers = stun ? [{ urls: stun }] : [];
+  if (turn) {
+    const entry = { urls: turn };
+    if (turnUsername != null) entry.username = String(turnUsername);
+    if (turnCredential != null) entry.credential = String(turnCredential);
+    servers.push(entry);
+  }
+  return servers;
+}

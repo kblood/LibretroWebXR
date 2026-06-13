@@ -40,4 +40,17 @@ export default defineConfig({
   optimizeDeps: {
     entries: ['index.html'],
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Split the bulky, rarely-changing three.js out of the app chunk
+        // (Phase C polish). The prod bundle was one ~702 kB chunk; three is the
+        // bulk of it. A separate vendor chunk downloads in parallel and stays
+        // cached across our frequent app-only deploys — helps Quest load time.
+        manualChunks(id) {
+          if (id.includes('node_modules/three')) return 'three';
+        },
+      },
+    },
+  },
 });

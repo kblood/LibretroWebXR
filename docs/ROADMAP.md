@@ -279,10 +279,16 @@ DebugHud for players 2-4, in-VR port retargeting.
     against `wss://dionysus.dk/ws/`. Desktop holders attach the ghost to the head
     (no tracked hand); file-keyed identity aliases if two shelves host the same
     file (acceptable pre-authority).
-  - **M0 remaining:** a TURN relay (symmetric NAT); an in-VR voice/menu
-    affordance (the button is desktop-only today); a real two-headset smoke test.
-    With presence + voice + TV + held-object sync all live, M0 is functionally
-    complete — these three are hardening/polish before M1.
+  - **M0 hardening (2026-06-13):** **TURN now config-wired** —
+    `NetProtocol.buildIceServers` (pure, unit-tested) composes STUN + an optional
+    TURN relay, threaded through `NetMgr` into the voice + video meshes, supplied
+    via `?turn=…&turnUser=…&turnCred=…`; `deploy/coturn.conf.example` ships
+    (coturn server provisioning + a live symmetric-NAT test still pending).
+    **In-VR voice affordance done** — a "Voice" item in the main menu mirrors the
+    desktop 🎤 button (enable/mute via the same NetMgr path; Quest mid-XR mic grant
+    is the open real-headset question). **Still pending:** a real two-headset smoke
+    test (needs hardware). With presence + voice + TV + held-object sync all live,
+    M0 is functionally complete.
 - **M1 — ✅ done + DEPLOYED (2026-06-13):** host-authoritative game sync (input +
   video stream) for 2-player. Built like M0: transport spine first, then
   consumers. All three slices below are live; the M1.1/M1.2 smokes pass against
@@ -334,18 +340,25 @@ DebugHud for players 2-4, in-VR port retargeting.
     displaying — saves Quest CPU/battery. Verified by `scripts/smoke-video.mjs`
     (now 16: two clients pause while watching, one resumes after becoming host).
 - **M2:** rollback game sync for deterministic cores (adapt netplayjs +
-  `SaveState`). **⚠ Blocked as scoped — research spike required first.** Our
-  RetroArch-wrapped cores can't frame-step (`retro_run` per frame — they drive
-  their own free-running `emscripten_set_main_loop`; we can pause/resume the loop
-  but not single-step it) and only snapshot asynchronously (RA's task system →
-  Emscripten VFS, ~hundreds of ms), whereas rollback needs synchronous sub-frame
-  savestates + frame stepping. True rollback therefore needs bare-libretro cores
-  (sync `retro_serialize`/`retro_unserialize`) + an `EmulatorClient` rewrite — a
-  large change against "don't rewrite the working core". Spike the bare-core path
-  before building.
+  `SaveState`). **⚠ Feasibility spike DONE (2026-06-13):
+  `docs/research/M2-rollback-feasibility.md`.** Confirmed: a genuine rewrite, not
+  a slice. Our RetroArch-wrapped cores can't frame-step (they drive their own
+  free-running `emscripten_set_main_loop`; we can pause/resume the loop but not
+  single-step `retro_run`) and only snapshot asynchronously (RA task system →
+  VFS, ~hundreds of ms). True rollback needs **bare-libretro cores** compiled to
+  wasm (sync `retro_serialize`/`retro_unserialize` + a JS-owned frame loop —
+  proven by `matthewbauer/retrojs`; RetroArch's own netplay/run-ahead prove the
+  runtime), est. ~3–6 weeks for a 2-player NES PoC. **Recommendation:** keep **M1
+  host-authoritative streaming as the shipped default for all games**; do a
+  bare-core spike on **`fceumm` (NES) only** as an opt-in PoC before deciding on
+  full M2; do not convert the whole core library.
 - **M3:** multiple simultaneous games, mid-session join, VR↔desktop crossplay.
 
 ## Phase C — Content & polish
+- **Bundle chunking ✅ done (2026-06-13)** — `vite.config.js` `manualChunks`
+  splits three.js into its own cache-stable vendor chunk (app ~134 kB / 42 kB gz
+  + `three` ~597 kB / 152 kB gz, was one ~702 kB chunk). Helps Quest load time +
+  caching across app-only deploys. Further: dynamic-import editor/net paths.
 - Documented open prop package schema (model + `prop.json`) — vs EmuVR's
   Discord-gated UGC kit.
 - Community gallery of room/collection URLs.

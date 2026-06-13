@@ -36,7 +36,7 @@ function defaultServerUrl() {
 }
 
 export class NetMgr {
-  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, videoCanvas = null, onHostVideo = null, onHostVideoEnded = null, now = () => performance.now() }) {
+  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, videoCanvas = null, onHostVideo = null, onHostVideoEnded = null, iceServers = null, now = () => performance.now() }) {
     this.scene = scene;
     this.room = room || 'lobby';
     this.nick = nick || 'Player';
@@ -44,6 +44,11 @@ export class NetMgr {
     this.serverUrl = serverUrl || defaultServerUrl();
     this.sendHz = sendHz;
     this._now = now;
+    // M0 hardening: optional TURN/STUN config for the WebRTC meshes (voice +
+    // video). null → each manager uses its built-in STUN-only default. A full
+    // list (built via NetProtocol.buildIceServers) is shared by both meshes so
+    // peers behind symmetric NAT can relay through TURN.
+    this.iceServers = iceServers;
 
     this.presence = new PresenceState({ ttlMs: 5000 });
     // M0.5 room-object sync: shared key→value state (the loaded game, etc.).
@@ -66,6 +71,7 @@ export class NetMgr {
       scene,
       avatars: this.avatars,
       getSelfId: () => this.presence.selfId,
+      iceServers: this.iceServers ?? undefined,
       send: ({ to, kind, data }) => {
         if (this._connected && this.ws) {
           try { this.ws.send(encode(makeSignal({ to, kind, data }))); } catch { /* mid-close */ }
@@ -82,6 +88,7 @@ export class NetMgr {
     this.video = new VideoMgr({
       getSelfId: () => this.presence.selfId,
       getCaptureCanvas: () => videoCanvas,
+      iceServers: this.iceServers ?? undefined,
       onHostVideo,
       onHostVideoEnded,
       send: ({ to, kind, data }) => {
