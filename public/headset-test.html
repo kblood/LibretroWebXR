@@ -91,6 +91,8 @@
     <h3>Open these</h3>
     <p><strong>Single headset (Part A):</strong><br>
       <a class="url" href="./">https://dionysus.dk/webxr/libretrowebxr2/ &nbsp;↩ open the app</a></p>
+    <p><strong>Multi-core rack spike (Part C — perf gate):</strong><br>
+      <a class="url" href="./?rack=3">https://dionysus.dk/webxr/libretrowebxr2/?rack=3 &nbsp;↩ 3 live cores</a></p>
     <p><strong>Two headsets (Part B)</strong> — both open the <em>same room</em>,
       different names:<br>
       <span class="url">https://dionysus.dk/webxr/libretrowebxr2/?session=ROOM&amp;nick=Alice</span><br>
@@ -122,6 +124,22 @@
     <li><strong>Portal + Export.</strong> Walk into the portal you added → it navigates to another room. Back in the menu, <em>Export Room</em> downloads / copies the room JSON.</li>
   </ol>
 
+  <h2>Part C — Multi-core rack spike <span class="pill new">PERF GATE</span></h2>
+  <p class="lead">This is the one measurement that decides the whole multi-console plan:
+    can a standalone Quest run <strong>several libretro cores live at once</strong>? It
+    auto-boots — you don't grab anything, you just enter VR and let it run while I read
+    the framerate telemetry from the logs. (Headless desktop already passed: 3 cores boot,
+    render, and input routes to the right core. Only Quest framerate is left.)</p>
+  <ol class="checks">
+    <li><strong>Open the rack URL.</strong> Open <code>…/libretrowebxr2/?rack=3</code> and tap <em>Enter VR</em>. Three CRT screens appear in a row in front of you, each running a <strong>different</strong> system (NES, Game Boy, SNES) at the same time. <span class="pass">If all three show moving/idle game pictures, multi-instance cores work on Quest.</span></li>
+    <li><strong>Let it run ~30 seconds.</strong> Just look around — turn your head, step side to side. The app ships framerate samples automatically every few seconds.</li>
+    <li><strong>Judge the smoothness.</strong> Does it feel <em>smooth</em> (no stutter/judder), <em>marginal</em> (occasional hitches), or <em>bad</em> (clearly choppy / nauseating)? Note which. <span class="note">I'll cross-check your impression against the measured <code>rack-perf</code> fps in the logs.</span></li>
+    <li><strong>Try 2 cores too (optional).</strong> Re-open with <code>?rack=2</code> and compare — if 3 is rough but 2 is smooth, that tells us the ceiling.</li>
+  </ol>
+  <p class="note">Note: in this spike the 3 screens are a perf probe only — they're not yet wired
+    to the controllers or the cord/patch system. That's the next phase, and it's gated on
+    this result.</p>
+
   <h2>Part B — Two headsets <span class="pill m0">M0</span> <span class="pill m1">M1</span></h2>
   <p class="lead">Both headsets open the <strong>same</strong> <code>?session=ROOM</code> URL (with different
     <code>nick</code>). For the basic test put both on the <strong>same Wi-Fi</strong> (STUN covers that;
@@ -144,9 +162,10 @@
 
   <h2>What to report back</h2>
   <p class="lead">For each failed step: which one, what you saw vs expected. Also note the
-    <strong>headset model + browser version</strong>, and specifically <strong>whether the mic
-    grant worked mid-XR</strong> (step B2) — that's the main open question. A screen recording
-    of any glitch helps a lot.</p>
+    <strong>headset model + browser version</strong>. Two things are the current open questions:
+    (1) the <strong>Part C rack smoothness</strong> at <code>?rack=3</code> and <code>?rack=2</code>
+    — the perf gate for the multi-console plan; and (2) <strong>whether the mic grant worked
+    mid-XR</strong> (step B2). A screen recording of any glitch helps a lot.</p>
 </main>
 
 <div class="bar">
