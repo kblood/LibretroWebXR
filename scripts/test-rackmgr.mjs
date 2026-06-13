@@ -96,6 +96,41 @@ console.log('--- unloaded consoles do not consume budget ---');
   ok('blank not in plan', !plan.live.includes('blank') && !plan.paused.includes('blank'));
 }
 
+console.log('--- budget disabled keeps every console live (powerful machine) ---');
+{
+  const rack = new RackMgr({ budget: 2, maxLive: 1 });
+  rack.setBudgetEnabled(false);
+  const a = rack.add(fakeRuntime('a', 2));
+  const b = rack.add(fakeRuntime('b', 2));
+  const c = rack.add(fakeRuntime('c', 2));        // way over budget/maxLive
+  const plan = rack.applyBudget();
+  eq('all live when disabled', plan.live.sort(), ['a', 'b', 'c']);
+  ok('none paused', plan.paused.length === 0);
+  ok('runtimes live', a.isLive() && b.isLive() && c.isLive());
+}
+
+console.log('--- re-enabling the budget resumes pausing ---');
+{
+  const rack = new RackMgr({ budget: 2, maxLive: 1 });
+  rack.setBudgetEnabled(false);
+  rack.add(fakeRuntime('a', 2));
+  const b = rack.add(fakeRuntime('b', 2));
+  rack.setFocus('a');
+  rack.applyBudget();
+  ok('b live while disabled', b.isLive());
+  rack.setBudgetEnabled(true);
+  rack.applyBudget();
+  ok('b paused after re-enable', !b.isLive());
+}
+
+console.log('--- single console never paused (>1 rule) ---');
+{
+  const rack = new RackMgr({ budget: 1, maxLive: 1 });
+  const only = rack.add(fakeRuntime('only', 9));  // heavier than budget
+  rack.applyBudget();
+  ok('lone heavy console stays live', only.isLive());
+}
+
 console.log('--- sendInput routes to the named console only ---');
 {
   const rack = new RackMgr();

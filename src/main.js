@@ -415,6 +415,14 @@ const primaryRuntime = new ConsoleRuntime({ id: CONSOLE_ID, adopt: { client, can
 rackMgr.add(primaryRuntime);
 rackMgr.setFocus(CONSOLE_ID);
 
+// "Auto-pause idle cores" setting (default ON). Off = every spawned core stays
+// live regardless of gaze/budget — for machines that can run them all. Persisted
+// so the choice survives reloads. The gaze pause only ever applies with >1 core.
+const AUTO_PAUSE_KEY = 'libretrowebxr.rackAutoPause';
+const loadAutoPause = () => { try { return localStorage.getItem(AUTO_PAUSE_KEY) !== 'off'; } catch (_) { return true; } };
+const saveAutoPause = (on) => { try { localStorage.setItem(AUTO_PAUSE_KEY, on ? 'on' : 'off'); } catch (_) {} };
+rackMgr.setBudgetEnabled(loadAutoPause());
+
 // Apply the patch graph's video edges to the scene: each TV samples the canvas
 // of the console patched to it (cable.sourceOf). Idempotent — TV.setSource
 // dedupes — so it's safe to call after any repatch / console spawn. At N=1 this
@@ -1032,6 +1040,8 @@ async function buildCartridgeWorld() {
     audio: () => audioRouter.branches.map((b) => ({ console: b.consoleId, gain: b.sink.gain.value })),
     clearSaved: () => { clearRack(); spawnedMetas.length = 0; return 'cleared'; },
     saved: () => loadRack(),
+    autoPause: (on) => { if (on !== undefined) { rackMgr.setBudgetEnabled(on); saveAutoPause(on); rackMgr.applyBudget(); refreshAudioFocus(); } return rackMgr.isBudgetEnabled(); },
+    live: () => rackMgr.runtimes().map((r) => ({ id: r.id, core: r.coreName, live: r.isLive() })),
     tvs: () => scene._tvs.map((t) => ({ id: t.id, source: t.sourceCanvas?.id || null, active: t.isActive() })),
     video: () => scene._tvs.map((t) => ({ tv: t.id, console: cable.sourceOf(t.id) })),
     // Phase 4: drive the video patch cord headlessly. repatch moves a console's
@@ -1569,9 +1579,12 @@ function buildMenuAndControlsPanel() {
       { label: 'Move',          onActivate: () => {} },
       { label: 'Change',        onActivate: () => {} },
       { label: 'Add',           onActivate: () => {} },
+      // Index 10: rack auto-pause toggle. Added unconditionally right after the
+      // mode buttons so indices 0-9 (destructured below) are unaffected; the
+      // net-only Voice button now follows at 11.
+      { label: 'Auto-pause: On', onActivate: () => {} },
       // M0 hardening: in-VR voice toggle (the 🎤 header button is desktop-only).
-      // Appended LAST and only in a networked session, so it never shifts the
-      // positional button indices the mode selector below relies on.
+      // Appended after the rack toggle and only in a networked session.
       ...(net ? [{ label: 'Voice: Off', onActivate: () => {} }] : []),
       // Multiplayer status + quick-join: always present so Quest users can join
       // a room without removing the headset to type in the URL bar. Index is
@@ -1582,7 +1595,8 @@ function buildMenuAndControlsPanel() {
   });
   scene.addObject(menu);
   const [controlsBtn, debugBtn, , , snapBtn, kbdBtn, playBtn, moveBtn, changeBtn, addBtn] = menu.userData.buttons;
-  const vrVoiceBtn = net ? menu.userData.buttons[10] : null;
+  const rackPauseBtn = menu.userData.buttons[10];
+  const vrVoiceBtn = net ? menu.userData.buttons[11] : null;
   // Always the last button regardless of whether Voice is present.
   const vrMpBtn = menu.userData.buttons.at(-1);
 
@@ -1983,6 +1997,19 @@ function buildMenuAndControlsPanel() {
     const on = editor?.setSnap(!editor?.snapEnabled());
     snapBtn.setLabel(on ? 'Snap: On' : 'Snap: Off');
   };
+
+  // Rack auto-pause toggle: ON = gaze/budget pauses unfocused cores (with >1
+  // console) to protect the framerate; OFF = keep every core live (powerful PC).
+  const syncRackPauseLabel = () => rackPauseBtn.setLabel(rackMgr.isBudgetEnabled() ? 'Auto-pause: On' : 'Auto-pause: Off');
+  rackPauseBtn.onActivate = () => {
+    const on = rackMgr.setBudgetEnabled(!rackMgr.isBudgetEnabled());
+    saveAutoPause(on);
+    rackMgr.applyBudget();          // resume everything (off) or re-apply (on)
+    refreshAudioFocus();
+    syncRackPauseLabel();
+    setStatus(on ? 'Idle cores auto-pause to save performance' : 'All cores stay live');
+  };
+  syncRackPauseLabel();             // reflect the persisted setting on the button
 
   // C64 keyboard toggle: manual override. Flips visibility for any system;
   // clears the auto-hide state so the user's choice persists until next boot.

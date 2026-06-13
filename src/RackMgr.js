@@ -21,7 +21,15 @@ export class RackMgr {
     if (maxLive != null) this._budgetOpts.maxLive = maxLive;
     this._logger = logger || null;
     this._focusedId = null;
+    // When false, the perf budget never pauses anything — every loaded console
+    // stays live (for machines that can run all cores at once). Toggled by the
+    // user; the gaze/budget pause is a perf optimisation, not a correctness one.
+    this._budgetEnabled = true;
   }
+
+  /** Enable/disable the perf budget. Disabled = keep every loaded console live. */
+  setBudgetEnabled(on) { this._budgetEnabled = on !== false; return this._budgetEnabled; }
+  isBudgetEnabled() { return this._budgetEnabled; }
 
   add(runtime) { this._runtimes.set(runtime.id, runtime); return runtime; }
   get(id) { return this._runtimes.get(id) || null; }
@@ -53,6 +61,17 @@ export class RackMgr {
    */
   applyBudget() {
     const loaded = this.runtimes().filter((r) => r.isLoaded?.());
+    // Gaze/budget pause only applies with MORE THAN ONE console, and only when
+    // the budget is enabled. Otherwise keep everything live (resume any paused).
+    if (!this._budgetEnabled || loaded.length <= 1) {
+      for (const r of loaded) if (!r.isLive?.()) r.resume();
+      const live = loaded.map((r) => r.id);
+      this._logger?.event?.('rack-budget', {
+        live, paused: [], liveWeight: null, focus: this._focusedId,
+        mode: this._budgetEnabled ? 'single' : 'disabled',
+      });
+      return { live, paused: [], liveWeight: 0 };
+    }
     const consoles = loaded.map((r) => ({
       id: r.id, weight: r.weight ?? 1, focused: r.id === this._focusedId,
     }));
