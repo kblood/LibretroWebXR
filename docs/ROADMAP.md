@@ -283,10 +283,10 @@ DebugHud for players 2-4, in-VR port retargeting.
     affordance (the button is desktop-only today); a real two-headset smoke test.
     With presence + voice + TV + held-object sync all live, M0 is functionally
     complete — these three are hardening/polish before M1.
-- **M1 — ✅ done (not yet deployed):** host-authoritative game sync (input +
+- **M1 — ✅ done + DEPLOYED (2026-06-13):** host-authoritative game sync (input +
   video stream) for 2-player. Built like M0: transport spine first, then
-  consumers. All three slices below are complete and verified locally; the live
-  build still predates M1 (deploy with `npm run deploy` when ready).
+  consumers. All three slices below are live; the M1.1/M1.2 smokes pass against
+  `wss://dionysus.dk/ws/`.
   - **M1.0 ✅ done + DEPLOYED** — remote-input transport: a directed `INPUT`
     message (`src/net/NetProtocol.js` `makeInput`) relayed client→host over the
     room socket (`server/Hub.js` `input()`, sender-id stamped, mirrors `signal`);
@@ -296,7 +296,7 @@ DebugHud for players 2-4, in-VR port retargeting.
     Verified by `scripts/test-net.mjs` (now 106) and `scripts/smoke-gameinput.mjs`
     (host/client/bystander: directed delivery, id-stamping, no broadcast leak)
     locally AND live against `wss://dionysus.dk/ws/`.
-  - **M1.1 ✅ done** — wired end-to-end. The host is resolved from shared state:
+  - **M1.1 ✅ done + DEPLOYED** — wired end-to-end. The host is resolved from shared state:
     whoever owns the `tv` key (booted the room's game) is the host
     (`NetProtocol.hostInputTarget` pure decision; `NetMgr.hostId/isHost/
     forwardGameInput`). A non-host's `GameInputMgr` now emits each *logical*
@@ -311,7 +311,7 @@ DebugHud for players 2-4, in-VR port retargeting.
     the right peer; no self-send; no broadcast leak). *Headless can't drive real
     XR gamepads, so the controller→logical capture + host injection dispatch are
     unit-tested, not in the smoke — same caveat as the edit-mode menus.*
-  - **M1.2 ✅ done** — host video stream over WebRTC. `src/net/VideoMgr.js` (a
+  - **M1.2 ✅ done + DEPLOYED** — host video stream over WebRTC. `src/net/VideoMgr.js` (a
     sibling of `VoiceMgr`) is a host→client subsystem: the host (tv-state owner)
     captures `#canvas` via `captureStream()` and adds it send-only to a peer
     connection per other peer (host is the sole offerer → no glare); each client

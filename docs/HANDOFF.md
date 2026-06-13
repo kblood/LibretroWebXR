@@ -1,12 +1,13 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated 2026-06-13.
-**Current focus: networked multiplayer (Phase M). M0 (shared-room presence) is
-live; M1 (host-authoritative game sync) is now complete locally and awaits a
-deploy.** M0 = avatars + spatial voice + shared TV/loaded-game + held-object
-ghosts (all live). M1 = remote input (M1.0, deployed) + client capture & host
-injection (M1.1) + host video stream (M1.2) — M1.1/M1.2 built & verified, not yet
-deployed. Built on top of the **three in-VR edit modes
+**Current focus: networked multiplayer (Phase M). M0 (shared-room presence) and
+M1 (host-authoritative game sync) are both complete and DEPLOYED + live-verified
+(2026-06-13).** M0 = avatars + spatial voice + shared TV/loaded-game + held-object
+ghosts. M1 = remote input (M1.0) + client capture & host injection (M1.1) + host
+video stream (M1.2) — all live; the M1.1/M1.2 smokes pass against
+`wss://dionysus.dk/ws/`. **Next: Phase M2 (rollback game sync for deterministic
+cores).** Built on top of the **three in-VR edit modes
 (Move / Change / Add)** + desktop controls + **local multiplayer (couch co-op)**
 merge (all live), Phase E.3 (create props/portals in-VR), E.2 (in-VR look
 editing), E.1 (move props + export), Phase R (R.1 JSON collection layer, R.2
@@ -61,7 +62,7 @@ transport spine first.
   recv ring. Carries one logical RetroPad button (`{player,btn,down}`) so the host
   resolves it per-player and feeds its core. Smoke: `scripts/smoke-gameinput.mjs`
   (directed delivery, id-stamping, no broadcast leak), live-verified.
-- **M1.1 ✅ done (not yet deployed)** — wired end-to-end. **Host = the `tv`-state
+- **M1.1 ✅ done + DEPLOYED (2026-06-13)** — wired end-to-end. **Host = the `tv`-state
   owner** (whoever booted the room's game); the routing decision is pure
   (`NetProtocol.hostInputTarget`) with `NetMgr.hostId()/isHost()/forwardGameInput()`
   on top. **Client capture:** `GameInputMgr` now emits each *logical* RetroPad
@@ -79,7 +80,7 @@ transport spine first.
   unit-tested, not in the smoke — same caveat as the edit-mode menus.* **Deferred:
   on a peer disconnect mid-press its remote keys can latch on the host —
   `GameInputMgr.clearRemote()` exists but isn't yet wired to a presence-leave.**
-- **M1.2 ✅ done (not yet deployed)** — host video stream. `src/net/VideoMgr.js`
+- **M1.2 ✅ done + DEPLOYED (2026-06-13)** — host video stream. `src/net/VideoMgr.js`
   (a sibling of `VoiceMgr`) is a **host→client** WebRTC subsystem: the host (the
   `tv`-state owner) captures `#canvas` via `captureStream()` and adds it
   **send-only** to a peer connection per other peer (host is the sole offerer, so
@@ -139,10 +140,12 @@ forwards arrows/Enter/Space/H/G/Y/T/E/P/R/O); **WASD is safe because it's not in
 forward-set.** Crosshair + control hint live in `index.html`. Verified headless
 (movement + room-clamp + synthetic grab/release of a prop) + screenshot.
 
-**Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, **current
-`main` @ 774a295, deployed 2026-06-09** — edit modes, desktop controls, local
-multiplayer, AND networked Phase M0 (presence/voice/TV/held-object sync) are all
-live; COOP/COEP verified). The original
+**Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, **code @
+40344eb (M1.2), deployed 2026-06-13** — edit modes, desktop controls, local
+multiplayer, networked Phase M0 (presence/voice/TV/held-object sync) AND the full
+Phase M1 (host-authoritative input + host video stream) are all live; COOP/COEP +
+`crossOriginIsolated` verified, an NES game boots over the wire, and the M1.1/M1.2
+smokes pass live against `wss://dionysus.dk/ws/`). The original
 https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and is left
 untouched — `libretrowebxr2` is a deliberate separate folder. User confirmed E.1
 works in VR; the gamepad-pickup regression below is fixed + redeployed.
@@ -491,9 +494,9 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
     (a new portal also joins the live nav list). *Collections-to-shelves still
     deferred* (live shelf rebuild + `GrabMgr.removeGrabbable`).
 - **Phase M — IN PROGRESS** — multiplayer (`docs/MULTIPLAYER.md`): **M0
-  presence/avatars/voice/room-object sync ✅ done + DEPLOYED**; **M1 ✅ done, not
-  yet deployed** (M1.0 remote-input transport — deployed; M1.1 client capture +
-  host injection; M1.2 host video stream — both built, not yet deployed);
+  presence/avatars/voice/room-object sync ✅ done + DEPLOYED**; **M1 ✅ done +
+  DEPLOYED** (M1.0 remote-input transport, M1.1 client capture + host injection,
+  M1.2 host video stream — all live + smoke-verified against `wss://dionysus.dk/ws/`);
   **M2 ← next** = rollback game sync; M3 crossplay.
 - **Phase C** — open prop package schema, community gallery, BIOS-needing
   systems (PSX/N64), PWA.
@@ -523,11 +526,12 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   (`window.__editor`/`__grab` are deliberately exposed *before* the await as a
   headless probe workaround — that's a patch, not the fix.)
 
-## Immediate next actions (Phase E done; Phase M0 done + deployed)
+## Immediate next actions (Phase E done; Phase M0 + M1 done + deployed)
 
-Phase E (in-VR editor) is complete and **Phase M0 (networked shared-room
-presence) is complete and deployed** — `main @ 774a295` is **live as of
-2026-06-09** (COOP/COEP verified). Sensible next steps, in rough priority order:
+Phase E (in-VR editor) is complete and **Phase M0 + M1 are complete and deployed**
+— code @ `40344eb` (M1.2) is **live as of 2026-06-13** (COOP/COEP +
+`crossOriginIsolated` verified; M1.1/M1.2 smokes pass live). Sensible next steps,
+in rough priority order:
 
 1. **Real-VR smoke test on a Quest** — now scoped down to only what can't be
    scripted: the Play/Move/Change/Add edit-mode **raycast menus**, and that the
@@ -545,12 +549,12 @@ presence) is complete and deployed** — `main @ 774a295` is **live as of
    the top of this doc; the slice details are in `docs/ROADMAP.md` (M0.1–M0.6).
    **M0 remaining is hardening/polish only:** a TURN relay (symmetric NAT —
    same-LAN/most NATs work on STUN); an **in-VR** voice/menu affordance (the 🎤
-   button is desktop-only); a real **two-headset** smoke test. **M1 is complete**
-   (not yet deployed) — M1.0 remote-input transport, M1.1 client capture + host
-   injection, and M1.2 host video stream are all built + verified locally. **Next:
-   deploy M1 (`npm run deploy`) and/or start M2 (rollback game sync for
-   deterministic cores).** See the Phase M1 block above and `docs/MULTIPLAYER.md` /
-   `docs/ROADMAP.md`.
+   button is desktop-only); a real **two-headset** smoke test. **M1 is complete +
+   DEPLOYED** — M1.0 remote-input transport, M1.1 client capture + host injection,
+   and M1.2 host video stream are all live and smoke-verified against
+   `wss://dionysus.dk/ws/`. **Next: Phase M2 (rollback game sync for deterministic
+   cores), or the M1 follow-up of pausing a watching client's local core.** See the
+   Phase M1 block above and `docs/MULTIPLAYER.md` / `docs/ROADMAP.md`.
 3. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
    a `manualChunks`/dynamic-import pass would help Quest load time if it bites.
 
