@@ -379,6 +379,23 @@ export class SceneMgr {
     this.desktopActive = false; // set true once DesktopControls takes the camera
   }
 
+  /**
+   * Return the inner room extents as a plain RoomBounds object compatible with
+   * src/Placement.js. Walls are at ±w/2 and ±d/2 (centred on origin), floor
+   * at Y=0, ceiling at Y=h. Safe to call any time after construction.
+   *
+   * @returns {{ minX:number, maxX:number, minZ:number, maxZ:number, floorY:number, ceilY:number }}
+   */
+  getRoomBounds() {
+    const { w, d, h } = this._roomDims;
+    return {
+      minX: -(w / 2), maxX:  w / 2,
+      minZ: -(d / 2), maxZ:  d / 2,
+      floorY: 0,
+      ceilY: h,
+    };
+  }
+
   addObject(obj) {
     this.scene.add(obj);
   }

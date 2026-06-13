@@ -49,6 +49,9 @@ import {
   createProp, createPortal,
   addProp as appendProp, addPortal as appendPortal,
 } from './PropCreator.js';
+import {
+  clampToRoom, snapToSurface, SURFACE_KIND,
+} from './Placement.js';
 
 // CORES and the system registry now live in src/systems.js (system-first,
 // single source of truth). detectCore() is coreForFile() from there; the
@@ -420,6 +423,11 @@ async function buildCartridgeWorld() {
     onCartridgeReleased: (cart) => {
       if (net) net.setObjectState(makeHoldKey(cart.userData.file), null);
     },
+    // Placement preview: supply live room bounds so the ghost can compute the
+    // snapped drop location each frame. isPreviewEnabled() reads the editor's
+    // surfaceSnap flag — the ghost is only shown when surface-snap is ON.
+    getRoomBounds: () => scene.getRoomBounds(),
+    isPreviewEnabled: () => !!(editor?.surfaceSnapEnabled() && editor?.isEditMode()),
   });
   cartridges.forEach((c) => grabMgr.addGrabbable(c));
   grabMgr.addGrabbable(gamepadObj);
@@ -595,14 +603,6 @@ function installPortals() {
 // descriptor into currentRoom, and registers it as an editable grabbable — so
 // E.1 move + E.2 look-editing + Export Room all apply to it immediately.
 
-// Default spawn height per type so a new prop lands at a sensible level (the
-// user then grabs it to its final spot). Posters go on walls; shelves/consoles
-// at furniture height.
-// Furniture (bookcase/cupboard/table) has a floor-contact origin, so it spawns
-// at y=0 (standing on the floor); shelves/console/poster keep their old heights.
-const SPAWN_Y = { shelf: 1.25, console: 0.74, gamepad: 0.78, poster: 1.5, portal: 0,
-                  bookcase: 0, cupboard: 0, table: 0 };
-
 // Example rooms a new portal can target (URL today; a local-id registry is a
 // deferred item). addPortal aims at one that isn't the current room so
 // walk-through navigation is verifiable out of the box.
@@ -612,7 +612,14 @@ const KNOWN_ROOMS = ['roms/bedroom.room.json', 'roms/arcade.room.json'];
 // the new prop back toward them. Reads the camera's last-rendered world pose
 // (controller events fire outside the XR rAF, so the pose is a frame stale —
 // fine for an initial placement the user adjusts by grabbing).
-function spawnTransform(y = 1.2) {
+//
+// Surface-snap is applied here so NEWLY SPAWNED props always land on the
+// correct surface inside the room (no floating, no clipping through walls):
+//   • Floor props  → Y is set to RESTING_Y[type]; XZ clamped inside walls.
+//   • Wall props   → snapped to the nearest wall plane; yaw faces into room.
+// The returned `rot[1]` is the player-facing yaw for floor props (so the user
+// can see the front face immediately), or the room-facing yaw for wall props.
+function spawnTransform(type) {
   const camPos = new THREE.Vector3();
   const dir = new THREE.Vector3();
   scene.camera.getWorldPosition(camPos);
@@ -621,9 +628,24 @@ function spawnTransform(y = 1.2) {
   if (dir.lengthSq() < 1e-6) dir.set(0, 0, -1);
   dir.normalize();
   const p = camPos.clone().addScaledVector(dir, 1.4);
-  // Face the prop's +Z back toward the player (opposite the look direction).
-  const yawDeg = (Math.atan2(-dir.x, -dir.z) * 180) / Math.PI;
-  return { pos: [p.x, y, p.z], rot: [0, yawDeg, 0] };
+
+  // Clamp the XZ to inside the room before surface-snap (keeps posters off the
+  // wall corner seams and floor props away from the wall base).
+  const bounds = scene.getRoomBounds();
+  const raw = { x: p.x, y: p.y, z: p.z };
+  const clamped = clampToRoom(raw, bounds, 0.25);
+
+  // Surface-snap: floor props get correct Y; wall props snap to nearest wall.
+  const { pos: snapped, yaw: wallYaw } = snapToSurface(clamped, bounds, type || 'shelf');
+
+  // For floor props: face the prop's +Z back toward the player so the front
+  // face is visible on spawn.  For wall props: use the snap-computed yaw so
+  // the poster faces into the room.
+  const isWall = SURFACE_KIND[type] === 'wall';
+  const yawRad = isWall ? wallYaw : Math.atan2(-dir.x, -dir.z);
+  const yawDeg = (yawRad * 180) / Math.PI;
+
+  return { pos: [snapped.x, snapped.y, snapped.z], rot: [0, yawDeg, 0] };
 }
 
 // Force edit mode on (so the freshly added prop is immediately grabbable). A
@@ -638,7 +660,7 @@ function ensureEditMode() {
 // null if it couldn't be built — e.g. a shelf with no collection to fill it).
 function addProp(type) {
   if (!editor || !currentRoom) return null;
-  const t = spawnTransform(SPAWN_Y[type] ?? 1.2);
+  const t = spawnTransform(type);
   const prop = createProp(currentRoom, type, t);
   if (!prop) { setStatus(`can't add ${type}`); return null; }
 
@@ -693,7 +715,7 @@ function addPortal() {
   if (!editor || !currentRoom) return null;
   const here = urlParams.get('room');
   const target = KNOWN_ROOMS.find((u) => u !== here) || KNOWN_ROOMS[0];
-  const t = spawnTransform(SPAWN_Y.portal);
+  const t = spawnTransform('portal');
   const portal = createPortal(currentRoom, { target, pos: t.pos, rot: t.rot });
   if (!portal) { setStatus('add portal failed'); return null; }
 
@@ -833,9 +855,28 @@ function buildMenuAndControlsPanel() {
     return p;
   };
 
+  // Move panel: instructions + two snap toggles.
+  // "Surface Snap" snaps floor props to the floor and wall props to the nearest
+  // wall on release; it also shows the placement ghost while dragging.
+  // "Grid Snap" is the existing 0.1 m / 15° quantiser — reachable here too for
+  // convenience without going back to the main panel.
   const movePanel = sub('Move', [
     { label: 'Grip a prop to move', onActivate: () => setStatus('Move: grip a prop and drag it') },
+    { label: 'Surface Snap: On',    onActivate: () => {} },  // wired below
+    { label: 'Grid Snap: Off',      onActivate: () => {} },  // mirrors main snapBtn
   ]);
+  const [, surfaceSnapBtn, gridSnapInMoveBtn] = movePanel.userData.buttons;
+  // Surface snap is on by default (matches editor._surfaceSnap initial value).
+  surfaceSnapBtn.onActivate = () => {
+    const on = editor?.setSurfaceSnap(!editor?.surfaceSnapEnabled());
+    surfaceSnapBtn.setLabel(on ? 'Surface Snap: On' : 'Surface Snap: Off');
+  };
+  // Grid snap mirror: keep this label in sync with the main snapBtn.
+  gridSnapInMoveBtn.onActivate = () => {
+    const on = editor?.setSnap(!editor?.snapEnabled());
+    snapBtn.setLabel(on ? 'Snap: On' : 'Snap: Off');
+    gridSnapInMoveBtn.setLabel(on ? 'Grid Snap: On' : 'Grid Snap: Off');
+  };
 
   // Change mode: global look (wallpaper/floor/lighting/all posters) plus
   // per-prop edits on the grip-selected prop (poster art / shelf collection).
@@ -1222,7 +1263,7 @@ async function addLocalRomToShelf(meta) {
   // No suitable shelf → create a fresh empty one in front of the player (same
   // as the "Add Shelf" in-VR menu but without requiring an existing collection).
   if (!targetShelf) {
-    const t = spawnTransform(1.25); // shelf height
+    const t = spawnTransform('shelf');
     const pos = new THREE.Vector3(t.pos[0], t.pos[1], t.pos[2]);
     const rotY = (t.rot[1] * Math.PI) / 180;
     // createShelf([]) builds a bare plank; addCartridgeToShelf widens it as needed.

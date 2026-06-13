@@ -17,6 +17,9 @@
 //   - Gamepad released → stays exactly where you let it go.
 
 import * as THREE from 'three';
+import {
+  clampToRoom, snapToSurface, footprintForKind, SURFACE_KIND,
+} from './Placement.js';
 
 const ARM_RANGE  = 0.45;  // metres — fallback close-range grab when nothing aimed
 const RAY_RANGE  = 5.0;   // metres — how far the aim ray reaches
@@ -26,7 +29,7 @@ const LASER_IDLE = 0x88aaff;
 const LASER_HOVER = 0xffd060;
 
 export class GrabMgr {
-  constructor({ scene, controllers, console: consoleObj, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased }) {
+  constructor({ scene, controllers, console: consoleObj, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, getRoomBounds, isPreviewEnabled }) {
     this.scene = scene;
     this.controllers = controllers;
     this.console = consoleObj;
@@ -54,6 +57,10 @@ export class GrabMgr {
     // (cartObject, hand) where hand is 'left'|'right'|null (null = desktop).
     this.onCartridgeGrabbed = onCartridgeGrabbed || (() => {});
     this.onCartridgeReleased = onCartridgeReleased || (() => {});
+    // Placement preview: getRoomBounds() supplies the room extents (from SceneMgr);
+    // isPreviewEnabled() gates whether the ghost box is shown while dragging.
+    this._getRoomBounds = getRoomBounds || null;
+    this._isPreviewEnabled = isPreviewEnabled || (() => false);
     this.grabbables = [];
     this.held = new Map();              // controller -> Object3D
     this._hover = new Map();            // controller -> Object3D (or null)
@@ -61,6 +68,11 @@ export class GrabMgr {
     this._origin = new THREE.Vector3();
     this._dir = new THREE.Vector3();
     this._quat = new THREE.Quaternion();
+
+    // Ghost preview: a single wireframe box reused across all held editable props.
+    // Shown only when isPreviewEnabled() is true and exactly one editable prop is held.
+    this._ghost = null;          // the THREE.LineSegments ghost mesh (created lazily)
+    this._ghostKind = null;      // prop kind the ghost was sized for (reset on kind change)
 
     controllers.forEach((ctrl) => {
       ctrl.addEventListener('squeezestart', () => this._tryGrab(ctrl));
@@ -136,8 +148,8 @@ export class GrabMgr {
     this.console.userData.setInserted(true);
   }
 
-  // Per-frame: update hover targets and laser colours. Wired up by main.js
-  // through SceneMgr.addTickCallback.
+  // Per-frame: update hover targets, laser colours, and placement ghost.
+  // Wired up by main.js through SceneMgr.addTickCallback.
   tick() {
     for (const ctrl of this.controllers) {
       // While holding, we don't ray-cast for a new target (the held thing
@@ -149,6 +161,80 @@ export class GrabMgr {
       const target = this._aimTarget(ctrl);
       this._setHover(ctrl, target);
     }
+    this._updateGhost();
+  }
+
+  // --- Placement ghost (preview) -------------------------------------------
+
+  /**
+   * Create or resize the ghost box to match the footprint of `kind`.
+   * The ghost is a translucent wireframe EdgesGeometry box painted in a
+   * cyan tint so it's distinguishable from the prop itself.
+   */
+  _ensureGhost(kind) {
+    if (this._ghost && this._ghostKind === kind) return; // already correct size
+
+    // Dispose old ghost before replacing it.
+    if (this._ghost) {
+      this.scene.remove(this._ghost);
+      this._ghost.geometry.dispose();
+      this._ghost.material.dispose();
+      this._ghost = null;
+    }
+
+    const fp = footprintForKind(kind);
+    const isWall = SURFACE_KIND[kind] === 'wall';
+    // For wall props use footprint.width × height × depth; for floor props a
+    // flat 0.05 m tall slab shows where it will land without obscuring the prop.
+    const ghostH = isWall ? 0.8 : 0.05;
+    const geom = new THREE.EdgesGeometry(
+      new THREE.BoxGeometry(fp.width, ghostH, fp.depth),
+    );
+    const mat = new THREE.LineBasicMaterial({ color: 0x44ddff, transparent: true, opacity: 0.7 });
+    this._ghost = new THREE.LineSegments(geom, mat);
+    this._ghost.name = 'placement-ghost';
+    this._ghostKind = kind;
+    this.scene.add(this._ghost);
+  }
+
+  /**
+   * Each frame: if preview is enabled and exactly one editable prop is held,
+   * compute the snapped drop position and move the ghost there. Otherwise hide.
+   */
+  _updateGhost() {
+    if (!this._isPreviewEnabled() || !this._getRoomBounds) {
+      this._hideGhost();
+      return;
+    }
+
+    // Find the one editable prop being held (not gamepads, not cartridges).
+    let heldProp = null;
+    for (const [, obj] of this.held) {
+      if (obj.userData?.editable && obj.userData?.kind !== 'gamepad') {
+        heldProp = obj;
+        break;
+      }
+    }
+
+    if (!heldProp) { this._hideGhost(); return; }
+
+    const kind = heldProp.userData?.kind || 'shelf';
+    this._ensureGhost(kind);
+
+    // Compute the snapped world position for the prop's current location.
+    const bounds = this._getRoomBounds();
+    const wp = new THREE.Vector3();
+    heldProp.getWorldPosition(wp);
+    const clamped = clampToRoom({ x: wp.x, y: wp.y, z: wp.z }, bounds, 0.1);
+    const { pos, yaw } = snapToSurface(clamped, bounds, kind);
+
+    this._ghost.position.set(pos.x, pos.y, pos.z);
+    this._ghost.rotation.set(0, yaw, 0);
+    this._ghost.visible = true;
+  }
+
+  _hideGhost() {
+    if (this._ghost) this._ghost.visible = false;
   }
 
   _setHover(ctrl, target) {

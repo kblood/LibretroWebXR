@@ -18,6 +18,7 @@
 
 import { serializeRoom } from './RoomSerializer.js';
 import { saveLastRoom } from './RoomPersistence.js';
+import { clampToRoom, snapToSurface, SURFACE_KIND } from './Placement.js';
 
 const DEG = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
@@ -47,6 +48,11 @@ export class RoomEditor {
     this.onStatus = onStatus || (() => {});
     this._mode = 'off';
     this._snap = false;
+    // Surface-snap: when on, releasing a floor prop snaps Y to the correct
+    // resting height for its kind; releasing a wall prop snaps to the nearest
+    // wall and faces it into the room. Orthogonal to the grid snap; both may
+    // be active simultaneously. Default ON so new users land props sensibly.
+    this._surfaceSnap = true;
     this._selected = null;        // { prop, object } currently selected (Change mode)
     this._onSelect = () => {};    // menu hook: fires with the selected record (or null)
 
@@ -177,20 +183,56 @@ export class RoomEditor {
     return this._snap;
   }
 
-  // Called by GrabMgr when an editable prop is released. Quantize to the grid
-  // when snapping is on; otherwise leave it exactly where dropped.
+  /** Surface-snap toggle: floor/wall surface snapping, separate from grid snap. */
+  surfaceSnapEnabled() { return this._surfaceSnap; }
+  setSurfaceSnap(on) {
+    this._surfaceSnap = !!on;
+    this.onStatus(`Surface snap ${this._surfaceSnap ? 'on' : 'off'}`);
+    return this._surfaceSnap;
+  }
+
+  /**
+   * Called by GrabMgr when an editable prop is released. Applies:
+   *   1. Surface snap (if enabled): clamp inside room + floor-or-wall snap.
+   *   2. Grid snap (if enabled): quantise X/Z/Y to 0.1 m and rotation to 15°.
+   * Either or both may be active; they compose cleanly (surface snap runs first,
+   * then grid snap rounds its output).
+   */
   onEditRelease(object) {
-    if (!this._snap) return;
-    object.position.set(
-      snap(object.position.x, GRID_POS),
-      snap(object.position.y, GRID_POS),
-      snap(object.position.z, GRID_POS),
-    );
-    object.rotation.set(
-      snap(object.rotation.x, GRID_ROT),
-      snap(object.rotation.y, GRID_ROT),
-      snap(object.rotation.z, GRID_ROT),
-    );
+    // Find the prop record so we know the kind for surface-snap.
+    const rec = this.placed.find((p) => p.object === object);
+    const kind = rec?.prop?.type || null;
+
+    if (this._surfaceSnap && kind) {
+      // SceneMgr exposes getRoomBounds(); fall back to the default 6×8×3.2 room.
+      const bounds = this.scene?.getRoomBounds
+        ? this.scene.getRoomBounds()
+        : { minX: -3, maxX: 3, minZ: -4, maxZ: 4, floorY: 0, ceilY: 3.2 };
+
+      const raw = { x: object.position.x, y: object.position.y, z: object.position.z };
+      const clamped = clampToRoom(raw, bounds, 0.1);
+      const { pos, yaw } = snapToSurface(clamped, bounds, kind);
+
+      object.position.set(pos.x, pos.y, pos.z);
+
+      // For wall props (poster), override the Y-axis rotation to face the room.
+      if (SURFACE_KIND[kind] === 'wall') {
+        object.rotation.set(0, yaw, 0);
+      }
+    }
+
+    if (this._snap) {
+      object.position.set(
+        snap(object.position.x, GRID_POS),
+        snap(object.position.y, GRID_POS),
+        snap(object.position.z, GRID_POS),
+      );
+      object.rotation.set(
+        snap(object.rotation.x, GRID_ROT),
+        snap(object.rotation.y, GRID_ROT),
+        snap(object.rotation.z, GRID_ROT),
+      );
+    }
   }
 
   // Build a Map<id,{pos,rot}> of live transforms (pos in metres, rot in DEGREES
