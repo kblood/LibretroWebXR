@@ -119,7 +119,11 @@ installXRRafShim(scene.renderer);
 // Reroute the core's audio through THREE.PositionalAudio anchored on the TV.
 // Must happen BEFORE the core ever runs `new AudioContext()` — see
 // src/SpatialAudio.js.
-installSpatialAudio({ listener: scene.audioListener, sourceObject: scene.tvGroup });
+const audioRouter = installSpatialAudio({ listener: scene.audioListener, defaultSource: scene.tv.group });
+// Label the primary console's audio branch so focus-mute can address it; the
+// primary core boots later (loadCartridge) and creates the matching context.
+// Literal 'console0' (== CONSOLE_ID, declared below) to avoid the TDZ here.
+audioRouter.expect('console0', scene.tv.group);
 window.__scene = scene;
 window.__client = client;
 
@@ -424,6 +428,35 @@ const routeVideo = () => {
   }
 };
 
+// ── Focus (gaze) → live-budget + audio mute ─────────────────────────────────
+// The console whose TV the user is looking at is the "focused" one: the rack
+// budget keeps it live ([[src/RackMgr.js]]) and the audio router makes only it
+// audible ([[src/SpatialAudio.js]]) so N live cores don't blast over each other.
+function refreshAudioFocus() { audioRouter?.setFocus?.(rackMgr.focusedId()); }
+
+const _camPos = new THREE.Vector3();
+const _camDir = new THREE.Vector3();
+const _toTv = new THREE.Vector3();
+function updateFocus() {
+  if (scene._tvs.length < 2) return;        // nothing to switch between
+  const cam = scene.camera;
+  cam.getWorldPosition(_camPos);
+  cam.getWorldDirection(_camDir);
+  let best = null, bestDot = 0.55;          // ~57° cone; ignore glances away
+  for (const tv of scene._tvs) {
+    tv.group.getWorldPosition(_toTv);
+    _toTv.sub(_camPos).normalize();
+    const dot = _toTv.dot(_camDir);
+    if (dot > bestDot) { bestDot = dot; best = tv; }
+  }
+  if (!best) return;
+  const consoleId = cable.sourceOf(best.id);
+  if (!consoleId || consoleId === rackMgr.focusedId()) return;
+  rackMgr.setFocus(consoleId);
+  rackMgr.applyBudget();
+  refreshAudioFocus();
+}
+
 // ── Video patch cords (console → TV) ────────────────────────────────────────
 // Each console has ONE physical video-out cable whose grabbable plug
 // ([[src/Plug.js]]) seats into a TV's video-in jack. Seating rewires the patch
@@ -522,14 +555,18 @@ async function spawnConsole(system, { game } = {}) {
   // module cores coexist). Boot the resolved ROM into it.
   const runtime = new ConsoleRuntime({ id: consoleId });
   const buf = await resolveRom(meta);
+  // Build this console's TV first so the audio branch can anchor on it, then
+  // label the NEXT core's audio branch before booting it (the core's
+  // `new AudioContext()` during load() lands in this branch).
+  const fanX = 2.6 + (n - 1) * 2.4;
+  const tv = scene.addTV({ id: tvId, position: [fanX, 1.5, -3.6] });
+  audioRouter.expect(consoleId, tv.group);
   // CORES entries are keyed by name and carry no `name` field; ConsoleRuntime
   // wants { name, url, style }, so graft the key on.
   await runtime.load(buf, { ...core, name: meta.core }, { system: meta.system, title: meta.title });
   rackMgr.add(runtime);
 
-  // Give it a TV, fanned out to the right of the primary, and patch the graph.
-  const fanX = 2.6 + (n - 1) * 2.4;
-  const tv = scene.addTV({ id: tvId, position: [fanX, 1.5, -3.6] });
+  // Patch the graph: this console feeds its new TV.
   cable.addConsole(consoleId, { ports: portsForSystem(meta.system) });
   cable.addTV(tvId);
   cable.connectVideo(consoleId, tvId);
@@ -546,8 +583,29 @@ async function spawnConsole(system, { game } = {}) {
 
   // Admit under the perf budget (may pause an over-budget core; focus stays live).
   rackMgr.applyBudget();
+  refreshAudioFocus();
   logger?.event?.('console-spawned', { consoleId, tvId, system: meta.system, core: meta.core, title: meta.title });
   return consoleId;
+}
+
+// Phase 5 spawn menu: spawn a live console for the next system not already
+// running (so repeated taps cycle through the library's systems). Wired to the
+// Add panel's "Spawn Console" button and window.__rack.spawnNext.
+async function spawnNextConsole() {
+  const games = window.__games || [];
+  if (!games.length) { setStatus('No games available to spawn'); return null; }
+  const running = new Set(rackMgr.runtimes().map((r) => r.system).filter(Boolean));
+  const meta = games.find((g) => !running.has(g.system)) || games[0];
+  setStatus(`Spawning ${meta.title}…`);
+  try {
+    const id = await spawnConsole(meta.system, { game: meta });
+    setStatus(`Spawned ${meta.title} on ${id}`);
+    return id;
+  } catch (e) {
+    setStatus(`Spawn failed: ${e.message || e}`);
+    logger?.event?.('console-spawn-error', { system: meta.system, error: String(e?.message || e) });
+    return null;
+  }
 }
 let gamepadCount = 0;
 const registerGamepad = (obj) => {
@@ -916,7 +974,11 @@ async function buildCartridgeWorld() {
   // Usage: await window.__rack.spawn('nes'); window.__rack.tvs() → [{id,source}]
   window.__rack = {
     spawn: (system, opts) => spawnConsole(system, opts),
+    spawnNext: () => spawnNextConsole(),
     route: () => routeVideo(),
+    focus: (id) => { rackMgr.setFocus(id); rackMgr.applyBudget(); refreshAudioFocus(); return rackMgr.focusedId(); },
+    focused: () => rackMgr.focusedId(),
+    audio: () => audioRouter.branches.map((b) => ({ console: b.consoleId, gain: b.sink.gain.value })),
     tvs: () => scene._tvs.map((t) => ({ id: t.id, source: t.sourceCanvas?.id || null, active: t.isActive() })),
     video: () => scene._tvs.map((t) => ({ tv: t.id, console: cable.sourceOf(t.id) })),
     // Phase 4: drive the video patch cord headlessly. repatch moves a console's
@@ -1054,6 +1116,7 @@ async function buildCartridgeWorld() {
   scene.addTickCallback((dt) => grabMgr.tick(dt));
   scene.addTickCallback(() => syncCords());
   scene.addTickCallback(() => syncVideoCords());
+  scene.addTickCallback(() => updateFocus());
   scene.addTickCallback((dt) => locomotion.tick(dt));
   scene.addTickCallback(() => gameInput.tick());
   // Diagnostic: while a game is loaded, log the input pipeline state whenever it
@@ -1822,6 +1885,7 @@ function buildMenuAndControlsPanel() {
     { label: 'Add Cupboard', onActivate: () => addProp('cupboard') },
     { label: 'Add Table',    onActivate: () => addProp('table') },
     { label: 'Add Console',  onActivate: () => addProp('console') },
+    { label: 'Spawn Console', onActivate: () => spawnNextConsole() },
     { label: 'Add Gamepad',  onActivate: () => addProp('gamepad') },
     { label: 'Add Poster',   onActivate: () => addProp('poster') },
     { label: 'Add Portal',   onActivate: () => addPortal() },
