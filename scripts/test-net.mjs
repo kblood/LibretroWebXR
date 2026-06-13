@@ -167,6 +167,14 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   ok(!validate({ type: MSG.SIGNAL, to: 'b', kind: 'offer' }).ok, 'signal without data rejected');
   const back = decode(encode(makeSignal({ to: 'b', kind: 'ice', data: { candidate: 'x' } })));
   ok(back && back.kind === 'ice' && back.data.candidate === 'x', 'SIGNAL round-trips through encode/decode');
+
+  // M1.2: optional `channel` multiplexes voice vs the host→client video stream.
+  ok(makeSignal({ to: 'b', kind: 'offer', data: {} }).channel === undefined, 'voice SIGNAL carries no channel (back-compat)');
+  const vid = makeSignal({ to: 'b', kind: 'offer', data: { sdp: 's' }, channel: 'video' });
+  ok(vid.channel === 'video' && validate(vid).ok, 'a video-channel SIGNAL validates');
+  ok(validate(makeSignal({ to: 'b', kind: 'offer', data: {}, channel: 'voice' })).ok, 'an explicit voice channel validates');
+  ok(!validate({ type: MSG.SIGNAL, to: 'b', kind: 'offer', data: {}, channel: 'bogus' }).ok, 'an unknown channel is rejected');
+  ok(decode(encode(vid)).channel === 'video', 'channel survives encode/decode');
 }
 
 // === Hub: signal is a DIRECTED relay, sender-id stamped ====================

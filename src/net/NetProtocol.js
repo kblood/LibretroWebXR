@@ -93,8 +93,13 @@ export function makeLeave({ id } = {}) {
  * can't forge who an offer came from). `data` is the SDP description or ICE
  * candidate, passed through verbatim.
  */
-export function makeSignal({ from, to, kind, data } = {}) {
+export function makeSignal({ from, to, kind, data, channel } = {}) {
   const msg = { type: MSG.SIGNAL, to: String(to), kind, data };
+  // M1.2: an optional channel multiplexes independent peer connections over the
+  // one SIGNAL relay. Absent === 'voice' (the M0.4 mesh, untouched); 'video' is
+  // the M1.2 host→client game-stream connection. The Hub relays it opaquely, so
+  // NetMgr can route an incoming SIGNAL to the right manager by this tag.
+  if (channel != null) msg.channel = String(channel);
   if (from != null) msg.from = String(from);
   return msg;
 }
@@ -166,6 +171,7 @@ export function validate(msg) {
       if (typeof msg.to !== 'string') return { ok: false, error: 'signal.to' };
       if (!SIGNAL_KINDS.includes(msg.kind)) return { ok: false, error: 'signal.kind' };
       if (msg.data == null || typeof msg.data !== 'object') return { ok: false, error: 'signal.data' };
+      if (msg.channel != null && msg.channel !== 'voice' && msg.channel !== 'video') return { ok: false, error: 'signal.channel' };
       return { ok: true };
     case MSG.STATE:
       if (typeof msg.key !== 'string' || msg.key === '') return { ok: false, error: 'state.key' };

@@ -17,6 +17,7 @@ import { PresenceState } from './PresenceState.js';
 import { RoomObjects } from './RoomObjects.js';
 import { AvatarMgr } from './AvatarMgr.js';
 import { VoiceMgr } from './VoiceMgr.js';
+import { VideoMgr } from './VideoMgr.js';
 import { MSG, makeJoin, makePose, makeSignal, makeState, makeInput, hostInputTarget, encode, decode } from './NetProtocol.js';
 
 const _p = new THREE.Vector3();
@@ -35,7 +36,7 @@ function defaultServerUrl() {
 }
 
 export class NetMgr {
-  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, now = () => performance.now() }) {
+  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, videoCanvas = null, onHostVideo = null, onHostVideoEnded = null, now = () => performance.now() }) {
     this.scene = scene;
     this.room = room || 'lobby';
     this.nick = nick || 'Player';
@@ -71,7 +72,32 @@ export class NetMgr {
         }
       },
     });
+
+    // M1.2 host video stream: a host→client WebRTC video of the running game,
+    // signaled over the same socket but on channel:'video' so it never collides
+    // with the voice mesh. Inert until a host calls startVideoBroadcast(); a
+    // client paints the received frames onto its TV via onHostVideo (and reverts
+    // on onHostVideoEnded). update() is driven from tick() with the live roster
+    // + host id. The capturable canvas is supplied by main.js (the emulator's).
+    this.video = new VideoMgr({
+      getSelfId: () => this.presence.selfId,
+      getCaptureCanvas: () => videoCanvas,
+      onHostVideo,
+      onHostVideoEnded,
+      send: ({ to, kind, data }) => {
+        if (this._connected && this.ws) {
+          try { this.ws.send(encode(makeSignal({ to, kind, data, channel: 'video' }))); } catch { /* mid-close */ }
+        }
+      },
+    });
   }
+
+  // --- M1.2 host video stream -----------------------------------------------
+
+  // Host: begin streaming our emulator canvas to the rest of the room. Called by
+  // main.js when this peer boots the room's game (it becomes the tv-state owner).
+  startVideoBroadcast() { return this.video.startBroadcast(); }
+  stopVideoBroadcast() { this.video.stopBroadcast(); }
 
   async enableVoice() {
     const ok = await this.voice.enable();
@@ -169,7 +195,10 @@ export class NetMgr {
     ws.addEventListener('message', (e) => {
       const msg = decode(typeof e.data === 'string' ? e.data : '');
       if (!msg) return;
-      if (msg.type === MSG.SIGNAL) this.voice.handleSignal(msg);      // voice negotiation
+      if (msg.type === MSG.SIGNAL) {                                  // WebRTC negotiation
+        if (msg.channel === 'video') this.video.handleSignal(msg);   // host↔client game video
+        else this.voice.handleSignal(msg);                           // voice mesh (default)
+      }
       else if (msg.type === MSG.STATE) this._applyState(msg);         // room-object sync
       else if (msg.type === MSG.INPUT) this._applyGameInput(msg);     // game sync (host side)
       else this.presence.apply(msg, this._now());                    // roster + poses
@@ -199,6 +228,9 @@ export class NetMgr {
     this.avatars.tick(dtMs);
     // Keep the voice mesh in step with the roster (no-op until voice enabled).
     if (this.voice.enabled) this.voice.syncPeers(peers.map((p) => p.id));
+    // Reconcile the host→client video connections against the roster + who the
+    // host is (the tv-state owner). No-op for a non-host with no host streaming.
+    this.video.update({ peerIds: peers.map((p) => p.id), selfId: this.presence.selfId, hostId: this.objects.ownerOf('tv') });
 
     // Throttle the local pose out.
     if (!this._connected || !this.ws) return;
@@ -214,6 +246,7 @@ export class NetMgr {
     try { this.ws?.close(); } catch { /* already closing */ }
     this._connected = false;
     this.voice.disable();
+    this.video.disable();
     this.avatars.removeAll();
   }
 
@@ -239,6 +272,10 @@ export class NetMgr {
       hostId: () => this.hostId(),
       isHost: () => this.isHost(),
       recvInputs: () => this._recvInputs.slice(),
+      // M1.2 host video stream
+      video: this.video.debugApi(),
+      startVideoBroadcast: () => this.startVideoBroadcast(),
+      stopVideoBroadcast: () => this.stopVideoBroadcast(),
     };
   }
 }

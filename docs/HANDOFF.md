@@ -1,9 +1,12 @@
 # Handoff
 
-Single orientation doc for picking this project up cold. Last updated 2026-06-10.
-**Current focus: networked multiplayer (Phase M). M0 — shared-room presence — is
-functionally complete and live** (avatars + spatial voice + shared TV/loaded-game
-+ held-object ghosts). Built on top of the **three in-VR edit modes
+Single orientation doc for picking this project up cold. Last updated 2026-06-13.
+**Current focus: networked multiplayer (Phase M). M0 (shared-room presence) is
+live; M1 (host-authoritative game sync) is now complete locally and awaits a
+deploy.** M0 = avatars + spatial voice + shared TV/loaded-game + held-object
+ghosts (all live). M1 = remote input (M1.0, deployed) + client capture & host
+injection (M1.1) + host video stream (M1.2) — M1.1/M1.2 built & verified, not yet
+deployed. Built on top of the **three in-VR edit modes
 (Move / Change / Add)** + desktop controls + **local multiplayer (couch co-op)**
 merge (all live), Phase E.3 (create props/portals in-VR), E.2 (in-VR look
 editing), E.1 (move props + export), Phase R (R.1 JSON collection layer, R.2
@@ -76,9 +79,23 @@ transport spine first.
   unit-tested, not in the smoke — same caveat as the edit-mode menus.* **Deferred:
   on a peer disconnect mid-press its remote keys can latch on the host —
   `GameInputMgr.clearRemote()` exists but isn't yet wired to a presence-leave.**
-- **M1.2 ← next** — host video stream (`canvas.captureStream()` over a host↔client
-  WebRTC track) so a non-host sees the host's frames and can drop its local core.
-  See `docs/ROADMAP.md`.
+- **M1.2 ✅ done (not yet deployed)** — host video stream. `src/net/VideoMgr.js`
+  (a sibling of `VoiceMgr`) is a **host→client** WebRTC subsystem: the host (the
+  `tv`-state owner) captures `#canvas` via `captureStream()` and adds it
+  **send-only** to a peer connection per other peer (host is the sole offerer, so
+  no glare); each client receives the track → a `<video>` → `SceneMgr.
+  setScreenVideo()` paints it on the CRT as a `THREE.VideoTexture` (reverting to
+  the local canvas on stream end). Signaling rides the **same SIGNAL relay** on
+  `channel:'video'` (`NetProtocol.makeSignal`) so it never collides with the voice
+  mesh — `NetMgr` routes by the tag, the `Hub` relays it opaquely. A host handover
+  (new `tv` owner) tears down + rebuilds. main.js: booting a game calls
+  `net.startVideoBroadcast()`; `onHostVideo`/`onHostVideoEnded` swap the TV.
+  Verified: `scripts/smoke-video.mjs` (host fans its stream out to 2 clients, both
+  receive; voice smoke still 8/8 — no regression) + `scripts/test-net.mjs` (the
+  `channel` tag). *VideoMgr is WebRTC-heavy → smoke-tested not unit-tested, same
+  split as VoiceMgr.* **Follow-up:** a watching client still runs its own core
+  locally (its TV just shows the host's frames) — pausing the client core is a
+  later optimisation.
 
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
@@ -474,10 +491,10 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
     (a new portal also joins the live nav list). *Collections-to-shelves still
     deferred* (live shelf rebuild + `GrabMgr.removeGrabbable`).
 - **Phase M — IN PROGRESS** — multiplayer (`docs/MULTIPLAYER.md`): **M0
-  presence/avatars/voice/room-object sync ✅ done + DEPLOYED**; **M1 in progress**
-  (M1.0 remote-input transport ✅ done + deployed; M1.1 client capture + host
-  injection ✅ done, not yet deployed; **M1.2 ← next** = host video stream),
-  M2 rollback, M3 crossplay.
+  presence/avatars/voice/room-object sync ✅ done + DEPLOYED**; **M1 ✅ done, not
+  yet deployed** (M1.0 remote-input transport — deployed; M1.1 client capture +
+  host injection; M1.2 host video stream — both built, not yet deployed);
+  **M2 ← next** = rollback game sync; M3 crossplay.
 - **Phase C** — open prop package schema, community gallery, BIOS-needing
   systems (PSX/N64), PWA.
 
@@ -528,10 +545,11 @@ presence) is complete and deployed** — `main @ 774a295` is **live as of
    the top of this doc; the slice details are in `docs/ROADMAP.md` (M0.1–M0.6).
    **M0 remaining is hardening/polish only:** a TURN relay (symmetric NAT —
    same-LAN/most NATs work on STUN); an **in-VR** voice/menu affordance (the 🎤
-   button is desktop-only); a real **two-headset** smoke test. **M1 is underway** —
-   M1.0 (remote-input transport) and **M1.1 (client capture + host injection) are
-   both done** (M1.1 not yet deployed); **M1.2 (host video stream) is the next
-   step**. See the Phase M1 block above and `docs/MULTIPLAYER.md` /
+   button is desktop-only); a real **two-headset** smoke test. **M1 is complete**
+   (not yet deployed) — M1.0 remote-input transport, M1.1 client capture + host
+   injection, and M1.2 host video stream are all built + verified locally. **Next:
+   deploy M1 (`npm run deploy`) and/or start M2 (rollback game sync for
+   deterministic cores).** See the Phase M1 block above and `docs/MULTIPLAYER.md` /
    `docs/ROADMAP.md`.
 3. **Polish (Phase C):** the prod bundle is one ~702 kB chunk (186 kB gzipped) —
    a `manualChunks`/dynamic-import pass would help Quest load time if it bites.

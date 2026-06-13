@@ -283,8 +283,10 @@ DebugHud for players 2-4, in-VR port retargeting.
     affordance (the button is desktop-only today); a real two-headset smoke test.
     With presence + voice + TV + held-object sync all live, M0 is functionally
     complete — these three are hardening/polish before M1.
-- **M1 — in progress:** host-authoritative game sync (input + video stream) for
-  2-player. Built like M0: transport spine first, then consumers.
+- **M1 — ✅ done (not yet deployed):** host-authoritative game sync (input +
+  video stream) for 2-player. Built like M0: transport spine first, then
+  consumers. All three slices below are complete and verified locally; the live
+  build still predates M1 (deploy with `npm run deploy` when ready).
   - **M1.0 ✅ done + DEPLOYED** — remote-input transport: a directed `INPUT`
     message (`src/net/NetProtocol.js` `makeInput`) relayed client→host over the
     room socket (`server/Hub.js` `input()`, sender-id stamped, mirrors `signal`);
@@ -309,9 +311,23 @@ DebugHud for players 2-4, in-VR port retargeting.
     the right peer; no self-send; no broadcast leak). *Headless can't drive real
     XR gamepads, so the controller→logical capture + host injection dispatch are
     unit-tested, not in the smoke — same caveat as the edit-mode menus.*
-  - **M1.2 ← next** — host video stream over WebRTC (`canvas.captureStream()` → a
-    track on a host↔client peer connection) so non-hosts see the running game on
-    their TV. Then a non-host can drop its local core and watch the host's frames.
+  - **M1.2 ✅ done** — host video stream over WebRTC. `src/net/VideoMgr.js` (a
+    sibling of `VoiceMgr`) is a host→client subsystem: the host (tv-state owner)
+    captures `#canvas` via `captureStream()` and adds it send-only to a peer
+    connection per other peer (host is the sole offerer → no glare); each client
+    receives the track, wraps it in a `<video>`, and `SceneMgr.setScreenVideo()`
+    paints it onto the CRT as a `THREE.VideoTexture` (reverting to the local
+    canvas when the stream ends). Its signaling rides the **same SIGNAL relay** on
+    `channel:'video'` (`NetProtocol.makeSignal`), so it never collides with the
+    voice mesh — NetMgr routes by the tag; the Hub relays it opaquely. A host
+    handover (new `tv` owner) tears down and rebuilds. Wired in main.js: booting a
+    game starts the broadcast; `onHostVideo`/`onHostVideoEnded` swap the TV.
+    Verified by `scripts/smoke-video.mjs` (host fans out to 2 clients, both
+    receive; voice smoke still green — no regression) + `scripts/test-net.mjs`
+    (the `channel` tag). *VideoMgr is WebRTC-heavy so it's smoke-tested, not
+    unit-tested — same split as VoiceMgr.* **Follow-up:** a watching client still
+    runs its own core locally (the TV just shows the host's frames); pausing the
+    client's core to actually save the work is a later optimisation.
 - **M2:** rollback game sync for deterministic cores (adapt netplayjs +
   `SaveState`).
 - **M3:** multiple simultaneous games, mid-session join, VR↔desktop crossplay.

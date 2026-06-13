@@ -228,6 +228,22 @@ export class SceneMgr {
     this.screenTexture = newTex;
   }
 
+  // M1.2: paint a remote host's game video (a <video> backed by a WebRTC track)
+  // onto the CRT. A THREE.VideoTexture auto-uploads each frame in the render
+  // loop. We clear sourceCanvas so a later setScreenSource(emuCanvas) — the
+  // revert when the host stops — re-applies the local canvas texture.
+  setScreenVideo(videoEl) {
+    if (!videoEl) return;
+    const tex = new THREE.VideoTexture(videoEl);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    if (this.screenMaterial) this.screenMaterial.uniforms.tDiffuse.value = tex;
+    if (this.screenTexture) this.screenTexture.dispose();
+    this.screenTexture = tex;
+    this.sourceCanvas = null;
+  }
+
   // --- Room environment (driven by RoomBuilder from a *.room.json) ---------
 
   /** Apply a room's `environment` block (surfaces + lighting). Safe on {}. */

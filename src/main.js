@@ -116,6 +116,12 @@ if (sessionRoom) {
     // us. We inject it into our core ONLY when we're the host (the tv-state
     // owner running the authoritative game); otherwise it isn't ours to apply.
     onGameInput: (ev) => { if (net?.isHost()) gameInput?.setRemoteButton(ev); },
+    // M1.2 host video stream: the host captures THIS canvas; a non-host paints
+    // the received frames onto its TV (onHostVideo) and reverts to its own
+    // local canvas when the stream ends (onHostVideoEnded).
+    videoCanvas: emuCanvas,
+    onHostVideo: (videoEl) => scene.setScreenVideo(videoEl),
+    onHostVideoEnded: () => scene.setScreenSource(emuCanvas),
   });
   net.connect();
   scene.addTickCallback((dt) => net.tick(dt));
@@ -868,7 +874,12 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // M0.5: tell the shared room which game is now on the TV. Suppressed when
     // this load is reflecting a remote peer's state (echo:false) so it can't
     // bounce a stale value back over a newer overwrite.
-    if (echo) net?.setObjectState('tv', { file: meta.file, core: meta.core, system: meta.system, title: meta.title });
+    if (echo) {
+      net?.setObjectState('tv', { file: meta.file, core: meta.core, system: meta.system, title: meta.title });
+      // M1.2: booting the game makes us the host (tv-state owner) — start
+      // streaming our canvas to the room so non-hosts see it on their TV.
+      net?.startVideoBroadcast();
+    }
   } catch (e) {
     setStatus(`error: ${e.message || e}`);
   }
