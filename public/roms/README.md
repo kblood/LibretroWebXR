@@ -42,11 +42,19 @@ game `main.c` authored). Per-system research on creating more is in
 `docs/research/` (one file per system + a `README.md` synthesis).
 
 ### Option B — curated redistributable homebrew (download yourself)
-This is the default `manifest.json` starter pack, chosen for **clear** licenses.
-Download each into this `freeware/` folder (filenames must match `manifest.json`)
-or a local library folder, then load via the app. Filenames expected:
+A curated starter pack chosen for **clear** licenses, listed in
+`homebrew.collection.json` (NOT the default `manifest.json` — see note below).
+Download each into this `freeware/` folder (filenames must match the collection)
+or a local library folder, then load the wall with
+`?collection=roms/homebrew.collection.json`. Filenames expected:
 `super-tilt-bro.nes`, `halo2600.a26`, `anguna.gba`, `tobutobugirl.gb`,
 `blox.vb`, `oldtowers.md`.
+
+> **Why a separate file?** These ROMs aren't shipped, so before you download them
+> a cartridge pointing at one would 404 and the TV would show "ROM not installed".
+> Keeping them out of the default `manifest.json` means every cartridge in the
+> default room actually boots out of the box. The default room is now exactly the
+> Option-A CC0 demos we build and ship.
 
 | Game | System | License | Where |
 |---|---|---|---|

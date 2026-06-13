@@ -1,0 +1,32 @@
+{
+  "schema": "libretrowebxr/collection@1",
+  "id": "homebrew",
+  "title": "Homebrew & Public-Domain (download required)",
+  "author": "various (see credits)",
+  "_comment": "Optional collection of free/PD/permissive homebrew games we do NOT ship (licensing/size). Each ROM must be downloaded from its listed page into roms/freeware/ (filename must match 'file') before it will boot — otherwise the cartridge 404s. Load this wall with ?collection=roms/homebrew.collection.json. These were moved OUT of the default manifest.json so every cartridge in the default room is one that actually ships and boots. See README.md.",
+  "games": [
+    { "file": "freeware/super-tilt-bro.nes", "system": "nes", "core": "nestopia", "title": "Super Tilt Bro.", "color": "#3a6a8a",
+      "license": "WTFPL (effectively public domain)", "credits": "Sylvain Gadrat",
+      "download": "https://github.com/retrobrews/nes-games/raw/master/super-tilt-bro.nes" },
+
+    { "file": "freeware/halo2600.a26", "system": "atari2600", "core": "stella2014", "title": "Halo 2600", "color": "#2a7a3a",
+      "license": "Public domain", "credits": "Ed Fries",
+      "download": "https://github.com/retrobrews/atari2600-games/raw/master/halo2600.bin" },
+
+    { "file": "freeware/anguna.gba", "system": "gba", "core": "mgba", "title": "Anguna: Warriors of Virtue", "color": "#6a2a2a",
+      "license": "Freeware — author permits free binary redistribution (keep credits file)", "credits": "Nathan Tolbert",
+      "download": "https://www.tolberts.net/anguna/" },
+
+    { "file": "freeware/tobutobugirl.gb", "system": "gb", "core": "gambatte", "title": "Tobu Tobu Girl", "color": "#8a3a6a",
+      "license": "MIT (code) + CC-BY (assets)", "credits": "Tangram Games",
+      "download": "https://tangramgames.itch.io/tobutobugirl" },
+
+    { "file": "freeware/blox.vb", "system": "vb", "core": "mednafen_vb", "title": "BLOX", "color": "#aa1a1a",
+      "license": "Public domain", "credits": "KR155E",
+      "download": "https://www.virtual-boy.com/homebrew/blox/" },
+
+    { "file": "freeware/oldtowers.md", "system": "md", "core": "genesis_plus_gx", "title": "Old Towers", "color": "#6a5a1a",
+      "license": "CC BY-NC-SA 4.0 (non-commercial)", "credits": "RetroSouls",
+      "download": "https://retrosouls.itch.io/old-towers" }
+  ]
+}

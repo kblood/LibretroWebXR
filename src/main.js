@@ -1855,7 +1855,21 @@ async function loadCartridge(meta, { echo = true } = {}) {
       net?.startVideoBroadcast();
     }
   } catch (e) {
-    setStatus(`error: ${e.message || e}`);
+    const msg = String(e?.message || e);
+    setStatus(`error: ${msg}`);
+    logger?.event?.('boot-error', { file: meta.file, system: meta.system, core: meta.core, error: msg });
+    // Surface the failure ON THE TV instead of silently leaving the idle screen,
+    // so a missing/un-downloaded ROM (the resolver throws on a 404) reads as a
+    // real error in VR rather than "nothing happened". Default room ships only
+    // cartridges that boot, but a user-added collection can still point at a ROM
+    // that isn't installed.
+    const notInstalled = /404|→\s*\d|not found|could not resolve|no url for rom/i.test(msg);
+    placeholder.setMessage(notInstalled
+      ? `ROM not installed: ${meta.title || meta.file}`
+      : `Couldn't load ${meta.title || meta.file}`);
+    placeholder.start();
+    scene.setScreenSource(placeholderCanvas);
+    nowPlayingPanel?.userData.setNowPlaying?.({});
   }
 }
 window.__loadCartridge = loadCartridge; // debug hook: boot a game via RomResolver
