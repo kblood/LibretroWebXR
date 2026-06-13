@@ -13,6 +13,7 @@ import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import { createCrtMaterial } from './CrtShader.js';
+import { TV } from './TV.js';
 
 // Built-in surface colours a room can name as `builtin:<key>` without shipping
 // a texture. Unknown keys fall back to mid-grey.
@@ -170,62 +171,43 @@ export class SceneMgr {
   }
 
   _initTV() {
-    const tvW = 2.2;
-    const tvH = 1.65;
-    const tvDepth = 0.25;
-
-    const tvGroup = new THREE.Group();
-    tvGroup.position.set(0, 1.5, -3.6);
-
-    const cab = new THREE.Mesh(
-      new THREE.BoxGeometry(tvW + 0.2, tvH + 0.2, tvDepth),
-      new THREE.MeshStandardMaterial({ color: 0x202028, roughness: 0.6 }),
-    );
-    cab.position.z = -tvDepth / 2 - 0.005;
-    tvGroup.add(cab);
-
-    this.screenTexture = this._makeScreenTexture(this.sourceCanvas);
-    this.screenMaterial = createCrtMaterial(this.screenTexture);
-    this.screenMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(tvW, tvH),
-      this.screenMaterial,
-    );
-    tvGroup.add(this.screenMesh);
-
-    const glow = new THREE.PointLight(0x88aaff, 0.6, 3, 1.5);
-    glow.position.set(0, 0, 0.4);
-    tvGroup.add(glow);
-
-    const standH = 0.7, standW = 1.6, standD = 0.5;
-    const stand = new THREE.Mesh(
-      new THREE.BoxGeometry(standW, standH, standD),
-      new THREE.MeshStandardMaterial({ color: 0x33333d, roughness: 0.6 }),
-    );
-    stand.position.set(0, standH / 2, -3.6);
-    this.scene.add(stand);
-
-    this.scene.add(tvGroup);
-    this.tvGroup = tvGroup;
+    // The primary TV is just _tvs[0] — built through the reusable TV prop so the
+    // single-console path is N=1 of the rack. Spawned consoles get their own
+    // TVs via addTV(); _render iterates _tvs to upload each one's frame.
+    this._tvs = [];
+    this.tv = this.addTV({ id: 'tv0', source: this.sourceCanvas, position: [0, 1.5, -3.6] });
+    this.tvGroup = this.tv.group;   // legacy alias (spatial audio source object)
   }
 
+  /**
+   * Add a TV to the scene and the per-frame upload list. Returns the TV so the
+   * caller can route a console's canvas into it (tv.setSource) per the patch
+   * graph. opts are forwarded to the TV constructor (id/position/size/source).
+   */
+  addTV(opts = {}) {
+    const tv = new TV(opts);
+    this.scene.add(tv.group);
+    this._tvs.push(tv);
+    return tv;
+  }
+
+  /** Look up a TV by its id (Patchbay TV node key). */
+  getTV(id) { return this._tvs.find((t) => t.id === id) || null; }
+
+  // Texture helper kept for the throwaway Phase-0 rack spike (addRackScreen).
   _makeScreenTexture(canvas) {
     const tex = new THREE.CanvasTexture(canvas);
     tex.minFilter = THREE.LinearFilter;
-    tex.magFilter = THREE.NearestFilter; // pixel-art friendly
+    tex.magFilter = THREE.NearestFilter;
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.flipY = true;
     return tex;
   }
 
   setScreenSource(canvas) {
-    if (!canvas || canvas === this.sourceCanvas) return;
+    if (!canvas) return;
     this.sourceCanvas = canvas;
-    const newTex = this._makeScreenTexture(canvas);
-    if (this.screenMaterial) {
-      this.screenMaterial.uniforms.tDiffuse.value = newTex;
-    }
-    if (this.screenTexture) this.screenTexture.dispose();
-    this.screenTexture = newTex;
+    this.tv?.setSource(canvas);
   }
 
   // Phase-0 rack spike (throwaway, see [[src/RackSpike.js]]): mount an extra
@@ -256,13 +238,7 @@ export class SceneMgr {
   // revert when the host stops — re-applies the local canvas texture.
   setScreenVideo(videoEl) {
     if (!videoEl) return;
-    const tex = new THREE.VideoTexture(videoEl);
-    tex.minFilter = THREE.LinearFilter;
-    tex.magFilter = THREE.LinearFilter;
-    tex.colorSpace = THREE.SRGBColorSpace;
-    if (this.screenMaterial) this.screenMaterial.uniforms.tDiffuse.value = tex;
-    if (this.screenTexture) this.screenTexture.dispose();
-    this.screenTexture = tex;
+    this.tv?.setVideo(videoEl);
     this.sourceCanvas = null;
   }
 
@@ -324,13 +300,7 @@ export class SceneMgr {
 
   /** Apply a `tv` prop. Today: toggle the CRT shader (`crt` | `flat`). */
   applyTv(prop) {
-    const u = this.screenMaterial?.uniforms;
-    if (!u || !prop) return;
-    if (prop.shader === 'flat') {
-      u.uCurvature.value = 0; u.uScanlineIntensity.value = 0; u.uMaskIntensity.value = 0; u.uVignette.value = 0;
-    } else if (prop.shader === 'crt') {
-      u.uCurvature.value = 0.18; u.uScanlineIntensity.value = 0.22; u.uMaskIntensity.value = 0.15; u.uVignette.value = 0.35;
-    }
+    if (prop?.shader) this.tv?.applyShader(prop.shader);
   }
 
   _initControllers() {
@@ -447,7 +417,9 @@ export class SceneMgr {
   }
 
   _render() {
-    if (this.screenTexture) this.screenTexture.needsUpdate = true;
+    // Upload each TV's latest emulator frame (skips paused/out-of-view via
+    // tv.setActive). This per-TV texture upload is the rack's main video cost.
+    for (const tv of this._tvs) tv.markNeedsUpdate();
     // Phase-0 rack spike: upload each extra core's frame (perf cost measured).
     if (this._rackScreens) for (const r of this._rackScreens) r.tex.needsUpdate = true;
 

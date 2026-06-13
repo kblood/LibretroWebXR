@@ -375,8 +375,15 @@ let gamepadObj = null;
 // console is registered at full MAX_PORTS width — the per-game enabled-port
 // count is applied as a clamp at seat time, never by pruning seated gamepads.
 const CONSOLE_ID = 'console0';
+const PRIMARY_TV_ID = 'tv0';
 const cable = new Patchbay();
 cable.addConsole(CONSOLE_ID, { ports: MAX_PORTS });
+// Video side of the patch graph: the primary console feeds the primary TV
+// (SceneMgr's _tvs[0], id 'tv0'). routeVideo() below reads these edges and
+// points each scene TV at its source console's canvas, so repatching the graph
+// (Phase 4 cords) reroutes video with no other change.
+cable.addTV(PRIMARY_TV_ID);
+cable.connectVideo(CONSOLE_ID, PRIMARY_TV_ID);
 
 // GrabMgr was written against the old single-console CableMgr API (numeric
 // portOf, plug(id, port), isPortFree(port), unplug(id)). Patchbay generalizes
@@ -400,6 +407,59 @@ const rackMgr = new RackMgr({ logger });
 const primaryRuntime = new ConsoleRuntime({ id: CONSOLE_ID, adopt: { client, canvas: emuCanvas } });
 rackMgr.add(primaryRuntime);
 rackMgr.setFocus(CONSOLE_ID);
+
+// Apply the patch graph's video edges to the scene: each TV samples the canvas
+// of the console patched to it (cable.sourceOf). Idempotent — TV.setSource
+// dedupes — so it's safe to call after any repatch / console spawn. At N=1 this
+// just keeps tv0 ↔ console0 in sync with whatever the primary client booted.
+const routeVideo = () => {
+  for (const tv of scene._tvs) {
+    const src = cable.sourceOf(tv.id);             // consoleId | null
+    const canvas = src ? rackMgr.get(src)?.canvas : null;
+    if (canvas) tv.setSource(canvas);
+  }
+};
+
+// Phase 3 — spawn a SECOND (third, …) console end-to-end: its own
+// ConsoleRuntime (own canvas + EmulatorClient) booting a game for `system`,
+// its own TV in the scene, wired through the patch graph (console→TV video),
+// then routed + budgeted. This is the multi-TV path the Phase 0 spike proved;
+// the Phase 5 spawn menu and Phase 4 cords will drive it from in-VR. Exposed on
+// window.__rack for headless verification. Returns the new console's id.
+let _spawnSeq = 0;
+async function spawnConsole(system, { game } = {}) {
+  const games = window.__games || [];
+  const meta = game || games.find((g) => g.system === system) || games[0];
+  if (!meta) throw new Error(`spawnConsole: no game available for ${system}`);
+  const core = CORES[meta.core];
+  if (!core) throw new Error(`spawnConsole: unknown core ${meta.core}`);
+
+  const n = ++_spawnSeq;
+  const consoleId = `console${n}`;
+  const tvId = `tv${n}`;
+
+  // Own-mode runtime: fresh isolated core in its own canvas (Phase 0 proved N
+  // module cores coexist). Boot the resolved ROM into it.
+  const runtime = new ConsoleRuntime({ id: consoleId });
+  const buf = await resolveRom(meta);
+  // CORES entries are keyed by name and carry no `name` field; ConsoleRuntime
+  // wants { name, url, style }, so graft the key on.
+  await runtime.load(buf, { ...core, name: meta.core }, { system: meta.system, title: meta.title });
+  rackMgr.add(runtime);
+
+  // Give it a TV, fanned out to the right of the primary, and patch the graph.
+  const tv = scene.addTV({ id: tvId, position: [2.6 + (n - 1) * 2.4, 1.5, -3.6] });
+  cable.addConsole(consoleId, { ports: portsForSystem(meta.system) });
+  cable.addTV(tvId);
+  cable.connectVideo(consoleId, tvId);
+  tv.setSource(runtime.canvas);
+  routeVideo();
+
+  // Admit under the perf budget (may pause an over-budget core; focus stays live).
+  rackMgr.applyBudget();
+  logger?.event?.('console-spawned', { consoleId, tvId, system: meta.system, core: meta.core, title: meta.title });
+  return consoleId;
+}
 let gamepadCount = 0;
 const registerGamepad = (obj) => {
   if (obj && obj.userData.cableId == null) obj.userData.cableId = `gp-${++gamepadCount}`;
@@ -755,6 +815,14 @@ async function buildCartridgeWorld() {
   window.__grab = grabMgr;
   window.__cable = cable; // debug: inspect port↔player↔gamepad assignments
   window.__rackMgr = rackMgr; // debug: inspect/spawn consoles + budget headlessly
+  // Phase 3 multi-TV hook: spawn a second console+TV and route video headlessly.
+  // Usage: await window.__rack.spawn('nes'); window.__rack.tvs() → [{id,source}]
+  window.__rack = {
+    spawn: (system, opts) => spawnConsole(system, opts),
+    route: () => routeVideo(),
+    tvs: () => scene._tvs.map((t) => ({ id: t.id, source: t.sourceCanvas?.id || null, active: t.isActive() })),
+    video: () => scene._tvs.map((t) => ({ tv: t.id, console: cable.sourceOf(t.id) })),
+  };
   // Headless hook: exercise addLocalRomToShelf() with a synthetic meta entry.
   // Usage: await window.__addLocalRom({ file:'test.sfc', system:'snes', core:'snes9x', title:'Test' })
   window.__addLocalRom = (meta) => addLocalRomToShelf(meta);
