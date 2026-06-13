@@ -183,18 +183,27 @@ export class EmulatorClient extends EventTarget {
   }
 
   sendInput(eventType, code, key, keyCode, location) {
-    // The libretro core's emscripten HTML5 glue registers its keyboard
-    // handler on **document** (empirically — even though the C call passes
-    // EMSCRIPTEN_EVENT_TARGET_WINDOW, the older emscripten version this
-    // core was built against resolves it to document; verified via
-    // JSEvents.eventHandlers inspection). Synthetic events don't propagate
-    // outside their dispatch target, so we must hit document directly.
-    // keyCode + which populated defensively — emscripten's HTML5 layer
-    // copies both into the C event struct.
+    // Dispatch synthetic key events to THIS core's canvas, not `document`.
+    //
+    // The modern MODULARIZE buildbot cores register their RetroArch web input
+    // (rwebinput) keyboard handler on their own canvas (`#canvas` → Module.canvas),
+    // NOT on document. Dispatching to document therefore never reaches the core —
+    // which was the "can't control any console" regression after the 2026-06-02
+    // classic→module core migration (the old classic cores DID listen on
+    // document). Verified empirically: holding a direction dispatched to the
+    // canvas moves the game; dispatched to document it does nothing
+    // (scripts/debug.js --hold-key --key-target).
+    //
+    // Targeting the per-core canvas (with bubbles:true, so a document-level
+    // listener would still see it in the bubble phase) is also exactly what
+    // multi-core routing needs: each console's core only hears keys aimed at its
+    // own canvas. keyCode + which are populated defensively — emscripten's HTML5
+    // layer copies both into the C event struct.
+    const target = this.emuCanvas || document;
     const opts = { code, key, bubbles: true, cancelable: true };
     if (keyCode !== undefined) { opts.keyCode = keyCode; opts.which = keyCode; }
     if (location !== undefined) opts.location = location;
-    document.dispatchEvent(new KeyboardEvent(eventType, opts));
+    target.dispatchEvent(new KeyboardEvent(eventType, opts));
   }
 
   // ---- internals ----

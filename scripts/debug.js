@@ -178,6 +178,45 @@ if (args.boot) {
   console.log('# boot:', booted);
 }
 
+// --hold-key=<Code> repeatedly dispatches that keydown to --key-target
+// (canvas|document, default canvas) for ~2.5s, and reports an emulator-canvas
+// pixel checksum before/after. Used to verify which dispatch target actually
+// drives the core (the sendInput-to-canvas fix). A "changed" checksum means
+// that target's input reached the core (on a game that's static without input).
+if (args['hold-key']) {
+  const emuChecksum = () => page.evaluate(() => {
+    const c = document.getElementById('canvas');
+    if (!c) return null;
+    const t = document.createElement('canvas'); t.width = 64; t.height = 64;
+    const ctx = t.getContext('2d');
+    try { ctx.drawImage(c, 0, 0, 64, 64); } catch (e) { return 'ERR:' + e.message; }
+    const d = ctx.getImageData(0, 0, 64, 64).data;
+    let h = 0, nonblack = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      h = (h * 31 + d[i] * 7 + d[i + 1] * 3 + d[i + 2]) >>> 0;
+      if (d[i] || d[i + 1] || d[i + 2]) nonblack++;
+    }
+    return { h, nonblack };
+  });
+  const code = args['hold-key'];
+  const target = args['key-target'] || 'canvas';
+  const before = await emuChecksum();
+  await page.evaluate((code, target) => {
+    const K = { ArrowRight: 39, ArrowLeft: 37, ArrowUp: 38, ArrowDown: 40, Enter: 13, Space: 32 }[code] || 0;
+    const el = target === 'document'
+      ? document
+      : ((window.__client && window.__client.emuCanvas) || document.getElementById('canvas'));
+    window.__hold = setInterval(() => {
+      el.dispatchEvent(new KeyboardEvent('keydown', { code, key: code, keyCode: K, which: K, bubbles: true, cancelable: true }));
+    }, 50);
+  }, code, target);
+  await new Promise((r) => setTimeout(r, 2500));
+  await page.evaluate(() => clearInterval(window.__hold));
+  const after = await emuChecksum();
+  const changed = JSON.stringify(before) !== JSON.stringify(after);
+  console.log('# holdkey:', JSON.stringify({ code, target, before, after, changed }));
+}
+
 // --probe-file=<path> evaluates a JS file as a function body in the page and
 // logs its JSON return. Runs before the screenshot so any visual changes it
 // makes are captured. Useful for poking window.__* debug hooks (e.g. driving
