@@ -71,6 +71,23 @@ export class TV {
       group.add(s);
     }
 
+    // Video-in jack: a yellow RCA-style socket on the lower-left of the cabinet
+    // front. A console's video cord plug ([[src/Plug.js]]) seats here to feed
+    // this TV (the Patchbay video edge). videoIn is the world-space anchor the
+    // cord/snap system reads; the mesh is just its visible marker.
+    const jack = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.022, 0.022, 0.03, 12),
+      new THREE.MeshStandardMaterial({ color: 0xccaa22, roughness: 0.5, metalness: 0.4 }),
+    );
+    jack.rotation.x = Math.PI / 2;             // face forward (+Z)
+    jack.position.set(-width / 2 + 0.12, -height / 2 + 0.12, 0.02);
+    group.add(jack);
+    const videoIn = new THREE.Object3D();
+    videoIn.position.set(jack.position.x, jack.position.y, 0.05);
+    group.add(videoIn);
+    this.videoIn = videoIn;
+    this.videoInMesh = jack;
+
     this.group = group;
   }
 

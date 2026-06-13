@@ -174,6 +174,14 @@ export function createConsole({ position = new THREE.Vector3(0, 0.74, -2.4) } = 
   cardAnchor.position.set(cardSlotX, CON_H / 2 + CARD_DIMS.H * 0.45, 0);
   group.add(cardAnchor);
 
+  // Video-out anchor: where this console's video cord exits (back-right corner).
+  // The cord runs from here to a TV's video-in jack; seating the plug there is
+  // what makes that TV show this console ([[src/Patchbay.js]] connectVideo).
+  const videoOut = new THREE.Object3D();
+  videoOut.position.set(CON_W / 2 - 0.04, 0, -CON_D / 2 - 0.01);
+  group.add(videoOut);
+  group.userData.videoOutAnchor = videoOut;
+
   return group;
 }
 

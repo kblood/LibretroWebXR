@@ -29,7 +29,7 @@ const LASER_IDLE = 0x88aaff;
 const LASER_HOVER = 0xffd060;
 
 export class GrabMgr {
-  constructor({ scene, controllers, console: consoleObj, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, getRoomBounds, isPreviewEnabled }) {
+  constructor({ scene, controllers, console: consoleObj, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, onPlugReleased, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, getRoomBounds, isPreviewEnabled }) {
     this.scene = scene;
     this.controllers = controllers;
     this.console = consoleObj;
@@ -42,6 +42,10 @@ export class GrabMgr {
     // Fired after a gamepad plugs into / unplugs from a port so main.js can
     // refresh input routing. Receives (gamepadObject).
     this.onGamepadPlugged = onGamepadPlugged || (() => {});
+    // Fired when a patch-cord plug ([[src/Plug.js]]) is released, so main.js can
+    // snap it to the nearest compatible jack and rewire the patch graph (or pull
+    // it out if dropped in mid-air). Receives the plug Object3D.
+    this.onPlugReleased = onPlugReleased || (() => {});
     // Edit mode (Phase E): when true, the only grab targets are room props
     // (userData.editable) and releasing one leaves it where dropped instead of
     // snapping home / inserting. onEditRelease lets the editor apply snapping.
@@ -105,6 +109,9 @@ export class GrabMgr {
   //    arranging.
   _isCandidate(obj) {
     if (obj.userData?.kind === 'gamepad') return true;
+    // Patch-cord plugs are grabbable while playing (repatch cords any time), but
+    // inert in edit mode so they don't compete with prop arranging.
+    if (obj.userData?.kind === 'plug') return !this.isEditMode();
     return !!obj.userData?.editable === this.isEditMode();
   }
 
@@ -304,13 +311,10 @@ export class GrabMgr {
     this._setHover(ctrl, null);
 
     if (target.userData?.kind === 'gamepad') {
-      // Picking up a plugged gamepad unplugs it (frees its port), mirroring how
-      // grabbing the inserted cartridge clears the slot above.
-      if (this.cable && target.userData.cableId != null &&
-          this.cable.portOf(target.userData.cableId) != null) {
-        this.cable.unplug(target.userData.cableId);
-        this.onGamepadPlugged(target);
-      }
+      // EmuVR-style: picking up a controller to play does NOT unplug it — the
+      // port assignment is owned by the cord, not by holding the pad, so the
+      // controller keeps driving its player and its cord simply stretches to
+      // your hand. Repatch by dropping it near a different port (release path).
       target.userData.setHeld?.(true);
       this.onGamepadHeldChanged(true);
     } else if (target.userData?.kind === 'cartridge') {
@@ -355,6 +359,10 @@ export class GrabMgr {
       // In edit mode, a non-gamepad editable prop is left exactly where dropped
       // (the editor may snap it to a grid) — never snapped home or inserted.
       this.onEditRelease(obj);
+    } else if (kind === 'plug') {
+      // Patch-cord plug: main.js snaps it to the nearest compatible jack and
+      // rewires the patch graph, or pulls the edge if dropped in mid-air.
+      this.onPlugReleased(obj);
     } else if (kind === 'cartridge') {
       this._handleCartridgeRelease(obj);
     } else if (kind === 'memory-card') {

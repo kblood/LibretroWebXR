@@ -14,6 +14,8 @@ import { SceneMgr } from './SceneMgr.js';
 import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
 import { Cord } from './Cord.js';
+import { Plug } from './Plug.js';
+import { nearestAnchor } from './Snap.js';
 import { GrabMgr } from './GrabMgr.js';
 import { LocomotionMgr } from './LocomotionMgr.js';
 import { DesktopControls } from './DesktopControls.js';
@@ -416,9 +418,87 @@ const routeVideo = () => {
   for (const tv of scene._tvs) {
     const src = cable.sourceOf(tv.id);             // consoleId | null
     const canvas = src ? rackMgr.get(src)?.canvas : null;
-    if (canvas) tv.setSource(canvas);
+    // A TV with no patched console shows the idle screen (a pulled video cord
+    // leaves the TV blank rather than frozen on the last frame).
+    tv.setSource(canvas || placeholderCanvas);
   }
 };
+
+// ── Video patch cords (console → TV) ────────────────────────────────────────
+// Each console has ONE physical video-out cable whose grabbable plug
+// ([[src/Plug.js]]) seats into a TV's video-in jack. Seating rewires the patch
+// graph (cable.connectVideo) and re-routes the texture; pulling the plug out and
+// dropping it in mid-air clears the console's video edge (EmuVR repatch). The
+// pure snap decision is [[src/Snap.js]]; the graph is [[src/Patchbay.js]].
+const PLUG_SNAP_RADIUS = 0.26;                     // m — jack acceptance radius
+const consoleObjs = new Map();                     // consoleId -> physical Console Object3D
+const videoPlugs = new Map();                      // consoleId -> { plug:Plug, cord:Cord }
+const _vp = new THREE.Vector3();
+const _vq = new THREE.Quaternion();
+
+// Snap a console's video plug onto a TV's video-in jack (world transform), so it
+// visually sits in the socket. tvId null leaves the plug where it is (dangling).
+function seatVideoPlug(consoleId, tvId) {
+  const rec = videoPlugs.get(consoleId);
+  const tv = tvId ? scene.getTV(tvId) : null;
+  if (!rec || !tv?.videoIn) return;
+  tv.videoIn.getWorldPosition(_vp);
+  tv.videoIn.getWorldQuaternion(_vq);
+  rec.plug.group.position.copy(_vp);
+  rec.plug.group.quaternion.copy(_vq);
+}
+
+// Build the video-out plug + cord for a console and seat it at its starting TV.
+function addVideoPlug(consoleId, tvId) {
+  if (videoPlugs.has(consoleId)) return;
+  const plug = new Plug({ id: `vplug-${consoleId}`, plugKind: 'video', sourceId: consoleId });
+  scene.addObject(plug.group);
+  grabMgr?.addGrabbable(plug.group);
+  const cord = new Cord({ color: 0xccaa22 });
+  scene.addObject(cord.mesh);
+  videoPlugs.set(consoleId, { plug, cord });
+  seatVideoPlug(consoleId, tvId);
+}
+
+// GrabMgr release handler: snap the plug to the nearest TV jack and repatch, or
+// pull the console's video if dropped away from every jack.
+const _plugWorld = new THREE.Vector3();
+function handlePlugReleased(plugObj) {
+  const ud = plugObj.userData || {};
+  if (ud.plugKind !== 'video') return;
+  const consoleId = ud.sourceId;
+  plugObj.getWorldPosition(_plugWorld);
+  const anchors = scene._tvs.map((tv) => {
+    const p = new THREE.Vector3();
+    tv.videoIn.getWorldPosition(p);
+    return { id: tv.id, x: p.x, y: p.y, z: p.z };
+  });
+  const hit = nearestAnchor({ x: _plugWorld.x, y: _plugWorld.y, z: _plugWorld.z }, anchors, PLUG_SNAP_RADIUS);
+  // One physical cable = one output: drop the console's prior TV edge(s) first.
+  for (const tvId of cable.displaysOf(consoleId)) cable.disconnectVideo(tvId);
+  if (hit) {
+    cable.connectVideo(consoleId, hit.id);
+    seatVideoPlug(consoleId, hit.id);
+  }
+  routeVideo();
+  logger?.event?.('video-repatch', { consoleId, tv: hit?.id || null });
+}
+
+// Per-frame: reshape each console's video cord from its console's video-out
+// anchor to its plug (seated in a jack or held in hand).
+const _cFrom = new THREE.Vector3();
+const _cTo = new THREE.Vector3();
+function syncVideoCords() {
+  for (const [consoleId, rec] of videoPlugs) {
+    const conObj = consoleObjs.get(consoleId);
+    const out = conObj?.userData?.videoOutAnchor;
+    if (!out) { rec.cord.setVisible(false); continue; }
+    out.getWorldPosition(_cFrom);
+    (rec.plug.cordAnchor || rec.plug.group).getWorldPosition(_cTo);
+    rec.cord.update(_cFrom, _cTo);
+    rec.cord.setVisible(true);
+  }
+}
 
 // Phase 3 — spawn a SECOND (third, …) console end-to-end: its own
 // ConsoleRuntime (own canvas + EmulatorClient) booting a game for `system`,
@@ -448,11 +528,20 @@ async function spawnConsole(system, { game } = {}) {
   rackMgr.add(runtime);
 
   // Give it a TV, fanned out to the right of the primary, and patch the graph.
-  const tv = scene.addTV({ id: tvId, position: [2.6 + (n - 1) * 2.4, 1.5, -3.6] });
+  const fanX = 2.6 + (n - 1) * 2.4;
+  const tv = scene.addTV({ id: tvId, position: [fanX, 1.5, -3.6] });
   cable.addConsole(consoleId, { ports: portsForSystem(meta.system) });
   cable.addTV(tvId);
   cable.connectVideo(consoleId, tvId);
   tv.setSource(runtime.canvas);
+
+  // A physical console under its TV, plus its grabbable video-out plug seated in
+  // the new TV's jack — so this console is repatchable like the primary.
+  const conObj = createConsole({ position: new THREE.Vector3(fanX, 0.74, -2.4) });
+  scene.addObject(conObj);
+  conObj.userData.setPorts?.(portsForSystem(meta.system));
+  consoleObjs.set(consoleId, conObj);
+  addVideoPlug(consoleId, tvId);
   routeVideo();
 
   // Admit under the perf budget (may pause an over-budget core; focus stays live).
@@ -775,6 +864,8 @@ async function buildCartridgeWorld() {
     // Plugging/unplugging a gamepad changes which player it drives; flush so a
     // key held under the old assignment doesn't latch on the core.
     onGamepadPlugged: () => gameInput?.flushReleases(),
+    // Patch-cord plug released → snap to nearest TV jack + repatch video.
+    onPlugReleased: (plug) => handlePlugReleased(plug),
     onMemoryCardInserted: handleMemoryCardInserted,
     // Phase E: deferred arrows — `editor` is assigned just below and these are
     // only called at tick/release time, never during GrabMgr construction.
@@ -802,6 +893,12 @@ async function buildCartridgeWorld() {
   cartridges.forEach((c) => grabMgr.addGrabbable(c));
   grabMgr.addGrabbable(gamepadObj);
 
+  // Phase 4: the primary console's physical object + its grabbable video-out
+  // plug, seated in the primary TV's jack. consoleObjs maps each consoleId to
+  // its physical Console so the video cord can anchor at its video-out.
+  consoleObjs.set(CONSOLE_ID, consoleObj);
+  addVideoPlug(CONSOLE_ID, PRIMARY_TV_ID);
+
   // In-VR room editor (Phase E.1): registers the room's props as editable
   // grabbables (inert until edit mode) and serializes them back on export.
   editor = new RoomEditor({
@@ -822,6 +919,24 @@ async function buildCartridgeWorld() {
     route: () => routeVideo(),
     tvs: () => scene._tvs.map((t) => ({ id: t.id, source: t.sourceCanvas?.id || null, active: t.isActive() })),
     video: () => scene._tvs.map((t) => ({ tv: t.id, console: cable.sourceOf(t.id) })),
+    // Phase 4: drive the video patch cord headlessly. repatch moves a console's
+    // plug onto a TV's jack and releases it (exercising the real snap + rewire);
+    // unpatch drops it in mid-air (pull-out). Returns the resulting routing.
+    repatch: (consoleId, tvId) => {
+      const rec = videoPlugs.get(consoleId); const tv = scene.getTV(tvId);
+      if (!rec || !tv?.videoIn) return null;
+      const p = new THREE.Vector3(); tv.videoIn.getWorldPosition(p);
+      rec.plug.group.position.copy(p);
+      handlePlugReleased(rec.plug.group);
+      return window.__rack.video();
+    },
+    unpatch: (consoleId) => {
+      const rec = videoPlugs.get(consoleId);
+      if (!rec) return null;
+      rec.plug.group.position.set(0, 0.2, 0);   // mid-air, far from any jack
+      handlePlugReleased(rec.plug.group);
+      return window.__rack.video();
+    },
   };
   // Headless hook: exercise addLocalRomToShelf() with a synthetic meta entry.
   // Usage: await window.__addLocalRom({ file:'test.sfc', system:'snes', core:'snes9x', title:'Test' })
@@ -938,6 +1053,7 @@ async function buildCartridgeWorld() {
   scene.addTickCallback((dt) => desktop.tick(dt));
   scene.addTickCallback((dt) => grabMgr.tick(dt));
   scene.addTickCallback(() => syncCords());
+  scene.addTickCallback(() => syncVideoCords());
   scene.addTickCallback((dt) => locomotion.tick(dt));
   scene.addTickCallback(() => gameInput.tick());
   // Diagnostic: while a game is loaded, log the input pipeline state whenever it
