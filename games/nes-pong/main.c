@@ -1,8 +1,11 @@
 // LWX Pong — a tiny CC0 NES game for LibretroWebXR test content.
 //
-// Single screen, NROM (mapper 0). Left paddle = player (D-pad up/down on the
-// NES controller, which the WebXR frontend's RetroPad maps to); right paddle =
-// a simple CPU that tracks the ball. Score shown as stacked blocks on each side.
+// Single screen, NROM (mapper 0). Left paddle = player 1 (D-pad up/down on the
+// NES controller, which the WebXR frontend's RetroPad maps to). Right paddle =
+// a simple CPU that tracks the ball UNTIL player 2 presses up/down, after which
+// player 2 drives it (so it doubles as a 2-player multiplayer test: in a shared
+// room the client's forwarded P2 input reaches the host core as controller 1).
+// Score shown as stacked blocks on each side.
 //
 // All hardware/timing code lives in the frozen neslib boilerplate (crt0.s,
 // neslib.sinc, ...). This file is just game logic calling neslib's documented
@@ -40,7 +43,8 @@ static u8  lpY, rpY;        // paddle top y
 static u8  bx, by;          // ball top-left
 static s8  dx, dy;          // ball velocity
 static u8  lScore, rScore;
-static u8  pad, i, spr;
+static u8  pad, pad2, i, spr;
+static u8  p2_active;       // latches once player 2 first touches up/down
 
 static void draw_net(void) {
   // Dashed centre line in the background — drawn once while rendering is off.
@@ -69,20 +73,30 @@ static void reset_round(void) {
 void main(void) {
   lpY = 92; rpY = 92;
   lScore = 0; rScore = 0;
+  p2_active = 0;
   reset_round();
   serve(-2);
 
   while (1) {
     ppu_wait_nmi();
-    pad = pad_poll(0);
+    pad  = pad_poll(0);
+    pad2 = pad_poll(1);
 
-    // --- player paddle (left) ---
+    // --- player 1 paddle (left) ---
     if ((pad & PAD_UP)   && lpY > TOP)    lpY -= 2;
     if ((pad & PAD_DOWN) && lpY < PADBOT) lpY += 2;
 
-    // --- CPU paddle (right), slower than the ball so it can miss ---
-    if (rpY + 12 > by + 4) { if (rpY > TOP)    rpY -= 1; }
-    else                   { if (rpY < PADBOT) rpY += 1; }
+    // --- right paddle: player 2 once they join, else CPU ---
+    if (pad2 & (PAD_UP | PAD_DOWN)) p2_active = 1;
+    if (p2_active) {
+      // human player 2 (matches P1 speed)
+      if ((pad2 & PAD_UP)   && rpY > TOP)    rpY -= 2;
+      if ((pad2 & PAD_DOWN) && rpY < PADBOT) rpY += 2;
+    } else {
+      // CPU, slower than the ball so it can miss
+      if (rpY + 12 > by + 4) { if (rpY > TOP)    rpY -= 1; }
+      else                   { if (rpY < PADBOT) rpY += 1; }
+    }
 
     // --- ball movement ---
     bx += dx;

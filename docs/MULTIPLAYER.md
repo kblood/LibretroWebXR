@@ -59,6 +59,51 @@ HTTPS + COOP/COEP, which threaded wasm cores need.
 - **M3:** multiple simultaneous games on different TVs; mid-session join;
   VR↔desktop crossplay (all things EmuVR does).
 
+## Playtesting (M1 host-authoritative is live)
+
+The current build implements M1: one peer (the one that last set the shared `tv`
+state) is the **host** and runs the core; it streams its TV video to the others
+over WebRTC and accepts their forwarded input as extra players. Only the focused
+console0 game is shared — the multi-console patch rack is local to each player.
+
+### Test games
+The host-authoritative model only shows its worth with a game that actually
+reads **player 2**. Most of our shipped CC0 carts are single-player or vs-CPU, so
+they only exercise the *video* half of MP. Two options:
+
+1. **LWX Pong (ships, no download).** The built-in `freeware/lwx-nes-pong.nes` is
+   now optional-2-player: the right paddle is CPU until player 2 presses up/down,
+   then a human drives it. In a shared room the client's forwarded P2 input
+   reaches the host core as controller 1, so both players see the same volley over
+   the video stream. This is the zero-setup MP smoke game. (Source:
+   `games/nes-pong/main.c`, rebuild with `npm run make-nes-pong`.)
+2. **Super Tilt Bro. (download required).** A real 2-player NES fighting game
+   (WTFPL). In `roms/homebrew.collection.json`; download
+   `super-tilt-bro.nes` into `public/roms/freeware/` and load that wall with
+   `?collection=roms/homebrew.collection.json`. Best for a "real game" co-op test.
+
+### Headless verification
+The MP transport + host-resolution are covered by smoke tests against a local
+room + dev server (start `PORT=8797 node server/room-server.mjs` and `npm run dev`
+first):
+
+```
+node scripts/smoke-gamesync.mjs    --app=http://localhost:<port>/ --ws=ws://localhost:8797/
+node scripts/smoke-object-sync.mjs --app=http://localhost:<port>/ --ws=ws://localhost:8797/
+node scripts/smoke-video.mjs       --app=http://localhost:<port>/ --ws=ws://localhost:8797/
+```
+
+`scripts/test-multiplayer.mjs` (in `npm test`) covers the host-side keycode
+injection (`GameInputMgr.setRemoteButton`) and the controller→logical capture.
+
+### On-headset / two-browser test
+1. Host and client open the same URL with `?session=<room>` (e.g.
+   `…/?session=pongtest`). They should see each other's avatars (presence).
+2. Host boots **LWX Pong** on the TV → becomes host; client's TV shows the host's
+   stream.
+3. Host plays the left paddle; client presses up/down → the right paddle wakes up
+   and the client is now player 2. Both see the same game.
+
 ## References
 - EmuVR netplay: emuvr.net/wiki/Netplay
 - libretro netplay (design to mirror) + browser gap: docs.libretro.com/development/retroarch/netplay/ , github.com/libretro/RetroArch/issues/7186 , /10851
