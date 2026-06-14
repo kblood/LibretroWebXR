@@ -60,6 +60,11 @@ import {
   stashRoomBridge, consumeRoomBridge, looksLikeRoom,
 } from './RoomPersistence.js';
 import { saveRack, loadRack, clearRack } from './RackPersistence.js';
+import {
+  addEntry as lrlAddEntry, removeEntry as lrlRemoveEntry,
+  toCartMeta as lrlToCartMeta,
+  loadLocalRoms, saveLocalRoms,
+} from './LocalRomLibrary.js';
 import { buildRoom, buildProp, buildPortal, applyPosterTexture, FIT_MODES, DEFAULT_FIT_MODE, lockBookcaseHomes } from './RoomBuilder.js';
 import { createShelf, addCartridgeToShelf } from './Shelf.js';
 import { createCartridge } from './Cartridge.js';
@@ -721,6 +726,72 @@ async function restoreRack() {
   setStatus('Rack restored');
 }
 
+// Re-mint shelf cartridges for every locally-picked ROM the user has ever
+// loaded. Runs after buildCartridgeWorld (shelves must exist). Best-effort,
+// fire-and-forget per entry — one bad entry must not block the others.
+// If OPFS no longer holds the bytes (evicted), the entry is pruned so the
+// shelf doesn't show a dead cart.
+async function restoreLocalRoms() {
+  const list = loadLocalRoms();
+  if (!list.length) return;
+  const pruned = [];
+  let anyPruned = false;
+  for (const entry of list) {
+    // Verify the OPFS bytes still exist before re-minting the cart.
+    let hasBytes = false;
+    try {
+      if (typeof navigator !== 'undefined' && navigator.storage?.getDirectory) {
+        const root = await navigator.storage.getDirectory();
+        const key = `sha1-${entry.sha1}`;
+        await root.getFileHandle(key); // throws if missing
+        hasBytes = true;
+      }
+    } catch {
+      hasBytes = false;
+    }
+    if (!hasBytes) {
+      logger?.event?.('local-rom-restore-evicted', { file: entry.file, sha1: entry.sha1 });
+      anyPruned = true;
+      continue; // skip — bytes gone, don't show a dead cart
+    }
+    pruned.push(entry);
+    try {
+      await addLocalRomToShelf(lrlToCartMeta(entry));
+    } catch (e) {
+      logger?.event?.('local-rom-restore-error', { file: entry.file, error: String(e?.message || e) });
+    }
+  }
+  if (anyPruned) {
+    // Persist the pruned list (entries whose OPFS bytes were evicted removed).
+    saveLocalRoms(pruned);
+  }
+}
+
+// Append/update a local-ROM entry in localStorage. Called after a successful
+// cacheRom so only OPFS-backed (sha1) entries are persisted.
+function persistLocalRom(meta) {
+  try {
+    const list = loadLocalRoms();
+    const next = lrlAddEntry(list, { ...meta, sha1: meta.rom?.sha1 });
+    saveLocalRoms(next);
+  } catch (e) {
+    console.warn('[main] persistLocalRom failed:', e);
+  }
+}
+
+// Request durable OPFS storage the first time a local ROM is cached.
+// Best-effort: the browser may decline (e.g. no user engagement yet on Quest),
+// and the pick fallback ensures the ROM can always be re-acquired anyway.
+let _persistRequested = false;
+function requestPersistentStorage() {
+  if (_persistRequested) return;
+  _persistRequested = true;
+  if (typeof navigator === 'undefined' || !navigator.storage?.persist) return;
+  navigator.storage.persist().then((granted) => {
+    logger?.event?.('storage-persist', { granted });
+  }).catch(() => {});
+}
+
 // Phase 5 spawn menu: spawn a live console for the next system not already
 // running (so repeated taps cycle through the library's systems). Wired to the
 // Add panel's "Spawn Console" button and window.__rack.spawnNext.
@@ -1194,6 +1265,11 @@ async function buildCartridgeWorld() {
   // session (survives the cross-core reload too). Best-effort, fire-and-forget.
   restoreRack().catch((e) => console.warn('[main] restoreRack failed:', e));
 
+  // Local-ROM library: re-mint shelf cartridges for every file the user ever
+  // loaded via the in-app picker, so they reappear automatically after a reload.
+  // Best-effort, fire-and-forget.
+  restoreLocalRoms().catch((e) => console.warn('[main] restoreLocalRoms failed:', e));
+
   // In-VR room editor (Phase E.1): registers the room's props as editable
   // grabbables (inert until edit mode) and serializes them back on export.
   editor = new RoomEditor({
@@ -1318,6 +1394,9 @@ async function buildCartridgeWorld() {
   window.__addLocalRom = (meta) => addLocalRomToShelf(meta);
   // Headless hook: exercise the ROM resolver (OPFS cache round-trip etc.).
   window.__rom = { resolve: resolveRom, cacheRom };
+  // Headless hook: inspect the persisted local-ROM library.
+  // Returns the current list as parsed from localStorage.
+  window.__localRoms = () => loadLocalRoms();
   /**
    * Headless hook: simulate a local ROM file-pick WITHOUT the OS file-picker
    * dialog (which can't open in headless/WebXR contexts). Mirrors the logic
@@ -1355,6 +1434,11 @@ async function buildCartridgeWorld() {
     // Cache content-addressed in OPFS so the shelf cart can re-resolve later.
     const sha1 = await cacheRom(buf);
     meta.rom = sha1 ? { sha1, sources: ['opfs', 'pick'] } : { source: 'pick' };
+    // Persist to local-ROM library (sha1 entries only, mirrors romInput handler).
+    if (sha1) {
+      persistLocalRom(meta);
+      requestPersistentStorage();
+    }
     // Mint the shelf cart (same as romInput handler).
     const cart = await addLocalRomToShelf(meta);
     return {
@@ -3317,6 +3401,13 @@ romInput.addEventListener('change', async (e) => {
     try {
       const sha1 = await cacheRom(buffer);
       meta.rom = sha1 ? { sha1, sources: ['opfs', 'pick'] } : { source: 'pick' };
+      // Persist to local-ROM library (sha1 entries only — pick-only can't
+      // be re-resolved after reload so there's nothing to remember).
+      if (sha1) {
+        persistLocalRom(meta);
+        // Request durable OPFS storage so the Quest browser doesn't evict it.
+        requestPersistentStorage();
+      }
     } catch (e) {
       console.warn('[main] cacheRom failed:', e);
     }
