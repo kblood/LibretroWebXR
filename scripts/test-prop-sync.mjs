@@ -95,6 +95,21 @@ console.log('--- serializePropState');
   const precObj = makeObj(1.23456789, 0, 0, 0, 0, 0);
   const pr = serializePropState({ type: 'console', id: 'x' }, precObj);
   ok(pr.pos[0] === 1.235, 'pos.x rounded to 3dp');
+
+  // FIX 3c: imageFile carried through poster STATE payload when set.
+  const posterWithFile = { type: 'poster', id: 'poster-2', texture: 'blob:fake', imageFile: 'art.png' };
+  const pf = serializePropState(posterWithFile, makeObj(0, 1.5, -3.9, 0, 0, 0));
+  ok(pf.imageFile === 'art.png', 'imageFile carried through poster STATE when set');
+
+  // imageFile omitted when not present on prop.
+  const posterNoFile = { type: 'poster', id: 'poster-3', texture: 'builtin:poster-1' };
+  const pnf = serializePropState(posterNoFile, makeObj(0, 1.5, -3.9, 0, 0, 0));
+  ok(pnf.imageFile === undefined, 'imageFile absent from STATE when prop has none');
+
+  // imageFile NOT emitted for non-poster types.
+  const shelfWithFile = { type: 'shelf', id: 'shelf-1', imageFile: 'art.png' };
+  const sf = serializePropState(shelfWithFile, makeObj(0, 1, -3, 0, 0, 0));
+  ok(sf.imageFile === undefined, 'imageFile not emitted for non-poster types');
 }
 
 // ---------------------------------------------------------------------------

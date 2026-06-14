@@ -33,6 +33,7 @@ export const SURFACE_KIND = {
   table:    'floor',
   poster:   'wall',
   portal:   'floor',
+  keyboard: 'floor',
 };
 
 /**
@@ -53,6 +54,7 @@ export const RESTING_Y = {
   cupboard: 0.0,    // floor-contact origin
   table:    0.0,    // floor-contact origin
   portal:   0.0,    // floor-level portal arch
+  keyboard: 0.72,   // keyboard resting on a desk at comfortable typing height
   default:  1.2,    // fallback for unknown kinds
 };
 
@@ -204,6 +206,7 @@ export const FOOTPRINT = {
   table:    { width: 1.0, depth: 0.6 },
   poster:   { width: 0.8, depth: 0.05 },  // width × thin depth for wall mount
   portal:   { width: 1.2, depth: 0.1 },
+  keyboard: { width: 0.7, depth: 0.25 },  // physical keyboard body footprint
   default:  { width: 0.5, depth: 0.5 },
 };
 

@@ -273,5 +273,28 @@ function rig({ controllers, cable, grab, system, onLogicalInput }) {
   ok(!got.has(EXTRA_PLAYER_KEYS[2].A), 'remote injection did not leak P1\'s button onto P2');
 }
 
+// === clearRemote: setRemoteButton(down) → clearRemote() → keyup emitted =======
+// Mirrors the onPeerLeave use-case: a remote peer disconnects mid-keypress; the
+// host calls clearRemote() which causes the next tick() to lift all latched keys.
+{
+  const grab = mockGrab();
+  const { gim, client } = rig({ controllers: [], cable: new CableMgr(), grab, system: 'snes' });
+
+  // Remote P2 holds button A down.
+  gim.setRemoteButton({ player: 2, btn: 'A', down: true });
+  gim.tick();
+  ok(client.keydownCodes().has(EXTRA_PLAYER_KEYS[2].A), 'remote P2 A latched via setRemoteButton');
+
+  client.clear();
+  // Simulate peer disconnecting: clearRemote drops all remote state.
+  gim.clearRemote();
+  ok([...gim._remoteDesired].length === 0, 'clearRemote empties _remoteDesired immediately');
+
+  // Next tick should emit the keyup (the normal sweep sees it was pressed, now absent).
+  gim.tick();
+  ok(client.keyupCodes().has(EXTRA_PLAYER_KEYS[2].A), 'clearRemote → next tick emits keyup (no latch)');
+  ok(client.keydownCodes().size === 0, 'no spurious keydown after clearRemote');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

@@ -13,12 +13,16 @@
 // Edge types:
 //   • controller → console[port]   (couch-co-op input; port index → player N)
 //   • console     → tv             (video; one source feeds one-or-many TVs)
+//   • keyboard    → console        (one keyboard per console; one console per
+//                                   keyboard — like a C64's integral keyboard DIN)
 //
 // Invariants enforced by the mutators:
 //   • a controller drives at most one console port (re-plug moves it)
 //   • a console port holds at most one controller (re-plug evicts the prior)
 //   • a TV samples at most one console (re-connect swaps its source)
 //   • a console may fan its video out to several TVs (a splitter is legal)
+//   • a keyboard attaches to at most one console (re-plug moves it)
+//   • a console hosts at most one keyboard (re-plug evicts the prior keyboard)
 // Port→player is fixed: port 0 = player 1, port 1 = player 2, … matching
 // EXTRA_PLAYER_KEYS in [[src/ControllerMaps.js]].
 
@@ -35,6 +39,7 @@ export class Patchbay {
     this._consoles = new Map();    // consoleId -> { ports }
     this._tvs = new Set();         // tvId
     this._controllers = new Set(); // controllerId
+    this._keyboards = new Set();   // keyboardId
 
     // controller edges
     this._ctrlPlug = new Map();    // controllerId -> { consoleId, port }
@@ -43,6 +48,10 @@ export class Patchbay {
     // video edges
     this._tvSource = new Map();    // tvId -> consoleId   (a TV samples ≤1 console)
     this._consoleTvs = new Map();  // consoleId -> Set<tvId>
+
+    // keyboard edges (one-to-one: a console holds ≤1 keyboard, a keyboard plugs into ≤1 console)
+    this._kbdPlug = new Map();     // keyboardId -> consoleId
+    this._consoleKbd = new Map();  // consoleId  -> keyboardId
   }
 
   _portKey(consoleId, port) { return `${consoleId}#${port}`; }
@@ -76,13 +85,20 @@ export class Patchbay {
     return controllerId;
   }
 
-  // Remove a console and every edge touching it (controller plugs + TV feeds).
+  // Remove a console and every edge touching it (controller plugs + TV feeds +
+  // keyboard plug).
   removeConsole(consoleId) {
     for (const [cid, plug] of [...this._ctrlPlug]) {
       if (plug.consoleId === consoleId) this.unplugController(cid);
     }
     for (const tvId of [...(this._consoleTvs.get(consoleId) || [])]) {
       this.disconnectVideo(tvId);
+    }
+    // Clear any keyboard wired to this console.
+    const kid = this._consoleKbd.get(consoleId);
+    if (kid != null) {
+      this._kbdPlug.delete(kid);
+      this._consoleKbd.delete(consoleId);
     }
     this._consoleTvs.delete(consoleId);
     this._consoles.delete(consoleId);
@@ -212,10 +228,70 @@ export class Patchbay {
     return [...(this._consoleTvs.get(consoleId) || [])];
   }
 
+  addKeyboard(keyboardId) {
+    if (keyboardId == null) return null;
+    this._keyboards.add(keyboardId);
+    return keyboardId;
+  }
+
+  removeKeyboard(keyboardId) {
+    this.unplugKeyboard(keyboardId);
+    this._keyboards.delete(keyboardId);
+  }
+
+  // ---- keyboard ⇄ console (one-to-one) ----
+
+  // Plug a keyboard into a console. A keyboard occupies at most one console and a
+  // console holds at most one keyboard, so any prior tenancy on either side is
+  // cleared first. The keyboard and console are auto-registered if unseen. Returns
+  // the consoleId the keyboard is now attached to, or null if the console is
+  // unknown (and cannot be auto-registered because no id was given).
+  plugKeyboard(keyboardId, consoleId) {
+    if (keyboardId == null || consoleId == null) return null;
+    if (!this._consoles.has(consoleId)) this.addConsole(consoleId);
+    this._keyboards.add(keyboardId);
+
+    // Evict any keyboard currently at this console.
+    const prevKbd = this._consoleKbd.get(consoleId);
+    if (prevKbd != null && prevKbd !== keyboardId) this._kbdPlug.delete(prevKbd);
+
+    // Move the keyboard off its prior console (if any).
+    const prevConsole = this._kbdPlug.get(keyboardId);
+    if (prevConsole != null && prevConsole !== consoleId) this._consoleKbd.delete(prevConsole);
+
+    this._kbdPlug.set(keyboardId, consoleId);
+    this._consoleKbd.set(consoleId, keyboardId);
+    return consoleId;
+  }
+
+  // Remove a keyboard from whatever console it's plugged into (no-op if unplugged).
+  unplugKeyboard(keyboardId) {
+    const consoleId = this._kbdPlug.get(keyboardId);
+    if (consoleId == null) return;
+    this._kbdPlug.delete(keyboardId);
+    // Only clear the reverse entry if it still points at this keyboard (guard
+    // against the case where a second keyboard was already seated at the same
+    // console via plugKeyboard's eviction path).
+    if (this._consoleKbd.get(consoleId) === keyboardId) this._consoleKbd.delete(consoleId);
+  }
+
+  /** consoleId a keyboard is plugged into, or null. */
+  consoleOfKeyboard(keyboardId) {
+    const c = this._kbdPlug.get(keyboardId);
+    return c == null ? null : c;
+  }
+
+  /** keyboardId attached to a console, or null. */
+  keyboardOf(consoleId) {
+    const k = this._consoleKbd.get(consoleId);
+    return k == null ? null : k;
+  }
+
   // ---- node listings ----
 
   consoles() { return [...this._consoles.keys()]; }
   tvs() { return [...this._tvs]; }
   controllers() { return [...this._controllers]; }
+  keyboards() { return [...this._keyboards]; }
   portsOf(consoleId) { return this._consoles.get(consoleId)?.ports ?? null; }
 }

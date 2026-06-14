@@ -6,8 +6,12 @@
 //
 // It rides the same [[src/GrabMgr.js]] pipeline as cartridges/gamepads via
 // userData.kind = 'plug'; GrabMgr hands releases to a callback that does the
-// snap ([[src/Snap.js]]) + repatch. plugKind ('video' | 'controller') tells the
-// caller which jack family this plug is allowed to seat into.
+// snap ([[src/Snap.js]]) + repatch. plugKind ('video' | 'controller' | 'keyboard')
+// tells the caller which jack family this plug is allowed to seat into:
+//   'video'      → console videoOutAnchor → TV video-in jack
+//   'controller' → console portJacks[i]  → player-port seat
+//   'keyboard'   → console keyboardJack  → DIN socket on the rear face
+//                  ([[src/Patchbay.js]] plugKeyboard / [[src/Console.js]] keyboardJack)
 
 import * as THREE from 'three';
 
@@ -15,12 +19,20 @@ export class Plug {
   /**
    * @param {object} opts
    * @param {string} opts.id          stable id (e.g. `vplug-console0`)
-   * @param {string} opts.plugKind    'video' | 'controller'
+   * @param {string} opts.plugKind    'video' | 'controller' | 'keyboard'
    * @param {string} opts.sourceId    the device this cord comes FROM (consoleId)
    * @param {number} [opts.color]     body tint (defaults by plugKind)
    */
   constructor({ id, plugKind, sourceId, color }) {
-    const tint = color ?? (plugKind === 'video' ? 0xccaa22 : 0x33cc55);
+    // Default tints by kind:
+    //   'video'      → warm amber/gold  (0xccaa22)
+    //   'controller' → green            (0x33cc55)
+    //   'keyboard'   → cream/off-white  (0xddcc88) — evokes a vintage keyboard finish
+    const tint = color ?? (
+      plugKind === 'video'      ? 0xccaa22 :
+      plugKind === 'keyboard'   ? 0xddcc88 :
+      /* 'controller' + default */ 0x33cc55
+    );
 
     const group = new THREE.Group();
     group.name = `plug-${id}`;
@@ -48,7 +60,7 @@ export class Plug {
 
     group.userData = {
       kind: 'plug',           // GrabMgr routes releases by this
-      plugKind,               // 'video' | 'controller'
+      plugKind,               // 'video' | 'controller' | 'keyboard'
       sourceId,               // consoleId the cord originates from
       plugId: id,
       cordAnchor,

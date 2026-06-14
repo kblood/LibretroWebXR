@@ -122,7 +122,7 @@ const MARGIN = 0.2;
 // snapToSurface — floor kinds
 // ---------------------------------------------------------------------------
 
-for (const kind of ['shelf', 'console', 'gamepad', 'bookcase', 'cupboard', 'table', 'portal']) {
+for (const kind of ['shelf', 'console', 'gamepad', 'bookcase', 'cupboard', 'table', 'portal', 'keyboard']) {
   const p = { x: 1.0, y: 2.5, z: -1.5 };
   const { pos, yaw } = snapToSurface(p, BOUNDS, kind);
   near(`floor snap ${kind} Y = RESTING_Y`, pos.y, RESTING_Y[kind] ?? 0);

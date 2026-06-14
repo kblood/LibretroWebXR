@@ -30,7 +30,7 @@ const DEST = join(ROOT, 'public', 'cores');
 const CORES = [
   'snes9x', 'nestopia', 'stella2014', 'genesis_plus_gx', 'mgba', 'mednafen_vb',
   'picodrive', 'gearsystem', 'fceumm', 'gambatte', 'mednafen_pce_fast',
-  'vice_x64', 'vice_xvic',
+  'vice_x64', 'vice_xvic', 'puae',
 ];
 
 // Candidate local source dirs, in priority order.

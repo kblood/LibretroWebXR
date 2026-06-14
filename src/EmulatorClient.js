@@ -20,7 +20,22 @@
 
 import { RETROARCH_CFG, RETROARCH_CFG_DIR, RETROARCH_CFG_PATH } from './RetroArchConfig.js';
 
-const ROM_VFS_PATH = '/rom/rom.bin';
+const ROM_VFS_DIR = '/rom';
+// Some cores identify content by its file *extension*, not by sniffing the
+// bytes — e.g. PUAE (Amiga) rejects a disk image named `.bin` with
+// "Unsupported file format". So the VFS content path carries the real
+// extension when the caller supplies one (opts.contentExt); cartridge cores,
+// which ignore the name, keep the historical `/rom/rom.bin` default.
+function romVfsPath(ext) {
+  const clean = String(ext || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8);
+  return `${ROM_VFS_DIR}/rom.${clean || 'bin'}`;
+}
+const ROM_VFS_PATH = romVfsPath('bin');
+// Legacy single-file libretro core options. We point RA at this explicitly
+// (core_options_path) and write `<key> = "<value>"` lines into it for cores
+// that need a non-default option — e.g. PUAE's `puae_kickstart = "aros"`, which
+// selects the built-in AROS Kickstart so the Amiga boots with no proprietary BIOS.
+const CORE_OPTIONS_PATH = RETROARCH_CFG_DIR + '/retroarch-core-options.cfg';
 const STATE_DIR = '/home/web_user/retroarch/userdata/states';
 const STATE_PATH = STATE_DIR + '/rom.state';
 // `-c PATH` explicitly tells RA which config file to load. RA's default
@@ -52,10 +67,21 @@ export class EmulatorClient extends EventTarget {
     // it isn't even showing. Re-applied after (re)start so the desired state
     // survives a fresh callMain / a same-core ROM swap (see _applyPauseState).
     this.paused = false;
+    // VFS path the loaded content is written to + handed to RetroArch. Default
+    // matches the legacy `/rom/rom.bin`; refined per-load from opts.contentExt.
+    this._romPath = ROM_VFS_PATH;
+    // Optional per-core libretro options ({ key: value }) written to the core
+    // options file before callMain. Null = none (RA uses core defaults).
+    this._coreOptions = null;
   }
 
   async start(emuCanvas, romBuffer, opts = {}) {
     this.emuCanvas = emuCanvas;
+    // Pin the content path BEFORE _loadCore (which bakes it into Module.arguments)
+    // and before _writeRom — so extension-sensitive cores (e.g. PUAE) see e.g.
+    // /rom/rom.adf instead of /rom/rom.bin.
+    if (opts.contentExt) this._romPath = romVfsPath(opts.contentExt);
+    if (opts.coreOptions && Object.keys(opts.coreOptions).length) this._coreOptions = opts.coreOptions;
     if (!this._coreLoaded) {
       if (opts.coreUrl) this.coreUrl = opts.coreUrl;
       if (opts.coreName) this.coreName = opts.coreName;
@@ -81,7 +107,7 @@ export class EmulatorClient extends EventTarget {
     this._writeRetroArchConfig();
     this._writeRom(romBuffer);
     try {
-      this._getModule().callMain(['-c', RA_CFG_PATH, ROM_VFS_PATH]);
+      this._getModule().callMain(['-c', RA_CFG_PATH, this._romPath]);
       this.ready = true;
       // callMain installs the core's main loop already running; if a pause was
       // requested before the loop existed (e.g. host video arrived first), apply
@@ -221,7 +247,7 @@ export class EmulatorClient extends EventTarget {
     const baseModule = {
       canvas: this.emuCanvas,
       noInitialRun: true,
-      arguments: ['-c', RA_CFG_PATH, ROM_VFS_PATH],
+      arguments: ['-c', RA_CFG_PATH, this._romPath],
       onRuntimeInitialized: () => {
         this._runtimeReady = true;
         this.dispatchEvent(new CustomEvent('runtime'));
@@ -280,6 +306,18 @@ export class EmulatorClient extends EventTarget {
     // $XDG_CONFIG_HOME/retroarch/). $HOME is /home/web_user in
     // emscripten. We don't know which one this RA build will actually
     // honour, so we cover all of them.
+    // When the core needs non-default options, point RA at an explicit
+    // single-file core-options path and write the requested key/values there.
+    let cfg = RETROARCH_CFG;
+    if (this._coreOptions) {
+      cfg += `core_options_path = "${CORE_OPTIONS_PATH}"\n`;
+      const body = Object.entries(this._coreOptions)
+        .map(([k, v]) => `${k} = "${v}"`).join('\n') + '\n';
+      try { M.FS.mkdirTree(RETROARCH_CFG_DIR); } catch (_) {}
+      try { M.FS.writeFile(CORE_OPTIONS_PATH, body); } catch (e) {
+        console.warn('[EmulatorClient] failed to write core options', e);
+      }
+    }
     const targets = [
       [RETROARCH_CFG_DIR, RETROARCH_CFG_PATH],
       ['/home/web_user/.config/retroarch', '/home/web_user/.config/retroarch/retroarch.cfg'],
@@ -287,7 +325,7 @@ export class EmulatorClient extends EventTarget {
     ];
     for (const [dir, path] of targets) {
       try { M.FS.mkdirTree(dir); } catch (_) {}
-      try { M.FS.writeFile(path, RETROARCH_CFG); } catch (e) {
+      try { M.FS.writeFile(path, cfg); } catch (e) {
         console.warn('[EmulatorClient] failed to write retroarch.cfg at', path, e);
       }
     }
@@ -301,7 +339,7 @@ export class EmulatorClient extends EventTarget {
     const M = this._getModule();
     if (!M?.FS) throw new Error('Module.FS not available — core not initialized');
     try { M.FS.mkdirTree('/rom'); } catch (_) {}
-    M.FS.writeFile(ROM_VFS_PATH, new Uint8Array(romBuffer));
+    M.FS.writeFile(this._romPath, new Uint8Array(romBuffer));
   }
 
   _fail(message) {

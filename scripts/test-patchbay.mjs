@@ -176,5 +176,70 @@ console.log('--- guards ---');
   eq('connect null tv -> null', pb.connectVideo('nesA', null), null);
 }
 
+console.log('--- keyboard: basic plug / query ---');
+{
+  const pb = new Patchbay();
+  pb.addConsole('c64A');
+  eq('plugKeyboard returns consoleId', pb.plugKeyboard('kb1', 'c64A'), 'c64A');
+  eq('consoleOfKeyboard = c64A', pb.consoleOfKeyboard('kb1'), 'c64A');
+  eq('keyboardOf = kb1', pb.keyboardOf('c64A'), 'kb1');
+}
+
+console.log('--- keyboard: unknown console returns null ---');
+{
+  const pb = new Patchbay();
+  // auto-registers the console (same as plugController)
+  const r = pb.plugKeyboard('kb1', 'ghost');
+  eq('unknown console is auto-registered, returns consoleId', r, 'ghost');
+  eq('consoleOfKeyboard correct after auto-register', pb.consoleOfKeyboard('kb1'), 'ghost');
+  eq('null keyboardId returns null', pb.plugKeyboard(null, 'c64A'), null);
+  eq('null consoleId returns null', pb.plugKeyboard('kb1', null), null);
+  eq('keyboardOf unknown console = null', pb.keyboardOf('missing'), null);
+  eq('consoleOfKeyboard unknown kb = null', pb.consoleOfKeyboard('missing'), null);
+}
+
+console.log('--- keyboard: one-to-one — plug K2 into console that has K1 (evicts K1) ---');
+{
+  const pb = new Patchbay();
+  pb.addConsole('c64A');
+  pb.plugKeyboard('kb1', 'c64A');
+  pb.plugKeyboard('kb2', 'c64A');
+  eq('kb2 now attached to c64A', pb.keyboardOf('c64A'), 'kb2');
+  eq('kb1 was evicted (consoleOfKeyboard null)', pb.consoleOfKeyboard('kb1'), null);
+  eq('kb2 consoleOfKeyboard = c64A', pb.consoleOfKeyboard('kb2'), 'c64A');
+}
+
+console.log('--- keyboard: one-to-one — plug K1 into a second console (moves it) ---');
+{
+  const pb = new Patchbay();
+  pb.addConsole('c64A');
+  pb.addConsole('speccy');
+  pb.plugKeyboard('kb1', 'c64A');
+  pb.plugKeyboard('kb1', 'speccy');
+  eq('kb1 moved to speccy', pb.consoleOfKeyboard('kb1'), 'speccy');
+  eq('speccy now has kb1', pb.keyboardOf('speccy'), 'kb1');
+  eq('c64A keyboard cleared', pb.keyboardOf('c64A'), null);
+}
+
+console.log('--- keyboard: unplugKeyboard clears both directions ---');
+{
+  const pb = new Patchbay();
+  pb.addConsole('c64A');
+  pb.plugKeyboard('kb1', 'c64A');
+  pb.unplugKeyboard('kb1');
+  eq('consoleOfKeyboard null after unplug', pb.consoleOfKeyboard('kb1'), null);
+  eq('keyboardOf null after unplug', pb.keyboardOf('c64A'), null);
+  ok('unplugKeyboard unknown is no-op', (pb.unplugKeyboard('nope'), true));
+}
+
+console.log('--- keyboard: removeConsole also clears keyboard edge ---');
+{
+  const pb = new Patchbay();
+  pb.addConsole('c64A');
+  pb.plugKeyboard('kb1', 'c64A');
+  pb.removeConsole('c64A');
+  eq('keyboard edge cleared when console removed', pb.consoleOfKeyboard('kb1'), null);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

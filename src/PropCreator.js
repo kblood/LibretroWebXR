@@ -18,7 +18,7 @@ import { normalizeProp, normalizePortal } from './RoomLoader.js';
 // RoomBuilder can build standalone. `tv` is excluded (it has no object — it only
 // toggles the CRT shader) and `model` is excluded (it needs an asset URL there's
 // no in-VR way to supply yet).
-export const CREATABLE_PROP_TYPES = ['shelf', 'console', 'gamepad', 'poster', 'bookcase', 'cupboard', 'table'];
+export const CREATABLE_PROP_TYPES = ['shelf', 'console', 'gamepad', 'poster', 'bookcase', 'cupboard', 'table', 'keyboard'];
 
 // Per-type non-spatial defaults baked into a freshly created prop.
 // - shelf: no `collection` → RoomBuilder falls back to the room's first
@@ -38,6 +38,7 @@ const PROP_DEFAULTS = {
   bookcase: {},  // collection unset → falls back to first collection in RoomBuilder
   cupboard: {},
   table:    {},
+  keyboard: { layout: 'standard' },  // standard full PC layout; switch via setLayout('c64')
 };
 
 /** Every id already used by a prop or portal in the room (for collision-free minting). */

@@ -36,7 +36,7 @@ function defaultServerUrl() {
 }
 
 export class NetMgr {
-  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, videoCanvas = null, onHostVideo = null, onHostVideoEnded = null, iceServers = null, now = () => performance.now() }) {
+  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, onPeerLeave = null, videoCanvas = null, onHostVideo = null, onHostVideoEnded = null, iceServers = null, now = () => performance.now() }) {
     this.scene = scene;
     this.room = room || 'lobby';
     this.nick = nick || 'Player';
@@ -59,6 +59,10 @@ export class NetMgr {
     // M1 game sync: a host receives remote players' RetroPad inputs here.
     // onGameInput({ from, player, btn, down }) lets main.js feed them to its core.
     this._onGameInput = onGameInput;
+    // Keyboard-latch fix: fired with the departing peer's id whenever a peer
+    // leaves cleanly (MSG.LEAVE) or is pruned as stale. main.js wires this to
+    // gameInput.clearRemote() so mid-keypress disconnects don't latch remote keys.
+    this._onPeerLeave = onPeerLeave;
     this._recvInputs = []; // small debug ring of the last received inputs
     this.avatars = new AvatarMgr({ scene });
     this.ws = null;
@@ -208,7 +212,15 @@ export class NetMgr {
       }
       else if (msg.type === MSG.STATE) this._applyState(msg);         // room-object sync
       else if (msg.type === MSG.INPUT) this._applyGameInput(msg);     // game sync (host side)
-      else this.presence.apply(msg, this._now());                    // roster + poses
+      else {
+        // Roster + poses. For LEAVE we also fire the peer-leave callback so
+        // callers (main.js) can clear any latched remote input from that peer.
+        const leftId = (msg.type === MSG.LEAVE) ? msg.id : null;
+        this.presence.apply(msg, this._now());
+        if (leftId != null) {
+          try { this._onPeerLeave?.(leftId); } catch (e) { console.warn('[net] onPeerLeave', e); }
+        }
+      }
     });
     ws.addEventListener('close', () => { this._connected = false; });
     ws.addEventListener('error', () => { /* close follows */ });
@@ -229,7 +241,14 @@ export class NetMgr {
   // Called every frame from SceneMgr's tick loop.
   tick(dtMs = 16) {
     // Reflect remote peers into the scene (prune stale → sync meshes → ease).
-    this.presence.prune(this._now());
+    // pruned ids are peers that timed out without a clean LEAVE (tab closed,
+    // network drop). Fire onPeerLeave for each so latched remote keys are cleared.
+    const pruned = this.presence.prune(this._now());
+    if (pruned.length && this._onPeerLeave) {
+      for (const id of pruned) {
+        try { this._onPeerLeave(id); } catch (e) { console.warn('[net] onPeerLeave (prune)', e); }
+      }
+    }
     const peers = this.presence.peers();
     this.avatars.sync(peers);
     this.avatars.tick(dtMs);

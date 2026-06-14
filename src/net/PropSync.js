@@ -101,10 +101,11 @@ export function serializePropState(prop, object, { roundTo = 3 } = {}) {
 
   // Carry type-specific authored fields so a remote peer can reconstruct.
   if (prop.type === 'poster') {
-    if (prop.texture !== undefined) payload.texture = prop.texture;
-    if (prop.size    !== undefined) payload.size    = prop.size;
-    if (prop.fit     !== undefined) payload.fit     = prop.fit;
-    if (prop.scale   !== undefined) payload.scale   = prop.scale;
+    if (prop.texture   !== undefined) payload.texture   = prop.texture;
+    if (prop.size      !== undefined) payload.size      = prop.size;
+    if (prop.fit       !== undefined) payload.fit       = prop.fit;
+    if (prop.scale     !== undefined) payload.scale     = prop.scale;
+    if (prop.imageFile !== undefined) payload.imageFile = prop.imageFile; // FIX 3c: persist source filename
   }
   // console: no extra fields needed (physical mesh only, game does not sync here)
   // tv: no extra fields — TV mesh exists on all peers from room.json

@@ -47,6 +47,14 @@ export const CORES = {
   mednafen_pce_fast: { url: 'cores/mednafen_pce_fast_libretro.js', exts: ['pce'],                        label: 'PC Engine/TurboGrafx (mednafen_pce_fast)', style: 'module', license: 'GPLv2', weight: 1 },
   vice_x64:          { url: 'cores/vice_x64_libretro.js',          exts: ['d64','d71','d80','d81','d82','g64','x64','t64','tap','prg','p00','crt'], label: 'C64 (VICE)', style: 'module', license: 'GPLv2', weight: 2 },
   vice_xvic:         { url: 'cores/vice_xvic_libretro.js',         exts: ['20','40','60','a0','b0','rom'], label: 'VIC-20 (VICE)',             style: 'module', license: 'GPLv2', weight: 2 },
+  // Amiga (PUAE / WinUAE-based). Built for emscripten from EmulatorJS's
+  // libretro-uae fork, linked against RetroArch's Makefile.emscripten →
+  // `export default libretro_puae` (same MODULARIZE ES-module shape as the
+  // buildbot cores). Boots via PUAE's built-in AROS Kickstart fallback when no
+  // proprietary Kickstart is supplied (partial A500 compat). weight 2 = 16-bit
+  // tier; the 68k + cycle-exact chipset is heavy in no-JIT wasm — bump to 3 if
+  // it can't hold a rack slot on the headset. See [[amiga-puae-blocked]].
+  puae:              { url: 'cores/puae_libretro.js',              exts: ['adf','adz','dms','fdi','ipf','hdf','hdz','lha','uae'], label: 'Amiga (PUAE)', style: 'module', license: 'GPLv2', weight: 2, coreOptions: { puae_kickstart: 'aros' } },
 };
 
 // Rack budget calibration (see RackBudget.js). Tuned to the Phase-0 Quest-3
@@ -70,19 +78,22 @@ export function coreWeight(name) {
 //                   includes the canonical id. Lower-cased, compared loosely.
 //   thumbnailRepo — libretro-thumbnails repo name (for ArtResolver). null = none.
 export const SYSTEMS = {
-  snes:      { label: 'Super Nintendo',     defaultCore: 'snes9x',           cores: ['snes9x'],                       exts: ['smc','sfc','swc','fig','bs'], aliases: ['snes','super nintendo','super famicom','sfc'],            thumbnailRepo: 'Nintendo_-_Super_Nintendo_Entertainment_System' },
-  nes:       { label: 'Nintendo (NES)',     defaultCore: 'nestopia',         cores: ['nestopia','fceumm'],            exts: ['nes','fds','unf','unif'],     aliases: ['nes','nintendo','famicom','nintendo entertainment system'], thumbnailRepo: 'Nintendo_-_Nintendo_Entertainment_System' },
-  gb:        { label: 'Game Boy',           defaultCore: 'gambatte',         cores: ['gambatte'],                     exts: ['gb'],                         aliases: ['gb','game boy','gameboy'],                               thumbnailRepo: 'Nintendo_-_Game_Boy' },
-  gbc:       { label: 'Game Boy Color',     defaultCore: 'gambatte',         cores: ['gambatte'],                     exts: ['gbc'],                        aliases: ['gbc','game boy color','gameboy color'],                  thumbnailRepo: 'Nintendo_-_Game_Boy_Color' },
-  gba:       { label: 'Game Boy Advance',   defaultCore: 'mgba',             cores: ['mgba'],                         exts: ['gba'],                        aliases: ['gba','game boy advance','gameboy advance'],              thumbnailRepo: 'Nintendo_-_Game_Boy_Advance' },
-  vb:        { label: 'Virtual Boy',        defaultCore: 'mednafen_vb',      cores: ['mednafen_vb'],                  exts: ['vb','vboy'],                  aliases: ['vb','virtual boy','virtualboy'],                         thumbnailRepo: 'Nintendo_-_Virtual_Boy' },
-  md:        { label: 'Sega Genesis',       defaultCore: 'genesis_plus_gx',  cores: ['genesis_plus_gx','picodrive'],  exts: ['md','gen','smd'],             aliases: ['md','genesis','mega drive','megadrive','sega genesis'],  thumbnailRepo: 'Sega_-_Mega_Drive_-_Genesis' },
-  sms:       { label: 'Sega Master System', defaultCore: 'picodrive',        cores: ['picodrive','gearsystem'],       exts: ['sms'],                        aliases: ['sms','master system','sega master system','mark iii'],   thumbnailRepo: 'Sega_-_Master_System_-_Mark_III' },
-  gg:        { label: 'Sega Game Gear',     defaultCore: 'picodrive',        cores: ['picodrive','gearsystem'],       exts: ['gg'],                         aliases: ['gg','game gear','gamegear'],                             thumbnailRepo: 'Sega_-_Game_Gear' },
-  atari2600: { label: 'Atari 2600',         defaultCore: 'stella2014',       cores: ['stella2014'],                   exts: ['a26','bin'],                  aliases: ['atari2600','atari 2600','2600','vcs'],                   thumbnailRepo: 'Atari_-_2600' },
-  pce:       { label: 'PC Engine / TG-16',  defaultCore: 'mednafen_pce_fast',cores: ['mednafen_pce_fast'],            exts: ['pce'],                        aliases: ['pce','pc engine','turbografx','turbografx-16','tg16'],   thumbnailRepo: 'NEC_-_PC_Engine_-_TurboGrafx_16' },
-  c64:       { label: 'Commodore 64',       defaultCore: 'vice_x64',         cores: ['vice_x64'],                     exts: ['d64','d71','d80','d81','d82','g64','x64','t64','tap','prg','p00','crt'], aliases: ['c64','commodore 64','commodore64'], thumbnailRepo: 'Commodore_-_64' },
-  vic20:     { label: 'Commodore VIC-20',   defaultCore: 'vice_xvic',        cores: ['vice_xvic'],                    exts: ['20','40','60','a0','b0','rom'], aliases: ['vic20','vic-20','commodore vic-20'],                    thumbnailRepo: 'Commodore_-_VIC-20' },
+  snes:      { label: 'Super Nintendo',     defaultCore: 'snes9x',           cores: ['snes9x'],                       exts: ['smc','sfc','swc','fig','bs'], aliases: ['snes','super nintendo','super famicom','sfc'],            thumbnailRepo: 'Nintendo_-_Super_Nintendo_Entertainment_System', medium: 'cartridge' },
+  nes:       { label: 'Nintendo (NES)',     defaultCore: 'nestopia',         cores: ['nestopia','fceumm'],            exts: ['nes','fds','unf','unif'],     aliases: ['nes','nintendo','famicom','nintendo entertainment system'], thumbnailRepo: 'Nintendo_-_Nintendo_Entertainment_System',       medium: 'cartridge' },
+  gb:        { label: 'Game Boy',           defaultCore: 'gambatte',         cores: ['gambatte'],                     exts: ['gb'],                         aliases: ['gb','game boy','gameboy'],                               thumbnailRepo: 'Nintendo_-_Game_Boy',                            medium: 'cartridge' },
+  gbc:       { label: 'Game Boy Color',     defaultCore: 'gambatte',         cores: ['gambatte'],                     exts: ['gbc'],                        aliases: ['gbc','game boy color','gameboy color'],                  thumbnailRepo: 'Nintendo_-_Game_Boy_Color',                      medium: 'cartridge' },
+  gba:       { label: 'Game Boy Advance',   defaultCore: 'mgba',             cores: ['mgba'],                         exts: ['gba'],                        aliases: ['gba','game boy advance','gameboy advance'],              thumbnailRepo: 'Nintendo_-_Game_Boy_Advance',                    medium: 'cartridge' },
+  vb:        { label: 'Virtual Boy',        defaultCore: 'mednafen_vb',      cores: ['mednafen_vb'],                  exts: ['vb','vboy'],                  aliases: ['vb','virtual boy','virtualboy'],                         thumbnailRepo: 'Nintendo_-_Virtual_Boy',                         medium: 'cartridge' },
+  md:        { label: 'Sega Genesis',       defaultCore: 'genesis_plus_gx',  cores: ['genesis_plus_gx','picodrive'],  exts: ['md','gen','smd'],             aliases: ['md','genesis','mega drive','megadrive','sega genesis'],  thumbnailRepo: 'Sega_-_Mega_Drive_-_Genesis',                    medium: 'cartridge' },
+  sms:       { label: 'Sega Master System', defaultCore: 'picodrive',        cores: ['picodrive','gearsystem'],       exts: ['sms'],                        aliases: ['sms','master system','sega master system','mark iii'],   thumbnailRepo: 'Sega_-_Master_System_-_Mark_III',                medium: 'cartridge' },
+  gg:        { label: 'Sega Game Gear',     defaultCore: 'picodrive',        cores: ['picodrive','gearsystem'],       exts: ['gg'],                         aliases: ['gg','game gear','gamegear'],                             thumbnailRepo: 'Sega_-_Game_Gear',                               medium: 'cartridge' },
+  sg1000:    { label: 'Sega SG-1000',       defaultCore: 'gearsystem',       cores: ['gearsystem','genesis_plus_gx'], exts: ['sg'],                         aliases: ['sg1000','sg-1000','sega sg-1000','sega sg1000','game 1000'], thumbnailRepo: 'Sega_-_SG-1000',                              medium: 'cartridge' },
+  sega32x:   { label: 'Sega 32X',           defaultCore: 'picodrive',        cores: ['picodrive'],                    exts: ['32x'],                        aliases: ['sega32x','sega 32x','32x','mega 32x','super 32x'],        thumbnailRepo: 'Sega_-_32X',                                     medium: 'cartridge' },
+  atari2600: { label: 'Atari 2600',         defaultCore: 'stella2014',       cores: ['stella2014'],                   exts: ['a26','bin'],                  aliases: ['atari2600','atari 2600','2600','vcs'],                   thumbnailRepo: 'Atari_-_2600',                                   medium: 'cartridge' },
+  pce:       { label: 'PC Engine / TG-16',  defaultCore: 'mednafen_pce_fast',cores: ['mednafen_pce_fast'],            exts: ['pce'],                        aliases: ['pce','pc engine','turbografx','turbografx-16','tg16'],   thumbnailRepo: 'NEC_-_PC_Engine_-_TurboGrafx_16',                medium: 'cartridge' },
+  c64:       { label: 'Commodore 64',       defaultCore: 'vice_x64',         cores: ['vice_x64'],                     exts: ['d64','d71','d80','d81','d82','g64','x64','t64','tap','prg','p00','crt'], aliases: ['c64','commodore 64','commodore64'], thumbnailRepo: 'Commodore_-_64',  medium: 'floppy', keyboard: true },
+  vic20:     { label: 'Commodore VIC-20',   defaultCore: 'vice_xvic',        cores: ['vice_xvic'],                    exts: ['20','40','60','a0','b0','rom'], aliases: ['vic20','vic-20','commodore vic-20'],                    thumbnailRepo: 'Commodore_-_VIC-20',                             medium: 'floppy', keyboard: true },
+  amiga:     { label: 'Commodore Amiga',    defaultCore: 'puae',             cores: ['puae'],                         exts: ['adf','adz','dms','fdi','ipf','hdf','hdz','lha','uae'], aliases: ['amiga','commodore amiga','a500','a1200','amiga 500','amiga 1200'], thumbnailRepo: 'Commodore_-_Amiga', medium: 'floppy', keyboard: true },
 };
 
 // Controller ports per system — how many controllers the base hardware
@@ -97,6 +108,8 @@ const SYSTEM_PORTS = {
   sms: 2, gg: 1, atari2600: 2,
   gb: 1, gbc: 1, gba: 1, vb: 1,
   pce: 2, c64: 2, vic20: 1,
+  sg1000: 2, sega32x: 2,
+  amiga: 2,   // two DB9 joystick/mouse ports
 };
 const DEFAULT_PORTS = 2;   // unknown system / no game loaded yet
 export const MAX_PORTS = 4; // hardware ceiling the console mesh renders
@@ -105,6 +118,16 @@ export const MAX_PORTS = 4; // hardware ceiling the console mesh renders
 export function portsForSystem(systemId) {
   const n = SYSTEM_PORTS[systemId] ?? DEFAULT_PORTS;
   return Math.max(1, Math.min(MAX_PORTS, n));
+}
+
+/**
+ * True if a system is a "computer" that takes keyboard input (so the
+ * physical keyboard device auto-shows / can usefully connect to it). Pure
+ * registry lookup of the `keyboard` flag — see [[src/Keyboard.js]] /
+ * the keyboard-device wiring in main.js.
+ */
+export function isKeyboardCapable(systemId) {
+  return SYSTEMS[systemId]?.keyboard === true;
 }
 
 // .bin is ambiguous (Atari 2600 / Mega Drive / PSX / …). When detection sees a
@@ -143,7 +166,15 @@ export function coreForFile(filename, override) {
 export function systemForFile(filename, override) {
   const core = coreForFile(filename, override);
   if (!core) return null;
-  // First system whose defaultCore (or cores list) includes this core.
+  const ext = extOf(filename);
+  // Prefer the system that both runs this core AND claims this extension. This
+  // disambiguates cores shared across systems — e.g. picodrive runs md/sms/gg/
+  // sega32x and gearsystem runs sms/gg/sg1000, so a bare core→system lookup
+  // would mis-route `.32x`/`.sg` to whichever system lists the core first.
+  for (const [id, sys] of Object.entries(SYSTEMS)) {
+    if (sys.cores.includes(core.name) && sys.exts.includes(ext)) return id;
+  }
+  // Fallback: first system whose cores list includes this core.
   for (const [id, sys] of Object.entries(SYSTEMS)) {
     if (sys.cores.includes(core.name)) return id;
   }
@@ -161,6 +192,45 @@ export function systemForName(name) {
     if (sys.aliases.some((a) => n.includes(a))) return id;
   }
   return null;
+}
+
+// --- Medium mapping ----------------------------------------------------------
+// Per-extension overrides. C64/VIC-20 cartridges (.crt) are cartridges even
+// though the system default medium is 'floppy'; disk/tape/program images are
+// all treated as 'floppy' for Phase 1 (we have only two media types).
+const FLOPPY_EXTS = new Set([
+  // C64/VIC-20 disk images
+  'd64','d71','d80','d81','d82','g64','x64',
+  // Tape and program images (treated as floppy this phase)
+  't64','tap','prg','p00',
+  // VIC-20 ROM cartridge as disk-style (vic20 default medium = floppy)
+  '20','40','60','a0','b0','rom',
+  // Amiga floppy / disk / WHDLoad images (all treated as 'floppy' this phase)
+  'adf','adz','dms','fdi','ipf','hdf','hdz','lha','uae',
+]);
+const CARTRIDGE_EXTS = new Set([
+  'crt', // C64 cartridge format — always a cartridge regardless of system medium
+]);
+
+/**
+ * Resolve the physical medium for a game meta object.
+ * Returns 'cartridge' | 'floppy'.
+ *
+ * Resolution order:
+ *   1. File extension in CARTRIDGE_EXTS → 'cartridge'  (overrides system default)
+ *   2. File extension in FLOPPY_EXTS   → 'floppy'
+ *   3. System registry medium field     → system default
+ *   4. Fallback                         → 'cartridge'
+ */
+export function mediumFor(meta) {
+  if (meta?.file) {
+    const ext = extOf(meta.file);
+    if (CARTRIDGE_EXTS.has(ext)) return 'cartridge';
+    if (FLOPPY_EXTS.has(ext)) return 'floppy';
+  }
+  const systemId = meta?.system;
+  if (systemId && SYSTEMS[systemId]?.medium) return SYSTEMS[systemId].medium;
+  return 'cartridge';
 }
 
 // --- Cross-check at load: every system's cores must exist in CORES ---------

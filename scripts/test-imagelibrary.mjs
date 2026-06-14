@@ -7,6 +7,8 @@
 import { fileExtension, isImageFile, filterImageNames } from '../src/ImageLibrary.js';
 import { fitModeUV } from '../src/PosterFit.js';
 import { cycleFitMode, stepScale, FIT_MODE_OPTIONS } from '../src/EnvEditor.js';
+import { serializeRoom } from '../src/RoomSerializer.js';
+import { parseRoom } from '../src/RoomLoader.js';
 
 let passed = 0;
 let failed = 0;
@@ -223,6 +225,33 @@ console.log('--- stepScale ---');
   const prop = {};
   const v = stepScale(prop, 'up');
   ok(typeof v === 'number', 'stepScale from missing scale returns number');
+}
+
+// ===========================================================================
+// FIX 3: imageFile round-trips through serializeRoom → parseRoom
+// ===========================================================================
+console.log('--- imageFile round-trip ---');
+{
+  const room = {
+    schema: 1,
+    id: 'test-room',
+    title: 'Test Room',
+    collections: [],
+    environment: {},
+    props: [
+      { type: 'poster', id: 'poster-1', texture: 'blob:stale', imageFile: 'art.png', pos: [0, 1.5, -3.9], rot: [0, 0, 0] },
+      { type: 'shelf',  id: 'shelf-1',  pos: [-1, 1, -3], rot: [0, 0, 0] },
+    ],
+    portals: [],
+  };
+  const serialized = serializeRoom(room);
+  const parsed = parseRoom(serialized);
+  const poster = parsed.props.find((p) => p.id === 'poster-1');
+  const shelf  = parsed.props.find((p) => p.id === 'shelf-1');
+  ok(poster !== undefined, 'poster-1 survives round-trip');
+  ok(poster?.imageFile === 'art.png', 'imageFile survives serializeRoom → parseRoom');
+  ok(poster?.texture === 'blob:stale', 'texture survives round-trip');
+  ok(shelf?.imageFile === undefined, 'non-poster prop has no imageFile');
 }
 
 // ===========================================================================

@@ -29,7 +29,7 @@ import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS } from './systems.js';
+import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, extOf } from './systems.js';
 import { Patchbay } from './Patchbay.js';
 import { RackMgr } from './RackMgr.js';
 import { ConsoleRuntime } from './ConsoleRuntime.js';
@@ -67,7 +67,7 @@ import {
 } from './LocalRomLibrary.js';
 import { buildRoom, buildProp, buildPortal, applyPosterTexture, FIT_MODES, DEFAULT_FIT_MODE, lockBookcaseHomes } from './RoomBuilder.js';
 import { createShelf, addCartridgeToShelf } from './Shelf.js';
-import { createCartridge } from './Cartridge.js';
+import { createMedia } from './Media.js';
 import { RoomEditor } from './RoomEditor.js';
 import { cycleSurface, cycleTimeOfDay, cyclePosterTexture, cycleShelfCollection, cycleFitMode, stepScale } from './EnvEditor.js';
 import {
@@ -77,7 +77,7 @@ import {
 import {
   clampToRoom, snapToSurface, SURFACE_KIND, placeInRoom, fanSlot,
 } from './Placement.js';
-import { C64Keyboard } from './C64Keyboard.js';
+import { createKeyboardDevice } from './Keyboard.js';
 
 // CORES and the system registry now live in src/systems.js (system-first,
 // single source of truth). detectCore() is coreForFile() from there; the
@@ -222,6 +222,17 @@ function connectToRoom(room, nick, color) {
     videoCanvas: emuCanvas,
     onHostVideo: (videoEl) => { scene.setScreenVideo(videoEl); client.pause(); },
     onHostVideoEnded: () => { scene.setScreenSource(emuCanvas); client.resume(); },
+    // FIX 1: clear latched remote keys when a peer disconnects mid-keypress.
+    // NOTE (FIX E): clearRemote() clears ALL remote input, not just the leaving
+    // peer's buttons. In a 3+ peer session this is a ~1-tick blip for other
+    // peers' held buttons: their keyups fire, then their keys re-latch on the
+    // very next tick when their setRemoteButton messages resume. Per-peer
+    // clearing would require threading `ev.from` (available in NetMgr's
+    // _applyGameInput as msg.from) through setRemoteButton and _remoteDesired
+    // entries, which is invasive across GameInputMgr, its tests, and the
+    // network contract. The conservative all-clear is safe and correct for the
+    // common 2-player case; the blip is benign in 3+ sessions.
+    onPeerLeave: (_peerId) => { if (net?.isHost()) gameInput?.clearRemote(); },
   });
   net = newNet;
   net.connect();
@@ -404,12 +415,19 @@ if (mpJoinBtn) {
 
 let grabMgr = null;
 let gameInput = null;
-// C64/VIC-20 virtual keyboard — created in buildCartridgeWorld, shown/hidden
-// when a Commodore game boots or via the "Keyboard" menu/header toggle.
+// Physical keyboard device — created in buildCartridgeWorld, shown/hidden
+// when a keyboard-capable game boots or via the "Keyboard" menu/header toggle.
+// `c64kbd` kept as the module-level handle so existing per-frame / toggle code
+// touches the same variable with minimal churn.
 let c64kbd = null;
 // True when the keyboard is in "manual override" mode (user toggled it).
 // Cleared on the next game boot so auto-show/hide resumes from there.
 let _kbdManualOverride = false;
+// Cable id used to track this keyboard in Patchbay's keyboard registry.
+const KBD_ID = 'kbd-primary';
+// Which console the primary keyboard is currently routing input to.
+// Initialised to CONSOLE_ID in buildCartridgeWorld once CONSOLE_ID is in scope.
+let _kbdTargetConsoleId = null;
 let cartridges = [];
 let shelves = [];    // live shelf objects — used by addLocalRomToShelf()
 let consoleObj = null;
@@ -548,6 +566,7 @@ const _plugWorld = new THREE.Vector3();
 function handlePlugReleased(plugObj) {
   const ud = plugObj.userData || {};
   if (ud.plugKind === 'controller') { handleControllerPlugReleased(plugObj); return; }
+  if (ud.plugKind === 'keyboard')   { handleKeyboardPlugReleased(plugObj);   return; }
   if (ud.plugKind !== 'video') return;
   const consoleId = ud.sourceId;
   plugObj.getWorldPosition(_plugWorld);
@@ -656,6 +675,11 @@ async function spawnConsole(system, opts = {}) {
   // wants { name, url, style }, so graft the key on.
   await runtime.load(buf, { ...core, name: meta.core }, { system: meta.system, title: meta.title });
   rackMgr.add(runtime);
+  // FIX B: record this console's system so connectKeyboardTo() can pick the
+  // correct layout (c64/standard) when the keyboard is plugged into a secondary
+  // console. Without this, _consoleSystems has no entry for consoleN and the
+  // keyboard stays on the generic 'standard' layout even for C64 spawns.
+  _consoleSystems.set(consoleId, meta.system);
 
   // Patch the graph: this console feeds its new TV.
   cable.addConsole(consoleId, { ports: portsForSystem(meta.system) });
@@ -922,6 +946,124 @@ function syncControllerCords() {
   }
 }
 
+// ── Keyboard patch cord (keyboard → console DIN jack) ───────────────────────
+// Mirrors the controller cord pattern: a Plug (plugKind 'keyboard') on the
+// end of a Cord from the keyboard's cordAnchor.  Seating it in a console's
+// keyboardJack calls connectKeyboardTo(consoleId); mid-air drop disconnects.
+const keyboardPlugs = new Map(); // kbdId -> { plug:Plug, cord:Cord }
+const _kbdFrom = new THREE.Vector3();
+const _kbdTo = new THREE.Vector3();
+const _kbdPlugPos = new THREE.Vector3();
+const _kbdPlugQuat = new THREE.Quaternion();
+
+// Build the grabbbable plug + cord for the keyboard device and seat it at the
+// connected console's keyboardJack (or dangling if not yet connected).
+function addKeyboardPlug(kbdObj) {
+  if (!kbdObj || keyboardPlugs.has(KBD_ID)) return;
+  const plug = new Plug({ id: `kplug-${KBD_ID}`, plugKind: 'keyboard', sourceId: KBD_ID });
+  scene.addObject(plug.group);
+  grabMgr?.addGrabbable(plug.group);
+  const cord = new Cord({ color: 0xddcc88 }); // cream/off-white, matches the plug tint
+  scene.addObject(cord.mesh);
+  keyboardPlugs.set(KBD_ID, { plug, cord });
+  seatKeyboardPlug();
+}
+
+// Snap the keyboard plug onto the keyboardJack of the connected console; if
+// disconnected, park it just behind the keyboard body so the loose cord reads clearly.
+function seatKeyboardPlug() {
+  const rec = keyboardPlugs.get(KBD_ID);
+  if (!rec) return;
+  const conObj = _kbdTargetConsoleId ? consoleObjs.get(_kbdTargetConsoleId) : null;
+  const jack = conObj?.userData?.keyboardJack;
+  if (jack) {
+    jack.getWorldPosition(_kbdPlugPos);
+    jack.getWorldQuaternion(_kbdPlugQuat);
+    rec.plug.group.position.copy(_kbdPlugPos);
+    rec.plug.group.quaternion.copy(_kbdPlugQuat);
+  } else if (c64kbd) {
+    (c64kbd.cordAnchor || c64kbd.object3d).getWorldPosition(_kbdPlugPos);
+    rec.plug.group.position.copy(_kbdPlugPos);
+    rec.plug.group.position.y += 0.08;
+  }
+}
+
+// GrabMgr release handler for a keyboard plug: snap to nearest keyboardJack
+// across all consoles (within keyboardJackRadius) and connect, else disconnect.
+const _kbdPlugWorld = new THREE.Vector3();
+function handleKeyboardPlugReleased(plugObj) {
+  if (plugObj.userData?.sourceId !== KBD_ID) return;
+  plugObj.getWorldPosition(_kbdPlugWorld);
+  const anchors = [];
+  const _j = new THREE.Vector3();
+  for (const [consoleId, conObj] of consoleObjs) {
+    const jack = conObj.userData?.keyboardJack;
+    const radius = conObj.userData?.keyboardJackRadius ?? 0.19;
+    if (!jack) continue;
+    jack.getWorldPosition(_j);
+    anchors.push({ id: consoleId, consoleId, radius, x: _j.x, y: _j.y, z: _j.z });
+  }
+  // Use the per-console keyboardJackRadius for the snap.
+  let hit = null;
+  let hitDist = Infinity;
+  for (const a of anchors) {
+    const dx = _kbdPlugWorld.x - a.x, dy = _kbdPlugWorld.y - a.y, dz = _kbdPlugWorld.z - a.z;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist < a.radius && dist < hitDist) { hitDist = dist; hit = a; }
+  }
+  if (hit) {
+    connectKeyboardTo(hit.consoleId);
+  } else {
+    disconnectKeyboard();
+  }
+  seatKeyboardPlug();
+  logger?.event?.('keyboard-repatch', { seat: hit?.consoleId || null });
+}
+
+// Reshape the keyboard cord from the keyboard body to its plug every frame.
+function syncKeyboardCord() {
+  const rec = keyboardPlugs.get(KBD_ID);
+  if (!rec || !c64kbd) { rec?.cord?.setVisible(false); return; }
+  (c64kbd.cordAnchor || c64kbd.object3d).getWorldPosition(_kbdFrom);
+  (rec.plug.cordAnchor || rec.plug.group).getWorldPosition(_kbdTo);
+  rec.cord.update(_kbdFrom, _kbdTo);
+  rec.cord.setVisible(c64kbd.object3d.visible);
+}
+
+// Route keyboard input to the given console's emulator core, updating the
+// Patchbay, sendInput closure, and the layout to match the booted system.
+// `currentConsoleSystems` tracks what each console is running (set by loadCartridge).
+const _consoleSystems = new Map(); // consoleId -> system string (set on each boot)
+
+function connectKeyboardTo(consoleId) {
+  if (!c64kbd) return;
+  // Flush any held keys on the old target before switching.
+  c64kbd.flushReleases();
+  _kbdTargetConsoleId = consoleId || CONSOLE_ID;
+  cable.plugKeyboard(KBD_ID, _kbdTargetConsoleId);
+  // Re-wire sendInput to target the new console.
+  c64kbd.setSendInput((type, code, key, keyCode, location) =>
+    rackMgr.get(_kbdTargetConsoleId)?.sendInput(type, code, key, keyCode, location));
+  // Switch layout: c64 layout for keyboard-capable Commodore systems, standard otherwise.
+  const sys = _consoleSystems.get(_kbdTargetConsoleId);
+  c64kbd.setLayout(isKeyboardCapable(sys) ? 'c64' : 'standard');
+  seatKeyboardPlug();
+}
+
+function disconnectKeyboard() {
+  if (!c64kbd) return;
+  c64kbd.flushReleases();
+  cable.unplugKeyboard(KBD_ID);
+  // FIX C: a mid-air drop is a TRUE disconnect — null target + no-op sendInput
+  // so no console receives keystrokes until the keyboard is re-plugged. The
+  // startup path (buildCartridgeWorld) still calls connectKeyboardTo(CONSOLE_ID)
+  // so out-of-the-box the keyboard is wired; only an explicit unplug disconnects.
+  // seatKeyboardPlug() reads _kbdTargetConsoleId===null and parks the plug behind
+  // the keyboard body (safe: consoleObjs.get(null) returns undefined → no jack).
+  _kbdTargetConsoleId = null;
+  c64kbd.setSendInput(() => {});
+}
+
 // Which player each hand drives this frame, for GameInputMgr ([[src/
 // GameInputMgr.js]]). Policy: one held gamepad → both hands forward to its
 // player (the original two-hands-one-player feel for >4-button systems); two
@@ -1165,19 +1307,23 @@ async function buildCartridgeWorld() {
   nowPlayingPanel.position.set(0, 0.58, -3.6);
   scene.addObject(nowPlayingPanel);
 
-  // C64/VIC-20 virtual keyboard panel.
-  // Positioned ~1 m in front of the user, angled up slightly for comfort.
-  // Hidden by default; shown automatically when a Commodore game boots, or
-  // manually via the "Keyboard" toggle in the menu / header button.
-  c64kbd = new C64Keyboard({
-    sendInput: (type, code, key, keyCode, location) =>
-      client.sendInput(type, code, key, keyCode, location),
-    position: new THREE.Vector3(0, 1.0, -1.8),
-    rotationX: -Math.PI / 8,  // tilt toward user for comfortable reach
+  // Physical keyboard device: a placeable, cabled keyboard that routes keystrokes
+  // to whichever console it is plugged into. Starts hidden; auto-shows when a
+  // keyboard-capable game (C64/VIC-20) boots. Placed on the desk slightly to the
+  // left of the primary console at the standard floor-prop resting height.
+  _kbdTargetConsoleId = CONSOLE_ID; // now in scope
+  cable.addKeyboard(KBD_ID);
+  c64kbd = createKeyboardDevice({
+    position: new THREE.Vector3(-0.35, 0.72, -2.15),
+    rotationY: 0,
+    layout: 'standard',
   });
+  c64kbd.setSendInput((type, code, key, keyCode, location) =>
+    rackMgr.get(_kbdTargetConsoleId)?.sendInput(type, code, key, keyCode, location));
   c64kbd.object3d.visible = false;
   scene.addObject(c64kbd.object3d);
-  window.__c64kbd = c64kbd; // debug hook
+  window.__c64kbd = c64kbd; // legacy debug hook
+  window.__kbd     = c64kbd; // canonical debug hook
 
   grabMgr = new GrabMgr({
     scene: scene.scene,
@@ -1257,6 +1403,10 @@ async function buildCartridgeWorld() {
   // The default gamepad (player 1) gets its grabbable controller patch-cord plug,
   // seated in console0's port-0 jack. New gamepads get theirs in addProp.
   addControllerPlug(gamepadObj);
+  // The primary keyboard gets its grabbable plug and auto-connects to the primary
+  // console (like the default gamepad auto-plugs into port 0).
+  addKeyboardPlug(c64kbd?.object3d);
+  connectKeyboardTo(CONSOLE_ID);
   // Item 6 — the primary console + every TV become repositionable in Move mode.
   registerMovableProp(consoleObj, 'console');
   for (const tv of scene._tvs) registerMovableProp(tv.group, 'tv');
@@ -1283,6 +1433,11 @@ async function buildCartridgeWorld() {
   window.__grab = grabMgr;
   window.__cable = cable; // debug: inspect port↔player↔gamepad assignments
   window.__rackMgr = rackMgr; // debug: inspect/spawn consoles + budget headlessly
+  // Keyboard debug hooks — exposed here (before buildMemoryCards await) so
+  // headless probes can reach them even when the later stall is slow.
+  window.__kbd        = c64kbd;
+  window.__kbdConnect = (consoleId) => connectKeyboardTo(consoleId);
+  window.__kbdTarget  = () => _kbdTargetConsoleId;
   // Phase 3 multi-TV hook: spawn a second console+TV and route video headlessly.
   // Usage: await window.__rack.spawn('nes'); window.__rack.tvs() → [{id,source}]
   window.__rack = {
@@ -1426,7 +1581,7 @@ async function buildCartridgeWorld() {
       rom: { source: 'pick' },
     };
     // Boot the ROM (same as romInput handler — uses the in-hand buffer).
-    await client.start(emuCanvas, buf, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style });
+    await client.start(emuCanvas, buf, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style, contentExt: extOf(name), coreOptions: coreInfo.coreOptions });
     primaryRuntime.noteLoaded(coreInfo.name, { system: meta.system, title });
     currentCore = coreInfo.name;
     currentMeta = { core: coreInfo.name, file: meta.file, title, system: meta.system };
@@ -1452,6 +1607,7 @@ async function buildCartridgeWorld() {
     shelf:    (col) => addProp('shelf',    col ? { collection: col } : {}),
     console:  ()    => addProp('console'),
     gamepad:  ()    => addProp('gamepad'),
+    keyboard: ()    => addProp('keyboard'),
     poster:   ()    => addProp('poster'),
     bookcase: (col) => addProp('bookcase', col ? { collection: col } : {}),
     cupboard: ()    => addProp('cupboard'),
@@ -1713,6 +1869,7 @@ async function buildCartridgeWorld() {
             // If poster texture changed, re-apply it.
             if (value.type === 'poster' && value.texture !== undefined && rec.prop.texture !== value.texture) {
               rec.prop.texture = value.texture;
+              if (value.imageFile !== undefined) rec.prop.imageFile = value.imageFile; // FIX 3c receive
               reapplyPosterProp(rec);
             }
             _knownPropPayloads.set(propId, value);
@@ -1746,6 +1903,7 @@ async function buildCartridgeWorld() {
           _applyRemotePropTransform(rec.object, payload);
           if (payload.type === 'poster' && payload.texture !== undefined && rec.prop.texture !== payload.texture) {
             rec.prop.texture = payload.texture;
+            if (payload.imageFile !== undefined) rec.prop.imageFile = payload.imageFile; // FIX 3c receive
             reapplyPosterProp(rec);
           }
           _knownPropPayloads.set(pid, payload);
@@ -1866,6 +2024,7 @@ async function buildCartridgeWorld() {
   scene.addTickCallback((dt) => grabMgr.tick(dt));
   scene.addTickCallback(() => syncControllerCords());
   scene.addTickCallback(() => syncVideoCords());
+  scene.addTickCallback(() => syncKeyboardCord());
   scene.addTickCallback(() => updateFocus());
   scene.addTickCallback((dt) => locomotion.tick(dt));
   scene.addTickCallback(() => gameInput.tick());
@@ -1920,6 +2079,30 @@ async function buildCartridgeWorld() {
   window.__locomotion = locomotion;
   window.__gameInput = gameInput;
   window.__room = room;
+
+  // FIX 3d: Fire-and-forget load-time re-resolution of imageFile poster props.
+  // Blob: URLs die on reload; if a poster has imageFile set, re-resolve it from
+  // the granted images folder (if any). Silently skip if the folder isn't granted
+  // or the file isn't found — the poster keeps its saved flat colour.
+  (async () => {
+    const posterRecs = [..._syncedProps.values()].filter(
+      (r) => r.prop.type === 'poster' && r.prop.imageFile &&
+             (!r.prop.texture || r.prop.texture.startsWith('blob:')),
+    );
+    if (!posterRecs.length) return;
+    let images;
+    try { images = await listImages(); } catch { return; }
+    if (!images.length) return;
+    for (const rec of posterRecs) {
+      const entry = images.find((e) => e.name === rec.prop.imageFile);
+      if (!entry) continue;
+      try {
+        const url = await entryObjectUrl(entry);
+        rec.prop.texture = url;
+        reapplyPosterProp(rec);
+      } catch { /* silently skip */ }
+    }
+  })();
 
   // After everything's built, see if we're resuming a cross-system swap.
   await resumePendingLoad();
@@ -2069,6 +2252,17 @@ function addProp(type, opts = {}) {
     return prop;
   }
 
+  // A new keyboard prop: wire sendInput to the primary console (or nearest if
+  // a consoleId is given in opts), make it editable-grabbable in edit mode.
+  if (r.kind === 'keyboard') {
+    const targetId = opts.consoleId || _kbdTargetConsoleId || CONSOLE_ID;
+    if (r.keyboard) {
+      r.keyboard.setSendInput((type, code, key, keyCode, location) =>
+        rackMgr.get(targetId)?.sendInput(type, code, key, keyCode, location));
+    }
+    // Fall through to the normal ensureEditMode / broadcast path below.
+  }
+
   ensureEditMode();
   setStatus(`added ${type} — grab to place`);
 
@@ -2180,6 +2374,9 @@ function cycleAllPosters() {
   let last;
   for (const { prop, object } of roomPosters) {
     last = cyclePosterTexture(prop);
+    // FIX D: cycling to a built-in texture must clear imageFile so a reload
+    // re-resolution doesn't override the user's chosen built-in art.
+    delete prop.imageFile;
     applyPosterTexture(object.material, prop.texture);
   }
   setStatus(`All posters: ${short(last)}`);
@@ -2230,7 +2427,7 @@ function rebuildBookcase(rec) {
     const count = Math.min(remaining, MAX_ROW);
     const startX = -(count - 1) * SLOT / 2;
     for (let i = 0; i < count; i++) {
-      const cart = createCartridge(games[gameIdx++]);
+      const cart = createMedia(games[gameIdx++]);
       cart.position.set(startX + i * SLOT, shelfY + CART_H / 2, 0);
       cart.quaternion.identity();
       cart.rotation.x = BACK_LEAN;
@@ -2252,6 +2449,9 @@ function cycleSelected() {
   const { prop, object } = rec;
   if (prop.type === 'poster') {
     const v = cyclePosterTexture(prop);
+    // FIX D: cycling to a built-in texture must clear imageFile so reload
+    // re-resolution doesn't override the user's chosen built-in art.
+    delete prop.imageFile;
     applyPosterTexture(object.material, prop.texture);
     setStatus(`Poster art: ${short(v)}`);
   } else if (prop.type === 'shelf') {
@@ -2576,6 +2776,7 @@ function buildMenuAndControlsPanel() {
       return;
     }
     rec.prop.texture = entry._objUrl;
+    rec.prop.imageFile = entry.name; // FIX 3a: persist source filename for reload re-resolution
     reapplyPosterProp(rec);
     setStatus(`Poster: ${entry.name}`);
   }
@@ -3035,7 +3236,7 @@ async function loadCartridge(meta, { echo = true } = {}) {
     const core = CORES[meta.core];
     if (!core) throw new Error(`no core registered as "${meta.core}"`);
     logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url });
-    await client.start(emuCanvas, buf, { coreUrl: core.url, coreName: meta.core, moduleStyle: core.style });
+    await client.start(emuCanvas, buf, { coreUrl: core.url, coreName: meta.core, moduleStyle: core.style, contentExt: extOf(meta.file), coreOptions: core.coreOptions });
     primaryRuntime.noteLoaded(meta.core, { system: meta.system, title: meta.title });
     currentCore = meta.core;
     currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system };
@@ -3044,10 +3245,16 @@ async function loadCartridge(meta, { echo = true } = {}) {
     consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
     setSystemLabel(meta.core);
     updateControlsPanel();
-    // Auto show/hide the C64 keyboard based on system. Manual override is
-    // cleared at every boot so the auto state takes effect again from here.
+    // Auto show/hide the keyboard and connect it to the booting console.
+    // Manual override is cleared at every boot so auto-state takes effect again.
+    _consoleSystems.set(CONSOLE_ID, meta.system);
     _kbdManualOverride = false;
-    setKbdVisibility(meta.system === 'c64' || meta.system === 'vic20');
+    if (isKeyboardCapable(meta.system)) {
+      connectKeyboardTo(CONSOLE_ID);
+      setKbdVisibility(true);
+    } else {
+      setKbdVisibility(false);
+    }
     // Update the in-VR "Now Playing" panel so the user can see what's running.
     nowPlayingPanel?.userData.setNowPlaying({
       system:    meta.system,
@@ -3140,7 +3347,15 @@ async function buildMemoryCards() {
   // Restore previously-saved cards from IndexedDB and render 4 cards on a
   // wall-mounted rack to the user's right.
   let saved = [];
-  try { saved = await listStates(); } catch (e) { console.warn('[main] listStates failed:', e); }
+  // FIX 2: Race against a timeout so a stalled IndexedDB open (headless Chrome)
+  // can't wedge init and leave __locomotion/__gameInput undefined.
+  const MEMORY_CARD_TIMEOUT_MS = 2000;
+  try {
+    saved = await Promise.race([
+      listStates(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('listStates timeout')), MEMORY_CARD_TIMEOUT_MS)),
+    ]);
+  } catch (e) { console.warn('[main] listStates failed:', e); }
   const bySlot = new Map(saved.map((s) => [s.slotId, s]));
 
   // Small plank mirroring the cartridge shelves but lower and shorter,
@@ -3328,7 +3543,7 @@ async function addLocalRomToShelf(meta) {
   }
 
   // Mint the cartridge and append it to the shelf (handles plank resize + homes).
-  const cart = createCartridge(meta);
+  const cart = createMedia(meta);
   addCartridgeToShelf(targetShelf, cart);
   cartridges.push(cart);
   grabMgr.addGrabbable(cart);
@@ -3378,7 +3593,7 @@ romInput.addEventListener('change', async (e) => {
   try {
     const buffer = await file.arrayBuffer();
     logger?.event?.('rom-picked', { file: meta.file, bytes: buffer?.byteLength ?? 0, core: coreInfo.name, coreUrl: coreInfo.url, opfs: opfsSupported() });
-    await client.start(emuCanvas, buffer, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style });
+    await client.start(emuCanvas, buffer, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style, contentExt: extOf(meta.file), coreOptions: coreInfo.coreOptions });
     primaryRuntime.noteLoaded(coreInfo.name, { system: meta.system, title });
     currentCore = coreInfo.name;
     currentMeta = { core: coreInfo.name, file: meta.file, title, system: meta.system };
@@ -3387,8 +3602,14 @@ romInput.addEventListener('change', async (e) => {
     setSystemLabel(coreInfo.name);
     updateControlsPanel();
     // Auto show/hide keyboard on local-file boot (same policy as loadCartridge).
+    _consoleSystems.set(CONSOLE_ID, meta.system);
     _kbdManualOverride = false;
-    setKbdVisibility(meta.system === 'c64' || meta.system === 'vic20');
+    if (isKeyboardCapable(meta.system)) {
+      connectKeyboardTo(CONSOLE_ID);
+      setKbdVisibility(true);
+    } else {
+      setKbdVisibility(false);
+    }
     nowPlayingPanel?.userData.setNowPlaying({
       system:    meta.system,
       coreLabel: coreInfo.label,
@@ -3567,7 +3788,7 @@ function reapplyPosterProp(rec) {
   });
 }
 
-function applyCustomPosterSource(src) {
+function applyCustomPosterSource(src, fileName) {
   // Resolve the currently-selected poster prop.
   const rec = editor?.selectedProp?.();
   if (!rec) { setStatus('Set Poster: enter Change mode and select a poster first'); return; }
@@ -3575,6 +3796,14 @@ function applyCustomPosterSource(src) {
 
   // Write the source into the descriptor so it survives Export + auto-load.
   rec.prop.texture = src;
+  // FIX 3b: store the source filename for blob: URLs so load-time re-resolution
+  // can recover a fresh object URL after reload. Only set for blob sources that
+  // die on reload; http/data URLs survive natively and need no filename.
+  if (fileName && src.startsWith('blob:')) {
+    rec.prop.imageFile = fileName;
+  } else if (!fileName) {
+    delete rec.prop.imageFile; // URL entered manually — clear stale imageFile
+  }
   // Apply immediately to the live mesh material (same path as in-VR cycle),
   // honouring the prop's current fit mode and scale.
   reapplyPosterProp(rec);
@@ -3598,7 +3827,7 @@ if (setPosterBtn && posterImgInput) {
       posterImgInput.value = ''; // reset
       // Create an object URL so THREE.TextureLoader can load it by URL.
       const objUrl = URL.createObjectURL(file);
-      applyCustomPosterSource(objUrl);
+      applyCustomPosterSource(objUrl, file.name); // FIX 3b: thread filename for re-resolution
     };
     // One-shot listener — remove after use so repeated clicks don't stack.
     posterImgInput.addEventListener('change', onFile, { once: true });

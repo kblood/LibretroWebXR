@@ -11,10 +11,11 @@
 // so this is a thin declarative front-end, not a rewrite. See ROADMAP Phase R.
 
 import * as THREE from 'three';
-import { createCartridge } from './Cartridge.js';
+import { createMedia } from './Media.js';
 import { createShelf, lockShelfHomes } from './Shelf.js';
 import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
+import { createKeyboardDevice } from './Keyboard.js';
 import {
   createBookcase, createCupboard, createTable,
   bookcaseShelfSurfaceYs, BOOKCASE_W, BOOKCASE_T,
@@ -252,7 +253,7 @@ function buildBookcaseCarts(bookcaseGroup, games) {
     const startX = -(count - 1) * SLOT / 2;
 
     for (let i = 0; i < count; i++) {
-      const cart = createCartridge(games[gameIdx++]);
+      const cart = createMedia(games[gameIdx++]);
       cart.position.set(
         startX + i * SLOT,
         shelfY + CART_H / 2,  // sit upright on the shelf surface
@@ -296,7 +297,7 @@ export function lockBookcaseHomes(bookcaseGroup) {
 export function buildProp(prop, { scene, collections }) {
   switch (prop.type) {
     case 'shelf': {
-      const carts = gamesForShelf(prop, collections).map((m) => createCartridge(m));
+      const carts = gamesForShelf(prop, collections).map((m) => createMedia(m));
       if (!carts.length) return null; // skip empty halves / empty collections
       const shelf = createShelf(carts, { position: v3(prop.pos), rotationY: prop.rot[1] * DEG });
       shelf.userData.kind = 'shelf'; // createShelf sets none; editor identifies by this
@@ -347,6 +348,18 @@ export function buildProp(prop, { scene, collections }) {
       applyRot(obj, prop.rot); // honour full XYZ rotation (rotationY already set; this re-applies all three)
       scene.addObject(obj);
       return { object: obj, kind: prop.type };
+    }
+    case 'keyboard': {
+      // Physical keyboard device prop. sendInput is wired later by main.js via
+      // the returned `keyboard` instance (.setSendInput(fn)). Layout defaults
+      // to 'standard' but can be overridden by prop.layout in the descriptor.
+      const kbd = createKeyboardDevice({
+        position:  v3(prop.pos),
+        rotationY: prop.rot[1] * DEG,
+        layout:    prop.layout || 'standard',
+      });
+      scene.addObject(kbd.object3d);
+      return { object: kbd.object3d, kind: 'keyboard', keyboard: kbd };
     }
     case 'tv':
       scene.applyTv?.(prop);

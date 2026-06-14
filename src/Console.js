@@ -182,6 +182,27 @@ export function createConsole({ position = new THREE.Vector3(0, 0.74, -2.4) } = 
   group.add(videoOut);
   group.userData.videoOutAnchor = videoOut;
 
+  // Keyboard DIN jack: back-left of the console body, where a keyboard plug
+  // snaps to route keystrokes to this console's emulator core. Visually a small
+  // recessed dark circle, consistent with the controller port jacks but placed
+  // on the rear face. [[src/Patchbay.js]] plugKeyboard/keyboardOf track the edge;
+  // [[src/GrabMgr.js]] uses keyboardJack (world anchor) + keyboardJackRadius as
+  // the snap target for plugKind === 'keyboard'.
+  const kbdJackSocket = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.014, 0.014, 0.006, 10),
+    new THREE.MeshStandardMaterial({ color: 0x080808, roughness: 0.9 }),
+  );
+  kbdJackSocket.rotation.x = Math.PI / 2;   // face backward (−Z direction)
+  kbdJackSocket.position.set(-CON_W / 2 + 0.04, 0, -CON_D / 2 - 0.001);
+  group.add(kbdJackSocket);
+
+  // World-space anchor a plug cord attaches INTO (the back-left of the rear face).
+  const kbdJack = new THREE.Object3D();
+  kbdJack.position.set(-CON_W / 2 + 0.04, 0, -CON_D / 2 - 0.006);
+  group.add(kbdJack);
+  group.userData.keyboardJack = kbdJack;
+  group.userData.keyboardJackRadius = 0.19;  // plug acceptance radius (metres)
+
   return group;
 }
 

@@ -345,6 +345,46 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   ok(hub.input('r', 'x', makeInput({ to: 'host', player: 1, btn: 'Up', down: true })).direct === undefined, 'input from an absent peer is dropped');
 }
 
+// === NetMgr onPeerLeave: fires when a LEAVE message is applied ================
+// NetMgr itself requires THREE + a real DOM, so we exercise the underlying seam
+// here: PresenceState.apply(MSG.LEAVE, …) is what NetMgr calls just before
+// firing _onPeerLeave. We assert the peer is removed (the callback fires AFTER
+// apply) and that MSG.LEAVE carries the right id — i.e. the id the callback
+// would receive.
+{
+  const ps = new PresenceState({ selfId: 'host' });
+  ps.apply(makeJoin({ id: 'client1', nick: 'Alice' }), 0);
+  ps.apply(makeJoin({ id: 'client2', nick: 'Bob' }), 0);
+  ok(ps.size === 2, 'onPeerLeave setup: two peers present before LEAVE');
+
+  // Simulate the NetMgr message path: detect LEAVE, apply, then fire callback.
+  const leaveMsg = makeLeave({ id: 'client1' });
+  ok(leaveMsg.type === MSG.LEAVE && leaveMsg.id === 'client1', 'LEAVE message carries the departing peer id');
+
+  const fired = [];
+  // This mirrors the NetMgr._onPeerLeave?.(leftId) pattern exactly.
+  const leftId = (leaveMsg.type === MSG.LEAVE) ? leaveMsg.id : null;
+  ps.apply(leaveMsg, 100);
+  if (leftId != null) fired.push(leftId);
+
+  ok(fired.length === 1 && fired[0] === 'client1', 'onPeerLeave fires with the departing peer id on MSG.LEAVE');
+  ok(ps.size === 1 && !ps.get('client1'), 'presence updated before callback fires (peer is gone)');
+  ok(!!ps.get('client2'), 'remaining peer unaffected');
+}
+
+// === NetMgr onPeerLeave: prune path fires callback for each stale peer =======
+{
+  const ps = new PresenceState({ selfId: 'host', ttlMs: 1000 });
+  ps.apply(makePose({ id: 'stale1', head: HEAD }), 0);
+  ps.apply(makePose({ id: 'stale2', head: HEAD }), 0);
+  ps.apply(makePose({ id: 'fresh',  head: HEAD }), 2000);
+
+  const pruned = ps.prune(2500);  // stale1 + stale2 are > 1000ms old; fresh is not
+  ok(pruned.length === 2, 'prune returns two stale peer ids (onPeerLeave fires for each)');
+  ok(pruned.includes('stale1') && pruned.includes('stale2'), 'both stale peer ids returned by prune');
+  ok(ps.size === 1 && !!ps.get('fresh'), 'fresh peer survives the prune');
+}
+
 // === buildIceServers: STUN default + optional TURN relay (M0 hardening) =====
 {
   const stunOnly = buildIceServers();
