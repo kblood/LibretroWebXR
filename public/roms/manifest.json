@@ -35,6 +35,9 @@
       "license": "CC0", "credits": "LibretroWebXR (game in games/gba-paint, built with devkitARM + libtonc Mode 3; see scripts/make-gba-paint.mjs)" },
 
     { "file": "freeware/lwx-vb-demo.vb", "system": "vb", "core": "mednafen_vb", "title": "LWX VB Demo", "color": "#aa1a1a",
-      "license": "CC0", "credits": "LibretroWebXR (game in games/vb-demo, built with VUEngine ves-v0.6.0; see scripts/make-vb-demo.mjs). Move a box with the D-pad; A/B change stereo depth." }
+      "license": "CC0", "credits": "LibretroWebXR (game in games/vb-demo, built with VUEngine ves-v0.6.0; see scripts/make-vb-demo.mjs). Move a box with the D-pad; A/B change stereo depth." },
+
+    { "file": "freeware/lwx-amiga-demo.adf", "system": "amiga", "core": "puae", "title": "LWX Amiga Demo", "color": "#0a3a6a",
+      "license": "CC0", "credits": "LibretroWebXR (boot-block 68k intro in scripts/amiga-bootblock.s, packed by scripts/make-amiga-demo.mjs). Boots on PUAE's built-in AROS; cycles the background colour." }
   ]
 }
