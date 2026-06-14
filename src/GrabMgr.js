@@ -29,7 +29,7 @@ const LASER_IDLE = 0x88aaff;
 const LASER_HOVER = 0xffd060;
 
 export class GrabMgr {
-  constructor({ scene, controllers, console: consoleObj, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, onPlugReleased, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, getRoomBounds, isPreviewEnabled }) {
+  constructor({ scene, controllers, console: consoleObj, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, onPlugReleased, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, onGamepadGrabbed, onGamepadReleased, isRemotelyHeld, getRoomBounds, isPreviewEnabled }) {
     this.scene = scene;
     this.controllers = controllers;
     this.console = consoleObj;
@@ -61,6 +61,15 @@ export class GrabMgr {
     // (cartObject, hand) where hand is 'left'|'right'|null (null = desktop).
     this.onCartridgeGrabbed = onCartridgeGrabbed || (() => {});
     this.onCartridgeReleased = onCartridgeReleased || (() => {});
+    // Shared-gamepad sync: fired when we grab/release a shared gamepad so
+    // main.js can broadcast the hold to peers (locking it from their grab).
+    // onGamepadGrabbed gets (gamepadObject, hand); onGamepadReleased gets (gamepadObject).
+    this.onGamepadGrabbed = onGamepadGrabbed || (() => {});
+    this.onGamepadReleased = onGamepadReleased || (() => {});
+    // isRemotelyHeld(obj): returns true when a gamepad is held by a remote peer
+    // (supplied by main.js from GhostGamepadMgr). When true the gamepad is NOT
+    // grabbable locally. No-op when null (single-player or pre-net).
+    this._isRemotelyHeld = isRemotelyHeld || (() => false);
     // Placement preview: getRoomBounds() supplies the room extents (from SceneMgr);
     // isPreviewEnabled() gates whether the ghost box is shown while dragging.
     this._getRoomBounds = getRoomBounds || null;
@@ -266,8 +275,10 @@ export class GrabMgr {
     let n = hits[0].object;
     while (n && !candidates.includes(n)) n = n.parent;
     if (!n) return null;
-    // Skip if another controller is already holding it.
+    // Skip if another controller is already holding it locally.
     for (const o of this.held.values()) if (o === n) return null;
+    // Skip if a remote peer is holding this gamepad (exclusive network lock).
+    if (n.userData?.kind === 'gamepad' && this._isRemotelyHeld(n.userData?.cableId)) return null;
     return n;
   }
 
@@ -280,6 +291,8 @@ export class GrabMgr {
       let busy = false;
       for (const o of this.held.values()) if (o === obj) { busy = true; break; }
       if (busy) continue;
+      // Skip if a remote peer holds this gamepad (exclusive network lock).
+      if (obj.userData?.kind === 'gamepad' && this._isRemotelyHeld(obj.userData?.cableId)) continue;
       const p = new THREE.Vector3();
       obj.getWorldPosition(p);
       const d = p.distanceTo(this._origin);
@@ -317,6 +330,8 @@ export class GrabMgr {
       // your hand. Repatch by dropping it near a different port (release path).
       target.userData.setHeld?.(true);
       this.onGamepadHeldChanged(true);
+      // Shared-gamepad sync: broadcast the grab so remote peers lock this pad.
+      this.onGamepadGrabbed(target, this._handFor(ctrl));
     } else if (target.userData?.kind === 'cartridge') {
       this.onCartridgeGrabbed(target, this._handFor(ctrl));
     }
@@ -375,6 +390,8 @@ export class GrabMgr {
       obj.userData.setHeld?.(false);
       this.onGamepadHeldChanged(false);
     }
+    // Shared-gamepad sync: clear our hold so peers can grab this pad again.
+    if (kind === 'gamepad') this.onGamepadReleased(obj);
 
     // Held-object sync: a cartridge is no longer in hand (it snapped home, was
     // inserted, or was left in place) — clear our hold so peers drop the ghost.

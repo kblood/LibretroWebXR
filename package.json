@@ -18,7 +18,7 @@
     "make-snes-demo": "node scripts/make-snes-demo.mjs",
     "make-gba-paint": "node scripts/make-gba-paint.mjs",
     "make-vb-demo": "node scripts/make-vb-demo.mjs",
-    "test": "node scripts/test-collection.mjs && node scripts/test-multiplayer.mjs && node scripts/test-net.mjs && node scripts/test-logger.mjs && node scripts/test-c64.mjs && node scripts/test-placement.mjs && node scripts/test-session.mjs && node scripts/test-imagelibrary.mjs && node scripts/test-cord.mjs && node scripts/test-patchbay.mjs && node scripts/test-rackbudget.mjs && node scripts/test-rackmgr.mjs && node scripts/test-snap.mjs && node scripts/test-rackpersistence.mjs && node scripts/test-routing.mjs && node scripts/test-gameinput.mjs && node scripts/test-romresolver.mjs",
+    "test": "node scripts/test-collection.mjs && node scripts/test-multiplayer.mjs && node scripts/test-net.mjs && node scripts/test-logger.mjs && node scripts/test-c64.mjs && node scripts/test-placement.mjs && node scripts/test-session.mjs && node scripts/test-imagelibrary.mjs && node scripts/test-cord.mjs && node scripts/test-patchbay.mjs && node scripts/test-rackbudget.mjs && node scripts/test-rackmgr.mjs && node scripts/test-snap.mjs && node scripts/test-rackpersistence.mjs && node scripts/test-routing.mjs && node scripts/test-gameinput.mjs && node scripts/test-romresolver.mjs && node scripts/test-gamepad-share.mjs && node scripts/test-gamepad-sync.mjs",
     "debug": "node scripts/debug.js",
     "smoke-room": "node server/smoke.mjs",
     "smoke-presence": "node scripts/smoke-presence.mjs",
@@ -29,6 +29,7 @@
     "smoke-gamesync": "node scripts/smoke-gamesync.mjs",
     "smoke-video": "node scripts/smoke-video.mjs",
     "smoke-log": "node scripts/smoke-log.mjs",
+    "smoke-gamepad-share": "node scripts/smoke-gamepad-share.mjs",
     "deploy": "pwsh scripts/deploy.ps1",
     "dummy-player": "node scripts/dummy-player.mjs"
   },

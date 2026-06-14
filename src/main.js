@@ -38,7 +38,12 @@ import { NetMgr } from './net/NetMgr.js';
 import { buildIceServers } from './net/NetProtocol.js';
 import { sanitiseRoom, randomRoomSuffix } from './net/SessionUtils.js';
 import { GhostCartMgr } from './GhostCartMgr.js';
+import { GhostGamepadMgr, makeGamepadHoldKey, isGamepadHoldKey, cableIdFromHoldKey } from './GhostGamepadMgr.js';
 import { makeHoldKey, parseHolds } from './net/HoldState.js';
+import {
+  makeGamepadStateKey, isGamepadStateKey, cableIdFromStateKey,
+  makePeerGamepadId, parseGamepadEntries, diffGamepadSync,
+} from './net/GamepadSync.js';
 import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, cacheRom, pickLibraryDirectory, fileSystemAccessSupported, resolutionPlan, opfsSupported } from './RomResolver.js';
 import {
@@ -136,6 +141,14 @@ window.__client = client;
 // The module-level tick callback always runs (added once below); it no-ops
 // when `net` is null so the solo experience is completely unchanged.
 let net = null;
+// Shared-gamepad ghost renderer (non-null only while in a session).
+let ghostGpMgr = null;
+// Gamepad existence reconciler: replaced by the real function once
+// buildCartridgeWorld runs and the gamepad-building pieces are ready.
+// Called whenever a `gamepad:*` STATE key arrives (including late-join snapshot).
+let _reconcileGamepadState = () => {};
+// Per-peer counter for generating globally-unique gamepad ids.
+let _peerGamepadCounter = 0;
 
 // TURN/ICE config is fixed from URL params at startup (same as before). We
 // don't expose a UI for it because it's an infrastructure detail; operators
@@ -174,7 +187,10 @@ function connectToRoom(room, nick, color) {
     color,
     iceServers: _iceServers,
     // M0.5 room-object sync: reflect a remote peer's shared state into our scene.
-    onObjectState: (key, value) => { if (key === 'tv') applyRemoteTv(value); },
+    onObjectState: (key, value) => {
+      if (key === 'tv') applyRemoteTv(value);
+      if (isGamepadStateKey(key)) _reconcileGamepadState();
+    },
     // M1.1 host-authoritative input: inject remote buttons only when we are host.
     onGameInput: (ev) => { if (net?.isHost()) gameInput?.setRemoteButton(ev); },
     // M1.2 host video: paint the host's frames on the TV; pause our core while
@@ -1087,6 +1103,21 @@ async function buildCartridgeWorld() {
     onCartridgeReleased: (cart) => {
       if (net) net.setObjectState(makeHoldKey(cart.userData.file), null);
     },
+    // Shared-gamepad sync: announce/clear which gamepad we're holding so remote
+    // peers see it locked and show a ghost in our avatar's hand.
+    onGamepadGrabbed: (gp, hand) => {
+      const id = net?.presence?.selfId;
+      const cableId = gp.userData?.cableId;
+      if (net && id && cableId) net.setObjectState(makeGamepadHoldKey(cableId), { holder: id, hand });
+    },
+    onGamepadReleased: (gp) => {
+      const cableId = gp.userData?.cableId;
+      if (net && cableId) net.setObjectState(makeGamepadHoldKey(cableId), null);
+    },
+    // Remote-hold lock: refuse grab of a gamepad currently held by a remote peer.
+    // ghostGpMgr is set up just after GrabMgr in this function, so the reference
+    // is captured as a closure — at grab-time it is non-null whenever net is active.
+    isRemotelyHeld: (cableId) => ghostGpMgr?.isRemotelyHeld(cableId) || false,
     // Placement preview: supply live room bounds so the ghost can compute the
     // snapped drop location each frame. isPreviewEnabled() reads the editor's
     // surfaceSnap flag — the ghost is only shown when surface-snap is ON.
@@ -1164,6 +1195,55 @@ async function buildCartridgeWorld() {
     // which console+port each gamepad drives (null = unplugged → drives nothing).
     seats: () => [...controllerPlugs.keys()].map((cableId) => ({ cableId, seat: cable.portOf(cableId) })),
     routing: () => computeRouting().map((r) => ({ consoleId: r.consoleId, player: r.player, hand: r.hand })),
+    // Shared-gamepad debug: list all shared gamepads with their port, player,
+    // and who holds them. heldBy is null when free, peerId when held remotely,
+    // 'self' when held locally.
+    gamepads: () => [..._gamepadObjs.entries()].map(([cableId, obj]) => {
+      const seat = cable.portOf(cableId);
+      const remoteHolder = ghostGpMgr?.heldBy(cableId) || null;
+      let heldBy = null;
+      if (remoteHolder) {
+        heldBy = remoteHolder;
+      } else {
+        // Check if WE are holding it locally.
+        for (const held of (grabMgr?.held?.values() || [])) {
+          if (held === obj) { heldBy = 'self'; break; }
+        }
+      }
+      return {
+        cableId,
+        port: seat?.port ?? null,
+        player: seat ? (seat.port + 1) : null,
+        heldBy,
+      };
+    }),
+    // Headless: programmatically grab a gamepad by cableId (as if a VR
+    // controller's squeeze fired). Simulates the net broadcast + lock.
+    // Returns true if grabbed, false if already held or not found.
+    grabGamepad: (cableId) => {
+      const gpObj = _gamepadObjs.get(cableId);
+      if (!gpObj) return false;
+      if (ghostGpMgr?.isRemotelyHeld(cableId)) return false; // locked
+      // Simulate the broadcast directly (no real XR controller here).
+      const id = net?.presence?.selfId;
+      if (net && id) net.setObjectState(makeGamepadHoldKey(cableId), { holder: id, hand: 'right' });
+      return true;
+    },
+    // Headless: release a locally-held gamepad (clear the hold state).
+    releaseGamepad: (cableId) => {
+      if (net && cableId) net.setObjectState(makeGamepadHoldKey(cableId), null);
+      return true;
+    },
+    // Headless: spawn a new shared gamepad (same as the Add-menu button).
+    // In a session, broadcasts its existence to peers. Returns the cableId.
+    spawnGamepad: () => {
+      const prop = addProp('gamepad');
+      if (!prop) return null;
+      // addProp → registerGamepad assigns the cableId; find it from _gamepadObjs.
+      // The last registered entry is the newly spawned one.
+      const entries = [..._gamepadObjs.entries()];
+      return entries[entries.length - 1]?.[0] || null;
+    },
     // plugCtrl moves a gamepad's controller plug onto a console's port jack and
     // releases it (exercising the real snap + rewire). console-less call (null
     // console) drops it in mid-air → unplug. Returns the resulting seats.
@@ -1239,6 +1319,97 @@ async function buildCartridgeWorld() {
       hidden: () => ghostMgr.hiddenCount,
       has: (file) => ghostMgr.hasGhost(file),
     };
+
+    // Shared-gamepad sync: show a ghost gamepad in the remote holder's hand and
+    // lock the local gamepad from being grabbed while it's held remotely.
+    // Uses the `hold:gp:<cableId>` STATE namespace (same Hub auto-clear as cart holds).
+    ghostGpMgr = new GhostGamepadMgr({ avatars: net.avatars, gamepadObjs: _gamepadObjs });
+    scene.addTickCallback(() => {
+      const presentIds = new Set(net.presence.peers().map((p) => p.id));
+      // Filter entries to only gamepad holds (hold:gp:*) and parse them.
+      const gpEntries = net.objects.entries().filter(([k]) => isGamepadHoldKey(k));
+      // Remap objId from 'gp:<cableId>' to just '<cableId>' for GhostGamepadMgr.
+      const gpHolds = parseHolds(gpEntries, { selfId: net.presence.selfId, presentIds })
+        .map((h) => ({ ...h, objId: cableIdFromHoldKey(`hold:${h.objId}`) || h.objId }));
+      ghostGpMgr.sync(gpHolds);
+    });
+    window.__ghostGp = {
+      count: () => ghostGpMgr.ghostCount,
+      hidden: () => ghostGpMgr.hiddenCount,
+      has: (cableId) => ghostGpMgr.hasGhost(cableId),
+      isHidden: (cableId) => ghostGpMgr.isHidden(cableId),
+      heldBy: (cableId) => ghostGpMgr.heldBy(cableId),
+      isRemotelyHeld: (cableId) => ghostGpMgr.isRemotelyHeld(cableId),
+    };
+
+    // GAP 1 — Gamepad existence sync: when any peer spawns a gamepad via the
+    // Add menu it broadcasts `gamepad:<id>` → { port }. Every peer (including
+    // late joiners who receive the state snapshot from the server) reconciles:
+    // create any gamepad it doesn't know about yet, and remove ones cleared
+    // (e.g. when the spawner disconnects — Hub clears `gamepad:` keys).
+    // The DEFAULT gamepad (gp-1) is ALWAYS local and never in the broadcast set.
+    const DEFAULT_GAMEPAD_IDS = new Set(['gp-1']);
+
+    // Create a peer-spawned gamepad locally from a state entry (called by the
+    // reconciler when we see an id we don't have yet). `port` is the port the
+    // spawner chose — we honour it so all peers agree on the player number.
+    function _createRemoteGamepad(cableId, port) {
+      if (_gamepadObjs.has(cableId)) return; // already exists
+      // Build at port position if possible, else a default spot.
+      const cu = consoleObj?.userData;
+      let pos = new THREE.Vector3(0.55, 0.78, -2.0);
+      const anchor = (cu?.portAnchors && port >= 0) ? cu.portAnchors[port] : null;
+      if (anchor) {
+        anchor.getWorldPosition(pos);
+        pos.y += 0.01; // sit just above the port
+      }
+      const gpObj = createGamepad({ position: pos });
+      gpObj.userData.cableId = cableId;
+      scene.addObject(gpObj);
+      registerGamepad(gpObj);
+      grabMgr?.addGrabbable(gpObj);
+      // Plug into the stated port — honour the spawner's assignment.
+      if (port >= 0) cable.plugController(cableId, CONSOLE_ID, port);
+      addControllerPlug(gpObj);
+    }
+
+    // Remove a peer-spawned gamepad (state cleared, e.g. spawner disconnected).
+    function _removeRemoteGamepad(cableId) {
+      const gpObj = _gamepadObjs.get(cableId);
+      if (!gpObj) return;
+      // Release grab if anyone is holding it.
+      if (grabMgr) {
+        for (const [ctrl, obj] of [...grabMgr.held]) {
+          if (obj === gpObj) {
+            grabMgr.held.delete(ctrl);
+            scene.scene.attach(gpObj);
+          }
+        }
+      }
+      grabMgr?.removeGrabbable(gpObj);
+      cable.unplugController(cableId);
+      controllerPlugs.get(cableId)?.plug?.group && scene.scene.remove(controllerPlugs.get(cableId).plug.group);
+      controllerPlugs.get(cableId)?.cord?.mesh && scene.scene.remove(controllerPlugs.get(cableId).cord.mesh);
+      controllerPlugs.delete(cableId);
+      scene.removeObject(gpObj);
+      _gamepadObjs.delete(cableId);
+    }
+
+    // Install the real reconciler (replaces the no-op set at module level).
+    _reconcileGamepadState = () => {
+      const desired = parseGamepadEntries(net.objects.entries());
+      const { toAdd, toRemove } = diffGamepadSync({
+        desired,
+        localIds: [..._gamepadObjs.keys()],
+        defaultIds: DEFAULT_GAMEPAD_IDS,
+      });
+      for (const { cableId, port } of toAdd) _createRemoteGamepad(cableId, port);
+      for (const cableId of toRemove) _removeRemoteGamepad(cableId);
+    };
+
+    // Run once immediately: catch any `gamepad:*` state that arrived before
+    // buildCartridgeWorld finished (e.g. late-join snapshot).
+    _reconcileGamepadState();
   }
 
   // Flat-screen controls: mouse-look + WASD + click-to-interact, so the in-VR
@@ -1485,12 +1656,26 @@ function addProp(type, opts = {}) {
   // auto-plug it into the next free port so one tap yields the next player.
   // It seats at the port (no placement step) rather than spawning mid-air.
   if (r.kind === 'gamepad') {
+    // In a session, assign a globally-unique cableId BEFORE registerGamepad
+    // so all peers agree on the id (and therefore the player number).
+    if (net) {
+      const selfId = net.presence.selfId || 'local';
+      r.object.userData.cableId = makePeerGamepadId(selfId, ++_peerGamepadCounter);
+    }
     registerGamepad(r.object);
     grabMgr.addGrabbable(r.object);
     const port = seatGamepadInFreePort(r.object);
     // Give the new pad its grabbable controller patch-cord plug (seated at the
     // port it just took, or dangling if none was free — repatch via the plug).
     addControllerPlug(r.object);
+    // In a session, broadcast this gamepad's existence so all peers create it
+    // too (with the same id and the same port→player mapping).
+    if (net && r.object.userData.cableId) {
+      net.setObjectState(
+        makeGamepadStateKey(r.object.userData.cableId),
+        { port: port ?? -1 },
+      );
+    }
     setStatus(port == null ? 'added gamepad (no free port — drag its plug to a port)' : `added gamepad → player ${port + 1}`);
     return prop;
   }

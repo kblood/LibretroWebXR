@@ -105,7 +105,10 @@ export class Hub {
     const state = this.roomState.get(roomId);
     if (state) {
       for (const [key, s] of [...state]) {
-        if (s.id === peerId && key.startsWith('hold:')) {
+        // Auto-clear owner-scoped ephemeral keys on disconnect:
+        //   hold:*    — held carts/gamepads (can't stay in a gone player's hand)
+        //   gamepad:* — dynamically-spawned gamepads (abandoned pads would pile up)
+        if (s.id === peerId && (key.startsWith('hold:') || key.startsWith('gamepad:'))) {
           state.delete(key);
           stateClears.push(makeState({ key, value: null, id: peerId }));
         }
