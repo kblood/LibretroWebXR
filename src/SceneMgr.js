@@ -388,6 +388,20 @@ export class SceneMgr {
     };
   }
 
+  /**
+   * Show/hide the four walls (and the ceiling) so a cramped room can be opened
+   * up — useful when arranging a multi-console rack or when spawned props would
+   * otherwise hide behind a wall. The floor stays visible. Returns the new state.
+   */
+  setWallsVisible(on) {
+    const vis = on !== false;
+    for (const mesh of Object.values(this._walls)) mesh.visible = vis;
+    if (this._ceiling) this._ceiling.visible = vis;
+    this._wallsVisible = vis;
+    return vis;
+  }
+  wallsVisible() { return this._wallsVisible !== false; }
+
   addObject(obj) {
     this.scene.add(obj);
   }

@@ -40,7 +40,7 @@ import { sanitiseRoom, randomRoomSuffix } from './net/SessionUtils.js';
 import { GhostCartMgr } from './GhostCartMgr.js';
 import { makeHoldKey, parseHolds } from './net/HoldState.js';
 import { loadCollection, parseCollection } from './Collection.js';
-import { resolve as resolveRom, cacheRom, pickLibraryDirectory, fileSystemAccessSupported } from './RomResolver.js';
+import { resolve as resolveRom, cacheRom, pickLibraryDirectory, fileSystemAccessSupported, resolutionPlan, opfsSupported } from './RomResolver.js';
 import {
   pickImagesDirectory, hasImagesDirectory, listImages, entryObjectUrl,
   fileSystemAccessSupported as imgFolderSupported,
@@ -61,7 +61,7 @@ import {
   addProp as appendProp, addPortal as appendPortal,
 } from './PropCreator.js';
 import {
-  clampToRoom, snapToSurface, SURFACE_KIND,
+  clampToRoom, snapToSurface, SURFACE_KIND, placeInRoom, fanSlot,
 } from './Placement.js';
 import { C64Keyboard } from './C64Keyboard.js';
 
@@ -507,6 +507,7 @@ function addVideoPlug(consoleId, tvId) {
 const _plugWorld = new THREE.Vector3();
 function handlePlugReleased(plugObj) {
   const ud = plugObj.userData || {};
+  if (ud.plugKind === 'controller') { handleControllerPlugReleased(plugObj); return; }
   if (ud.plugKind !== 'video') return;
   const consoleId = ud.sourceId;
   plugObj.getWorldPosition(_plugWorld);
@@ -543,6 +544,16 @@ function syncVideoCords() {
   }
 }
 
+// Item 6 — make a rack prop (TV cabinet / console) repositionable: register it
+// as an editable grabbable so it is inert during play but movable in the editor's
+// Move mode (released props keep their dropped pose, grid-snapped if grid is on).
+function registerMovableProp(obj, kind) {
+  if (!obj || !grabMgr) return;
+  if (!obj.userData.kind) obj.userData.kind = kind;
+  obj.userData.editable = true;
+  grabMgr.addGrabbable(obj);
+}
+
 // Phase 3 — spawn a SECOND (third, …) console end-to-end: its own
 // ConsoleRuntime (own canvas + EmulatorClient) booting a game for `system`,
 // its own TV in the scene, wired through the patch graph (console→TV video),
@@ -569,8 +580,15 @@ async function spawnConsole(system, opts = {}) {
   // Build this console's TV first so the audio branch can anchor on it, then
   // label the NEXT core's audio branch before booting it (the core's
   // `new AudioContext()` during load() lands in this branch).
-  const fanX = 2.6 + (n - 1) * 2.4;
-  const tv = scene.addTV({ id: tvId, position: [fanX, 1.5, -3.6] });
+  // Item 4 — room-aware placement: lay the console out in a row that STAYS
+  // INSIDE the room (fanSlot, [[src/Placement.js]]) instead of the old fixed
+  // fan-out that walked the 2nd+ console straight through the side wall. The TV
+  // sits above its console; clamp its (wider) cabinet so it can't clip the wall.
+  const bounds = scene.getRoomBounds();
+  const slot = fanSlot(n - 1, bounds, 'console', { z: -2.4 });
+  const TV_HALF_W = 1.2;                              // TV cabinet half-width + margin
+  const tvX = Math.max(bounds.minX + TV_HALF_W, Math.min(bounds.maxX - TV_HALF_W, slot.x));
+  const tv = scene.addTV({ id: tvId, position: [tvX, 1.5, -3.6] });
   audioRouter.expect(consoleId, tv.group);
   // CORES entries are keyed by name and carry no `name` field; ConsoleRuntime
   // wants { name, url, style }, so graft the key on.
@@ -585,11 +603,14 @@ async function spawnConsole(system, opts = {}) {
 
   // A physical console under its TV, plus its grabbable video-out plug seated in
   // the new TV's jack — so this console is repatchable like the primary.
-  const conObj = createConsole({ position: new THREE.Vector3(fanX, 0.74, -2.4) });
+  const conObj = createConsole({ position: new THREE.Vector3(slot.x, slot.y, slot.z) });
   scene.addObject(conObj);
   conObj.userData.setPorts?.(portsForSystem(meta.system));
   consoleObjs.set(consoleId, conObj);
   addVideoPlug(consoleId, tvId);
+  // Item 6 — the spawned console + its TV are repositionable in Move mode too.
+  registerMovableProp(conObj, 'console');
+  registerMovableProp(tv.group, 'tv');
   routeVideo();
 
   // Admit under the perf budget (may pause an over-budget core; focus stays live).
@@ -669,43 +690,107 @@ const registerGamepad = (obj) => {
   return obj;
 };
 
-// ── Controller cords ────────────────────────────────────────────────────────
-// A visible rope from each gamepad to the console jack it's plugged into, so the
-// controller↔port↔player wiring ([[src/Patchbay.js]]) is legible in VR. Pure
-// curve + tube live in [[src/Cord.js]]; here we keep one Cord per gamepad and
-// reshape it each frame from the gamepad's cord-exit anchor to its port's jack
-// anchor. Per-player colour so you can tell P1/P2/P3/P4 cords apart.
+// Per-player cord colour so you can tell P1/P2/P3/P4 controller cords apart.
 const PLAYER_CORD_COLORS = [0x33cc55, 0x3388ff, 0xffaa33, 0xcc55dd]; // P1..P4
-const cords = new Map(); // cableId -> Cord
 const _gamepadObjs = new Map(); // cableId -> gamepad Object3D (for cord endpoints)
 
 function cordColorForPlayer(player) {
   return PLAYER_CORD_COLORS[(player - 1) % PLAYER_CORD_COLORS.length];
 }
 
-// Reshape every cord from its gamepad to its plugged port's jack; hide the cord
-// for any unplugged gamepad. Cheap when nothing moved (Cord.update no-ops).
+// ── Controller patch cords (gamepad → console port) ─────────────────────────
+// Each gamepad has a grabbable plug ([[src/Plug.js]], plugKind 'controller') on
+// the end of its cord — the EmuVR repatch handle, the controller analogue of the
+// video plugs. Seating the plug in a console's port jack plugs that controller
+// into that console+port ([[src/Patchbay.js]] plugController); dropping it in
+// mid-air unplugs it. The cord ([[src/Cord.js]]) runs gamepad → plug each frame.
+// Works across ALL consoles in the rack (the snap searches every console's
+// jacks), which is what makes a second console actually controllable.
+const controllerPlugs = new Map(); // cableId -> { plug:Plug, cord:Cord }
 const _cordFrom = new THREE.Vector3();
 const _cordTo = new THREE.Vector3();
-function syncCords() {
-  const cu = consoleObj?.userData;
-  for (const [cableId, obj] of _gamepadObjs) {
-    const plug = cable.portOf(cableId);              // { consoleId, port } | null
-    let cord = cords.get(cableId);
-    if (!plug || !cu?.portJacks?.[plug.port]) {
-      cord?.setVisible(false);
-      continue;
+const _cpPos = new THREE.Vector3();
+const _cpQuat = new THREE.Quaternion();
+
+// Build the grabbable plug + cord for a gamepad and seat it at its current port.
+function addControllerPlug(gpObj) {
+  const cableId = gpObj?.userData?.cableId;
+  if (!cableId || controllerPlugs.has(cableId)) return;
+  const seat = cable.portOf(cableId);                // { consoleId, port } | null
+  const color = cordColorForPlayer((seat?.port ?? 0) + 1);
+  const plug = new Plug({ id: `cplug-${cableId}`, plugKind: 'controller', sourceId: cableId, color });
+  scene.addObject(plug.group);
+  grabMgr?.addGrabbable(plug.group);
+  const cord = new Cord({ color });
+  scene.addObject(cord.mesh);
+  controllerPlugs.set(cableId, { plug, cord });
+  seatControllerPlug(cableId);
+}
+
+// Snap a controller plug onto the jack of the port it's plugged into; if it's
+// unplugged, park it just above its gamepad so the loose cord reads clearly.
+function seatControllerPlug(cableId) {
+  const rec = controllerPlugs.get(cableId);
+  if (!rec) return;
+  const seat = cable.portOf(cableId);
+  const conObj = seat ? consoleObjs.get(seat.consoleId) : null;
+  const jack = conObj?.userData?.portJacks?.[seat?.port];
+  if (jack) {
+    jack.getWorldPosition(_cpPos);
+    jack.getWorldQuaternion(_cpQuat);
+    rec.plug.group.position.copy(_cpPos);
+    rec.plug.group.quaternion.copy(_cpQuat);
+  } else {
+    const gp = _gamepadObjs.get(cableId);
+    if (gp) {
+      (gp.userData.cordAnchor || gp).getWorldPosition(_cpPos);
+      rec.plug.group.position.copy(_cpPos);
+      rec.plug.group.position.y += 0.08;
     }
-    if (!cord) {
-      cord = new Cord({ color: cordColorForPlayer(plug.port + 1) });
-      scene.addObject(cord.mesh);
-      cords.set(cableId, cord);
+  }
+}
+
+// GrabMgr release handler for a controller plug: snap to the nearest free port
+// jack across EVERY console and re-plug, or unplug if dropped in mid-air.
+const _ctrlPlugWorld = new THREE.Vector3();
+function handleControllerPlugReleased(plugObj) {
+  const cableId = plugObj.userData?.sourceId;
+  if (!cableId) return;
+  plugObj.getWorldPosition(_ctrlPlugWorld);
+  const cur = cable.portOf(cableId);
+  const anchors = [];
+  const _j = new THREE.Vector3();
+  for (const [consoleId, conObj] of consoleObjs) {
+    const jacks = conObj.userData?.portJacks || [];
+    const active = conObj.userData?.activePorts ?? jacks.length;
+    for (let port = 0; port < jacks.length && port < active; port++) {
+      const free = cable.isPortFree(consoleId, port);
+      const mine = cur && cur.consoleId === consoleId && cur.port === port;
+      if (!free && !mine) continue;          // taken by another pad → skip
+      jacks[port].getWorldPosition(_j);
+      anchors.push({ id: `${consoleId}#${port}`, consoleId, port, x: _j.x, y: _j.y, z: _j.z });
     }
-    cord.setColor(cordColorForPlayer(plug.port + 1));
-    (obj.userData.cordAnchor || obj).getWorldPosition(_cordFrom);
-    cu.portJacks[plug.port].getWorldPosition(_cordTo);
-    cord.update(_cordFrom, _cordTo);
-    cord.setVisible(true);
+  }
+  const hit = nearestAnchor(
+    { x: _ctrlPlugWorld.x, y: _ctrlPlugWorld.y, z: _ctrlPlugWorld.z },
+    anchors, PLUG_SNAP_RADIUS,
+  );
+  if (hit) cable.plugController(cableId, hit.anchor.consoleId, hit.anchor.port);
+  else cable.unplugController(cableId);
+  seatControllerPlug(cableId);
+  gameInput?.flushReleases();               // drop keys held under the old seat
+  logger?.event?.('controller-repatch', { cableId, seat: hit ? hit.id : null });
+}
+
+// Reshape each controller cord from its gamepad to its plug every frame.
+function syncControllerCords() {
+  for (const [cableId, rec] of controllerPlugs) {
+    const gp = _gamepadObjs.get(cableId);
+    if (!gp) { rec.cord.setVisible(false); continue; }
+    (gp.userData.cordAnchor || gp).getWorldPosition(_cordFrom);
+    (rec.plug.cordAnchor || rec.plug.group).getWorldPosition(_cordTo);
+    rec.cord.update(_cordFrom, _cordTo);
+    rec.cord.setVisible(true);
   }
 }
 
@@ -721,7 +806,11 @@ function computeRouting() {
     controllers: scene.controllers,
     heldObject: (ctrl) => grabMgr.heldObject(ctrl),
     isControllerFree: (ctrl) => grabMgr.isControllerFree(ctrl),
-    playerOf: (cableId) => cable.playerOf(cableId)?.player ?? 1,
+    // Patchbay returns { consoleId, player } | null. null (an unplugged pad)
+    // now drives NOTHING — no silent fall-back to player 1, which is what made
+    // grabbing controller 2 still control gamepad 1. Console-aware: each entry
+    // carries consoleId so GameInputMgr dispatches to the right core.
+    playerOf: (cableId) => cable.playerOf(cableId),
   });
 }
 let debugHud = null;
@@ -975,8 +1064,9 @@ async function buildCartridgeWorld() {
       if (!held) gameInput.flushReleases();
     },
     // Plugging/unplugging a gamepad changes which player it drives; flush so a
-    // key held under the old assignment doesn't latch on the core.
-    onGamepadPlugged: () => gameInput?.flushReleases(),
+    // key held under the old assignment doesn't latch on the core. Also re-seat
+    // its patch-cord plug so the cord follows the body-seated pad to its port.
+    onGamepadPlugged: (gp) => { gameInput?.flushReleases(); seatControllerPlug(gp?.userData?.cableId); },
     // Patch-cord plug released → snap to nearest TV jack + repatch video.
     onPlugReleased: (plug) => handlePlugReleased(plug),
     onMemoryCardInserted: handleMemoryCardInserted,
@@ -1011,6 +1101,12 @@ async function buildCartridgeWorld() {
   // its physical Console so the video cord can anchor at its video-out.
   consoleObjs.set(CONSOLE_ID, consoleObj);
   addVideoPlug(CONSOLE_ID, PRIMARY_TV_ID);
+  // The default gamepad (player 1) gets its grabbable controller patch-cord plug,
+  // seated in console0's port-0 jack. New gamepads get theirs in addProp.
+  addControllerPlug(gamepadObj);
+  // Item 6 — the primary console + every TV become repositionable in Move mode.
+  registerMovableProp(consoleObj, 'console');
+  for (const tv of scene._tvs) registerMovableProp(tv.group, 'tv');
 
   // Phase 5 persistence: re-create any consoles the user spawned in a previous
   // session (survives the cross-core reload too). Best-effort, fire-and-forget.
@@ -1061,6 +1157,29 @@ async function buildCartridgeWorld() {
       rec.plug.group.position.set(0, 0.2, 0);   // mid-air, far from any jack
       handlePlugReleased(rec.plug.group);
       return window.__rack.video();
+    },
+    // Item 7 — toggle the room walls headlessly.
+    walls: (on) => (on === undefined ? scene.wallsVisible() : scene.setWallsVisible(on)),
+    // Items 2/3 — inspect + drive the CONTROLLER patch cords. seats() reports
+    // which console+port each gamepad drives (null = unplugged → drives nothing).
+    seats: () => [...controllerPlugs.keys()].map((cableId) => ({ cableId, seat: cable.portOf(cableId) })),
+    routing: () => computeRouting().map((r) => ({ consoleId: r.consoleId, player: r.player, hand: r.hand })),
+    // plugCtrl moves a gamepad's controller plug onto a console's port jack and
+    // releases it (exercising the real snap + rewire). console-less call (null
+    // console) drops it in mid-air → unplug. Returns the resulting seats.
+    plugCtrl: (cableId, consoleId, port = 0) => {
+      const rec = controllerPlugs.get(cableId);
+      if (!rec) return null;
+      if (consoleId) {
+        const jack = consoleObjs.get(consoleId)?.userData?.portJacks?.[port];
+        if (!jack) return null;
+        const p = new THREE.Vector3(); jack.getWorldPosition(p);
+        rec.plug.group.position.copy(p);
+      } else {
+        rec.plug.group.position.set(0, 0.2, 0);  // mid-air → unplug
+      }
+      handlePlugReleased(rec.plug.group);
+      return window.__rack.seats();
     },
   };
   // Headless hook: exercise addLocalRomToShelf() with a synthetic meta entry.
@@ -1159,13 +1278,21 @@ async function buildCartridgeWorld() {
     isGamepadHeld: () => grabMgr.isGamepadHeld(),
     // Local-multiplayer routing: which player each hand drives this frame.
     getRouting: computeRouting,
+    // Console-aware dispatch: a controller plugged into console N drives console
+    // N's own core (canvas-targeted via its ConsoleRuntime). defaultConsoleId is
+    // the primary so the single-console path is unchanged. The N=1 client path
+    // remains the fallback inside GameInputMgr when no dispatch is supplied; here
+    // we always supply one so spawned consoles are playable too.
+    dispatch: (consoleId, type, code, key, keyCode, location) =>
+      rackMgr.get(consoleId)?.sendInput(type, code, key, keyCode, location),
+    defaultConsoleId: CONSOLE_ID,
     // LED pulse for every emulator keydown — visible in-VR feedback that
-    // gamepad input is reaching the core. Also forward to the Now Playing
-    // panel so the user can see the specific key code IN the headset.
-    onKeyDown: (code) => {
-      consoleObj.userData.pulse?.(0xffffff, 90);
+    // gamepad input is reaching the core. Pulses the console that actually
+    // received the input. Also forward to the Now Playing panel.
+    onKeyDown: (code, consoleId) => {
+      (consoleObjs.get(consoleId) || consoleObj)?.userData?.pulse?.(0xffffff, 90);
       nowPlayingPanel?.userData.notifyInput(code);
-      logger.event('input', { code });
+      logger.event('input', { code, console: consoleId });
     },
     // M1.1 networked client: forward each logical RetroPad transition to the
     // host (no-op when we ARE the host or no game is loaded — see
@@ -1177,7 +1304,7 @@ async function buildCartridgeWorld() {
 
   scene.addTickCallback((dt) => desktop.tick(dt));
   scene.addTickCallback((dt) => grabMgr.tick(dt));
-  scene.addTickCallback(() => syncCords());
+  scene.addTickCallback(() => syncControllerCords());
   scene.addTickCallback(() => syncVideoCords());
   scene.addTickCallback(() => updateFocus());
   scene.addTickCallback((dt) => locomotion.tick(dt));
@@ -1297,14 +1424,13 @@ function spawnTransform(type) {
   dir.normalize();
   const p = camPos.clone().addScaledVector(dir, 1.4);
 
-  // Clamp the XZ to inside the room before surface-snap (keeps posters off the
-  // wall corner seams and floor props away from the wall base).
+  // Item 5 — placeInRoom ([[src/Placement.js]]) does the snap+clamp in the
+  // CORRECT order: a wall prop (poster) is snapped to the actual wall plane FIRST
+  // and only its tangential axis clamped, so it can never land inside/behind the
+  // wall (the old clamp-then-snap order pushed posters off the wall by the
+  // margin). Floor props get their resting Y and are kept inside the walls.
   const bounds = scene.getRoomBounds();
-  const raw = { x: p.x, y: p.y, z: p.z };
-  const clamped = clampToRoom(raw, bounds, 0.25);
-
-  // Surface-snap: floor props get correct Y; wall props snap to nearest wall.
-  const { pos: snapped, yaw: wallYaw } = snapToSurface(clamped, bounds, type || 'shelf');
+  const { pos: snapped, yaw: wallYaw } = placeInRoom({ x: p.x, y: p.y, z: p.z }, bounds, type || 'shelf');
 
   // For floor props: face the prop's +Z back toward the player so the front
   // face is visible on spawn.  For wall props: use the snap-computed yaw so
@@ -1362,7 +1488,10 @@ function addProp(type, opts = {}) {
     registerGamepad(r.object);
     grabMgr.addGrabbable(r.object);
     const port = seatGamepadInFreePort(r.object);
-    setStatus(port == null ? 'added gamepad (no free port)' : `added gamepad → player ${port + 1}`);
+    // Give the new pad its grabbable controller patch-cord plug (seated at the
+    // port it just took, or dangling if none was free — repatch via the plug).
+    addControllerPlug(r.object);
+    setStatus(port == null ? 'added gamepad (no free port — drag its plug to a port)' : `added gamepad → player ${port + 1}`);
     return prop;
   }
 
@@ -1580,11 +1709,12 @@ function buildMenuAndControlsPanel() {
       { label: 'Change',        onActivate: () => {} },
       { label: 'Add',           onActivate: () => {} },
       // Index 10: rack auto-pause toggle. Added unconditionally right after the
-      // mode buttons so indices 0-9 (destructured below) are unaffected; the
-      // net-only Voice button now follows at 11.
+      // mode buttons so indices 0-9 (destructured below) are unaffected.
       { label: 'Auto-pause: On', onActivate: () => {} },
+      // Index 11: hide/show the room walls (open up the space for a big rack).
+      { label: 'Walls: On', onActivate: () => {} },
       // M0 hardening: in-VR voice toggle (the 🎤 header button is desktop-only).
-      // Appended after the rack toggle and only in a networked session.
+      // Appended after the rack toggles and only in a networked session (idx 12).
       ...(net ? [{ label: 'Voice: Off', onActivate: () => {} }] : []),
       // Multiplayer status + quick-join: always present so Quest users can join
       // a room without removing the headset to type in the URL bar. Index is
@@ -1596,7 +1726,8 @@ function buildMenuAndControlsPanel() {
   scene.addObject(menu);
   const [controlsBtn, debugBtn, , , snapBtn, kbdBtn, playBtn, moveBtn, changeBtn, addBtn] = menu.userData.buttons;
   const rackPauseBtn = menu.userData.buttons[10];
-  const vrVoiceBtn = net ? menu.userData.buttons[11] : null;
+  const wallsBtn = menu.userData.buttons[11];
+  const vrVoiceBtn = net ? menu.userData.buttons[12] : null;
   // Always the last button regardless of whether Voice is present.
   const vrMpBtn = menu.userData.buttons.at(-1);
 
@@ -2011,6 +2142,14 @@ function buildMenuAndControlsPanel() {
   };
   syncRackPauseLabel();             // reflect the persisted setting on the button
 
+  // Walls toggle: hide the room shell so a multi-console rack isn't boxed in (and
+  // so any prop that lands near a wall stays visible). Floor stays put.
+  wallsBtn.onActivate = () => {
+    const on = scene.setWallsVisible(!scene.wallsVisible());
+    wallsBtn.setLabel(on ? 'Walls: On' : 'Walls: Off');
+    setStatus(on ? 'Walls shown' : 'Walls hidden');
+  };
+
   // C64 keyboard toggle: manual override. Flips visibility for any system;
   // clears the auto-hide state so the user's choice persists until next boot.
   kbdBtn.onActivate = () => {
@@ -2284,11 +2423,20 @@ function handleCartridgeInserted(meta, { echo = true } = {}) {
 
 async function loadCartridge(meta, { echo = true } = {}) {
   setStatus(`loading ${meta.title}…`);
+  // Boot telemetry (diagnoses headset boot failures): how the ROM resolves +
+  // whether the OPFS cache is even available on this device, logged BEFORE the
+  // attempt so a crash/hang still leaves a breadcrumb. See [[src/RomResolver.js]].
+  logger?.event?.('boot-attempt', {
+    file: meta.file, system: meta.system, core: meta.core,
+    plan: resolutionPlan(meta), opfs: opfsSupported(),
+  });
   try {
     // RomResolver (Phase R.2) turns the entry into bytes from url / local
     // folder / picker / OPFS cache, per its rom.source (default: url).
     const buf = await resolveRom(meta);
     const core = CORES[meta.core];
+    if (!core) throw new Error(`no core registered as "${meta.core}"`);
+    logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url });
     await client.start(emuCanvas, buf, { coreUrl: core.url, coreName: meta.core, moduleStyle: core.style });
     primaryRuntime.noteLoaded(meta.core, { system: meta.system, title: meta.title });
     currentCore = meta.core;
@@ -2324,7 +2472,10 @@ async function loadCartridge(meta, { echo = true } = {}) {
   } catch (e) {
     const msg = String(e?.message || e);
     setStatus(`error: ${msg}`);
-    logger?.event?.('boot-error', { file: meta.file, system: meta.system, core: meta.core, error: msg });
+    logger?.event?.('boot-error', {
+      file: meta.file, system: meta.system, core: meta.core, error: msg,
+      plan: resolutionPlan(meta), opfs: opfsSupported(),
+    });
     // Surface the failure ON THE TV instead of silently leaving the idle screen,
     // so a missing/un-downloaded ROM (the resolver throws on a 404) reads as a
     // real error in VR rather than "nothing happened". Default room ships only
@@ -2621,6 +2772,7 @@ romInput.addEventListener('change', async (e) => {
   setStatus(`loading "${title}" on ${coreInfo.label}…`);
   try {
     const buffer = await file.arrayBuffer();
+    logger?.event?.('rom-picked', { file: meta.file, bytes: buffer?.byteLength ?? 0, core: coreInfo.name, coreUrl: coreInfo.url, opfs: opfsSupported() });
     await client.start(emuCanvas, buffer, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style });
     primaryRuntime.noteLoaded(coreInfo.name, { system: meta.system, title });
     currentCore = coreInfo.name;
@@ -2654,7 +2806,9 @@ romInput.addEventListener('change', async (e) => {
       console.warn('[main] addLocalRomToShelf failed:', err);
     });
   } catch (err) {
-    setStatus(`error loading "${title}": ${err.message || err}`);
+    const emsg = String(err?.message || err);
+    setStatus(`error loading "${title}": ${emsg}`);
+    logger?.event?.('boot-error', { file: meta.file, system: meta.system, core: coreInfo.name, error: emsg, source: 'pick', opfs: opfsSupported() });
   }
 });
 
