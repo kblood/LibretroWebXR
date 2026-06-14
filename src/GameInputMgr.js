@@ -14,6 +14,11 @@
 // onKeyDown callback fires when a key transitions to pressed — main.js
 // uses it to pulse the console LED so the user can see input is reaching
 // the emulator without leaving the headset.
+//
+// Console-aware routing (multi-console rack):
+// Pass `dispatch` to route each key event to the correct console.
+// Without `dispatch`, falls back to `this.client.sendInput(...)` for
+// full N=1 back-compat.
 
 import {
   RETROPAD_KEYS, mapForSystem, EXTRA_PLAYER_KEYS, EXTRA_KEY_DEFS,
@@ -63,36 +68,90 @@ function codesFor(player, btn) {
 }
 
 export class GameInputMgr {
-  constructor({ controllers, client, isControllerHoldingGamepad, isGamepadHeld, getRouting, onKeyDown, onLogicalInput }) {
+  /**
+   * @param {object} opts
+   * @param {Array}    opts.controllers
+   * @param {object}   [opts.client]                     sendInput fallback (N=1 back-compat)
+   * @param {Function} [opts.isControllerHoldingGamepad]
+   * @param {Function} [opts.isGamepadHeld]
+   * @param {Function} [opts.getRouting]
+   * @param {Function} [opts.onKeyDown]
+   * @param {Function} [opts.onLogicalInput]
+   * @param {Function} [opts.dispatch]   (consoleId, eventType, code, key, keyCode, location)=>void
+   *   When provided, ALL key send-out goes through this. When absent, falls back to
+   *   `this.client.sendInput(eventType, code, key, keyCode, location)` — exact N=1 behaviour.
+   * @param {string}   [opts.defaultConsoleId='console0']
+   *   Used for routing entries without a `consoleId`, and for remote-player input.
+   */
+  constructor({
+    controllers,
+    client,
+    isControllerHoldingGamepad,
+    isGamepadHeld,
+    getRouting,
+    onKeyDown,
+    onLogicalInput,
+    dispatch,
+    defaultConsoleId = 'console0',
+  }) {
     this.controllers = controllers;
     this.client = client;
+    this._dispatch = dispatch || null;
+    this._defaultConsoleId = defaultConsoleId;
     this.isControllerHoldingGamepad = isControllerHoldingGamepad;
     this.isGamepadHeld = isGamepadHeld;
     this.onKeyDown = onKeyDown || (() => {});
-    // M1.1 (networked client): fired with { player, btn, down } on each logical
-    // RetroPad button transition of a routed controller — BEFORE keycode mapping,
-    // so the host can resolve it for its own core. main.js forwards these to the
-    // host peer over the room socket. null on a single-player / host peer.
+    // M1.1 (networked client): fired with { player, btn, down, consoleId } on each
+    // logical RetroPad button transition of a routed controller — BEFORE keycode
+    // mapping, so the host can resolve it for its own core. main.js forwards these
+    // to the host peer over the room socket. null on a single-player / host peer.
     this._onLogicalInput = onLogicalInput || null;
-    this._logicalState = new Map(); // `${player}\0${btn}` -> { player, btn } held last frame
+    // Keyed by `${consoleId} ${player}\0${btn}` → { player, btn, consoleId }
+    this._logicalState = new Map();
     // M1.1 (networked host): key codes a remote player currently holds, merged
     // into each tick()'s dispatch (see setRemoteButton).
-    this._remoteDesired = new Set();
-    // getRouting() → [{ ctrl, player, hand:'holding'|'free' }] : which player
-    // each active controller drives this frame (main.js derives it from grab +
-    // cable state). Default reproduces the original single-player behaviour:
-    // when the one gamepad is held, both hands forward to player 1.
+    // Keyed by composite key `${consoleId} ${code}`.
+    this._remoteDesired = new Map(); // compositeKey -> { consoleId, code }
+    // getRouting() → [{ ctrl, consoleId, player, hand:'holding'|'free' }] : which
+    // player each active controller drives this frame (main.js derives it from
+    // grab + cable state). Default reproduces the original single-player behaviour:
+    // when the one gamepad is held, both hands forward to player 1 on defaultConsoleId.
     this.getRouting = getRouting || (() => {
       if (!this.isGamepadHeld()) return [];
       return this.controllers.map((ctrl) => ({
-        ctrl, player: 1,
+        ctrl,
+        consoleId: this._defaultConsoleId,
+        player: 1,
         hand: this.isControllerHoldingGamepad(ctrl) ? 'holding' : 'free',
       }));
     });
-    this._state = new Map(); // code -> boolean (currently pressed)
+    // Per-console pressed state, keyed by composite `${consoleId} ${code}` → bool.
+    this._state = new Map();
     this._systemMap = mapForSystem('default');
     this._system = 'default';
   }
+
+  // --- Composite key helpers -------------------------------------------------
+
+  /** Build a composite Map key from a consoleId and a code string. */
+  _k(consoleId, code) { return `${consoleId} ${code}`; }
+
+  // --- Output routing --------------------------------------------------------
+
+  /**
+   * Send a single key event to the appropriate target.
+   * When `_dispatch` is set, routes to the correct console.
+   * When absent, falls back to `this.client.sendInput(...)` (N=1 back-compat).
+   */
+  _send(consoleId, eventType, code, key, keyCode, location) {
+    if (this._dispatch) {
+      this._dispatch(consoleId, eventType, code, key, keyCode, location);
+    } else {
+      this.client.sendInput(eventType, code, key, keyCode, location);
+    }
+  }
+
+  // --- Public lifecycle -------------------------------------------------------
 
   setSystem(system) {
     this._system = system || 'default';
@@ -103,26 +162,29 @@ export class GameInputMgr {
   currentMap()    { return this._systemMap; }
 
   tick() {
-    const desired = new Set();
+    // desired: composite key `${consoleId} ${code}` → { consoleId, code }
+    const desired = new Map();
     const map = this._systemMap;
-    // Logical (player, RetroPad-button) pairs pressed this frame by local
-    // controllers — gathered before keycode mapping so a networked client can
-    // forward the logical transitions to the host (the host re-resolves codes
-    // for its own core). Keyed by `${player}\0${btn}` for cheap diffing.
+    // Logical (consoleId, player, RetroPad-button) tuples pressed this frame by
+    // local controllers — gathered before keycode mapping so a networked client
+    // can forward the logical transitions to the host. Keyed by
+    // `${consoleId} ${player}\0${btn}`.
     const logical = new Map();
 
-    // Each routed controller drives its player's keys, using the holding/free
-    // half of the system map. addRetro resolves the logical button to that
-    // player's code(s) AND records the logical pair for the host forward.
-    for (const { ctrl, player, hand } of this.getRouting()) {
+    for (const entry of this.getRouting()) {
+      const { ctrl, player, hand } = entry;
+      const consoleId = entry.consoleId || this._defaultConsoleId;
       const handMap = map[hand] || map.holding;
       const gp = ctrl.userData.inputSource?.gamepad;
       if (!gp || !gp.buttons || !gp.axes) continue;
 
       const addRetro = (btn) => {
         if (!btn) return;
-        logical.set(`${player}\0${btn}`, { player, btn });
-        for (const c of codesFor(player, btn)) desired.add(c);
+        const lk = `${consoleId} ${player}\0${btn}`;
+        logical.set(lk, { player, btn, consoleId });
+        for (const c of codesFor(player, btn)) {
+          desired.set(this._k(consoleId, c), { consoleId, code: c });
+        }
       };
 
       if (gp.buttons[0]?.pressed) addRetro(handMap.trigger);
@@ -142,61 +204,75 @@ export class GameInputMgr {
     // frame). Done before code-mapping so the host owns the keycode resolution.
     if (this._onLogicalInput) {
       for (const [k, v] of logical) {
-        if (!this._logicalState.has(k)) this._onLogicalInput({ player: v.player, btn: v.btn, down: true });
+        if (!this._logicalState.has(k)) {
+          this._onLogicalInput({ player: v.player, btn: v.btn, down: true, consoleId: v.consoleId });
+        }
       }
       for (const [k, v] of this._logicalState) {
-        if (!logical.has(k)) this._onLogicalInput({ player: v.player, btn: v.btn, down: false });
+        if (!logical.has(k)) {
+          this._onLogicalInput({ player: v.player, btn: v.btn, down: false, consoleId: v.consoleId });
+        }
       }
       this._logicalState = logical;
     }
 
     // M1.1 host: merge remote players' held codes so the unified press/release
-    // sweep below drives them into the core exactly like a local press — and the
-    // keyup sweep won't lift a remote key that is still held.
-    for (const c of this._remoteDesired) desired.add(c);
-
-    // Emit keydown for newly-pressed codes.
-    for (const code of desired) {
-      if (this._state.get(code)) continue;
-      this._state.set(code, true);
-      const m = KEYS[code];
-      if (!m) continue;
-      this.client.sendInput('keydown', m.code, m.key, m.keyCode, m.location);
-      this.onKeyDown(m.code);
+    // sweep below drives them into the correct console's core exactly like a
+    // local press — and the keyup sweep won't lift a remote key still held.
+    for (const [ck, info] of this._remoteDesired) {
+      desired.set(ck, info);
     }
-    // Emit keyup for codes that were pressed and no longer are.
-    for (const [code, was] of this._state) {
-      if (!was || desired.has(code)) continue;
-      this._state.set(code, false);
+
+    // Emit keydown for newly-pressed codes (per console).
+    for (const [ck, { consoleId, code }] of desired) {
+      if (this._state.get(ck)) continue;
+      this._state.set(ck, true);
       const m = KEYS[code];
       if (!m) continue;
-      this.client.sendInput('keyup', m.code, m.key, m.keyCode, m.location);
+      this._send(consoleId, 'keydown', m.code, m.key, m.keyCode, m.location);
+      this.onKeyDown(m.code, consoleId);
+    }
+    // Emit keyup for codes that were pressed and no longer are (per console).
+    for (const [ck, was] of this._state) {
+      if (!was || desired.has(ck)) continue;
+      this._state.set(ck, false);
+      // Parse the composite key: consoleId is everything before the last space,
+      // code is everything after.
+      const spaceIdx = ck.indexOf(' ');
+      const consoleId = ck.slice(0, spaceIdx);
+      const code = ck.slice(spaceIdx + 1);
+      const m = KEYS[code];
+      if (!m) continue;
+      this._send(consoleId, 'keyup', m.code, m.key, m.keyCode, m.location);
     }
   }
 
-  // Release every currently-pressed key. Called when the gamepad is
-  // dropped so a held-down button doesn't latch on the emulator side.
+  // Release every currently-pressed key across ALL consoles. Called when the
+  // gamepad is dropped so a held-down button doesn't latch on the emulator side.
   flushReleases() {
-    for (const [code, was] of this._state) {
+    for (const [ck, was] of this._state) {
       if (!was) continue;
-      this._state.set(code, false);
+      this._state.set(ck, false);
+      const spaceIdx = ck.indexOf(' ');
+      const consoleId = ck.slice(0, spaceIdx);
+      const code = ck.slice(spaceIdx + 1);
       const m = KEYS[code];
       if (!m) continue;
-      this.client.sendInput('keyup', m.code, m.key, m.keyCode, m.location);
+      this._send(consoleId, 'keyup', m.code, m.key, m.keyCode, m.location);
     }
   }
 
   // M1.1 host side: record a remote networked player's logical button as held
   // or released. `player` is a console-port slot (1..4), `btn` a RetroPad button
-  // name (A/B/X/Y/L/R/Start/Select/Up/Down/Left/Right — the keys of
-  // [[src/ControllerMaps.js]]'s RETROPAD_KEYS / EXTRA_PLAYER_KEYS). The resolved
-  // code(s) join _remoteDesired and dispatch on the next tick(). Safe before the
-  // first tick. Remote codes coexist with local ones because every player's
-  // codes are globally unique (asserted by the no-overlap test).
-  setRemoteButton({ player, btn, down }) {
+  // name (A/B/X/Y/L/R/Start/Select/Up/Down/Left/Right). `consoleId` defaults to
+  // `_defaultConsoleId`. The resolved code(s) join _remoteDesired and dispatch on
+  // the next tick(). Safe before the first tick.
+  setRemoteButton({ player, btn, down, consoleId }) {
+    const cid = consoleId || this._defaultConsoleId;
     for (const c of codesFor(player, btn)) {
-      if (down) this._remoteDesired.add(c);
-      else this._remoteDesired.delete(c);
+      const ck = this._k(cid, c);
+      if (down) this._remoteDesired.set(ck, { consoleId: cid, code: c });
+      else this._remoteDesired.delete(ck);
     }
   }
 
@@ -205,10 +281,8 @@ export class GameInputMgr {
   clearRemote() { this._remoteDesired.clear(); }
 
   // Per-controller debug snapshot for [[src/DebugHud.js]] and the
-  // gamepad mesh's animation. Returns { holdingHand, freeHand } where
-  // each is { handedness, buttons[], axes[], pressedKeys[], handMap } or
-  // null. handMap lets the HUD label each button with the action it
-  // currently fires (e.g. "B (jump)").
+  // gamepad mesh's animation. Returns { system, holding, free, pressedKeys }
+  // where pressedKeys shows bare code strings (consoleId prefix stripped).
   getDebugState() {
     if (!this.isGamepadHeld()) return null;
     const map = this._systemMap;
@@ -235,8 +309,14 @@ export class GameInputMgr {
         free = s;
       }
     }
+    // Strip consoleId prefix from the composite key so the returned shape is
+    // identical to the pre-refactor shape: pressedKeys is an array of bare codes.
     const pressedKeys = [];
-    for (const [code, was] of this._state) if (was) pressedKeys.push(code);
+    for (const [ck, was] of this._state) {
+      if (!was) continue;
+      const spaceIdx = ck.indexOf(' ');
+      pressedKeys.push(ck.slice(spaceIdx + 1));
+    }
     return { system: this._system, holding, free, pressedKeys };
   }
 }

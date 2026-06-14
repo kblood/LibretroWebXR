@@ -215,3 +215,151 @@ export const FOOTPRINT = {
 export function footprintForKind(kind) {
   return FOOTPRINT[kind] || FOOTPRINT.default;
 }
+
+// ---------------------------------------------------------------------------
+// placeInRoom  — combined snap + clamp that guarantees the result is inside
+// ---------------------------------------------------------------------------
+
+/**
+ * Place a prop of the given kind somewhere near `pos`, fully inside the room.
+ *
+ * For FLOOR props the position is clamped on X/Z so the prop body stays
+ * inside (margin + half footprint), and Y is set to RESTING_Y[kind].
+ *
+ * For WALL props (poster) the position is snapped to the nearest wall first
+ * (so the prop actually reaches the wall), then the TANGENTIAL axis and Y are
+ * clamped to the room face. This order is intentional: clamping X/Z before
+ * snapping (as external callers sometimes do) can push the point so far from
+ * a wall that "nearest wall" selection is wrong or the poster ends up floating
+ * off the wall.
+ *
+ * @param {{ x:number, y:number, z:number }} pos  desired world position
+ * @param {RoomBounds} bounds
+ * @param {string} kind   prop type key (see SURFACE_KIND)
+ * @param {{ margin?:number }} [opts]
+ *   margin — extra inset from each wall (default 0.3 m)
+ * @returns {{ pos:{x,y,z}, yaw:number }}
+ *   pos — safe world position; yaw — rotation about Y (radians).
+ */
+export function placeInRoom(pos, bounds, kind, opts = {}) {
+  const margin = opts.margin ?? 0.3;
+  const fp = footprintForKind(kind);
+  const surface = SURFACE_KIND[kind] || 'floor';
+
+  if (surface === 'floor') {
+    // Inset = margin + half footprint so the body doesn't poke through the wall.
+    const insetX = margin + fp.width  / 2;
+    const insetZ = margin + fp.depth  / 2;
+    const x = Math.max(bounds.minX + insetX, Math.min(bounds.maxX - insetX, pos.x));
+    const z = Math.max(bounds.minZ + insetZ, Math.min(bounds.maxZ - insetZ, pos.z));
+    const y = RESTING_Y[kind] ?? RESTING_Y.default;
+    return { pos: { x, y, z }, yaw: 0 };
+  }
+
+  // Wall prop — snap to nearest wall FIRST, then clamp the tangential axis
+  // and Y.  This is the correct order; doing clamp first corrupts wall selection.
+  const walls = [
+    { axis: 'z', plane: bounds.minZ, dir: +1, yaw:          0 },   // back wall
+    { axis: 'z', plane: bounds.maxZ, dir: -1, yaw:  Math.PI   },   // front wall
+    { axis: 'x', plane: bounds.minX, dir: +1, yaw: -Math.PI / 2 }, // left wall
+    { axis: 'x', plane: bounds.maxX, dir: -1, yaw:  Math.PI / 2 }, // right wall
+  ];
+
+  let bestWall = walls[0];
+  let bestDist = Infinity;
+  for (const w of walls) {
+    const d = Math.abs(pos[w.axis] - w.plane);
+    if (d < bestDist) { bestDist = d; bestWall = w; }
+  }
+
+  // Seat the poster face just inside the wall plane.
+  const snapped = { x: pos.x, y: pos.y, z: pos.z };
+  snapped[bestWall.axis] = bestWall.plane + bestWall.dir * POSTER_DEPTH_OFFSET;
+
+  // Clamp the tangential axis so the poster body stays on the wall face.
+  // For a z-wall the tangential axis is x; for an x-wall it's z.
+  const tangAxis = bestWall.axis === 'z' ? 'x' : 'z';
+  const tangInset = margin + fp.width / 2;   // poster 'width' runs along the wall
+  if (tangAxis === 'x') {
+    snapped.x = Math.max(bounds.minX + tangInset, Math.min(bounds.maxX - tangInset, snapped.x));
+  } else {
+    snapped.z = Math.max(bounds.minZ + tangInset, Math.min(bounds.maxZ - tangInset, snapped.z));
+  }
+
+  // Clamp Y to a sensible range on the wall face.
+  const minPosterY = 0.6;
+  const maxPosterY = bounds.ceilY - 0.4;
+  snapped.y = Math.max(minPosterY, Math.min(maxPosterY, snapped.y));
+
+  return { pos: snapped, yaw: bestWall.yaw };
+}
+
+// ---------------------------------------------------------------------------
+// fanSlot  — deterministic grid of floor props that always stays inside
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the world position for the Nth (0-based) spawned floor prop of the
+ * given kind, laid out in a row along X inside the room.
+ *
+ * The row sits at a Z depth near the back third of the room so consoles/TVs
+ * line up against the back wall without poking through the side walls.
+ * When more items are requested than fit in a single row the slots wrap
+ * deterministically (modulo) across X, stepping forward in Z by
+ * `opts.zStep` (default 0.0 — purely wrapping).
+ *
+ * KEY GUARANTEE: for any index ≥ 0 and any valid bounds, the returned point
+ * is strictly inside the room on X and Z.
+ *
+ * @param {number} index  0-based slot index
+ * @param {RoomBounds} bounds
+ * @param {string} kind   prop type key
+ * @param {{ margin?:number, z?:number, zStep?:number }} [opts]
+ *   margin — extra wall inset (default 0.3 m)
+ *   z      — desired Z depth (default: back third of the room); clamped inside
+ *   zStep  — Z step per wrap row (default 0)
+ * @returns {{ x:number, y:number, z:number }}
+ */
+export function fanSlot(index, bounds, kind, opts = {}) {
+  const margin = opts.margin ?? 0.3;
+  const fp = footprintForKind(kind);
+  const insetX = margin + fp.width  / 2;
+  const insetZ = margin + fp.depth  / 2;
+
+  const xMin = bounds.minX + insetX;
+  const xMax = bounds.maxX - insetX;
+  const zMin = bounds.minZ + insetZ;
+  const zMax = bounds.maxZ - insetZ;
+
+  // Default Z = back third of the room (near minZ).
+  const defaultZ = bounds.minZ + (bounds.maxZ - bounds.minZ) / 3;
+  const baseZ    = opts.z !== undefined
+    ? Math.max(zMin, Math.min(zMax, opts.z))
+    : Math.max(zMin, Math.min(zMax, defaultZ));
+
+  const zStep = opts.zStep ?? 0.0;
+
+  // How many slots fit along X given the footprint width + a small gap.
+  const slotWidth = fp.width + 0.05;          // 5 cm gap between units
+  const available  = xMax - xMin;
+  const slotsPerRow = Math.max(1, Math.floor(available / slotWidth));
+
+  const row = Math.floor(index / slotsPerRow);
+  const col = index % slotsPerRow;
+
+  // Distribute columns evenly across [xMin, xMax].
+  let x;
+  if (slotsPerRow === 1) {
+    x = (xMin + xMax) / 2;
+  } else {
+    x = xMin + col * (available / (slotsPerRow - 1));
+  }
+
+  // Clamp x defensively (floating-point rounding).
+  x = Math.max(xMin, Math.min(xMax, x));
+
+  const z = Math.max(zMin, Math.min(zMax, baseZ + row * zStep));
+  const y = RESTING_Y[kind] ?? RESTING_Y.default;
+
+  return { x, y, z };
+}

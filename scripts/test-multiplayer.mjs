@@ -13,6 +13,13 @@
 
 import { CableMgr } from '../src/CableMgr.js';
 import { computeRouting } from '../src/Routing.js';
+// Routing's playerOf accessor returns { consoleId, player } | null (null when a
+// pad is unplugged) — the multi-console contract. CableMgr is single-console, so
+// adapt it: a plugged pad maps to console0 + (port+1); an unplugged one to null.
+const seatOf = (cable, id) => {
+  const p = cable.portOf(id);
+  return p == null ? null : { consoleId: 'console0', player: p + 1 };
+};
 import { GameInputMgr } from '../src/GameInputMgr.js';
 import { RETROPAD_KEYS, EXTRA_PLAYER_KEYS, mapForSystem } from '../src/ControllerMaps.js';
 
@@ -80,7 +87,7 @@ function rig({ controllers, cable, grab, system, onLogicalInput }) {
       controllers,
       heldObject: grab.heldObject,
       isControllerFree: grab.isControllerFree,
-      playerOf: (id) => cable.playerOf(id),
+      playerOf: (id) => seatOf(cable, id),
     }),
     onLogicalInput,
   });
@@ -101,7 +108,7 @@ function rig({ controllers, cable, grab, system, onLogicalInput }) {
     controllers: [right, left],
     heldObject: grab.heldObject,
     isControllerFree: grab.isControllerFree,
-    playerOf: (id) => cable.playerOf(id),
+    playerOf: (id) => seatOf(cable, id),
   });
   ok(routing.length === 2, '1 held pad routes both hands');
   ok(routing.every((r) => r.player === 1), 'both hands drive player 1');
@@ -117,7 +124,7 @@ function rig({ controllers, cable, grab, system, onLogicalInput }) {
   const { gim, client } = rig({ controllers: [c], cable, grab, system: 'snes' });
   c.press(FACE_A); // pressing with nothing held must do nothing
   gim.tick();
-  ok(computeRouting({ controllers: [c], heldObject: grab.heldObject, isControllerFree: grab.isControllerFree, playerOf: (id) => cable.playerOf(id) }).length === 0, 'no held pad → empty routing');
+  ok(computeRouting({ controllers: [c], heldObject: grab.heldObject, isControllerFree: grab.isControllerFree, playerOf: (id) => seatOf(cable, id) }).length === 0, 'no held pad → empty routing');
   ok(client.keydownCodes().size === 0, 'no input dispatched when nothing is held');
 }
 

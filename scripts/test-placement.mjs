@@ -15,6 +15,7 @@ import {
   roomBoundsFromDims, clampToRoom, snapToSurface,
   RESTING_Y, POSTER_DEPTH_OFFSET, SURFACE_KIND,
   DEFAULT_ROOM_BOUNDS, footprintForKind,
+  placeInRoom, fanSlot,
 } from '../src/Placement.js';
 
 let pass = 0, fail = 0;
@@ -199,6 +200,132 @@ for (const kind of ['shelf', 'console', 'gamepad', 'bookcase', 'cupboard', 'tabl
 {
   const fp = footprintForKind('unknown_prop_xyz');
   ok('footprint unknown falls back', fp.width > 0 && fp.depth > 0);
+}
+
+// ---------------------------------------------------------------------------
+// placeInRoom — floor props
+// ---------------------------------------------------------------------------
+
+// Floor prop near the right wall stays inside on X and Z.
+{
+  const p = { x: 99, y: 0, z: 0 };
+  const { pos, yaw } = placeInRoom(p, BOUNDS, 'console');
+  ok('placeInRoom console x <= maxX', pos.x <= BOUNDS.maxX);
+  ok('placeInRoom console x >= minX', pos.x >= BOUNDS.minX);
+  ok('placeInRoom console z <= maxZ', pos.z <= BOUNDS.maxZ);
+  ok('placeInRoom console z >= minZ', pos.z >= BOUNDS.minZ);
+  near('placeInRoom console Y = RESTING_Y', pos.y, RESTING_Y.console);
+  near('placeInRoom console yaw = 0', yaw, 0);
+}
+
+// Floor prop near the back wall — stays inside Z.
+{
+  const p = { x: 0, y: 0, z: -99 };
+  const { pos } = placeInRoom(p, BOUNDS, 'shelf');
+  ok('placeInRoom shelf z >= minZ', pos.z >= BOUNDS.minZ);
+  near('placeInRoom shelf Y = RESTING_Y', pos.y, RESTING_Y.shelf);
+}
+
+// Floor prop already in centre — unchanged X/Z (within margin).
+{
+  const p = { x: 0, y: 0, z: 0 };
+  const { pos } = placeInRoom(p, BOUNDS, 'console');
+  near('placeInRoom console centre X', pos.x, 0);
+  near('placeInRoom console centre Z', pos.z, 0);
+}
+
+// ---------------------------------------------------------------------------
+// placeInRoom — wall props (poster)
+// ---------------------------------------------------------------------------
+
+// Poster at room centre — snaps to a wall; face is INSIDE the room.
+{
+  const p = { x: 0, y: 1.5, z: 0 };
+  const { pos, yaw } = placeInRoom(p, BOUNDS, 'poster');
+  // The returned position must be inside (or on) every wall boundary.
+  ok('placeInRoom poster centre x >= minX', pos.x >= BOUNDS.minX);
+  ok('placeInRoom poster centre x <= maxX', pos.x <= BOUNDS.maxX);
+  ok('placeInRoom poster centre z >= minZ', pos.z >= BOUNDS.minZ);
+  ok('placeInRoom poster centre z <= maxZ', pos.z <= BOUNDS.maxZ);
+  // Yaw must be one of the four cardinal wall yaws.
+  const validYaws = [0, Math.PI, -Math.PI / 2, Math.PI / 2];
+  ok('placeInRoom poster centre yaw is a wall yaw',
+    validYaws.some(v => Math.abs(yaw - v) < 1e-9));
+  // Y must be clamped between minPosterY and ceilY-0.4.
+  ok('placeInRoom poster Y >= 0.6',        pos.y >= 0.6);
+  ok('placeInRoom poster Y <= ceilY-0.4',  pos.y <= BOUNDS.ceilY - 0.4);
+}
+
+// Poster near the back wall — must snap to the back wall (z == minZ + offset).
+{
+  const p = { x: 0.5, y: 1.5, z: -3.5 };
+  const { pos, yaw } = placeInRoom(p, BOUNDS, 'poster');
+  near('placeInRoom poster near back wall: z', pos.z, BOUNDS.minZ + POSTER_DEPTH_OFFSET);
+  near('placeInRoom poster near back wall: yaw', yaw, 0);
+  // Tangential axis (x) must be within bounds.
+  ok('placeInRoom poster near back wall: x inside', pos.x >= BOUNDS.minX && pos.x <= BOUNDS.maxX);
+}
+
+// Poster near the right wall — must snap to the right wall (x == maxX - offset).
+{
+  const p = { x: 2.8, y: 1.5, z: 0 };
+  const { pos, yaw } = placeInRoom(p, BOUNDS, 'poster');
+  near('placeInRoom poster near right wall: x', pos.x, BOUNDS.maxX - POSTER_DEPTH_OFFSET);
+  near('placeInRoom poster near right wall: yaw', yaw, Math.PI / 2);
+  ok('placeInRoom poster near right wall: z inside', pos.z >= BOUNDS.minZ && pos.z <= BOUNDS.maxZ);
+}
+
+// Regression: poster must NOT end up behind (outside) the wall plane it snapped to.
+{
+  const p = { x: -2.7, y: 1.5, z: 0 };
+  const { pos } = placeInRoom(p, BOUNDS, 'poster');
+  // Left wall is at minX = -3. Poster face must be to the RIGHT of (inside) it.
+  ok('placeInRoom poster not behind left wall', pos.x >= BOUNDS.minX);
+}
+
+// ---------------------------------------------------------------------------
+// fanSlot — console fan-out stays inside the room
+// ---------------------------------------------------------------------------
+
+// All slots 0..6 for a console in the default 6×8 room must be inside bounds.
+{
+  const B = DEFAULT_ROOM_BOUNDS;
+  for (let i = 0; i <= 6; i++) {
+    const p = fanSlot(i, B, 'console');
+    ok(`fanSlot console i=${i}: x > minX`, p.x > B.minX);
+    ok(`fanSlot console i=${i}: x < maxX`, p.x < B.maxX);
+    ok(`fanSlot console i=${i}: z > minZ`, p.z > B.minZ);
+    ok(`fanSlot console i=${i}: z < maxZ`, p.z < B.maxZ);
+    near(`fanSlot console i=${i}: Y = RESTING_Y`, p.y, RESTING_Y.console);
+  }
+}
+
+// Regression for Bug 4: a high-index console must NOT exceed maxX.
+{
+  const B = DEFAULT_ROOM_BOUNDS;
+  for (let i = 0; i < 20; i++) {
+    const p = fanSlot(i, B, 'console');
+    ok(`fanSlot Bug4 regression i=${i}: x <= maxX`, p.x <= B.maxX);
+    ok(`fanSlot Bug4 regression i=${i}: x >= minX`, p.x >= B.minX);
+  }
+}
+
+// fanSlot is deterministic (same index → same result).
+{
+  const B = DEFAULT_ROOM_BOUNDS;
+  const a = fanSlot(3, B, 'console');
+  const b = fanSlot(3, B, 'console');
+  near('fanSlot deterministic x', a.x, b.x);
+  near('fanSlot deterministic z', a.z, b.z);
+}
+
+// fanSlot index 0 differs from index 1 (they should not collapse to the same X
+// when there is room for more than one slot).
+{
+  const B = DEFAULT_ROOM_BOUNDS;
+  const a = fanSlot(0, B, 'console');
+  const b = fanSlot(1, B, 'console');
+  ok('fanSlot slot 0 != slot 1 on X', Math.abs(a.x - b.x) > 1e-6);
 }
 
 // ---------------------------------------------------------------------------

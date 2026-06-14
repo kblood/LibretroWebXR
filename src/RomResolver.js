@@ -73,6 +73,25 @@ export function cacheKey(meta) {
   return sha1 ? `sha1-${String(sha1).toLowerCase()}` : null;
 }
 
+/**
+ * Diagnostic snapshot of how a ROM *would* be resolved — safe to call in Node
+ * (no browser APIs touched). Intended for boot telemetry: log this object plus
+ * opfsSupported() before/after resolve() so a headset failure can be diagnosed
+ * from remote logs alone.
+ *
+ * Shape:
+ *   { sha1, cacheKey, order, url, wantedFile }
+ */
+export function resolutionPlan(meta) {
+  return {
+    sha1: meta?.rom?.sha1 ?? null,
+    cacheKey: cacheKey(meta),
+    order: sourceOrder(meta),
+    url: romUrlFor(meta),
+    wantedFile: wantedFileName(meta) || null,
+  };
+}
+
 // --- Browser feature detection ---------------------------------------------
 
 /** Is the File System Access API (persistent local folder) available? */
@@ -292,7 +311,8 @@ export async function resolve(meta, opts = {}) {
   }
 
   const order = opts.source ? [opts.source] : sourceOrder(meta);
-  let buf = null, lastErr = null;
+  let buf = null;
+  const srcErrors = []; // aggregated per-source diagnostics
   for (const src of order) {
     try {
       if (src === 'url') buf = await fromUrl(meta, opts);
@@ -301,12 +321,16 @@ export async function resolve(meta, opts = {}) {
       else if (src === 'opfs') buf = await opfsGet(key);
       else throw new Error(`unknown ROM source "${src}"`);
       if (buf) break;
+      // Source returned a falsy value (e.g. opfsGet miss returns null).
+      srcErrors.push(`${src}: not cached`);
     } catch (e) {
-      lastErr = e;
+      srcErrors.push(`${src}: ${e.message}`);
     }
   }
   if (!buf) {
-    throw lastErr || new Error(`could not resolve ROM for ${meta?.title || meta?.file || '?'}`);
+    const title = meta?.title || meta?.file || '?';
+    const detail = srcErrors.length ? srcErrors.join('; ') : 'no sources attempted';
+    throw new Error(`could not resolve ROM for "${title}": ${detail}`);
   }
 
   // Best-effort write-through cache, sha1 entries only (so never stale).
