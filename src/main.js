@@ -44,6 +44,10 @@ import {
   makeGamepadStateKey, isGamepadStateKey, cableIdFromStateKey,
   makePeerGamepadId, parseGamepadEntries, diffGamepadSync,
 } from './net/GamepadSync.js';
+import {
+  makePropStateKey, isPropStateKey, propIdFromStateKey,
+  makePeerPropId, serializePropState, parsePropEntries, diffPropSync,
+} from './net/PropSync.js';
 import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, cacheRom, pickLibraryDirectory, fileSystemAccessSupported, resolutionPlan, opfsSupported } from './RomResolver.js';
 import {
@@ -150,6 +154,20 @@ let _reconcileGamepadState = () => {};
 // Per-peer counter for generating globally-unique gamepad ids.
 let _peerGamepadCounter = 0;
 
+// Prop room-layout sync: reconciler installed once buildCartridgeWorld sets up
+// the editor and built.placed. No-op stub until then.
+// Called whenever a `prop:*` STATE key arrives (including late-join snapshot).
+let _reconcilePropState = () => {};
+// Per-peer counter for generating globally-unique prop ids.
+let _peerPropCounter = 0;
+// Known synced payloads: propId → last payload applied from the network.
+// Used by diffPropSync to detect moves vs first-time-seen.
+const _knownPropPayloads = new Map();
+// Registry of all synced props (static room props + peer-spawned): propId → { prop, object }.
+// Populated in buildCartridgeWorld and updated when local props are added/broadcast.
+// Also used by window.__props debug hook.
+const _syncedProps = new Map();
+
 // TURN/ICE config is fixed from URL params at startup (same as before). We
 // don't expose a UI for it because it's an infrastructure detail; operators
 // who need TURN pass it in the URL.
@@ -190,6 +208,7 @@ function connectToRoom(room, nick, color) {
     onObjectState: (key, value) => {
       if (key === 'tv') applyRemoteTv(value);
       if (isGamepadStateKey(key)) _reconcileGamepadState();
+      if (isPropStateKey(key)) _reconcilePropState(key, value);
     },
     // M1.1 host-authoritative input: inject remote buttons only when we are host.
     onGameInput: (ev) => { if (net?.isHost()) gameInput?.setRemoteButton(ev); },
@@ -558,6 +577,28 @@ function syncVideoCords() {
     rec.cord.update(_cFrom, _cTo);
     rec.cord.setVisible(true);
   }
+}
+
+// Broadcast the current position + descriptor of a placed prop to all peers in
+// the session. Called from GrabMgr's onEditRelease (after the editor has snapped
+// the final position) and from addProp (to announce a newly created prop).
+// No-ops outside a session (net === null) or if the object has no prop descriptor
+// or no id.  The key is `prop:<propId>`; the value is the serialized payload
+// (type, pos, rot, and any type-specific fields like poster texture).
+// _knownPropPayloads is updated immediately so subsequent local moves that
+// produce the same transform are deduplicated by setObjectState's JSON equality
+// check.
+function _broadcastPropMove(obj) {
+  if (!net || !obj) return;
+  const prop = obj.userData?.roomProp;
+  if (!prop || !prop.id) return;
+  const payload = serializePropState(prop, obj);
+  const changed = net.setObjectState(makePropStateKey(prop.id), payload);
+  // Sync _knownPropPayloads so diffPropSync doesn't re-process our own echo.
+  if (changed) _knownPropPayloads.set(prop.id, payload);
+  // Register newly-added local props in _syncedProps (if not already there)
+  // so window.__props and reconciler can find them by propId.
+  if (!_syncedProps.has(prop.id)) _syncedProps.set(prop.id, { prop, object: obj });
 }
 
 // Item 6 — make a rack prop (TV cabinet / console) repositionable: register it
@@ -1089,7 +1130,17 @@ async function buildCartridgeWorld() {
     // Phase E: deferred arrows — `editor` is assigned just below and these are
     // only called at tick/release time, never during GrabMgr construction.
     isEditMode: () => editor?.isEditMode() || false,
-    onEditRelease: (obj) => editor?.onEditRelease(obj),
+    onEditRelease: (obj) => {
+      editor?.onEditRelease(obj);
+      // Prop room-layout sync (M-prop): after the editor has snapped the prop to
+      // its final resting position, broadcast the new transform to all peers.
+      // Only fires in a multiplayer session (net non-null). The prop descriptor
+      // lives on userData.roomProp (set by buildRoom/editor.registerPlaced).
+      // No echo guard needed: RoomObjects.apply deduplicates state that we set
+      // ourselves (changed===false path in _applyState), so the server echo of
+      // our own broadcast never triggers _reconcilePropState.
+      if (net) _broadcastPropMove(obj);
+    },
     // Three edit modes: in 'change' mode a grip selects a prop instead of moving
     // it; the menu then cycles the selected prop's options.
     getMode: () => editor?.getMode() || 'off',
@@ -1410,6 +1461,215 @@ async function buildCartridgeWorld() {
     // Run once immediately: catch any `gamepad:*` state that arrived before
     // buildCartridgeWorld finished (e.g. late-join snapshot).
     _reconcileGamepadState();
+
+    // ── Prop room-layout sync (M-prop) ─────────────────────────────────────
+    // When a remote peer adds a poster/console, moves a prop (onEditRelease),
+    // or removes one, we receive a `prop:<id>` STATE update. The reconciler
+    // below creates/moves/removes the corresponding THREE objects on this peer
+    // by reusing buildProp (construct) and direct object transform (move).
+    //
+    // Static props (those that exist in every peer's room.json from startup)
+    // get transform-only updates (toUpdate); they are NEVER created or removed
+    // by this sync (they already exist on all peers). Peer-spawned props
+    // (prop-<selfId>-<n>) can be created, updated, or removed.
+    //
+    // Disconnect policy: prop: keys are NOT auto-cleared by the Hub. Room
+    // layout persists after the setter leaves (unlike hold:/gamepad: which
+    // are owner-scoped). See Hub.js for the auto-clear rules.
+
+    // Build the set of "static" prop ids — the ones every peer has from the
+    // room.json — so diffPropSync never tries to remove or create them from
+    // scratch (we only update their transforms). Include all placed props
+    // (posters, consoles, TVs, portals, …) and the scene TVs.
+    const _staticPropIds = new Set();
+    for (const { prop } of built.placed) _staticPropIds.add(prop.id);
+    for (const tv of scene._tvs) _staticPropIds.add(tv.id);
+
+    // Seed the module-level _syncedProps with all static placed props.
+    // (_syncedProps is declared at module level so _broadcastPropMove and
+    // window.__props can access it after buildCartridgeWorld completes.)
+    // Seed with all static placed props.
+    for (const { prop, object } of built.placed) {
+      _syncedProps.set(prop.id, { prop, object });
+    }
+    // Seed with built-in TV groups (TVs can be moved in the editor).
+    for (const tv of scene._tvs) {
+      // Create a minimal "prop descriptor" for the TV so serializePropState can
+      // work with it. The id comes from SceneMgr's tv.id (e.g. 'tv0').
+      const tvDesc = { type: 'tv', id: tv.id };
+      _syncedProps.set(tv.id, { prop: tvDesc, object: tv.group });
+    }
+
+    // Apply a remote prop payload to a live object (move-only, no snap — the
+    // sender already snapped before broadcasting).
+    function _applyRemotePropTransform(object, payload) {
+      if (!object || !payload) return;
+      const DEG = Math.PI / 180;
+      if (Array.isArray(payload.pos)) {
+        object.position.set(
+          payload.pos[0] ?? 0,
+          payload.pos[1] ?? 0,
+          payload.pos[2] ?? 0,
+        );
+      }
+      if (Array.isArray(payload.rot)) {
+        object.rotation.set(
+          (payload.rot[0] ?? 0) * DEG,
+          (payload.rot[1] ?? 0) * DEG,
+          (payload.rot[2] ?? 0) * DEG,
+        );
+      }
+    }
+
+    // Create a remote-spawned prop locally from a STATE entry. Reuses the same
+    // buildProp path as the local addProp, so the mesh is identical. The prop
+    // descriptor is reconstructed directly from the payload (no dynamic import
+    // needed — buildProp accepts any object with type/pos/rot).
+    function _createRemoteProp(propId, payload) {
+      if (_syncedProps.has(propId)) return; // already exists
+      // Build descriptor from payload (pos/rot/type + any extras).
+      const prop = {
+        ...payload,
+        id: propId,
+        pos: Array.isArray(payload.pos) ? payload.pos : [0, 0, 0],
+        rot: Array.isArray(payload.rot) ? payload.rot : [0, 0, 0],
+      };
+      const r = buildProp(prop, { scene, collections: currentCollections });
+      if (!r) {
+        console.warn(`[PropSync] buildProp failed for remote prop ${propId} (type: ${payload.type})`);
+        return;
+      }
+      appendProp(currentRoom, prop);
+      editor.registerPlaced(prop, r.object);
+      _syncedProps.set(propId, { prop, object: r.object });
+      _knownPropPayloads.set(propId, payload);
+      // Track cartridges for shelf/bookcase so they're grabbable.
+      if (r.kind === 'shelf') r.cartridges?.forEach((c) => grabMgr?.addGrabbable(c));
+      if (r.kind === 'bookcase') r.cartridges?.forEach((c) => grabMgr?.addGrabbable(c));
+    }
+
+    // Remove a remote-spawned prop (state cleared, e.g. remote peer deleted it).
+    function _removeRemoteProp(propId) {
+      const rec = _syncedProps.get(propId);
+      if (!rec) return;
+      editor.removePlaced(rec.object);
+      scene.removeObject(rec.object);
+      grabMgr?.removeGrabbable(rec.object);
+      // Remove from room descriptor so Export Room stays clean.
+      if (currentRoom?.props) {
+        const i = currentRoom.props.findIndex((p) => p.id === propId);
+        if (i >= 0) currentRoom.props.splice(i, 1);
+      }
+      _syncedProps.delete(propId);
+      _knownPropPayloads.delete(propId);
+    }
+
+    // The real prop reconciler (replaces the module-level no-op stub).
+    _reconcilePropState = (key, value) => {
+      // Called per-key by the onObjectState path (not full-scan).
+      // We also support a full re-scan (no args) for late-join snapshot.
+      if (key !== undefined) {
+        const propId = propIdFromStateKey(key);
+        if (!propId) return;
+        if (value === null) {
+          // Key cleared: remove a peer-spawned prop (static props never removed).
+          if (!_staticPropIds.has(propId)) _removeRemoteProp(propId);
+        } else {
+          const prev = _knownPropPayloads.get(propId);
+          if (JSON.stringify(prev) === JSON.stringify(value)) return; // no change
+          const rec = _syncedProps.get(propId);
+          if (rec) {
+            // Existing prop — update its transform.
+            _applyRemotePropTransform(rec.object, value);
+            // If poster texture changed, re-apply it.
+            if (value.type === 'poster' && value.texture !== undefined && rec.prop.texture !== value.texture) {
+              rec.prop.texture = value.texture;
+              reapplyPosterProp(rec);
+            }
+            _knownPropPayloads.set(propId, value);
+          } else if (!_staticPropIds.has(propId)) {
+            // Peer-spawned prop we don't have yet — create it.
+            _createRemoteProp(propId, value);
+          } else {
+            // Static prop first seen in network state — update transform.
+            // (The object exists from buildRoom; just not in _knownPropPayloads yet.)
+            const staticRec = _syncedProps.get(propId);
+            if (staticRec) {
+              _applyRemotePropTransform(staticRec.object, value);
+              _knownPropPayloads.set(propId, value);
+            }
+          }
+        }
+        return;
+      }
+
+      // Full re-scan (called at late-join or reconnect).
+      const desired = parsePropEntries(net.objects.entries());
+      const { toCreate, toUpdate, toRemove } = diffPropSync({
+        desired,
+        localProps: _knownPropPayloads,
+        staticIds: _staticPropIds,
+      });
+      for (const { propId: pid, payload } of toCreate) _createRemoteProp(pid, payload);
+      for (const { propId: pid, payload } of toUpdate) {
+        const rec = _syncedProps.get(pid);
+        if (rec) {
+          _applyRemotePropTransform(rec.object, payload);
+          if (payload.type === 'poster' && payload.texture !== undefined && rec.prop.texture !== payload.texture) {
+            rec.prop.texture = payload.texture;
+            reapplyPosterProp(rec);
+          }
+          _knownPropPayloads.set(pid, payload);
+        }
+      }
+      for (const pid of toRemove) _removeRemoteProp(pid);
+    };
+
+    // Run once immediately to reconcile any state that arrived before we built
+    // the world (late-join snapshot or race between connect + buildCartridgeWorld).
+    _reconcilePropState();
+
+    // Expose props debug hook for headless smoke tests.
+    window.__props = {
+      // List all synced props: { propId, type, pos, rot, synced }
+      list: () => [..._syncedProps.entries()].map(([id, rec]) => ({
+        propId: id,
+        type: rec.prop.type,
+        pos: [rec.object.position.x, rec.object.position.y, rec.object.position.z],
+        rot: [rec.object.rotation.x, rec.object.rotation.y, rec.object.rotation.z],
+        static: _staticPropIds.has(id),
+        synced: _knownPropPayloads.has(id),
+      })),
+      // Broadcast the current transform of a placed prop by its descriptor id.
+      // Used headlessly to simulate a move without a VR grab/release.
+      broadcastMove: (propId) => {
+        const rec = _syncedProps.get(propId);
+        if (!rec || !net) return false;
+        net.setObjectState(makePropStateKey(propId), serializePropState(rec.prop, rec.object));
+        _knownPropPayloads.set(propId, net.getObjectState(makePropStateKey(propId)));
+        return true;
+      },
+      // Add a poster at a specific position and broadcast it (headless test helper).
+      addPoster: (opts = {}) => {
+        const prop = addProp('poster');
+        if (!prop) return null;
+        const rec = [..._syncedProps.values()].find((r) => r.prop === prop);
+        if (!rec) return prop.id;
+        // Move to requested position if supplied.
+        if (opts.pos) rec.object.position.set(opts.pos[0] ?? 0, opts.pos[1] ?? 1.5, opts.pos[2] ?? -3.9);
+        if (opts.texture) rec.prop.texture = opts.texture;
+        if (net) net.setObjectState(makePropStateKey(prop.id), serializePropState(rec.prop, rec.object));
+        _knownPropPayloads.set(prop.id, net?.getObjectState(makePropStateKey(prop.id)));
+        return prop.id;
+      },
+      // Broadcast removal of a peer-spawned prop.
+      removeProp: (propId) => {
+        if (!net || _staticPropIds.has(propId)) return false;
+        net.setObjectState(makePropStateKey(propId), null);
+        _removeRemoteProp(propId);
+        return true;
+      },
+    };
   }
 
   // Flat-screen controls: mouse-look + WASD + click-to-interact, so the in-VR
@@ -1682,6 +1942,30 @@ function addProp(type, opts = {}) {
 
   ensureEditMode();
   setStatus(`added ${type} — grab to place`);
+
+  // Prop room-layout sync (M-prop): broadcast the new prop's existence so
+  // remote peers can create it on their side. We use the prop's descriptor id
+  // which is unique (PropCreator.uniqueId). In a session, assign a peer-scoped
+  // id BEFORE broadcasting so all peers agree on the id. (This overrides the
+  // sequential id PropCreator minted — that's fine since the room descriptor on
+  // this peer uses the updated id too.)
+  if (net) {
+    const selfId = net.presence.selfId || 'local';
+    const peerPropId = makePeerPropId(selfId, ++_peerPropCounter);
+    // Update the descriptor and the room entry (PropCreator already appended it
+    // above with the sequential id; we rename it to the peer-scoped id).
+    const oldId = prop.id;
+    prop.id = peerPropId;
+    // Fix up the room.props entry (appendProp already pushed prop by reference,
+    // so mutating prop.id is sufficient for the in-place entry).
+    // Update the placed record's userData too (editor.registerPlaced was called
+    // with prop by reference — it stored prop directly, so the id is live).
+    if (r.object.userData.roomProp && r.object.userData.roomProp.id === oldId) {
+      r.object.userData.roomProp.id = peerPropId;
+    }
+    _broadcastPropMove(r.object);
+  }
+
   return prop;
 }
 
