@@ -32,7 +32,8 @@
     "smoke-gamepad-share": "node scripts/smoke-gamepad-share.mjs",
     "smoke-prop-sync": "node scripts/smoke-prop-sync.mjs",
     "deploy": "pwsh scripts/deploy.ps1",
-    "dummy-player": "node scripts/dummy-player.mjs"
+    "dummy-player": "node scripts/dummy-player.mjs",
+    "probe-local-rom": "node scripts/probe-local-rom.mjs"
   },
   "devDependencies": {
     "puppeteer-core": "^25.0.2",

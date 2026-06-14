@@ -49,7 +49,7 @@ import {
   makePeerPropId, serializePropState, parsePropEntries, diffPropSync,
 } from './net/PropSync.js';
 import { loadCollection, parseCollection } from './Collection.js';
-import { resolve as resolveRom, cacheRom, pickLibraryDirectory, fileSystemAccessSupported, resolutionPlan, opfsSupported } from './RomResolver.js';
+import { resolve as resolveRom, cacheRom, pickLibraryDirectory, fileSystemAccessSupported, resolutionPlan, opfsSupported, isLocalRomMeta } from './RomResolver.js';
 import {
   pickImagesDirectory, hasImagesDirectory, listImages, entryObjectUrl,
   fileSystemAccessSupported as imgFolderSupported,
@@ -1318,6 +1318,51 @@ async function buildCartridgeWorld() {
   window.__addLocalRom = (meta) => addLocalRomToShelf(meta);
   // Headless hook: exercise the ROM resolver (OPFS cache round-trip etc.).
   window.__rom = { resolve: resolveRom, cacheRom };
+  /**
+   * Headless hook: simulate a local ROM file-pick WITHOUT the OS file-picker
+   * dialog (which can't open in headless/WebXR contexts). Mirrors the logic
+   * of the romInput change-handler exactly: boots the ROM, caches it in OPFS
+   * (sha1), mints a shelf cartridge carrying the sha1 provenance, and returns
+   * the minted cart's userData so tests can assert the round-trip.
+   *
+   * Usage:
+   *   const bytes = new Uint8Array(1024).fill(0); // fake ROM
+   *   const result = await window.__pickLocalRom('test.sfc', bytes.buffer);
+   *   // result: { cart: {file, rom:{sha1,sources}}, sha1, sources }
+   *
+   * @param {string} name     ROM filename (used for core detection + title)
+   * @param {ArrayBuffer|Uint8Array} data  ROM bytes
+   */
+  window.__pickLocalRom = async (name, data) => {
+    const buf = data instanceof ArrayBuffer ? data : data.buffer;
+    const coreInfo = detectCore(name, coreOverride);
+    if (!coreInfo) throw new Error(`no core for "${name}"`);
+    const system = systemForFile(name, coreOverride);
+    const title = name.replace(/\.[^.]+$/, '');
+    const meta = {
+      file: name,
+      core: coreInfo.name,
+      system: system || 'unknown',
+      title,
+      rom: { source: 'pick' },
+    };
+    // Boot the ROM (same as romInput handler — uses the in-hand buffer).
+    await client.start(emuCanvas, buf, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style });
+    primaryRuntime.noteLoaded(coreInfo.name, { system: meta.system, title });
+    currentCore = coreInfo.name;
+    currentMeta = { core: coreInfo.name, file: meta.file, title, system: meta.system };
+    gameInput?.setSystem(meta.system);
+    // Cache content-addressed in OPFS so the shelf cart can re-resolve later.
+    const sha1 = await cacheRom(buf);
+    meta.rom = sha1 ? { sha1, sources: ['opfs', 'pick'] } : { source: 'pick' };
+    // Mint the shelf cart (same as romInput handler).
+    const cart = await addLocalRomToShelf(meta);
+    return {
+      cart: cart ? { file: cart.userData.file, rom: cart.userData.rom } : null,
+      sha1,
+      sources: meta.rom.sources || [meta.rom.source],
+    };
+  };
   window.__add = {
     // Basic spawners (used by headless probes + the in-VR Add-mode buttons).
     shelf:    (col) => addProp('shelf',    col ? { collection: col } : {}),
@@ -2950,10 +2995,17 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // real error in VR rather than "nothing happened". Default room ships only
     // cartridges that boot, but a user-added collection can still point at a ROM
     // that isn't installed.
+    //
+    // Local ROMs (opfs/pick only) get a special message: the user needs to pick
+    // the file again (the OPFS cache may have been cleared), NOT to "install" a
+    // server ROM. Avoids the confusing "ROM not installed" on the headset.
+    const isLocal = isLocalRomMeta(meta);
     const notInstalled = /404|→\s*\d|not found|could not resolve|no url for rom/i.test(msg);
-    placeholder.setMessage(notInstalled
-      ? `ROM not installed: ${meta.title || meta.file}`
-      : `Couldn't load ${meta.title || meta.file}`);
+    placeholder.setMessage(isLocal
+      ? `Local ROM not in cache — pick the file again: ${meta.title || meta.file}`
+      : notInstalled
+        ? `ROM not installed: ${meta.title || meta.file}`
+        : `Couldn't load ${meta.title || meta.file}`);
     placeholder.start();
     scene.setScreenSource(placeholderCanvas);
     nowPlayingPanel?.userData.setNowPlaying?.({});

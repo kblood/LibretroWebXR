@@ -74,6 +74,27 @@ export function cacheKey(meta) {
 }
 
 /**
+ * True when the ROM is a locally-picked (or OPFS-cached) file that has no
+ * server URL — re-resolving it via `url` would 404, so callers can surface a
+ * more helpful "pick the file again" message instead of "ROM not installed".
+ *
+ * A ROM is considered local-only when `rom.sources` (or `rom.source`) is
+ * explicitly set and contains ONLY opfs/pick entries. Entries that fall
+ * through to the default (`['url']` or `['pick']`) because no explicit source
+ * was declared are NOT considered local — the default pick fallback applies to
+ * any entry with no URL, which is too broad.
+ */
+export function isLocalRomMeta(meta) {
+  const r = meta?.rom;
+  if (!r) return false; // no rom block → default url resolution, not a local pick
+  if (Array.isArray(r.sources) && r.sources.length) {
+    return r.sources.every((s) => s === 'opfs' || s === 'pick');
+  }
+  if (r.source) return r.source === 'opfs' || r.source === 'pick';
+  return false; // no explicit source declared → not a known local-pick
+}
+
+/**
  * Diagnostic snapshot of how a ROM *would* be resolved — safe to call in Node
  * (no browser APIs touched). Intended for boot telemetry: log this object plus
  * opfsSupported() before/after resolve() so a headset failure can be diagnosed

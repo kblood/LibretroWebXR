@@ -11,6 +11,7 @@ import {
   cacheKey,
   resolutionPlan,
   resolve,
+  isLocalRomMeta,
 } from '../src/RomResolver.js';
 
 let pass = 0, fail = 0;
@@ -274,6 +275,146 @@ const notFoundFetch = async (_url) => ({ ok: false, status: 404, arrayBuffer: as
     ok('resolve pick-in-Node message contains "pick:"', e.message.includes('pick:'));
     ok('resolve pick-in-Node message contains title', e.message.includes('No URL Game'));
   }
+}
+
+// ---------------------------------------------------------------------------
+// isLocalRomMeta — picked/OPFS-only ROMs (no server URL fallback)
+// ---------------------------------------------------------------------------
+
+console.log('--- isLocalRomMeta ---');
+{
+  // The canonical post-cacheRom meta: opfs first, pick as fallback.
+  ok('opfs+pick is local',
+    isLocalRomMeta({ file: 'game.sfc', rom: { sha1: 'abc', sources: ['opfs', 'pick'] } }));
+
+  // OPFS only (sha1 known but cacheRom-only)
+  ok('opfs-only is local',
+    isLocalRomMeta({ file: 'game.sfc', rom: { sha1: 'abc', sources: ['opfs'] } }));
+
+  // pick-only (OPFS unavailable on this device)
+  ok('pick-only is local',
+    isLocalRomMeta({ file: 'game.sfc', rom: { source: 'pick' } }));
+
+  // pick only via sources array
+  ok('pick-only sources[] is local',
+    isLocalRomMeta({ file: 'game.sfc', rom: { sources: ['pick'] } }));
+
+  // url-containing entries are NOT local (server ROM)
+  ok('url alone is NOT local',
+    !isLocalRomMeta({ file: 'game.sfc' }));
+  ok('url source is NOT local',
+    !isLocalRomMeta({ file: 'game.sfc', rom: { source: 'url' } }));
+  ok('opfs+url mix is NOT local',
+    !isLocalRomMeta({ file: 'game.sfc', rom: { sources: ['opfs', 'url'] } }));
+  ok('local-folder source is NOT local',
+    !isLocalRomMeta({ file: 'game.sfc', rom: { source: 'local' } }));
+
+  // null / empty — no explicit rom source → NOT local (could be any unspecced entry)
+  ok('null meta → NOT local', !isLocalRomMeta(null));
+  ok('empty meta → NOT local', !isLocalRomMeta({}));
+  ok('rom block with no source → NOT local', !isLocalRomMeta({ rom: {} }));
+}
+
+// ---------------------------------------------------------------------------
+// Local-ROM lifecycle round-trip (pure logic, no browser APIs)
+//
+// This verifies the key invariant from the Quest bug:
+//   picked ROM meta with sha1 + sources=['opfs','pick']
+//   → sourceOrder NEVER contains 'url'
+//   → cacheKey returns a valid key
+//   → resolutionPlan reflects it correctly
+//   → cart.userData.rom round-trip: the same object passed to createCartridge
+//     is what the cart carries, and GrabMgr forwards it verbatim on insert
+// ---------------------------------------------------------------------------
+
+console.log('--- local-ROM round-trip (core invariant) ---');
+{
+  // Simulate what romInput handler produces after a successful cacheRom:
+  const sha1 = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
+  const pickedMeta = {
+    file: 'AD&D - Eye of the Beholder.smc',
+    core: 'snes9x',
+    system: 'snes',
+    title: 'AD&D - Eye of the Beholder',
+    rom: { sha1, sources: ['opfs', 'pick'] },
+  };
+
+  // sourceOrder must be ['opfs','pick'] — never ['url'].
+  const order = sourceOrder(pickedMeta);
+  eq('picked-ROM sourceOrder', order, ['opfs', 'pick']);
+  ok('picked-ROM order has no url', !order.includes('url'));
+
+  // cacheKey must resolve to the sha1-prefixed key.
+  eq('picked-ROM cacheKey', cacheKey(pickedMeta), `sha1-${sha1}`);
+
+  // resolutionPlan must reflect opfs+pick, no url source.
+  const plan = resolutionPlan(pickedMeta);
+  eq('picked-ROM plan order', plan.order, ['opfs', 'pick']);
+  ok('picked-ROM plan has sha1', plan.sha1 === sha1);
+  // url in the plan is the fallback URL that would be built from meta.file;
+  // it IS populated (romUrlFor uses meta.file) but the source ORDER never
+  // contains 'url', so the resolver never fetches it.
+  ok('picked-ROM plan url exists (but not used)', plan.url !== null);
+
+  // isLocalRomMeta confirms this is a local-only entry.
+  ok('picked-ROM isLocalRomMeta', isLocalRomMeta(pickedMeta));
+
+  // --- Simulate cart.userData round-trip ---
+  // createCartridge stores meta.rom as cart.userData.rom.
+  // GrabMgr forwards it on insert: { file, core, system, title, rom: cart.userData.rom || undefined }
+  // Verify the forwarded meta still resolves correctly.
+  const cartUserDataRom = pickedMeta.rom; // what Cartridge.js stores
+  const insertedMeta = {
+    file: pickedMeta.file,
+    core: pickedMeta.core,
+    system: pickedMeta.system,
+    title: pickedMeta.title,
+    rom: cartUserDataRom || undefined,
+  };
+  eq('cart round-trip sourceOrder', sourceOrder(insertedMeta), ['opfs', 'pick']);
+  ok('cart round-trip no url', !sourceOrder(insertedMeta).includes('url'));
+  eq('cart round-trip cacheKey', cacheKey(insertedMeta), `sha1-${sha1}`);
+  ok('cart round-trip isLocal', isLocalRomMeta(insertedMeta));
+
+  // --- Fallback when OPFS is unavailable (cacheRom returns null) ---
+  const noCacheMeta = {
+    file: 'game.sfc',
+    core: 'snes9x',
+    system: 'snes',
+    title: 'Game',
+    rom: { source: 'pick' }, // what romInput sets when sha1 = null
+  };
+  eq('no-opfs sourceOrder', sourceOrder(noCacheMeta), ['pick']);
+  ok('no-opfs no url', !sourceOrder(noCacheMeta).includes('url'));
+  ok('no-opfs isLocal', isLocalRomMeta(noCacheMeta));
+  eq('no-opfs cacheKey', cacheKey(noCacheMeta), null); // no sha1 → no opfs key
+
+  // --- Confirm that a plain file-only meta (shipping ROM) is NOT affected ---
+  const shippingMeta = { file: 'freeware/lwx-snes-demo.sfc', core: 'snes9x', system: 'snes', title: 'LWX Demo' };
+  eq('shipping sourceOrder', sourceOrder(shippingMeta), ['url']);
+  ok('shipping isLocal false', !isLocalRomMeta(shippingMeta));
+}
+
+// ---------------------------------------------------------------------------
+// Special characters in romUrlFor (filenames with spaces and ampersands)
+// The sha1-keyed OPFS path is safe; only the url fallback uses raw filename.
+// Assert the URL is at least built (encoding is the caller's job) and that
+// local-ROM meta never reaches fromUrl in the resolver.
+// ---------------------------------------------------------------------------
+
+console.log('--- special chars in romUrlFor ---');
+{
+  const specialMeta = { file: 'AD&D - Eye of the Beholder.smc' };
+  const url = romUrlFor(specialMeta);
+  // URL is built using the raw filename — contains the special chars.
+  ok('special chars url built', url === 'roms/AD&D - Eye of the Beholder.smc');
+  // A picked version of the same file (with sha1) never hits fromUrl.
+  const pickedSpecial = {
+    file: 'AD&D - Eye of the Beholder.smc',
+    rom: { sha1: 'deadbeef01', sources: ['opfs', 'pick'] },
+  };
+  ok('special chars picked not url', !sourceOrder(pickedSpecial).includes('url'));
+  ok('special chars picked isLocal', isLocalRomMeta(pickedSpecial));
 }
 
 // ---------------------------------------------------------------------------
