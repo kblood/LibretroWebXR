@@ -489,6 +489,10 @@ remote INPUT, held-object). CLI: `--session/--url/--nick/--color/--move`.
   Discord-gated UGC kit.
 - Community gallery of room/collection URLs.
 - BIOS-needing systems (PSX/N64) via fetched cores; user-supplied BIOS UX.
+  **Feasibility assessed 2026-06-15 (`docs/research/psx-n64-feasibility.md`):**
+  the no-JIT wasm runtime (same wall as Amiga/Amiberry) makes **PSX marginal —
+  gate on a `pcsx_rearmed` perf spike, HLE BIOS default** — and **N64 not viable**
+  on a standalone Quest 3 (slideshow; skip unless wanted as a non-playable demo).
 - PWA install; per-headset storage UX; performance passes on Quest.
 
 ## Parked (user-deferred, low priority)
