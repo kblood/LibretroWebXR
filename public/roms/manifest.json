@@ -13,6 +13,9 @@
     { "file": "freeware/lwx-nes-pong.nes", "system": "nes", "core": "nestopia", "title": "LWX Pong", "color": "#3a3a8a",
       "license": "CC0", "credits": "LibretroWebXR (game in games/nes-pong, built with cc65 + neslib; see scripts/make-nes-pong.mjs)." },
 
+    { "file": "freeware/lwx-nes-bomberman.nes", "system": "nes", "core": "fceumm", "title": "LWX Bomberman", "color": "#8a3a3a",
+      "license": "CC0", "credits": "LibretroWebXR (game in games/nes-bomberman, built with cc65 + neslib; see scripts/make-nes-bomberman.mjs). 2-player: D-pad moves, A drops a bomb, last one standing wins." },
+
     { "file": "freeware/lwx-gb-snake.gb", "system": "gb", "core": "gambatte", "title": "LWX Snake (GB)", "color": "#3a8a3a",
       "license": "CC0", "credits": "LibretroWebXR (game in games/gb-snake, built with GBDK-2020; see scripts/make-gb-snake.mjs)" },
 
