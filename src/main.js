@@ -719,6 +719,7 @@ function setConsolePower(consoleId, on, btn) {
   if (on) rt?.resume?.(); else rt?.pause?.();
   _tintPowerBtn(btn, on);
   routeVideo();
+  persistRack();
   logger?.event?.('console-power', { consoleId, on });
 }
 
@@ -726,6 +727,7 @@ function setTvPower(tvId, on, btn) {
   tvPowered.set(tvId, on);
   _tintPowerBtn(btn, on);
   routeVideo();
+  persistRack();
   logger?.event?.('tv-power', { tvId, on });
 }
 
@@ -853,9 +855,55 @@ async function spawnConsole(system, opts = {}) {
 
 // Spawned (non-primary) console metas, in spawn order, for RackPersistence.
 const spawnedMetas = [];
+
+// Snapshot the physical layout (position + rotation) and power state of every
+// rack object — primary AND spawned consoles + their TVs — keyed by id. Restored
+// after the cross-core reload so a rearranged rack doesn't snap back to defaults.
+function buildRackLayout() {
+  const transforms = {};
+  const power = {};
+  const cap = (id, obj3d) => {
+    if (!obj3d) return;
+    const p = obj3d.position, r = obj3d.rotation;
+    transforms[id] = { pos: [p.x, p.y, p.z], rot: [r.x, r.y, r.z] };
+  };
+  for (const [id, obj] of consoleObjs) { cap(id, obj); power[id] = isConsoleOn(id); }
+  for (const tv of scene._tvs) { cap(tv.id, tv.group); power[tv.id] = isTvOn(tv.id); }
+  return { transforms, power };
+}
+
 function persistRack() {
-  try { saveRack(spawnedMetas, cable.tvs().map((tv) => ({ tv, console: cable.sourceOf(tv) }))); }
-  catch (e) { console.warn('[main] persistRack failed:', e); }
+  try {
+    saveRack(
+      spawnedMetas,
+      cable.tvs().map((tv) => ({ tv, console: cable.sourceOf(tv) })),
+      buildRackLayout(),
+    );
+  } catch (e) { console.warn('[main] persistRack failed:', e); }
+}
+
+// Re-apply a saved layout entry (pos + rot) to a rack Object3D.
+function _applyRackTransform(obj3d, t) {
+  if (!obj3d || !t || !Array.isArray(t.pos)) return;
+  obj3d.position.set(t.pos[0], t.pos[1], t.pos[2]);
+  if (Array.isArray(t.rot)) obj3d.rotation.set(t.rot[0], t.rot[1], t.rot[2]);
+  obj3d.updateMatrixWorld(true);
+}
+
+// Restore positions/rotations + power for every rack object from a saved layout.
+// Called from restoreRack after consoles are (re)spawned and ids exist.
+function applyRackLayout(layout) {
+  if (!layout) return;
+  const { transforms = {}, power = {} } = layout;
+  for (const [id, obj] of consoleObjs) _applyRackTransform(obj, transforms[id]);
+  for (const tv of scene._tvs) _applyRackTransform(tv.group, transforms[tv.id]);
+  // Power: only flip the ones explicitly stored OFF (default is on).
+  for (const [id] of consoleObjs) {
+    if (power[id] === false) setConsolePower(id, false, consoleObjs.get(id)?.userData?.powerBtn);
+  }
+  for (const tv of scene._tvs) {
+    if (power[tv.id] === false) setTvPower(tv.id, false, tv.group.userData?.powerBtn);
+  }
 }
 
 // Re-create the saved rack: re-spawn each persisted console (re-booting its core
@@ -883,6 +931,10 @@ async function restoreRack() {
       seatVideoPlug(e.console, e.tv);
     }
   }
+  // Restore each console/TV to where the user left it (and its power state) so
+  // the cross-core reload preserves a rearranged rack instead of resetting it.
+  // Plugs/cords re-seat to the moved jacks automatically (per-frame sync*Cords).
+  applyRackLayout(saved.layout);
   routeVideo();
   refreshAudioFocus();
   persistRack();
@@ -1506,6 +1558,9 @@ async function buildCartridgeWorld() {
       // ourselves (changed===false path in _applyState), so the server echo of
       // our own broadcast never triggers _reconcilePropState.
       if (net) _broadcastPropMove(obj);
+      // A moved console/TV is rack state, not an editor prop — persist its new
+      // transform so it survives the cross-core reload.
+      if (obj?.userData?.kind === 'console' || obj?.userData?.kind === 'tv') persistRack();
     },
     // Three edit modes: in 'change' mode a grip selects a prop instead of moving
     // it; the menu then cycles the selected prop's options.

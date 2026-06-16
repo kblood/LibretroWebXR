@@ -17,10 +17,15 @@ const SCHEMA = 'libretrowebxr/rack@1';
  * @param {Array<{system:string,file:string,core:string,title:string}>} consoles
  *   spawned (non-primary) consoles, in spawn order.
  * @param {Array<{tv:string,console:(string|null)}>} video  full TV→console map.
+ * @param {{transforms?:Object<string,{pos:number[],rot:number[]}>, power?:Object<string,boolean>}} [layout]
+ *   Physical layout of EVERY rack object (primary + spawned), keyed by id
+ *   ('console0','tv0','console1',…): position+rotation (so a moved console/TV
+ *   survives the cross-core reload instead of snapping back to its default slot)
+ *   and on/off power state. Optional + backward-compatible (older saves omit it).
  * @returns {object}
  */
-export function serializeRack(consoles, video) {
-  return {
+export function serializeRack(consoles, video, layout) {
+  const desc = {
     schema: SCHEMA,
     consoles: (consoles || []).map((c) => ({
       system: c.system, file: c.file, core: c.core, title: c.title,
@@ -29,6 +34,37 @@ export function serializeRack(consoles, video) {
       .filter((e) => e && e.tv)
       .map((e) => ({ tv: e.tv, console: e.console ?? null })),
   };
+  if (layout && (layout.transforms || layout.power)) {
+    desc.layout = {
+      transforms: layout.transforms || {},
+      power: layout.power || {},
+    };
+  }
+  return desc;
+}
+
+// Validate a parsed layout block (optional). Drops malformed entries rather than
+// rejecting the whole save, so a future/garbled layout never blocks a rack
+// restore. Returns { transforms, power } or null.
+function parseLayout(layout) {
+  if (!layout || typeof layout !== 'object') return null;
+  const transforms = {};
+  const power = {};
+  const t = layout.transforms;
+  if (t && typeof t === 'object') {
+    for (const [id, v] of Object.entries(t)) {
+      if (v && Array.isArray(v.pos) && v.pos.length === 3 && v.pos.every((n) => typeof n === 'number')) {
+        const rot = Array.isArray(v.rot) && v.rot.length === 3 && v.rot.every((n) => typeof n === 'number')
+          ? v.rot.slice() : [0, 0, 0];
+        transforms[id] = { pos: v.pos.slice(), rot };
+      }
+    }
+  }
+  const p = layout.power;
+  if (p && typeof p === 'object') {
+    for (const [id, v] of Object.entries(p)) power[id] = !!v;
+  }
+  return { transforms, power };
 }
 
 /**
@@ -47,7 +83,7 @@ export function parseRack(obj) {
   const cleanVideo = video
     .filter((e) => e && typeof e.tv === 'string')
     .map((e) => ({ tv: e.tv, console: e.console || null }));
-  return { consoles: cleanConsoles, video: cleanVideo };
+  return { consoles: cleanConsoles, video: cleanVideo, layout: parseLayout(obj.layout) };
 }
 
 /** True if the descriptor has nothing worth restoring (no spawned consoles). */
@@ -57,9 +93,9 @@ export function isEmptyRack(parsed) {
 
 // --- localStorage I/O -------------------------------------------------------
 
-export function saveRack(consoles, video) {
+export function saveRack(consoles, video, layout) {
   try {
-    const desc = serializeRack(consoles, video);
+    const desc = serializeRack(consoles, video, layout);
     if (isEmptyRack(desc)) { localStorage.removeItem(RACK_KEY); return; }
     localStorage.setItem(RACK_KEY, JSON.stringify(desc));
   } catch (e) { console.warn('[RackPersistence] save failed:', e); }
