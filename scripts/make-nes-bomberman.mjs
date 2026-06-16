@@ -3,7 +3,7 @@
 //
 // Pipeline (the cc65 + neslib template-fill workflow):
 //   1. generate tiles.chr from the readable tile maps below
-//      (0 floor, 1 wall, 2 brick, 3-6 bomb, 7 flame, 8-11 player)
+//      (0 floor, 1 wall, 2 brick, 3-6 bomb, 7 flame, 8-11 player, 12-14 items)
 //   2. cl65 -t nes -C nes.cfg  main.c crt0.s  ->  NROM .nes
 //   3. copy to public/roms/freeware/lwx-nes-bomberman.nes
 // Only games/nes-bomberman/main.c is "ours to write"; the neslib boilerplate
@@ -117,6 +117,20 @@ const PLAYER16 = [
   '...222...222....',
   '................',
 ];
+// Power-up icons (8x8, shown 2x2 to fill a cell). Drawn in the bg palette
+// (1 gray, 2 red, 3 yellow) so they read against the black floor.
+const ITEMBOMB = [   // bomb-up: a bomb glyph with a yellow '+'
+  '..1111..', '.113111.', '.131111.', '.111111.',
+  '.111111.', '..1111..', '...33...', '..3333..',
+];
+const ITEMFIRE = [   // fire-up: a flame
+  '...3....', '..323...', '..323...', '.32223..',
+  '.32223..', '.322223.', '.322223.', '..2222..',
+];
+const ITEMSPEED = [  // speed-up: a lightning bolt
+  '....33..', '...33...', '..33....', '.33333..',
+  '..333...', '..33....', '.33.....', '33......',
+];
 
 const chr = Buffer.alloc(8192, 0);
 function putTile(id, bytes) { for (let b = 0; b < 16; b++) chr[id * 16 + b] = bytes[b]; }
@@ -127,6 +141,9 @@ putTile(2, tileBytes(BRICK));
 split16(BOMB16).forEach((t, n) => putTile(3 + n, t));   // 3,4,5,6
 putTile(7, tileBytes(FLAME));
 split16(PLAYER16).forEach((t, n) => putTile(8 + n, t)); // 8,9,10,11
+putTile(12, tileBytes(ITEMBOMB));
+putTile(13, tileBytes(ITEMFIRE));
+putTile(14, tileBytes(ITEMSPEED));
 
 writeFileSync(join(GAME_DIR, 'tiles.chr'), chr);
 

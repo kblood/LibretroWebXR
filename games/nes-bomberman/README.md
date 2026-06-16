@@ -1,19 +1,26 @@
 # LWX Bomberman (NES)
 
-A CC0 two-player Bomberman / Dynablaster clone for LibretroWebXR test content.
-Single screen, NROM (mapper 0). It exists to give the NES's multi-controller
-setup a real couch-co-op showcase that boots with no downloads.
+A CC0 Bomberman / Dynablaster clone for LibretroWebXR test content, for up to
+four players. Single screen, NROM (mapper 0). It exists to give the NES's
+multi-controller setup a real couch-co-op showcase that boots with no downloads.
 
-- **Player 1** — D-pad to move, **A** to drop a bomb (controller 0).
-- **Player 2** — same, on controller 1. In a shared WebXR room the client's
-  forwarded input arrives as host controller 1, so this doubles as a
-  multiplayer test.
+- **Player 1 / Player 2** — D-pad to move, **A** to drop a bomb, on controllers
+  0 and 1. In a shared WebXR room the client's forwarded input arrives as host
+  controller 1, so this doubles as a multiplayer test.
+- **Player 3 / Player 4** — the two extra pads of an NES **Four Score** multitap.
+  The Four Score is auto-detected from its signature: present → 4-player, absent
+  → the game cleanly runs as 2-player. (See "Four Score" below for the frontend
+  step still needed to feed P3/P4 input to the ROM.)
 - Press **START** on the title screen to begin (it also seeds the random brick
   layout from how long you waited).
-- Bombs explode after ~2 s, throwing flame two cells in each direction. Flame
-  stops at the gray walls, blasts through one destructible brick, and chains
-  into other bombs it touches. Last player standing wins; the round then
-  rebuilds automatically.
+- Bombs explode after ~2 s, throwing flame outward. Flame stops at the gray
+  walls, blasts through one destructible brick, and chains into other bombs it
+  touches. Last player standing wins; the round then rebuilds automatically.
+- **Power-ups** hide under ~1 in 4 bricks and appear when the brick is blasted:
+  **bomb-up** (one more simultaneous bomb), **fire-up** (longer blast range),
+  **speed-up** (move faster). Walk over one to collect it. Players start with a
+  range-1 bomb and one bomb at a time, and each spawn has a 2-cell clear lane so
+  the first bomb is always survivable.
 
 ## Design
 
@@ -53,10 +60,27 @@ player), builds with `cl65 -t nes -C nes.cfg main.c crt0.s`, and writes
 The compiled ROM is **CC0** — neslib's zlib license does not taint the output;
 keep `NESLIB-COPYING.txt` for the vendored library source.
 
+## Four Score (P3/P4 input)
+
+The ROM reads all four pads itself: `poll4()` strobes `$4016` once and clocks the
+Four Score serial stream (P1/P2, then P3/P4, then the signature), packing bits
+LSB-first to match neslib's `PAD_*` masks. neslib's own `pad_poll` only reads two
+ports, so this is a small hand-rolled reader in `main.c` — no change to the frozen
+boilerplate. If the signature isn't seen, `nplayers` stays 2.
+
+What still needs doing on the **frontend** to actually deliver P3/P4 to the ROM:
+the libretro layer must put the NES controller ports into the Four Score device.
+This is **not** an `fceumm` core option (there is no `fceumm_4player` — verified
+against the shipped core; the `4-Player`/`2-Player` strings in it are device-type
+labels). In a full-RetroArch wasm build it's `input_libretro_device_pN` in the RA
+config (`src/RetroArchConfig.js`) and/or a `retro_set_controller_port_device`
+call; the exact device id and whether this RA build honours it need verifying on
+the headset. Until then the game runs as a polished 2-player title everywhere.
+
 ## Notes
 
 - The manifest pins **`fceumm`**: like the other neslib NROM ROMs here, nestopia
   black-screens it.
-- Phase 1 ships 2 players with a fixed bomb range and one bomb each. Four-player
-  (Four Score) and power-ups (extra bombs / longer range) are the planned next
-  steps; the code already spawns four corners and gates players behind `NUMP`.
+- Tunables live as `#define`s at the top of `main.c` (`BOMB_FUSE`, `FLAME_DUR`,
+  `ITEM_CHANCE`, the `MAX_*` power-up caps). Bomb slots are shared globally
+  (`MAXBOMBS`).
