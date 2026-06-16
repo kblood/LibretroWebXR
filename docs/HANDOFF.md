@@ -498,11 +498,11 @@ scripts/
   fetch-cores.mjs    Populate public/cores/ from a local source (scratch workspace).
   make-c64-demo.mjs  Generate the CC0 C64 BASIC demo .prg.
   lib/cbm-basic.mjs  Shared Commodore BASIC v2 tokenizer (C64 + VIC-20).
-  make-*.mjs         One per CC0 game (make-nes-pong, make-gb-snake, make-genesis-demo,
-                     make-sms-arcade, make-pce-pong, make-snes-demo, make-gba-paint,
-                     make-vb-demo, make-c64-snake, make-vic20-demo). Each rebuilds a
-                     ROM in games/<sys>/ → public/roms/freeware/. npm run make-games
-                     runs the zero-install (pure-Node CBM) trio.
+  make-*.mjs         One per CC0 game (make-nes-pong, make-nes-bomberman, make-gb-snake,
+                     make-genesis-demo, make-sms-arcade, make-pce-pong, make-snes-demo,
+                     make-gba-paint, make-vb-demo, make-c64-snake, make-vic20-demo). Each
+                     rebuilds a ROM in games/<sys>/ → public/roms/freeware/. npm run
+                     make-games runs the zero-install (pure-Node CBM) trio.
   test-collection.mjs  npm test — pure-logic assertions for the R.1 layer.
 server/
   log-server.mjs     ★LOG POST /log receiver + GET /logs (auto-refreshing HTML

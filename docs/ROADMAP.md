@@ -316,6 +316,18 @@ players. **VR controller routing still needs a real-headset smoke test; not yet
 redeployed.** Follow-ons: physical USB-gamepad routing, per-pad mesh animation +
 DebugHud for players 2-4, in-VR port retargeting.
 
+> **Four Score gap (surfaced by LWX Bomberman, 2026-06-16).** Routing P2-4 keys
+> via `EXTRA_PLAYER_KEYS` is necessary but **not sufficient on the NES**: a real
+> NES only has two controller ports, so a 4-player ROM reads P3/P4 over the
+> **Four Score** multitap serial protocol. For fceumm to present that to the
+> ROM, the libretro layer must put the NES ports into the Four Score *device*
+> (`input_libretro_device_pN` in `RetroArchConfig.js`, and/or
+> `retro_set_controller_port_device`). This is **not** a core option — verified
+> there is no `fceumm_4player` in the shipped core. LWX Bomberman already reads
+> all four pads and auto-detects the Four Score (falling back to 2-player), so it
+> is the ready-made test case once the device is wired; needs headset
+> verification. Same applies to any genuinely-4-port console (SNES multitap, etc.).
+
 ## Phase M — Multiplayer, networked (see `docs/MULTIPLAYER.md`)  ← in progress
 
 ### Remote logging system  ✅ done (2026-06-13)

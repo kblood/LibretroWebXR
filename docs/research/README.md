@@ -66,7 +66,7 @@ Notes:
   stereoscopy (per-eye parallax) has no AI precedent; still practical for a
   one-scene depth demo, and thematically perfect for a VR frontend.
 
-## Built so far (2026-06-01)
+## Built so far (2026-06-01; updated 2026-06-16)
 
 All authored CC0, added to `public/roms/manifest.json`, and runtime-verified by
 booting in the actual app (headless-Chrome screenshot of the in-world CRT):
@@ -76,7 +76,20 @@ booting in the actual app (headless-Chrome screenshot of the in-world CRT):
 - **VIC-20 — demo** (`scripts/make-vic20-demo.mjs` → `freeware/lwx-vic20-demo.prg`).
   Load address `$1001` (unexpanded). Shares the C64 tokenizer.
 - **NES — LWX Pong** (`games/nes-pong/main.c`, cc65 + neslib, `npm run make-nes-pong`
-  → `freeware/lwx-nes-pong.nes`). NROM-256. Runs on nestopia (the `.nes` default).
+  → `freeware/lwx-nes-pong.nes`). NROM-256. Manifest pins **fceumm** (nestopia
+  black-screens these neslib NROM ROMs — see "Known issue" below).
+- **NES — LWX Bomberman** (`games/nes-bomberman/main.c`, cc65 + neslib,
+  `npm run make-nes-bomberman` → `freeware/lwx-nes-bomberman.nes`). NROM-256,
+  up to **4 players** via the NES **Four Score** (auto-detected from its
+  signature; cleanly falls back to 2-player when absent). The grid arena —
+  floor, walls, destructible bricks, bombs, flames — lives in the background
+  nametable and is repainted incrementally with `set_vram_update`; only players
+  are sprites. Bombs chain; ~1-in-4 bricks hide bomb/fire/speed power-ups. Pins
+  **fceumm**. Headless-verified with **jsnes** (boot, explosion, power-up
+  reveal/pickup, 2-player degrade). Frontend follow-up: actually feeding P3/P4
+  input to the ROM needs the libretro layer to set the Four Score *device* on
+  the NES ports (not a core option — there is no `fceumm_4player`); see the game
+  README and the couch-co-op follow-on in `docs/ROADMAP.md`.
 - **Game Boy — LWX Snake** (`games/gb-snake/main.c`, GBDK-2020, `npm run make-gb-snake`
   → `freeware/lwx-gb-snake.gb`). ROM-only, runs on gambatte. D-pad steer, START to start/restart.
 - **Genesis — LWX Genesis Demo** (`games/genesis-demo/main.c`, SGDK 2.11, `npm run make-genesis-demo`
