@@ -596,6 +596,11 @@ function syncVideoCords() {
     const conObj = consoleObjs.get(consoleId);
     const out = conObj?.userData?.videoOutAnchor;
     if (!out) { rec.cord.setVisible(false); continue; }
+    // Re-snap the plug to its TV's video-in jack every frame (unless it's in
+    // hand) so the cord follows when the console OR the TV is repositioned in
+    // Edit mode. seatVideoPlug(_, undefined) no-ops for a dangling plug, so a
+    // disconnected cable just stays where it was dropped.
+    if (!grabMgr?.isHeld(rec.plug.group)) seatVideoPlug(consoleId, cable.displaysOf(consoleId)[0]);
     out.getWorldPosition(_cFrom);
     (rec.plug.cordAnchor || rec.plug.group).getWorldPosition(_cTo);
     rec.cord.update(_cFrom, _cTo);
@@ -939,6 +944,9 @@ function syncControllerCords() {
   for (const [cableId, rec] of controllerPlugs) {
     const gp = _gamepadObjs.get(cableId);
     if (!gp) { rec.cord.setVisible(false); continue; }
+    // Re-snap the plug to its port jack every frame (unless it's in hand) so the
+    // cord follows when the console it's plugged into is moved in Edit mode.
+    if (!grabMgr?.isHeld(rec.plug.group)) seatControllerPlug(cableId);
     (gp.userData.cordAnchor || gp).getWorldPosition(_cordFrom);
     (rec.plug.cordAnchor || rec.plug.group).getWorldPosition(_cordTo);
     rec.cord.update(_cordFrom, _cordTo);
@@ -1024,6 +1032,9 @@ function handleKeyboardPlugReleased(plugObj) {
 function syncKeyboardCord() {
   const rec = keyboardPlugs.get(KBD_ID);
   if (!rec || !c64kbd) { rec?.cord?.setVisible(false); return; }
+  // Re-snap the plug to the connected console's keyboard jack every frame
+  // (unless it's in hand) so the cord follows when that console is moved.
+  if (!grabMgr?.isHeld(rec.plug.group)) seatKeyboardPlug();
   (c64kbd.cordAnchor || c64kbd.object3d).getWorldPosition(_kbdFrom);
   (rec.plug.cordAnchor || rec.plug.group).getWorldPosition(_kbdTo);
   rec.cord.update(_kbdFrom, _kbdTo);
@@ -1329,6 +1340,10 @@ async function buildCartridgeWorld() {
     scene: scene.scene,
     controllers: scene.controllers,
     console: consoleObj,
+    // Every physical console in the rack (primary + spawned), so a cartridge can
+    // be dropped into any one of them. consoleObjs is a Map<consoleId, Object3D>,
+    // already iterable as [consoleId, obj] pairs.
+    getConsoles: () => consoleObjs,
     cable: cableAdapter,
     onCartridgeInserted: handleCartridgeInserted,
     onGamepadHeldChanged: (held) => {
@@ -3196,6 +3211,16 @@ function handleCartridgeInserted(meta, { echo = true } = {}) {
     setStatus(`unknown core ${meta.core}`);
     return;
   }
+  // Multi-console rack: a cartridge dropped into a SECONDARY console boots into
+  // that console's own runtime (own canvas + core) and shows on its own TV via
+  // the patch graph. Pre-fix every load hit the primary client/emuCanvas, so the
+  // 2nd console could never be targeted and a load hijacked the main TV. The
+  // primary console (CONSOLE_ID) keeps the established path below (same-core
+  // hot-swap / different-core page reload, room broadcast, resume bridge).
+  if (meta.consoleId && meta.consoleId !== CONSOLE_ID) {
+    loadCartridgeIntoConsole(meta.consoleId, meta);
+    return;
+  }
   // Same-core swap: keep the page, just feed the new ROM. Different core:
   // full page reload (libretro cores can't cleanly unload — they pin globals
   // on the window and own a WebGL context that survives even after callMain
@@ -3303,6 +3328,71 @@ async function loadCartridge(meta, { echo = true } = {}) {
   }
 }
 window.__loadCartridge = loadCartridge; // debug hook: boot a game via RomResolver
+
+// Boot a cartridge into a SECONDARY console's own runtime (its own EmulatorClient
+// + canvas), routed to its own TV through the patch graph. This is the per-console
+// load path the rack always had for the *spawn* moment but never exposed to plain
+// cartridge insertion — so before this, a cart could only ever load on console0.
+//
+// Cross-core swaps on an already-booted secondary runtime are refused: libretro
+// cores pin window globals and can't cleanly unload, and only the primary console
+// can fall back to a whole-page reload (which would tear down the rest of the
+// rack). Same-core ROM swaps just re-feed the running core and are safe.
+async function loadCartridgeIntoConsole(consoleId, meta) {
+  const runtime = rackMgr.get(consoleId);
+  if (!runtime) { setStatus(`no such console ${consoleId}`); return; }
+  setStatus(`loading ${meta.title} on ${consoleId}…`);
+  logger?.event?.('boot-attempt', {
+    consoleId, file: meta.file, system: meta.system, core: meta.core,
+    plan: resolutionPlan(meta), opfs: opfsSupported(),
+  });
+  if (runtime.coreName && runtime.coreName !== meta.core) {
+    setStatus(`can't load ${meta.title}: ${consoleId} runs ${runtime.coreName}, not ${meta.core} (different core)`);
+    logger?.event?.('boot-error', { consoleId, core: meta.core, error: 'secondary cross-core swap unsupported' });
+    return;
+  }
+  try {
+    const buf = await resolveRom(meta);
+    const core = CORES[meta.core];
+    if (!core) throw new Error(`no core registered as "${meta.core}"`);
+    logger?.event?.('rom-resolved', { consoleId, file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url });
+    // CORES entries carry no `name`; ConsoleRuntime.load wants { name, url, style }.
+    await runtime.load(buf, { ...core, name: meta.core }, { system: meta.system, title: meta.title });
+    // Repaint via the patch graph (idempotent) so this console's TV samples its
+    // canvas and no other TV is touched — the fix for "game showed on both screens".
+    routeVideo();
+    consoleObjs.get(consoleId)?.userData.setPorts?.(portsForSystem(meta.system));
+    _consoleSystems.set(consoleId, meta.system);
+    // Auto-connect the keyboard to THIS console when it boots a keyboard system.
+    if (isKeyboardCapable(meta.system)) {
+      connectKeyboardTo(consoleId);
+      setKbdVisibility(true);
+    }
+    rackMgr.applyBudget();
+    refreshAudioFocus();
+    // Persist the swap so a reload restores the new game on this console.
+    _updateSpawnedMeta(consoleId, meta);
+    persistRack();
+    logger?.event?.('console-loaded', { consoleId, system: meta.system, core: meta.core, title: meta.title });
+    setStatus(`${meta.title} → ${consoleId}`);
+  } catch (e) {
+    const msg = String(e?.message || e);
+    setStatus(`error: ${msg}`);
+    logger?.event?.('boot-error', { consoleId, file: meta.file, system: meta.system, core: meta.core, error: msg });
+  }
+}
+
+// Rewrite the persisted meta for a spawned console after an in-place game swap so
+// restoreRack re-boots the game that's actually on it. consoleId is `console<n>`
+// (n = spawn order), and spawnedMetas is in that same order — console1 ↔ [0].
+function _updateSpawnedMeta(consoleId, meta) {
+  const n = parseInt(String(consoleId).replace('console', ''), 10);
+  if (!Number.isFinite(n) || n < 1) return;
+  const idx = n - 1;
+  if (idx >= 0 && idx < spawnedMetas.length) {
+    spawnedMetas[idx] = { system: meta.system, file: meta.file, core: meta.core, title: meta.title };
+  }
+}
 
 // M0.5: a remote peer loaded a game — reflect it onto our TV. A peer with
 // nothing running (or running the same core) boots it seamlessly; we deliberately

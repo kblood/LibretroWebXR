@@ -29,10 +29,15 @@ const LASER_IDLE = 0x88aaff;
 const LASER_HOVER = 0xffd060;
 
 export class GrabMgr {
-  constructor({ scene, controllers, console: consoleObj, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, onPlugReleased, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, onGamepadGrabbed, onGamepadReleased, isRemotelyHeld, getRoomBounds, isPreviewEnabled }) {
+  constructor({ scene, controllers, console: consoleObj, getConsoles, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, onPlugReleased, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, onGamepadGrabbed, onGamepadReleased, isRemotelyHeld, getRoomBounds, isPreviewEnabled }) {
     this.scene = scene;
     this.controllers = controllers;
     this.console = consoleObj;
+    // Multi-console rack: a cartridge can be dropped into ANY console's slot, so
+    // cart-release scans every console returned here ([consoleId, Object3D] pairs)
+    // and loads into the nearest one. Defaults to just the primary console so
+    // tests / single-console callers keep working unchanged.
+    this.getConsoles = getConsoles || (() => [[null, consoleObj]]);
     // Local-multiplayer cable system ([[src/CableMgr.js]]). Optional: when
     // absent the gamepad behaves as before (always player 1, never seats).
     this.cable = cable || null;
@@ -143,6 +148,14 @@ export class GrabMgr {
   // each hand to the gamepad → player it drives (local-multiplayer routing).
   heldObject(ctrl) {
     return this.held.get(ctrl) || null;
+  }
+
+  // True if `obj` is currently grabbed by ANY controller. Used by the per-frame
+  // cord sync so a seated plug can be re-snapped to its (possibly moved) jack
+  // every frame WITHOUT fighting the hand when the user is actively holding it.
+  isHeld(obj) {
+    for (const o of this.held.values()) if (o === obj) return true;
+    return false;
   }
 
   insertedCartridge() {
@@ -399,21 +412,36 @@ export class GrabMgr {
   }
 
   _handleCartridgeRelease(cart) {
-    const slotAnchor = this.console.userData.slotAnchor;
-    const anchorWorld = new THREE.Vector3();
-    slotAnchor.getWorldPosition(anchorWorld);
-
     const cartWorld = new THREE.Vector3();
     cart.getWorldPosition(cartWorld);
 
-    if (cartWorld.distanceTo(anchorWorld) < DROP_RADIUS) {
+    // Pick the nearest console slot across the WHOLE rack (each slotAnchor lives
+    // in its console's group, so its world position tracks the console even after
+    // it's been moved in Edit mode). Pre-fix this only ever checked the primary
+    // console, so a cartridge could never be loaded into a second console.
+    let best = null;                        // { consoleId, consoleObj, dist }
+    const _p = new THREE.Vector3();
+    for (const [consoleId, consoleObj] of this.getConsoles()) {
+      const slotAnchor = consoleObj?.userData?.slotAnchor;
+      if (!slotAnchor) continue;
+      slotAnchor.getWorldPosition(_p);
+      const dist = cartWorld.distanceTo(_p);
+      if (dist < DROP_RADIUS && (!best || dist < best.dist)) {
+        best = { consoleId, consoleObj, dist };
+      }
+    }
+
+    if (best) {
+      const slotAnchor = best.consoleObj.userData.slotAnchor;
+      const anchorWorld = new THREE.Vector3();
       const anchorQuat = new THREE.Quaternion();
+      slotAnchor.getWorldPosition(anchorWorld);
       slotAnchor.getWorldQuaternion(anchorQuat);
       cart.position.copy(anchorWorld);
       cart.quaternion.copy(anchorQuat);
 
       this._insertedCart = cart;
-      this.console.userData.setInserted(true);
+      best.consoleObj.userData.setInserted(true);
       this.onCartridgeInserted({
         file: cart.userData.file,
         system: cart.userData.system,
@@ -423,6 +451,9 @@ export class GrabMgr {
         // their real source (OPFS cache / folder), not a 404ing url fetch.
         rom: cart.userData.rom || undefined,
         cartObject: cart,
+        // Which console received the cart, so main.js boots into THAT console's
+        // runtime (its own canvas/core/TV) instead of always the primary.
+        consoleId: best.consoleId,
       });
       return;
     }
