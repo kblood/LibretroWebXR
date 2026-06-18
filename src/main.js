@@ -3551,8 +3551,20 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
     plan: resolutionPlan(meta), opfs: opfsSupported(),
   });
   if (runtime.coreName && runtime.coreName !== meta.core) {
-    setStatus(`can't load ${meta.title}: ${consoleId} runs ${runtime.coreName}, not ${meta.core} (different core)`);
-    logger?.event?.('boot-error', { consoleId, core: meta.core, error: 'secondary cross-core swap unsupported' });
+    // Option B — a secondary console CAN change cores: the old core can't unload,
+    // so swapConsoleCore() builds a fresh runtime for the new core in its own
+    // canvas and retires the old one, leaving every OTHER console's game running
+    // (no whole-page reload). The primary console still reloads (it owns #canvas).
+    try {
+      const from = runtime.coreName;
+      await swapConsoleCore(consoleId, meta);
+      logger?.event?.('console-coreswap', { consoleId, from, to: meta.core, title: meta.title });
+      setStatus(`${meta.title} → ${consoleId}`);
+    } catch (e) {
+      const msg = String(e?.message || e);
+      setStatus(`error: ${msg}`);
+      logger?.event?.('boot-error', { consoleId, core: meta.core, error: msg });
+    }
     return;
   }
   try {
@@ -3585,6 +3597,65 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
     setStatus(`error: ${msg}`);
     logger?.event?.('boot-error', { consoleId, file: meta.file, system: meta.system, core: meta.core, error: msg });
   }
+}
+
+// The first TV the patch graph has this console feeding (a console usually drives
+// exactly one TV). Used to label the new core's audio branch on a core swap.
+function tvForConsole(consoleId) {
+  for (const tvId of cable.tvs()) if (cable.sourceOf(tvId) === consoleId) return tvId;
+  return null;
+}
+
+// Option B — change the core running on a SECONDARY console WITHOUT a page reload.
+// A libretro core can't cleanly unload (it pins a WebGL context that survives
+// callMain), so we can't re-point the existing runtime at a different core. Instead
+// we build a FRESH ConsoleRuntime (its own canvas + core) for the new game, retire
+// the old runtime (dispose = pause + detach; the orphaned context lingers, same as
+// every rack teardown — RackBudget.maxLive bounds the LIVE ones), and install the
+// new runtime under the SAME console id. routeVideo() reads rackMgr.get(id).canvas
+// per TV, so the TV re-samples the new canvas automatically. Crucially, no other
+// console is touched — their cores keep running. The PRIMARY console (CONSOLE_ID)
+// never reaches here: it owns #canvas + the room/net host role and keeps the
+// whole-page reload path in handleCartridgeInserted.
+async function swapConsoleCore(consoleId, meta) {
+  const core = CORES[meta.core];
+  if (!core) throw new Error(`no core registered as "${meta.core}"`);
+  const buf = await resolveRom(meta);
+
+  // Label the audio branch BEFORE boot so the new core's AudioContext (created
+  // during load) lands on this console's TV, mirroring spawnConsole's ordering.
+  const tvId = tvForConsole(consoleId);
+  const tvGroup = tvId ? scene.getTV(tvId)?.group : null;
+
+  // Boot the new core first (TV keeps showing the old canvas until it's ready),
+  // then atomically retire the old runtime and install the new one under this id.
+  const next = new ConsoleRuntime({ id: consoleId });
+  if (tvGroup) audioRouter.expect(consoleId, tvGroup);
+  await next.load(buf, { ...core, name: meta.core }, { system: meta.system, title: meta.title });
+  rackMgr.remove(consoleId);   // dispose old (pause + detach its canvas)
+  rackMgr.add(next);
+
+  // Re-point video + controller ports for the new system. Re-adding the console to
+  // the patch graph only updates its port count (it keeps the existing TV edge),
+  // and routeVideo() makes the TV sample the new core's canvas.
+  cable.addConsole(consoleId, { ports: portsForSystem(meta.system) });
+  consoleObjs.get(consoleId)?.userData.setPorts?.(portsForSystem(meta.system));
+  routeVideo();
+
+  // Keep this console powered, remember its system (keyboard layout + restore),
+  // and auto-connect the keyboard if the new system is keyboard-capable.
+  setConsolePower(consoleId, true, consoleObjs.get(consoleId)?.userData?.powerBtn);
+  _consoleSystems.set(consoleId, meta.system);
+  if (isKeyboardCapable(meta.system)) {
+    connectKeyboardTo(consoleId);
+    setKbdVisibility(true);
+  }
+
+  rackMgr.applyBudget();
+  refreshAudioFocus();
+  // Persist so a later reload restores the game now on this console.
+  _updateSpawnedMeta(consoleId, meta);
+  persistRack();
 }
 
 // Rewrite the persisted meta for a spawned console after an in-place game swap so
