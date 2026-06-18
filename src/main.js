@@ -1217,14 +1217,19 @@ function handleKeyboardPlugReleased(plugObj) {
 // Reshape the keyboard cord from the keyboard body to its plug every frame.
 function syncKeyboardCord() {
   const rec = keyboardPlugs.get(KBD_ID);
-  if (!rec || !c64kbd) { rec?.cord?.setVisible(false); return; }
+  if (!rec) return;
+  // The plug + cord only exist while the keyboard is shown — hide both (and the
+  // grabbable plug, so it can't be caught) when there's no keyboard on screen.
+  const kbShown = !!c64kbd && c64kbd.object3d.visible;
+  rec.plug.group.visible = kbShown;
+  rec.cord.setVisible(kbShown);
+  if (!kbShown) return;
   // Re-snap the plug to the connected console's keyboard jack every frame
   // (unless it's in hand) so the cord follows when that console is moved.
   if (!grabMgr?.isHeld(rec.plug.group)) seatKeyboardPlug();
   (c64kbd.cordAnchor || c64kbd.object3d).getWorldPosition(_kbdFrom);
   (rec.plug.cordAnchor || rec.plug.group).getWorldPosition(_kbdTo);
   rec.cord.update(_kbdFrom, _kbdTo);
-  rec.cord.setVisible(c64kbd.object3d.visible);
 }
 
 // Route keyboard input to the given console's emulator core, updating the
@@ -1610,6 +1615,9 @@ async function buildCartridgeWorld() {
   // The primary keyboard gets its grabbable plug and auto-connects to the primary
   // console (like the default gamepad auto-plugs into port 0).
   addKeyboardPlug(c64kbd?.object3d);
+  // The keyboard body is grabbable in play mode (move it like a controller);
+  // _isCandidate gates this on its visibility so it's inert while hidden.
+  if (c64kbd) grabMgr.addGrabbable(c64kbd.object3d);
   connectKeyboardTo(CONSOLE_ID);
   // Item 6 — the primary console + every TV become repositionable in Move mode.
   registerMovableProp(consoleObj, 'console');

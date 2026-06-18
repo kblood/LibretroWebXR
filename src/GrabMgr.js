@@ -123,9 +123,14 @@ export class GrabMgr {
   //    arranging.
   _isCandidate(obj) {
     if (obj.userData?.kind === 'gamepad') return true;
-    // Patch-cord plugs are grabbable while playing (repatch cords any time), but
-    // inert in edit mode so they don't compete with prop arranging.
-    if (obj.userData?.kind === 'plug') return !this.isEditMode();
+    // The keyboard device moves like a controller: grabbable in either mode while
+    // it's visible (a keyboard-capable game is up). Hidden → inert, so a stray grip
+    // can't catch it. Grabbing is on grip (squeeze); typing is on trigger (select),
+    // so the two never collide.
+    if (obj.userData?.kind === 'keyboard') return obj.visible !== false;
+    // Patch-cord plugs are grabbable while playing (repatch cords any time) and
+    // visible, but inert in edit mode so they don't compete with prop arranging.
+    if (obj.userData?.kind === 'plug') return obj.visible !== false && !this.isEditMode();
     return !!obj.userData?.editable === this.isEditMode();
   }
 
