@@ -95,7 +95,7 @@ static u8 vbuf[140];           // set_vram_update buffer
 // global scratch (keeps the cc65 software stack shallow)
 static u8 i, j, p, k, n, spr, t0, t1, t2, t3, cx, cy, idx, dir;
 static u8 alive, winner, over, gameframe, px, py, sx, sy, rng;
-static u16 addr, seed;
+static u16 addr;
 
 // spawn cells, indexed by player (corners)
 static const u8 SPX[4] = { 1, GW - 2, GW - 2, 1 };
@@ -349,23 +349,18 @@ static void new_round(void) {
 }
 
 void main(void) {
-  // Title: blank field; advance a seed each frame until P1 presses START.
-  // poll4() also runs here so the Four Score is detected before the first round.
-  ppu_off();
-  pal_all(PALETTE);
-  vram_adr(NAMETABLE_A);
-  vram_fill(T_FLOOR, 32 * 30);
-  vram_adr(0x23c0);
-  vram_fill(0, 64);
-  ppu_on_all();
-  seed = 1;
-  while (1) {
-    ppu_wait_nmi();
-    poll4();
-    ++seed;
-    if (pads[0] & PAD_START) break;
-  }
-  set_rand(seed);
+  // Drop straight into a live, playable arena. The old title screen was a BLACK
+  // nametable (floor tile 0 painted with the black floor palette) that simply
+  // waited for START — on screen it was indistinguishable from a hung or blank
+  // console, and START may not even route to a cartridge loaded into a SECONDARY
+  // rack console. Booting the arena immediately means inserting the cart always
+  // paints visible, playable content with no input required.
+  //
+  // A Four Score is still auto-detected by poll4() in the main loop below, so the
+  // game upgrades 2->4 players on the next round once the signature is seen.
+  // The first arena uses a fixed seed (deterministic layout); rand8() state then
+  // advances through play, so each subsequent round is freshly randomised.
+  set_rand(0x4711);
   new_round();
 
   while (1) {
