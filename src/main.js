@@ -1610,8 +1610,11 @@ async function buildCartridgeWorld() {
     },
     // Picking up the light gun arms it: connect the gun device on the current
     // (and future) gun-capable game. See armLightGunAndReload for the reload.
-    onObjectGrabbed: (obj) => {
-      if (obj?.userData?.kind === 'lightgun') armLightGunAndReload();
+    onObjectGrabbed: (obj, hand) => {
+      if (obj?.userData?.kind === 'lightgun') {
+        logger?.event?.('lightgun-grab', { hand, system: currentMeta?.system || null, consoleId: CONSOLE_ID, alreadyArmed: _lightgunArmedConsole });
+        armLightGunAndReload();
+      }
     },
     // Remote-hold lock: refuse grab of a gamepad currently held by a remote peer.
     // ghostGpMgr is set up just after GrabMgr in this function, so the reference
@@ -1640,6 +1643,9 @@ async function buildCartridgeWorld() {
     consoleIdForTV: (tvId) => cable.sourceOf(tvId),
     clientForGun: () => rackMgr.get(CONSOLE_ID)?.client || null,
     consoleIdForGun: () => CONSOLE_ID,
+    // Telemetry so a headset session is diagnosable from the logs without seeing
+    // the screen (docs/HEADSET_LIGHTGUN_VALIDATION.md). Throttled aim + edge fire.
+    log: (name, fields) => logger?.event?.(name, fields),
   });
 
   // Phase 4: the primary console's physical object + its grabbable video-out
@@ -3556,10 +3562,20 @@ async function armLightGunAndReload() {
   const sys = currentMeta?.system;
   if (!sys || !isLightgunCapable(sys) || !_lastLoadedMeta) return;
   const lg = lightgunForSystem(sys);
-  setStatus(`connecting ${lg?.label || 'light gun'}…`);
+  // A light gun occupies a controller port (player = port + 1). When that port
+  // already drives a gamepad — e.g. the SMS Light Phaser on port 0 / player 1 —
+  // the gun supersedes the pad on that port while armed, matching real hardware
+  // (the gun plugs into a controller socket). Say so plainly. Other ports keep
+  // their pads (NES Zapper / SNES Super Scope / MD Menacer all sit on port 1).
+  const player = (lg?.port ?? 0) + 1;
+  const padSuperseded = !!cable.occupantOf?.(CONSOLE_ID, lg?.port ?? -1);
+  setStatus(padSuperseded
+    ? `connecting ${lg?.label || 'light gun'} on player ${player} (replaces that gamepad)…`
+    : `connecting ${lg?.label || 'light gun'} on player ${player}…`);
   // Bridge the SAME game across a page reload with the gun flagged on, exactly
   // like a cross-system swap (preserving ROM provenance + in-VR room edits).
   const m = _lastLoadedMeta;
+  logger?.event?.('lightgun-arm-reload', { system: sys, gun: lg?.label || null, file: m.file, core: m.core, title: m.title, alreadyArmedConsole: _lightgunArmedConsole });
   try {
     sessionStorage.setItem(PENDING_KEY, JSON.stringify({
       file: m.file, core: m.core, system: m.system, title: m.title, rom: m.rom, lightgun: true,

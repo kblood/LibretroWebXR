@@ -252,9 +252,28 @@ immersive XR session on a headset), same as the existing cross-system swap. A fu
 improvement could give the primary console a live core reboot (fresh runtime + re-point
 tv0, à la `swapConsoleCore`) to arm without a page reload.
 
-**Follow-ups:** SMS needs a default-core switch (picodrive → genesis_plus_gx) in the
-load path and its Light Phaser sits on port 0 (conflicts with the pad); 2-gun co-op
-needs per-port pointer state in `rwebinput`; headset validation pending.
+**SMS core switch + port policy (handled).** SMS detects as `picodrive` but its Light
+Phaser is provided by `genesis_plus_gx`, so the gun config switches the boot core — now
+correct in BOTH load paths (`loadCartridge` always used the gun core; `__pickLocalRom`
+was fixed to boot `CORES[gun.core]` instead of the detected cart core). The Phaser sits
+on controller **port 0 (player 1)**, where a gamepad normally lives. Deliberate policy:
+a light gun occupies a controller port and **supersedes the pad on that port while
+armed** (matching real hardware — the gun plugs into a controller socket); the arm
+status says so (`…on player 1 (replaces that gamepad)`). NES/SNES/MD guns sit on port 1
+(player 2), so their pads are untouched. Breadth verified end-to-end on SNES (Super
+Scope — crosshair renders), Genesis (Menacer) and SMS (Light Phaser).
+
+**Telemetry.** `LightGunMgr` takes an optional `log(name, fields)` sink and emits
+`lightgun-aim` (throttled ~4 Hz + on hit/miss flip) and `lightgun-fire` (trigger rising
+edge); `main.js` emits `lightgun-grab` and `lightgun-arm-reload`. These ship to the
+remote log so a headset session is diagnosable without seeing the screen — see
+`docs/HEADSET_LIGHTGUN_VALIDATION.md` for the full Quest validation plan.
+
+**Follow-ups:** live primary-console reboot to arm without the page reload (the only way
+to keep an immersive XR session alive — blocked on de-singletonizing the primary
+`client`/`#canvas`, since a libretro core permanently holds the GL context on its
+canvas); 2-gun co-op needs per-port pointer state in `rwebinput`; headset validation
+pending (checklist ready).
 
 `EmulatorClient` retains the de-risk debug hooks (`__forceInputDevices`,
 `__forceCoreOptions`, `__forceRemapName`, `__forceCfgExtra`, `__forceExtraFiles`); the

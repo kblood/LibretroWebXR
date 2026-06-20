@@ -20,6 +20,7 @@
 import * as THREE from 'three';
 
 const DEFAULT_CURVATURE = 0.18; // must match CrtShader's uCurvature default
+const AIM_LOG_INTERVAL = 0.25;  // seconds — throttle aim telemetry to ~4 Hz
 
 /**
  * Replicate the CRT shader's barrel `curve()` and convert a screen-surface UV
@@ -52,13 +53,19 @@ export class LightGunMgr {
    * @param {Function} opts.consoleIdForGun (gun) => consoleId|null       the console the gun is plugged into
    * @param {number}   [opts.curvature]     CRT curvature (defaults to the shader's)
    */
-  constructor({ getActiveGuns, getScreenTargets, consoleIdForTV, clientForGun, consoleIdForGun, curvature = DEFAULT_CURVATURE }) {
+  constructor({ getActiveGuns, getScreenTargets, consoleIdForTV, clientForGun, consoleIdForGun, curvature = DEFAULT_CURVATURE, log = null }) {
     this._getActiveGuns = getActiveGuns;
     this._getScreenTargets = getScreenTargets;
     this._consoleIdForTV = consoleIdForTV;
     this._clientForGun = clientForGun;
     this._consoleIdForGun = consoleIdForGun;
     this._curvature = curvature;
+    // Optional telemetry sink: log(name, fields). Used to diagnose headset aim
+    // without seeing the screen (see docs/HEADSET_LIGHTGUN_VALIDATION.md). Aim is
+    // throttled; fire is per rising-edge. No-op when null (default).
+    this._log = typeof log === 'function' ? log : null;
+    this._aimAccum = 0;             // seconds since the last throttled aim log
+    this._lastOnScreen = new WeakMap();
     this._raycaster = new THREE.Raycaster();
     this._ray = new THREE.Ray();
     // Per-gun previous trigger state, to flash on the rising edge.
@@ -68,6 +75,8 @@ export class LightGunMgr {
   /** Per-frame update. dt in seconds (for muzzle-flash decay). */
   tick(dt = 0.016) {
     const guns = this._getActiveGuns?.() || [];
+    this._aimAccum += dt;
+    const aimDue = this._aimAccum >= AIM_LOG_INTERVAL;
     if (!guns.length) return;
     const targets = this._getScreenTargets?.() || [];
     const meshes = targets.map((t) => t.mesh);
@@ -89,7 +98,7 @@ export class LightGunMgr {
         if (hits.length) hit = hits[0];
       }
 
-      let onScreen = false;
+      let onScreen = false, aimU = -1, aimV = -1, aimTv = null, aimConsole = null;
       if (hit && hit.uv) {
         // Only a hit on a TV showing THIS gun's console counts as on-screen.
         const tvId = targets.find((t) => t.mesh === hit.object)?.tvId ?? null;
@@ -97,7 +106,7 @@ export class LightGunMgr {
         if (myConsole == null || srcConsole == null || srcConsole === myConsole) {
           const { u, v } = surfaceUvToCanvasUv(hit.uv.x, hit.uv.y, this._curvature);
           client?.sendLightgun(u, v, trigger);
-          onScreen = true;
+          onScreen = true; aimU = u; aimV = v; aimTv = tvId; aimConsole = srcConsole;
         }
       }
       if (!onScreen) {
@@ -105,11 +114,24 @@ export class LightGunMgr {
         client?.sendLightgun(-1, -1, trigger);
       }
 
+      // Telemetry: fire on every trigger rising edge; aim throttled OR whenever
+      // the on/off-screen state flips (so a miss/hit transition is always logged).
+      const wasTrig = !!this._wasTriggered.get(gun);
+      if (this._log) {
+        const flipped = this._lastOnScreen.get(gun) !== onScreen;
+        if (trigger && !wasTrig) this._log('lightgun-fire', { consoleId: aimConsole ?? myConsole, tvId: aimTv, onScreen, u: round3(aimU), v: round3(aimV) });
+        if (aimDue || flipped) this._log('lightgun-aim', { consoleId: aimConsole ?? myConsole, tvId: aimTv, onScreen, u: round3(aimU), v: round3(aimV) });
+        this._lastOnScreen.set(gun, onScreen);
+      }
+
       // Prop feedback: trigger depress + muzzle flash on the rising edge.
       ud.setTriggered?.(trigger);
-      if (trigger && !this._wasTriggered.get(gun)) ud.fireFlash?.();
+      if (trigger && !wasTrig) ud.fireFlash?.();
       this._wasTriggered.set(gun, trigger);
       ud.tick?.(dt);
     }
+    if (aimDue) this._aimAccum = 0;
   }
 }
+
+function round3(n) { return Math.round(n * 1000) / 1000; }
