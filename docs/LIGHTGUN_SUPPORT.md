@@ -178,12 +178,22 @@ symbol.
 ### Deploy / reproducibility note
 
 The patched cores in `public/cores/` are **local builds** and are gitignored.
-`scripts/fetch-cores.mjs` pulls stock cores from the libretro buildbot and **would
-overwrite** them with the unpatched (no-lightgun) versions. To make the fix permanent:
-host the patched `*_libretro.{js,wasm}` (nestopia / genesis_plus_gx / snes9x) where the
-deploy fetches them, or add a post-fetch step that rebuilds them from
-`docs/patches/rwebinput-lightgun.diff` via the recipe above. The warm WSL2 build trees
-(`~/lightgun-build/<core>/`) make a rebuild a one-command relink.
+`npm run deploy` runs `npm run fetch-cores` first, which used to **overwrite** them with
+stock (no-lightgun) cores and silently break gun games in production.
+
+**Now guarded.** A local marker `public/cores/PATCHED.json` lists the patched cores
+(`nestopia` / `snes9x` / `genesis_plus_gx`); `scripts/fetch-cores.mjs` reads it and
+**skips** those cores when a build is present here (prints `⚠ keeping PATCHED …`), so
+deploy preserves them. The marker is gitignored with the cores, so a fresh checkout
+(no marker, no build) just fetches stock — nothing to protect. To intentionally pull a
+gun core back to stock: `node scripts/fetch-cores.mjs --refresh-patched` (or drop its
+entry from `PATCHED.json`).
+
+To rebuild the patched cores from scratch (e.g. on a new machine): apply
+`docs/patches/rwebinput-lightgun.diff` and relink via the recipe above — the warm WSL2
+build trees (`~/lightgun-build/<core>/`) make it a one-command relink — then recreate
+`PATCHED.json`. A future improvement is hosting the patched `*_libretro.{js,wasm}` where
+deploy fetches them so no local build is needed.
 
 ### Per-system gun device ids (for systems.js metadata) — VERIFIED FROM SOURCE
 

@@ -1697,7 +1697,7 @@ async function buildCartridgeWorld() {
   // Arm-on-grab debug hooks: __armGun runs the real arm+reload path;
   // __gunArmedState reports whether the gun device is connected this boot.
   window.__armGun = () => armLightGunAndReload();
-  window.__gunArmedState = () => ({ armed: !!window.__lightgunArmed, consoleArmed: _lightgunArmedConsole, system: currentMeta?.system || null });
+  window.__gunArmedState = () => ({ armed: !!window.__lightgunArmed, consoleArmed: _lightgunArmedConsole, system: currentMeta?.system || null, core: currentMeta?.core || null });
   window.__gunFire = (pos, look, trigger) => {
     if (!lightGunObj || !lightGunMgr) return 'no-gun';
     lightGunObj.position.set(pos.x, pos.y, pos.z);
@@ -1873,10 +1873,14 @@ async function buildCartridgeWorld() {
     // remapName: the RA library name for the per-core remap file that connects an
     // inputDevices port override at boot.
     const remapName = window.__forceRemapName || gun?.remapName || coreInfo.remapName;
-    await client.start(emuCanvas, buf, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style, contentExt: extOf(name), coreOptions, inputDevices, remapName });
-    primaryRuntime.noteLoaded(coreInfo.name, { system: meta.system, title });
-    currentCore = coreInfo.name;
-    currentMeta = { core: coreInfo.name, file: meta.file, title, system: meta.system };
+    // The gun core can differ from the cart's detected core (e.g. SMS detects as
+    // picodrive but its Light Phaser is provided by genesis_plus_gx) — boot the
+    // gun core in that case, mirroring loadCartridge. Falls back to coreInfo.
+    const bootCore = (gun && CORES[gun.core]) ? { ...CORES[gun.core], name: gun.core } : coreInfo;
+    await client.start(emuCanvas, buf, { coreUrl: bootCore.url, coreName: bootCore.name, moduleStyle: bootCore.style, contentExt: extOf(name), coreOptions, inputDevices, remapName });
+    primaryRuntime.noteLoaded(bootCore.name, { system: meta.system, title });
+    currentCore = bootCore.name;
+    currentMeta = { core: bootCore.name, file: meta.file, title, system: meta.system };
     gameInput?.setSystem(meta.system);
     // Cache content-addressed in OPFS so the shelf cart can re-resolve later.
     const sha1 = await cacheRom(buf);
