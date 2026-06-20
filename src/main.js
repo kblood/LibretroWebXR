@@ -9,6 +9,9 @@ logger.init();
 import * as THREE from 'three';
 import { EmulatorClient } from './EmulatorClient.js';
 import { InputMgr } from './InputMgr.js';
+import { Bindings } from './Bindings.js';
+import { DesktopGamepad } from './DesktopGamepad.js';
+import { BindingsUI } from './BindingsUI.js';
 import { Placeholder } from './Placeholder.js';
 import { SceneMgr } from './SceneMgr.js';
 import { createConsole } from './Console.js';
@@ -110,7 +113,13 @@ const urlParams = new URLSearchParams(location.search);
 const coreOverride = urlParams.get('core');
 
 const client = new EmulatorClient();
-const input = new InputMgr(client);
+// Desktop controller-binding model ([[src/Bindings.js]]): keyboard + PC-gamepad
+// remapping for the emulated RetroPad. Managed for all four couch-co-op players
+// so the historical P2-4 keyboard forwarding keeps working (defaults reproduce
+// today's behaviour exactly); the bindings UI wires P1 only for now. Shared by
+// InputMgr (keyboard), DesktopGamepad (PC pad), and BindingsUI (the panel).
+const bindings = new Bindings({ players: [1, 2, 3, 4] });
+const input = new InputMgr(client, { bindings });
 // Tracks the core + file actually currently loaded (after `ready` fires).
 // Used to decide between in-place ROM swap and page-reload-with-state for
 // cross-system swaps, and to tag any save-state written from this session.
@@ -2278,6 +2287,30 @@ async function buildCartridgeWorld() {
     scene,
   });
   window.__desktop = desktop.debugApi();
+
+  // Desktop PC-gamepad reader ([[src/DesktopGamepad.js]]) + the controller-binding
+  // overlay ([[src/BindingsUI.js]]). Both share the module-level `bindings` with
+  // InputMgr so a rebind takes effect on the next physical input. The gamepad
+  // poller is gated on !xr.isPresenting (kept separate from the VR GameInputMgr,
+  // which reads XR controllers' inputSource.gamepad). The UI releases pointer
+  // lock when it opens so the cursor is usable and gameplay listeners go quiet.
+  const desktopGamepad = new DesktopGamepad({ renderer: scene.renderer, client, bindings });
+  scene.addTickCallback(() => desktopGamepad.tick());
+  const bindingsUI = new BindingsUI({
+    bindings,
+    renderer: scene.renderer,
+    exitPointerLock: () => { try { document.exitPointerLock?.(); } catch (_) {} },
+    player: 1,
+  });
+  window.__bindings = {
+    model: bindings,
+    ui: bindingsUI.debugApi(),
+    gamepad: desktopGamepad.debugApi(),
+    // The keyboard InputMgr attaches on core `ready` in production (see the
+    // client 'ready' handler). Expose attach() so the headless harness can drive
+    // the keyboard path without booting a real core.
+    attachKeyboard: () => input.attach(window),
+  };
 
   await buildMemoryCards();
 
