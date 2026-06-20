@@ -75,6 +75,14 @@ export class ConsoleRuntime {
   async load(romBuffer, core, meta = {}) {
     await this.client.start(this.canvas, romBuffer, {
       coreUrl: core.url, coreName: core.name, moduleStyle: core.style,
+      contentExt: meta.contentExt,
+      // Light-gun / port-device wiring (LightGunMgr supplies these when a gun is
+      // seated on this console): inputDevices = {player: libretroDeviceId},
+      // coreOptions selects the gun read path, remapName names the per-core remap
+      // file that connects the device at boot. All optional — plain games omit them.
+      coreOptions: meta.coreOptions ?? core.coreOptions,
+      inputDevices: meta.inputDevices,
+      remapName: meta.remapName,
     });
     this.coreName = core.name;
     this.system = meta.system ?? null;

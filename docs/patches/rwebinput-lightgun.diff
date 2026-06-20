@@ -1,0 +1,73 @@
+diff --git a/input/drivers/rwebinput_input.c b/input/drivers/rwebinput_input.c
+index 3e3a162..ba3ed6b 100644
+--- a/input/drivers/rwebinput_input.c
++++ b/input/drivers/rwebinput_input.c
+@@ -717,6 +717,68 @@ static int16_t rwebinput_input_state(
+          break;
+       case RETRO_DEVICE_KEYBOARD:
+          return (id && id < RETROK_LAST) && rwebinput->keys[id];
++      /* --- Web light-gun support (added for WebXR light-gun) -------------
++       * Stock master rwebinput had no RETRO_DEVICE_LIGHTGUN case, so a
++       * game-port light gun (NES Zapper, Super Scope, Light Phaser,
++       * GunCon, ...) always read 0/0 for aim and 0 for trigger, leaving
++       * the in-game crosshair pinned. Mirror the native x11/winraw drivers:
++       * aim comes from the canvas-relative absolute mouse position
++       * (mouse->x / mouse->y, already set from EmscriptenMouseEvent
++       * targetX/targetY in rwebinput_mouse_cb) run through the viewport
++       * translation that yields the [-0x7fff, 0x7fff] light-gun range;
++       * trigger and the aux/reload buttons come from the mouse buttons. */
++      case RETRO_DEVICE_LIGHTGUN:
++         switch (id)
++         {
++            /* aiming */
++            case RETRO_DEVICE_ID_LIGHTGUN_SCREEN_X:
++            case RETRO_DEVICE_ID_LIGHTGUN_SCREEN_Y:
++            case RETRO_DEVICE_ID_LIGHTGUN_IS_OFFSCREEN:
++               {
++                  struct video_viewport vp = {0};
++                  int16_t res_x            = 0;
++                  int16_t res_y            = 0;
++                  int16_t res_screen_x     = 0;
++                  int16_t res_screen_y     = 0;
++
++                  /* non-confined wrap: same call the native lightgun
++                   * drivers use; emits screen coords in lightgun range */
++                  if (video_driver_translate_coord_viewport_wrap(&vp,
++                           rwebinput->mouse.x, rwebinput->mouse.y,
++                           &res_x, &res_y, &res_screen_x, &res_screen_y))
++                  {
++                     switch (id)
++                     {
++                        case RETRO_DEVICE_ID_LIGHTGUN_SCREEN_X:
++                           return res_x;
++                        case RETRO_DEVICE_ID_LIGHTGUN_SCREEN_Y:
++                           return res_y;
++                        case RETRO_DEVICE_ID_LIGHTGUN_IS_OFFSCREEN:
++                           return input_driver_pointer_is_offscreen(res_x, res_y);
++                        default:
++                           break;
++                     }
++                  }
++               }
++               break;
++            /* buttons: map to mouse buttons (left = trigger) */
++            case RETRO_DEVICE_ID_LIGHTGUN_TRIGGER:
++               return !!(rwebinput->mouse.buttons & (1 << RWEBINPUT_MOUSE_BTNL));
++            case RETRO_DEVICE_ID_LIGHTGUN_RELOAD:
++            case RETRO_DEVICE_ID_LIGHTGUN_AUX_A:
++               return !!(rwebinput->mouse.buttons & (1 << RWEBINPUT_MOUSE_BTNR));
++            case RETRO_DEVICE_ID_LIGHTGUN_AUX_B:
++            case RETRO_DEVICE_ID_LIGHTGUN_START:
++               return !!(rwebinput->mouse.buttons & (1 << RWEBINPUT_MOUSE_BTNM));
++            /* deprecated relative aim */
++            case RETRO_DEVICE_ID_LIGHTGUN_X:
++               return (int16_t)rwebinput->mouse.delta_x;
++            case RETRO_DEVICE_ID_LIGHTGUN_Y:
++               return (int16_t)rwebinput->mouse.delta_y;
++            default:
++               break;
++         }
++         break;
+       case RETRO_DEVICE_MOUSE:
+       case RARCH_DEVICE_MOUSE_SCREEN:
+          return rwebinput_mouse_state(&rwebinput->mouse, id, device == RARCH_DEVICE_MOUSE_SCREEN);

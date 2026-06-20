@@ -35,9 +35,13 @@ export const CORES = {
   stella2014:        { url: 'cores/stella2014_libretro.js',        exts: ['a26','bin'],                  label: 'Atari 2600 (stella)',         style: 'classic', license: 'GPLv2', weight: 1 },
 
   // Modern libretro buildbot cores (ES-module factory)
-  snes9x:            { url: 'cores/snes9x_libretro.js',            exts: ['smc','sfc','swc','fig','bs'], label: 'SNES (snes9x)',               style: 'module', license: 'Non-commercial', weight: 2 },
-  nestopia:          { url: 'cores/nestopia_libretro.js',          exts: ['nes','fds','unf','unif'],     label: 'NES (nestopia)',              style: 'module', license: 'GPLv2', weight: 1 },
-  genesis_plus_gx:   { url: 'cores/genesis_plus_gx_libretro.js',   exts: ['md','gen','smd'],             label: 'Genesis (genesis_plus_gx)',   style: 'module', license: 'Non-commercial', weight: 2 },
+  // remapName = the RetroArch library_name used to name this core's per-core
+  // input-remap dir/file (<userdata>/config/remaps/<name>/<name>.rmp) — the only
+  // place a port-device override (e.g. a light gun) takes effect at boot in this
+  // web build. Only set on the (patched) gun-capable cores. See LIGHTGUN_SUPPORT.md.
+  snes9x:            { url: 'cores/snes9x_libretro.js',            exts: ['smc','sfc','swc','fig','bs'], label: 'SNES (snes9x)',               style: 'module', license: 'Non-commercial', weight: 2, remapName: 'Snes9x' },
+  nestopia:          { url: 'cores/nestopia_libretro.js',          exts: ['nes','fds','unf','unif'],     label: 'NES (nestopia)',              style: 'module', license: 'GPLv2', weight: 1, remapName: 'Nestopia' },
+  genesis_plus_gx:   { url: 'cores/genesis_plus_gx_libretro.js',   exts: ['md','gen','smd'],             label: 'Genesis (genesis_plus_gx)',   style: 'module', license: 'Non-commercial', weight: 2, remapName: 'Genesis Plus GX' },
   mgba:              { url: 'cores/mgba_libretro.js',              exts: ['gba'],                        label: 'GBA (mGBA)',                  style: 'module', license: 'MPL-2.0', weight: 2 },
   mednafen_vb:       { url: 'cores/mednafen_vb_libretro.js',       exts: ['vb','vboy'],                  label: 'Virtual Boy (mednafen)',      style: 'module', license: 'GPLv2', weight: 2 },
   picodrive:         { url: 'cores/picodrive_libretro.js',         exts: ['sms','gg','md','gen','smd','32x','cue','iso'], label: 'Sega multi (picodrive)', style: 'module', license: 'Non-commercial', weight: 2 },
@@ -78,14 +82,30 @@ export function coreWeight(name) {
 //                   includes the canonical id. Lower-cased, compared loosely.
 //   thumbnailRepo — libretro-thumbnails repo name (for ArtResolver). null = none.
 export const SYSTEMS = {
-  snes:      { label: 'Super Nintendo',     defaultCore: 'snes9x',           cores: ['snes9x'],                       exts: ['smc','sfc','swc','fig','bs'], aliases: ['snes','super nintendo','super famicom','sfc'],            thumbnailRepo: 'Nintendo_-_Super_Nintendo_Entertainment_System', medium: 'cartridge' },
-  nes:       { label: 'Nintendo (NES)',     defaultCore: 'nestopia',         cores: ['nestopia','fceumm'],            exts: ['nes','fds','unf','unif'],     aliases: ['nes','nintendo','famicom','nintendo entertainment system'], thumbnailRepo: 'Nintendo_-_Nintendo_Entertainment_System',       medium: 'cartridge' },
+  snes:      { label: 'Super Nintendo',     defaultCore: 'snes9x',           cores: ['snes9x'],                       exts: ['smc','sfc','swc','fig','bs'], aliases: ['snes','super nintendo','super famicom','sfc'],            thumbnailRepo: 'Nintendo_-_Super_Nintendo_Entertainment_System', medium: 'cartridge',
+    // SNES Super Scope (snes9x). Reads the native RETRO_DEVICE_LIGHTGUN path the
+    // rwebinput patch feeds, so no read-mode core option is needed — just the
+    // crosshair. Device id 260 = (1<<8)|RETRO_DEVICE_LIGHTGUN. See LIGHTGUN_SUPPORT.md.
+    lightgun: { label: 'Super Scope', core: 'snes9x', device: 260, port: 1, coreOptions: { snes9x_superscope_crosshair: 'enabled' } } },
+  nes:       { label: 'Nintendo (NES)',     defaultCore: 'nestopia',         cores: ['nestopia','fceumm'],            exts: ['nes','fds','unf','unif'],     aliases: ['nes','nintendo','famicom','nintendo entertainment system'], thumbnailRepo: 'Nintendo_-_Nintendo_Entertainment_System',       medium: 'cartridge',
+    // NES Zapper (nestopia). Device 262 = SUBCLASS(POINTER,0); nestopia hardcodes
+    // reading the gun from port index 1 (player 2), and needs the zapper_device
+    // option set to "lightgun" to read the patched RETRO_DEVICE_LIGHTGUN path.
+    // This is the fully-proven core (docs/LIGHTGUN_SUPPORT.md).
+    lightgun: { label: 'Zapper', core: 'nestopia', device: 262, port: 1, coreOptions: { nestopia_zapper_device: 'lightgun', nestopia_show_crosshair: 'enabled' } } },
   gb:        { label: 'Game Boy',           defaultCore: 'gambatte',         cores: ['gambatte'],                     exts: ['gb'],                         aliases: ['gb','game boy','gameboy'],                               thumbnailRepo: 'Nintendo_-_Game_Boy',                            medium: 'cartridge' },
   gbc:       { label: 'Game Boy Color',     defaultCore: 'gambatte',         cores: ['gambatte'],                     exts: ['gbc'],                        aliases: ['gbc','game boy color','gameboy color'],                  thumbnailRepo: 'Nintendo_-_Game_Boy_Color',                      medium: 'cartridge' },
   gba:       { label: 'Game Boy Advance',   defaultCore: 'mgba',             cores: ['mgba'],                         exts: ['gba'],                        aliases: ['gba','game boy advance','gameboy advance'],              thumbnailRepo: 'Nintendo_-_Game_Boy_Advance',                    medium: 'cartridge' },
   vb:        { label: 'Virtual Boy',        defaultCore: 'mednafen_vb',      cores: ['mednafen_vb'],                  exts: ['vb','vboy'],                  aliases: ['vb','virtual boy','virtualboy'],                         thumbnailRepo: 'Nintendo_-_Virtual_Boy',                         medium: 'cartridge' },
-  md:        { label: 'Sega Genesis',       defaultCore: 'genesis_plus_gx',  cores: ['genesis_plus_gx','picodrive'],  exts: ['md','gen','smd'],             aliases: ['md','genesis','mega drive','megadrive','sega genesis'],  thumbnailRepo: 'Sega_-_Mega_Drive_-_Genesis',                    medium: 'cartridge' },
-  sms:       { label: 'Sega Master System', defaultCore: 'picodrive',        cores: ['picodrive','gearsystem'],       exts: ['sms'],                        aliases: ['sms','master system','sega master system','mark iii'],   thumbnailRepo: 'Sega_-_Master_System_-_Mark_III',                medium: 'cartridge' },
+  md:        { label: 'Sega Genesis',       defaultCore: 'genesis_plus_gx',  cores: ['genesis_plus_gx','picodrive'],  exts: ['md','gen','smd'],             aliases: ['md','genesis','mega drive','megadrive','sega genesis'],  thumbnailRepo: 'Sega_-_Mega_Drive_-_Genesis',                    medium: 'cartridge',
+    // Genesis Menacer (genesis_plus_gx). Device 516 = SUBCLASS(LIGHTGUN,1) on port
+    // index 1; reads the native RETRO_DEVICE_LIGHTGUN path (no read-mode option).
+    lightgun: { label: 'Menacer', core: 'genesis_plus_gx', device: 516, port: 1, coreOptions: {} } },
+  sms:       { label: 'Sega Master System', defaultCore: 'picodrive',        cores: ['picodrive','gearsystem'],       exts: ['sms'],                        aliases: ['sms','master system','sega master system','mark iii'],   thumbnailRepo: 'Sega_-_Master_System_-_Mark_III',                medium: 'cartridge',
+    // SMS Light Phaser. Device 260 = SUBCLASS(LIGHTGUN,0) on port index 0. Provided
+    // by genesis_plus_gx (the patched, gun-capable SMS core) — NOT the system's
+    // default picodrive core, so the gun forces a core switch when seated.
+    lightgun: { label: 'Light Phaser', core: 'genesis_plus_gx', device: 260, port: 0, coreOptions: {} } },
   gg:        { label: 'Sega Game Gear',     defaultCore: 'picodrive',        cores: ['picodrive','gearsystem'],       exts: ['gg'],                         aliases: ['gg','game gear','gamegear'],                             thumbnailRepo: 'Sega_-_Game_Gear',                               medium: 'cartridge' },
   sg1000:    { label: 'Sega SG-1000',       defaultCore: 'gearsystem',       cores: ['gearsystem','genesis_plus_gx'], exts: ['sg'],                         aliases: ['sg1000','sg-1000','sega sg-1000','sega sg1000','game 1000'], thumbnailRepo: 'Sega_-_SG-1000',                              medium: 'cartridge' },
   sega32x:   { label: 'Sega 32X',           defaultCore: 'picodrive',        cores: ['picodrive'],                    exts: ['32x'],                        aliases: ['sega32x','sega 32x','32x','mega 32x','super 32x'],        thumbnailRepo: 'Sega_-_32X',                                     medium: 'cartridge' },
@@ -128,6 +148,46 @@ export function portsForSystem(systemId) {
  */
 export function isKeyboardCapable(systemId) {
   return SYSTEMS[systemId]?.keyboard === true;
+}
+
+/**
+ * Light-gun descriptor for a system, or null. Shape:
+ *   { label, core, device, port, coreOptions }
+ * where `device` is the libretro controller-device id to assign on `port`
+ * (0-based), `core` is the (patched) core that implements the gun, and
+ * `coreOptions` are any core options needed to select the light-gun read path.
+ * See docs/LIGHTGUN_SUPPORT.md for how these were derived. Pure registry lookup.
+ */
+export function lightgunForSystem(systemId) {
+  return SYSTEMS[systemId]?.lightgun ?? null;
+}
+
+/** True if a system has a light-gun peripheral wired up. */
+export function isLightgunCapable(systemId) {
+  return !!SYSTEMS[systemId]?.lightgun;
+}
+
+/**
+ * Build the EmulatorClient.start() light-gun wiring for a system, or null if it
+ * has no gun. Returns { core, inputDevices, coreOptions, remapName } where:
+ *   • core         — the (patched) core that implements the gun. May differ from
+ *                    the system's defaultCore (e.g. SMS uses genesis_plus_gx, not
+ *                    picodrive), so the caller must load THIS core for the gun.
+ *   • inputDevices — { player: deviceId } to assign (player = gun port + 1).
+ *   • coreOptions  — core options selecting the gun read path.
+ *   • remapName    — the gun core's RA library name for its remap file.
+ * The device only connects at boot, so this is applied at load time.
+ */
+export function lightgunLoadConfig(systemId) {
+  const lg = SYSTEMS[systemId]?.lightgun;
+  if (!lg) return null;
+  const remapName = CORES[lg.core]?.remapName ?? null;
+  return {
+    core: lg.core,
+    inputDevices: { [lg.port + 1]: lg.device },
+    coreOptions: lg.coreOptions || {},
+    remapName,
+  };
 }
 
 // .bin is ambiguous (Atari 2600 / Mega Drive / PSX / …). When detection sees a

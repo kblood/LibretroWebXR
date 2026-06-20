@@ -13,6 +13,8 @@ import { Placeholder } from './Placeholder.js';
 import { SceneMgr } from './SceneMgr.js';
 import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
+import { createLightGun } from './LightGun.js';
+import { LightGunMgr } from './LightGunMgr.js';
 import { Cord } from './Cord.js';
 import { Plug } from './Plug.js';
 import { nearestAnchor } from './Snap.js';
@@ -29,7 +31,7 @@ import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, extOf } from './systems.js';
+import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, extOf } from './systems.js';
 import { Patchbay } from './Patchbay.js';
 import { RackMgr } from './RackMgr.js';
 import { ConsoleRuntime } from './ConsoleRuntime.js';
@@ -114,6 +116,12 @@ const input = new InputMgr(client);
 // cross-system swaps, and to tag any save-state written from this session.
 let currentCore = null;
 let currentMeta = null;
+// Full meta of the last game booted on the primary console, retained so a
+// light-gun arm (grab the gun → connect the gun device, which only attaches at
+// boot) can re-resolve and reload the SAME game. Unlike currentMeta this keeps
+// the rom-resolution fields (rom.source / sha1). null until a game loads.
+let _lastLoadedMeta = null;
+let _lightgunArmedConsole = false;  // primary console booted with the gun device
 const placeholder = new Placeholder(placeholderCanvas);
 placeholder.setMessage('Pick up a cartridge');
 placeholder.start();
@@ -443,6 +451,8 @@ let cartridges = [];
 let shelves = [];    // live shelf objects — used by addLocalRomToShelf()
 let consoleObj = null;
 let gamepadObj = null;
+let lightGunObj = null;   // grabbable light-gun prop ([[src/LightGun.js]])
+let lightGunMgr = null;   // per-frame aim → console lightgun input ([[src/LightGunMgr.js]])
 // Local-multiplayer patch graph: which gamepad is plugged into which console
 // port → which player it drives ([[src/Patchbay.js]]). Each gamepad object gets
 // a stable userData.cableId; the default one auto-plugs into port 0 (player 1).
@@ -1483,6 +1493,13 @@ async function buildCartridgeWorld() {
     gamepadObj = createGamepad({ position: new THREE.Vector3(0.55, 0.78, -2.15) });
     scene.addObject(gamepadObj);
   }
+  // Light-gun prop: a grabbable pistol you point at the TV to play gun games
+  // (Duck Hunt-style). Rests on the desk left of the console; wired into the
+  // grab system + LightGunMgr below (see grabMgr.addGrabbable / new LightGunMgr).
+  if (!lightGunObj) {
+    lightGunObj = createLightGun({ position: new THREE.Vector3(-0.62, 0.78, -2.15) });
+    scene.addObject(lightGunObj);
+  }
   // The default gamepad is player 1: logically plug it into port 0 (it stays at
   // its rest spot — only explicit re-plugging moves the mesh). This also marks
   // port 0 taken so the first "Add Gamepad" auto-plugs into port 1 (player 2).
@@ -1591,6 +1608,11 @@ async function buildCartridgeWorld() {
       const cableId = gp.userData?.cableId;
       if (net && cableId) net.setObjectState(makeGamepadHoldKey(cableId), null);
     },
+    // Picking up the light gun arms it: connect the gun device on the current
+    // (and future) gun-capable game. See armLightGunAndReload for the reload.
+    onObjectGrabbed: (obj) => {
+      if (obj?.userData?.kind === 'lightgun') armLightGunAndReload();
+    },
     // Remote-hold lock: refuse grab of a gamepad currently held by a remote peer.
     // ghostGpMgr is set up just after GrabMgr in this function, so the reference
     // is captured as a closure — at grab-time it is non-null whenever net is active.
@@ -1603,6 +1625,22 @@ async function buildCartridgeWorld() {
   });
   cartridges.forEach((c) => grabMgr.addGrabbable(c));
   grabMgr.addGrabbable(gamepadObj);
+  grabMgr.addGrabbable(lightGunObj);
+
+  // Light-gun aiming: every frame, for each controller currently holding the gun,
+  // raycast its barrel ray against the rack TV screens and drive the source
+  // console's EmulatorClient.sendLightgun() with the hit's canvas u,v + trigger
+  // (off-screen = a reload shot). The gun is bound to the primary console for now;
+  // multi-console gun binding (plug the gun into a chosen console) is a follow-up.
+  lightGunMgr = new LightGunMgr({
+    getActiveGuns: () => scene.controllers
+      .filter((ctrl) => grabMgr.heldObject(ctrl) === lightGunObj)
+      .map((ctrl) => ({ gun: lightGunObj, controller: ctrl })),
+    getScreenTargets: () => scene._tvs.map((tv) => ({ tvId: tv.id, mesh: tv.mesh })),
+    consoleIdForTV: (tvId) => cable.sourceOf(tvId),
+    clientForGun: () => rackMgr.get(CONSOLE_ID)?.client || null,
+    consoleIdForGun: () => CONSOLE_ID,
+  });
 
   // Phase 4: the primary console's physical object + its grabbable video-out
   // plug, seated in the primary TV's jack. consoleObjs maps each consoleId to
@@ -1645,6 +1683,34 @@ async function buildCartridgeWorld() {
   window.__grab = grabMgr;
   window.__cable = cable; // debug: inspect port↔player↔gamepad assignments
   window.__rackMgr = rackMgr; // debug: inspect/spawn consoles + budget headlessly
+  // Light-gun debug hooks: inspect the prop + manager and exercise the full
+  // aim→raycast→sendLightgun chain headlessly without an XR controller. __aimGun
+  // poses the gun toward a TV-relative point and forces it "held" for one tick.
+  window.__lightGun = () => lightGunObj;
+  window.__lightGunMgr = () => lightGunMgr;
+  window.__gunTargets = () => scene._tvs.map((tv) => {
+    const p = tv.mesh ? tv.mesh.getWorldPosition(new THREE.Vector3()) : null;
+    return { tvId: tv.id, hasMesh: !!tv.mesh, source: cable.sourceOf(tv.id), pos: p ? { x: p.x, y: p.y, z: p.z } : null };
+  });
+  // Force a single manager tick with the gun held by a synthetic controller whose
+  // trigger state = `trigger`. Poses the gun at `pos` aiming at `look` (world).
+  // Arm-on-grab debug hooks: __armGun runs the real arm+reload path;
+  // __gunArmedState reports whether the gun device is connected this boot.
+  window.__armGun = () => armLightGunAndReload();
+  window.__gunArmedState = () => ({ armed: !!window.__lightgunArmed, consoleArmed: _lightgunArmedConsole, system: currentMeta?.system || null });
+  window.__gunFire = (pos, look, trigger) => {
+    if (!lightGunObj || !lightGunMgr) return 'no-gun';
+    lightGunObj.position.set(pos.x, pos.y, pos.z);
+    // Barrel is local -Z; Object3D.lookAt points +Z at the target for non-cameras,
+    // so look at the mirrored point to aim the muzzle at `look`.
+    lightGunObj.lookAt(new THREE.Vector3(2 * pos.x - look.x, 2 * pos.y - look.y, 2 * pos.z - look.z));
+    lightGunObj.updateMatrixWorld(true);
+    const fakeCtrl = { userData: { inputSource: { gamepad: { buttons: [{ pressed: !!trigger }] } } } };
+    const saved = lightGunMgr._getActiveGuns;
+    lightGunMgr._getActiveGuns = () => [{ gun: lightGunObj, controller: fakeCtrl }];
+    try { lightGunMgr.tick(0.016); } finally { lightGunMgr._getActiveGuns = saved; }
+    return 'ticked';
+  };
   // Keyboard debug hooks — exposed here (before buildMemoryCards await) so
   // headless probes can reach them even when the later stall is slow.
   window.__kbd        = c64kbd;
@@ -1793,7 +1859,21 @@ async function buildCartridgeWorld() {
       rom: { source: 'pick' },
     };
     // Boot the ROM (same as romInput handler — uses the in-hand buffer).
-    await client.start(emuCanvas, buf, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style, contentExt: extOf(name), coreOptions: coreInfo.coreOptions });
+    // inputDevices: per-port libretro device overrides (e.g. light gun on p2).
+    // window.__forceInputDevices is a de-risk/test hook; coreInfo.inputDevices is
+    // the per-system default once wired into systems.js.
+    // Light-gun wiring (same as loadCartridge): when armed/flagged, boot the
+    // gun's core with the peripheral on its port. __force* are de-risk/test hooks
+    // that override the registry-derived config.
+    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system) : null;
+    const inputDevices = window.__forceInputDevices || gun?.inputDevices || coreInfo.inputDevices;
+    const coreOptions = window.__forceCoreOptions
+      ? { ...(coreInfo.coreOptions || {}), ...window.__forceCoreOptions }
+      : (gun ? { ...(coreInfo.coreOptions || {}), ...gun.coreOptions } : coreInfo.coreOptions);
+    // remapName: the RA library name for the per-core remap file that connects an
+    // inputDevices port override at boot.
+    const remapName = window.__forceRemapName || gun?.remapName || coreInfo.remapName;
+    await client.start(emuCanvas, buf, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style, contentExt: extOf(name), coreOptions, inputDevices, remapName });
     primaryRuntime.noteLoaded(coreInfo.name, { system: meta.system, title });
     currentCore = coreInfo.name;
     currentMeta = { core: coreInfo.name, file: meta.file, title, system: meta.system };
@@ -1801,6 +1881,8 @@ async function buildCartridgeWorld() {
     // Cache content-addressed in OPFS so the shelf cart can re-resolve later.
     const sha1 = await cacheRom(buf);
     meta.rom = sha1 ? { sha1, sources: ['opfs', 'pick'] } : { source: 'pick' };
+    _lastLoadedMeta = { ...meta };     // full meta (now OPFS-resolvable) for gun-reload
+    _lightgunArmedConsole = !!gun;     // did this boot connect the gun device?
     // Persist to local-ROM library (sha1 entries only, mirrors romInput handler).
     if (sha1) {
       persistLocalRom(meta);
@@ -2234,6 +2316,7 @@ async function buildCartridgeWorld() {
 
   scene.addTickCallback((dt) => desktop.tick(dt));
   scene.addTickCallback((dt) => grabMgr.tick(dt));
+  scene.addTickCallback((dt) => lightGunMgr.tick(dt));
   scene.addTickCallback(() => syncControllerCords());
   scene.addTickCallback(() => syncVideoCords());
   scene.addTickCallback(() => syncKeyboardCord());
@@ -2315,6 +2398,11 @@ async function buildCartridgeWorld() {
       } catch { /* silently skip */ }
     }
   })();
+
+  // Restore the light-gun arm across a page reload (gun stays "out" for the
+  // session) BEFORE the resume so the bridged game boots with the gun device.
+  try { if (sessionStorage.getItem(LIGHTGUN_ARM_KEY)) window.__lightgunArmed = true; }
+  catch (_) { /* sessionStorage unavailable */ }
 
   // After everything's built, see if we're resuming a cross-system swap.
   await resumePendingLoad();
@@ -3402,6 +3490,9 @@ function setKbdVisibility(visible) {
 // --- Cartridge → load wiring ---------------------------------------------
 
 const PENDING_KEY = 'libretrowebxr.pending';
+// Set once the light gun has been picked up; survives the arm page-reload and
+// keeps later gun-capable boots armed for the rest of the session.
+const LIGHTGUN_ARM_KEY = 'libretrowebxr.lightgun';
 
 // `echo` controls whether a successful load re-announces the TV state to the
 // room (M0.5). Local inserts echo (true, default); a load that is itself
@@ -3447,6 +3538,39 @@ function handleCartridgeInserted(meta, { echo = true } = {}) {
   loadCartridge(meta, { echo });
 }
 
+// Light-gun arming: picking up the gun connects the gun device. A libretro
+// peripheral attaches ONLY at a fresh core boot, and the primary console owns
+// #canvas (its runtime can't be hot-swapped — see swapConsoleCore), so the same
+// reload bridge used for cross-system swaps re-boots the current game with the
+// gun flagged on. A persisted session flag keeps every later boot armed (the gun
+// is out) and survives the reload. Picking up the gun with no gun-capable game
+// running just sets the flag so the next gun-capable game boots armed.
+async function armLightGunAndReload() {
+  try { sessionStorage.setItem(LIGHTGUN_ARM_KEY, '1'); } catch (_) {}
+  window.__lightgunArmed = true;                 // arm future gun-capable boots
+  if (_lightgunArmedConsole) return;             // current game already has the gun
+  const sys = currentMeta?.system;
+  if (!sys || !isLightgunCapable(sys) || !_lastLoadedMeta) return;
+  const lg = lightgunForSystem(sys);
+  setStatus(`connecting ${lg?.label || 'light gun'}…`);
+  // Bridge the SAME game across a page reload with the gun flagged on, exactly
+  // like a cross-system swap (preserving ROM provenance + in-VR room edits).
+  const m = _lastLoadedMeta;
+  try {
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify({
+      file: m.file, core: m.core, system: m.system, title: m.title, rom: m.rom, lightgun: true,
+    }));
+    if (editor) {
+      try { stashRoomBridge(JSON.stringify(editor.serialize())); }
+      catch (e) { console.warn('[main] room bridge stash failed:', e); }
+    }
+    location.reload();
+  } catch (e) {
+    console.warn('[lightgun] arm reload failed:', e);
+    setStatus('could not connect the light gun');
+  }
+}
+
 async function loadCartridge(meta, { echo = true } = {}) {
   setStatus(`loading ${meta.title}…`);
   // Boot telemetry (diagnoses headset boot failures): how the ROM resolves +
@@ -3460,13 +3584,26 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // RomResolver (Phase R.2) turns the entry into bytes from url / local
     // folder / picker / OPFS cache, per its rom.source (default: url).
     const buf = await resolveRom(meta);
-    const core = CORES[meta.core];
-    if (!core) throw new Error(`no core registered as "${meta.core}"`);
-    logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url });
-    await client.start(emuCanvas, buf, { coreUrl: core.url, coreName: meta.core, moduleStyle: core.style, contentExt: extOf(meta.file), coreOptions: core.coreOptions });
-    primaryRuntime.noteLoaded(meta.core, { system: meta.system, title: meta.title });
-    currentCore = meta.core;
+    // Light-gun wiring: when this load is gun-enabled (the game is flagged, or a
+    // gun has been armed for this session), boot the gun's (patched) core with the
+    // peripheral assigned to its port — the device only connects at boot, so it
+    // must be present in this client.start(). lightgunLoadConfig picks the gun
+    // core, which may differ from meta.core (e.g. SMS → genesis_plus_gx).
+    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system) : null;
+    const coreName = gun?.core || meta.core;
+    const core = CORES[coreName];
+    if (!core) throw new Error(`no core registered as "${coreName}"`);
+    const coreOptions = gun ? { ...(core.coreOptions || {}), ...gun.coreOptions } : core.coreOptions;
+    logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url, lightgun: !!gun });
+    await client.start(emuCanvas, buf, {
+      coreUrl: core.url, coreName, moduleStyle: core.style, contentExt: extOf(meta.file),
+      coreOptions, inputDevices: gun?.inputDevices, remapName: gun?.remapName ?? core.remapName,
+    });
+    primaryRuntime.noteLoaded(coreName, { system: meta.system, title: meta.title });
+    currentCore = coreName;
     currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system };
+    _lastLoadedMeta = meta;            // full meta (keeps rom.source) for gun-reload
+    _lightgunArmedConsole = !!gun;     // did this boot connect the gun device?
     gameInput?.setSystem(meta.system);
     // Loading implies the primary console is on — sync power state + switch tint.
     setConsolePower(CONSOLE_ID, true, consoleObjs.get(CONSOLE_ID)?.userData?.powerBtn);

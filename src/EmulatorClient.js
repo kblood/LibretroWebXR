@@ -36,6 +36,13 @@ const ROM_VFS_PATH = romVfsPath('bin');
 // that need a non-default option — e.g. PUAE's `puae_kickstart = "aros"`, which
 // selects the built-in AROS Kickstart so the Amiga boots with no proprietary BIOS.
 const CORE_OPTIONS_PATH = RETROARCH_CFG_DIR + '/retroarch-core-options.cfg';
+// Per-core input remap directory. RetroArch reads a controller-port device
+// override (input_libretro_device_pN) from a core-specific remap file at
+// <remap_dir>/<LibraryName>/<LibraryName>.rmp — and, critically, HONOURS it at
+// boot when the main cfg's input_libretro_device_pN is ignored (verified during
+// the light-gun bring-up; see docs/LIGHTGUN_SUPPORT.md). This is how a light gun
+// gets its console to connect the Zapper / Super Scope / Light Phaser on a port.
+const REMAP_DIR = RETROARCH_CFG_DIR + '/config/remaps';
 const STATE_DIR = '/home/web_user/retroarch/userdata/states';
 const STATE_PATH = STATE_DIR + '/rom.state';
 // `-c PATH` explicitly tells RA which config file to load. RA's default
@@ -73,6 +80,19 @@ export class EmulatorClient extends EventTarget {
     // Optional per-core libretro options ({ key: value }) written to the core
     // options file before callMain. Null = none (RA uses core defaults).
     this._coreOptions = null;
+    // Optional controller-port device overrides ({ player: libretroDeviceId }),
+    // e.g. { 2: 4 } assigns RETRO_DEVICE_LIGHTGUN to player 2 so a core boots its
+    // light-gun (NES Zapper, SMS Light Phaser, …) on that port. Written as
+    // input_libretro_device_pN before callMain. Null = cores use their defaults.
+    this._inputDevices = null;
+    // RetroArch library name (e.g. "Nestopia", "Snes9x", "Genesis Plus GX") used
+    // to name the per-core remap dir/file that carries _inputDevices. Required for
+    // a port-device override to take effect at boot (the main cfg's value is
+    // ignored). Null = don't write a remap (port devices won't connect).
+    this._remapName = null;
+    // Tracks the synthetic light-gun trigger so sendLightgun() emits clean
+    // mousedown/mouseup edges (RetroArch holds the button until the up event).
+    this._gunDown = false;
   }
 
   async start(emuCanvas, romBuffer, opts = {}) {
@@ -82,6 +102,8 @@ export class EmulatorClient extends EventTarget {
     // /rom/rom.adf instead of /rom/rom.bin.
     if (opts.contentExt) this._romPath = romVfsPath(opts.contentExt);
     if (opts.coreOptions && Object.keys(opts.coreOptions).length) this._coreOptions = opts.coreOptions;
+    if (opts.inputDevices && Object.keys(opts.inputDevices).length) this._inputDevices = opts.inputDevices;
+    if (opts.remapName) this._remapName = opts.remapName;
     if (!this._coreLoaded) {
       if (opts.coreUrl) this.coreUrl = opts.coreUrl;
       if (opts.coreName) this.coreName = opts.coreName;
@@ -232,6 +254,43 @@ export class EmulatorClient extends EventTarget {
     target.dispatchEvent(new KeyboardEvent(eventType, opts));
   }
 
+  // Aim + fire this core's light gun. (u, v) are normalised canvas coords with
+  // origin top-left: u/v in [0,1] map onto the visible framebuffer; values
+  // outside that range are off-screen (a reload shot). `trigger` is the held
+  // trigger state. RetroArch's web input reads the gun's absolute position from
+  // the mouse pointer (clientX/Y minus the canvas bounding rect) and the trigger
+  // from a mouse button, so we synthesise mousemove + mousedown/up against this
+  // core's own canvas — the same per-canvas targeting sendInput() relies on, so
+  // each console only hears its own gun. We hold the button down across frames
+  // (edge-triggered mousedown/up) since RetroArch latches it until release.
+  sendLightgun(u, v, trigger) {
+    const canvas = this.emuCanvas;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    // Map normalised coords onto the canvas's on-screen box. The canvas lives at
+    // a large negative offset (off-viewport) but still has a real layout rect,
+    // and rwebinput uses getBoundingClientRect the same way, so clientX/Y here
+    // are consistent with whatever the core computes.
+    const clientX = rect.left + u * rect.width;
+    const clientY = rect.top + v * rect.height;
+    const base = { clientX, clientY, bubbles: true, cancelable: true, view: window };
+    const offscreen = u < 0 || u > 1 || v < 0 || v > 1;
+    canvas.dispatchEvent(new MouseEvent('mousemove', base));
+    if (trigger && !this._gunDown) {
+      // Off-screen shots use the right button (offscreen_shot_mbtn = 2); an
+      // on-screen shot uses the left/trigger button (1). DOM button: 0 = left,
+      // 2 = right; buttons bitmask: 1 = left, 2 = right.
+      const button = offscreen ? 2 : 0;
+      const buttons = offscreen ? 2 : 1;
+      canvas.dispatchEvent(new MouseEvent('mousedown', { ...base, button, buttons }));
+      this._gunDown = button;
+    } else if (!trigger && this._gunDown !== false) {
+      const button = this._gunDown;
+      canvas.dispatchEvent(new MouseEvent('mouseup', { ...base, button, buttons: 0 }));
+      this._gunDown = false;
+    }
+  }
+
   // ---- internals ----
 
   _getModule() {
@@ -316,6 +375,63 @@ export class EmulatorClient extends EventTarget {
       try { M.FS.mkdirTree(RETROARCH_CFG_DIR); } catch (_) {}
       try { M.FS.writeFile(CORE_OPTIONS_PATH, body); } catch (e) {
         console.warn('[EmulatorClient] failed to write core options', e);
+      }
+    }
+    if (this._inputDevices) {
+      // Port device overrides + light-gun input wiring. RetroArch's libretro
+      // lightgun reads its absolute aim from the MOUSE pointer (rwebinput maps
+      // the canvas-relative cursor to gun X/Y — the rwebinput patch in
+      // docs/patches/) and its buttons from mouse buttons, so for any gun port we
+      // bind trigger→LMB and the off-screen/reload shot→RMB. sendLightgun() emits
+      // those synthetic mouse events. A "gun" port is one whose device base class
+      // is LIGHTGUN (4) — or POINTER (6), which covers nestopia's Zapper (id 262 =
+      // SUBCLASS(POINTER,0)) that is nonetheless read via the LIGHTGUN path.
+      const RETRO_DEVICE_MASK = 0xff, RETRO_DEVICE_LIGHTGUN = 4, RETRO_DEVICE_POINTER = 6;
+      const validPorts = Object.entries(this._inputDevices)
+        .filter(([player]) => Number.isInteger(Number(player)) && Number(player) >= 1);
+      // Main cfg: enable the per-core remap dir (so the .rmp below is honoured at
+      // boot) + the device line (belt-and-suspenders; ignored at boot but correct
+      // for any runtime re-read) + the gun mouse-button binds.
+      cfg += `input_remap_binds_enable = "true"\n`;
+      cfg += `input_remapping_directory = "${REMAP_DIR}"\n`;
+      for (const [player, dev] of validPorts) {
+        const p = Number(player);
+        cfg += `input_libretro_device_p${p} = "${dev}"\n`;
+        const base = Number(dev) & RETRO_DEVICE_MASK;
+        if (base === RETRO_DEVICE_LIGHTGUN || base === RETRO_DEVICE_POINTER) {
+          cfg += `input_player${p}_mouse_index = "0"\n`;
+          cfg += `input_player${p}_gun_trigger_mbtn = "1"\n`;
+          cfg += `input_player${p}_gun_offscreen_shot_mbtn = "2"\n`;
+        }
+      }
+      // The per-core remap FILE is what actually connects the device at boot.
+      // <REMAP_DIR>/<LibraryName>/<LibraryName>.rmp with input_libretro_device_pN.
+      if (this._remapName && validPorts.length) {
+        const rmp = validPorts.map(([p, dev]) => `input_libretro_device_p${Number(p)} = "${dev}"`).join('\n') + '\n';
+        const dir = `${REMAP_DIR}/${this._remapName}`;
+        try { M.FS.mkdirTree(dir); } catch (_) {}
+        try { M.FS.writeFile(`${dir}/${this._remapName}.rmp`, rmp); } catch (e) {
+          console.warn('[EmulatorClient] failed to write remap', e);
+        }
+      } else if (this._inputDevices) {
+        console.warn('[EmulatorClient] inputDevices set without remapName — port device will not connect at boot');
+      }
+    }
+    // Debug/test hook: append arbitrary raw cfg lines (e.g. to probe input grab
+    // behaviour during light-gun bring-up). Never set in production.
+    if (typeof window !== 'undefined' && typeof window.__forceCfgExtra === 'string') {
+      cfg += (window.__forceCfgExtra.endsWith('\n') ? window.__forceCfgExtra : window.__forceCfgExtra + '\n');
+    }
+    // Debug/test hook: write arbitrary extra files into the core FS before
+    // callMain (e.g. a per-core remap .rmp to force a controller-port device).
+    // { '/abs/path': 'contents' }. Never set in production.
+    if (typeof window !== 'undefined' && window.__forceExtraFiles) {
+      for (const [path, body] of Object.entries(window.__forceExtraFiles)) {
+        const dir = path.slice(0, path.lastIndexOf('/'));
+        try { M.FS.mkdirTree(dir); } catch (_) {}
+        try { M.FS.writeFile(path, body); } catch (e) {
+          console.warn('[EmulatorClient] failed to write extra file', path, e);
+        }
       }
     }
     const targets = [

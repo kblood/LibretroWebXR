@@ -29,7 +29,7 @@ const LASER_IDLE = 0x88aaff;
 const LASER_HOVER = 0xffd060;
 
 export class GrabMgr {
-  constructor({ scene, controllers, console: consoleObj, getConsoles, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, onPlugReleased, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, onGamepadGrabbed, onGamepadReleased, isRemotelyHeld, getRoomBounds, isPreviewEnabled }) {
+  constructor({ scene, controllers, console: consoleObj, getConsoles, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, onPlugReleased, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, onGamepadGrabbed, onGamepadReleased, onObjectGrabbed, isRemotelyHeld, getRoomBounds, isPreviewEnabled }) {
     this.scene = scene;
     this.controllers = controllers;
     this.console = consoleObj;
@@ -71,6 +71,9 @@ export class GrabMgr {
     // onGamepadGrabbed gets (gamepadObject, hand); onGamepadReleased gets (gamepadObject).
     this.onGamepadGrabbed = onGamepadGrabbed || (() => {});
     this.onGamepadReleased = onGamepadReleased || (() => {});
+    // Generic grab notification: fired for ANY grabbed object after it attaches,
+    // with (object, hand). Used by main.js to arm the light gun on pick-up.
+    this.onObjectGrabbed = onObjectGrabbed || (() => {});
     // isRemotelyHeld(obj): returns true when a gamepad is held by a remote peer
     // (supplied by main.js from GhostGamepadMgr). When true the gamepad is NOT
     // grabbable locally. No-op when null (single-player or pre-net).
@@ -352,7 +355,13 @@ export class GrabMgr {
       this.onGamepadGrabbed(target, this._handFor(ctrl));
     } else if (target.userData?.kind === 'cartridge') {
       this.onCartridgeGrabbed(target, this._handFor(ctrl));
+    } else {
+      // Non-gamepad props (e.g. the light gun) get their held highlight here —
+      // the gamepad branch above owns its own setHeld + flush bookkeeping.
+      target.userData?.setHeld?.(true);
     }
+    // Generic grab notification for any object (light-gun arming, etc.).
+    this.onObjectGrabbed(target, this._handFor(ctrl));
   }
 
   // 'left'|'right' for the two XR controllers; null for the synthetic desktop one.
@@ -414,6 +423,9 @@ export class GrabMgr {
     // Held-object sync: a cartridge is no longer in hand (it snapped home, was
     // inserted, or was left in place) — clear our hold so peers drop the ghost.
     if (kind === 'cartridge') this.onCartridgeReleased(obj);
+
+    // Non-gamepad props (light gun, etc.) clear their held highlight on release.
+    if (kind !== 'gamepad') obj.userData?.setHeld?.(false);
   }
 
   _handleCartridgeRelease(cart) {
