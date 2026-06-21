@@ -113,7 +113,14 @@ if (!self.crossOriginIsolated) {
 const urlParams = new URLSearchParams(location.search);
 const coreOverride = urlParams.get('core');
 
-const client = new EmulatorClient();
+// `client` is the PRIMARY console's EmulatorClient. It starts as the singleton
+// adopted by primaryRuntime, but a live primary reboot (armLiveReboot — used to
+// connect the light-gun device without a page reload) builds a FRESH runtime with
+// its OWN client + canvas and retires the old one. So this binding is mutable and
+// every consumer that captured it must be re-pointed via rebindPrimaryClient().
+// Code that needs the CURRENT primary client/canvas at call-time should prefer
+// rackMgr.get(CONSOLE_ID)?.client / primaryCanvas() over capturing these.
+let client = new EmulatorClient();
 // Desktop controller-binding model ([[src/Bindings.js]]): keyboard + PC-gamepad
 // remapping for the emulated RetroPad. Managed for all four couch-co-op players
 // so the historical P2-4 keyboard forwarding keeps working (defaults reproduce
@@ -300,9 +307,13 @@ function connectToRoom(room, nick, color) {
     },
     // M1.2 host video: paint the host's frames on the TV; pause our core while
     // watching (it isn't authoritative). Resume + revert when the stream ends.
-    videoCanvas: emuCanvas,
+    // primaryCanvas (a getter, resolved per-capture-frame in NetMgr) so the host
+    // video stream follows a live primary reboot's NEW canvas, not the original
+    // #canvas. client.pause/resume read the live `client` binding (let, rebound on
+    // reboot); the revert paints whatever the primary console is now showing.
+    videoCanvas: primaryCanvas,
     onHostVideo: (videoEl) => { scene.setScreenVideo(videoEl); client.pause(); },
-    onHostVideoEnded: () => { scene.setScreenSource(emuCanvas); client.resume(); },
+    onHostVideoEnded: () => { scene.setScreenSource(primaryCanvas()); client.resume(); },
     // FIX 1: clear latched remote keys when a peer disconnects mid-keypress.
     // NOTE (FIX E): clearRemote() clears ALL remote input, not just the leaving
     // peer's buttons. In a 3+ peer session this is a ~1-tick blip for other
@@ -331,7 +342,7 @@ function disconnectFromRoom() {
   if (!net) return;
   // If we were watching a host video, revert the TV to our own canvas and
   // resume the local core (same as onHostVideoEnded but triggered by leave).
-  scene.setScreenSource?.(emuCanvas);
+  scene.setScreenSource?.(primaryCanvas());
   client.resume?.();
   net.disconnect();
   net = null;
@@ -620,6 +631,28 @@ const rackMgr = new RackMgr({ logger });
 const primaryRuntime = new ConsoleRuntime({ id: CONSOLE_ID, adopt: { client, canvas: emuCanvas } });
 rackMgr.add(primaryRuntime);
 rackMgr.setFocus(CONSOLE_ID);
+
+// The PRIMARY console's CURRENT video canvas. Starts as the adopted #canvas
+// (emuCanvas) but a live primary reboot (rebootPrimaryConsole) installs a fresh runtime
+// with its own canvas, so anything that must paint the live primary picture (the
+// host-video capture + the TV's idle-revert) reads this getter rather than the
+// captured emuCanvas const. Falls back to emuCanvas if the runtime is missing.
+const primaryCanvas = () => rackMgr.get(CONSOLE_ID)?.canvas ?? emuCanvas;
+
+// Consumers that captured the singleton primary `client` register a re-point
+// callback here; a live primary reboot reassigns `client` to the new runtime's
+// EmulatorClient and fires them so keyboard/desktop-pad/reset all drive the new
+// core. (Input that already routes through rackMgr.get(CONSOLE_ID) — LightGunMgr,
+// GameInputMgr.dispatch — needs no rebind; it's live-aware already.)
+const _primaryClientListeners = [];
+function onPrimaryClientChange(fn) { _primaryClientListeners.push(fn); fn(client); }
+function rebindPrimaryClient(newClient) {
+  client = newClient;
+  window.__client = newClient;
+  for (const fn of _primaryClientListeners) { try { fn(newClient); } catch (e) { console.warn('[main] primary-client rebind listener', e); } }
+}
+// The keyboard InputMgr forwards to its captured client; keep it on the live one.
+onPrimaryClientChange((c) => { input.client = c; });
 
 // "Auto-pause idle cores" setting (default ON). Off = every spawned core stays
 // live regardless of gaze/budget — for machines that can run them all. Persisted
@@ -2157,8 +2190,8 @@ async function buildCartridgeWorld() {
     // picodrive but its Light Phaser is provided by genesis_plus_gx) — boot the
     // gun core in that case, mirroring loadCartridge. Falls back to coreInfo.
     const bootCore = (gun && CORES[gun.core]) ? { ...CORES[gun.core], name: gun.core } : coreInfo;
-    await client.start(emuCanvas, buf, { coreUrl: bootCore.url, coreName: bootCore.name, moduleStyle: bootCore.style, contentExt: extOf(name), coreOptions, inputDevices, remapName });
-    primaryRuntime.noteLoaded(bootCore.name, { system: meta.system, title });
+    await client.start(primaryCanvas(), buf, { coreUrl: bootCore.url, coreName: bootCore.name, moduleStyle: bootCore.style, contentExt: extOf(name), coreOptions, inputDevices, remapName });
+    rackMgr.get(CONSOLE_ID)?.noteLoaded(bootCore.name, { system: meta.system, title });
     currentCore = bootCore.name;
     currentMeta = { core: bootCore.name, file: meta.file, title, system: meta.system };
     gameInput?.setSystem(meta.system);
@@ -2606,6 +2639,7 @@ async function buildCartridgeWorld() {
   // which reads XR controllers' inputSource.gamepad). The UI releases pointer
   // lock when it opens so the cursor is usable and gameplay listeners go quiet.
   const desktopGamepad = new DesktopGamepad({ renderer: scene.renderer, client, bindings });
+  onPrimaryClientChange((c) => { desktopGamepad.client = c; });
   scene.addTickCallback(() => desktopGamepad.tick());
   const bindingsUI = new BindingsUI({
     bindings,
@@ -2786,6 +2820,9 @@ async function buildCartridgeWorld() {
   installPortals();
 
   window.__locomotion = locomotion;
+  // gameInput dispatches per-console via rackMgr (live-aware); its `client` is
+  // only an N=1 fallback, but keep it on the live primary client for consistency.
+  onPrimaryClientChange((c) => { gameInput.client = c; });
   window.__gameInput = gameInput;
   window.__room = room;
 
@@ -4098,12 +4135,17 @@ function handleCartridgeInserted(meta, { echo = true } = {}) {
 }
 
 // Light-gun arming: picking up the gun connects the gun device. A libretro
-// peripheral attaches ONLY at a fresh core boot, and the primary console owns
-// #canvas (its runtime can't be hot-swapped — see swapConsoleCore), so the same
-// reload bridge used for cross-system swaps re-boots the current game with the
-// gun flagged on. A persisted session flag keeps every later boot armed (the gun
-// is out) and survives the reload. Picking up the gun with no gun-capable game
-// running just sets the flag so the next gun-capable game boots armed.
+// peripheral attaches ONLY at a fresh core boot. Historically the primary console
+// owned the singleton #canvas and couldn't re-boot in place, so this did a full
+// location.reload() — jarring, and it ENDED any immersive XR session and dropped
+// the net session. Now we re-boot the SAME game LIVE: rebootPrimaryConsole stands
+// up a fresh runtime (own canvas + client) for CONSOLE_ID with the gun device on,
+// retires the old one, and re-points every singleton consumer — no page navigation,
+// so the XR session and the room/host role survive untouched. A persisted session
+// flag keeps every LATER boot armed (the gun is out). Picking up the gun with no
+// gun-capable game running just sets the flag so the next gun-capable game boots
+// armed. Falls back to the old reload bridge if the live reboot throws, so arming
+// never hard-fails.
 async function armLightGunAndReload() {
   try { sessionStorage.setItem(LIGHTGUN_ARM_KEY, '1'); } catch (_) {}
   window.__lightgunArmed = true;                 // arm future gun-capable boots
@@ -4121,24 +4163,40 @@ async function armLightGunAndReload() {
   setStatus(padSuperseded
     ? `connecting ${lg?.label || 'light gun'} on player ${player} (replaces that gamepad)…`
     : `connecting ${lg?.label || 'light gun'} on player ${player}…`);
-  // Bridge the SAME game across a page reload with the gun flagged on, exactly
-  // like a cross-system swap (preserving ROM provenance + in-VR room edits).
   const m = _lastLoadedMeta;
-  logger?.event?.('lightgun-arm-reload', { system: sys, gun: lg?.label || null, file: m.file, core: m.core, title: m.title, alreadyArmedConsole: _lightgunArmedConsole });
+  // Build the SAME gun boot config the load path uses, so the fresh boot seats the
+  // device on the right port(s). twoGun seats two guns on two-gun-capable games.
+  const twoGun = _twoGunActiveFor(m);
+  const gun = lightgunLoadConfig(m.system, { twoGun });
+  logger?.event?.('lightgun-arm-reboot', { system: sys, gun: lg?.label || null, file: m.file, core: m.core, title: m.title, twoGun: !!(gun && gun.guns?.length > 1) });
   try {
-    sessionStorage.setItem(PENDING_KEY, JSON.stringify({
-      file: m.file, core: m.core, system: m.system, title: m.title, rom: m.rom, lightgun: true,
-    }));
-    if (editor) {
-      try { stashRoomBridge(JSON.stringify(editor.serialize())); }
-      catch (e) { console.warn('[main] room bridge stash failed:', e); }
-    }
-    // Keep the session (and host role) alive across the gun-arm reload.
-    stashSessionRejoin();
-    location.reload();
+    // LIVE reboot: re-boot the same ROM with the gun device attached, no reload.
+    await rebootPrimaryConsole(m, gun);
+    // Snap the matching cart back into the slot (the runtime swap doesn't touch
+    // the visual cart state, but keep parity with the reload path's resume).
+    const cart = cartridges.find((c) => c.userData.file === m.file);
+    if (cart && grabMgr) grabMgr.setInsertedCart(cart);
+    setStatus(`${lg?.label || 'light gun'} connected`);
   } catch (e) {
-    console.warn('[lightgun] arm reload failed:', e);
-    setStatus('could not connect the light gun');
+    // Fallback: the old reload bridge so arming never hard-fails. Bridges the SAME
+    // game across a page reload with the gun flagged on (preserving ROM provenance
+    // + in-VR room edits + the net session/host role).
+    console.warn('[lightgun] live arm failed, falling back to reload:', e);
+    logger?.event?.('lightgun-arm-reboot-fallback', { error: String(e?.message || e) });
+    try {
+      sessionStorage.setItem(PENDING_KEY, JSON.stringify({
+        file: m.file, core: m.core, system: m.system, title: m.title, rom: m.rom, lightgun: true,
+      }));
+      if (editor) {
+        try { stashRoomBridge(JSON.stringify(editor.serialize())); }
+        catch (e2) { console.warn('[main] room bridge stash failed:', e2); }
+      }
+      stashSessionRejoin();
+      location.reload();
+    } catch (e2) {
+      console.warn('[lightgun] arm reload fallback failed:', e2);
+      setStatus('could not connect the light gun');
+    }
   }
 }
 
@@ -4170,11 +4228,11 @@ async function loadCartridge(meta, { echo = true } = {}) {
     if (!core) throw new Error(`no core registered as "${coreName}"`);
     const coreOptions = gun ? { ...(core.coreOptions || {}), ...gun.coreOptions } : core.coreOptions;
     logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url, lightgun: !!gun, twoGun: !!(gun && gun.guns?.length > 1) });
-    await client.start(emuCanvas, buf, {
+    await client.start(primaryCanvas(), buf, {
       coreUrl: core.url, coreName, moduleStyle: core.style, contentExt: extOf(meta.file),
       coreOptions, inputDevices: gun?.inputDevices, remapName: gun?.remapName ?? core.remapName,
     });
-    primaryRuntime.noteLoaded(coreName, { system: meta.system, title: meta.title });
+    rackMgr.get(CONSOLE_ID)?.noteLoaded(coreName, { system: meta.system, title: meta.title });
     currentCore = coreName;
     currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system };
     _lastLoadedMeta = meta;            // full meta (keeps rom.source) for gun-reload
@@ -4338,7 +4396,25 @@ async function swapConsoleCore(consoleId, meta) {
   const core = CORES[meta.core];
   if (!core) throw new Error(`no core registered as "${meta.core}"`);
   const buf = await resolveRom(meta);
+  await bootFreshRuntime(consoleId, meta, {
+    core: { ...core, name: meta.core }, romBuffer: buf,
+  });
+  // Persist so a later reload restores the game now on this console.
+  _updateSpawnedMeta(consoleId, meta);
+  persistRack();
+}
 
+// Build a FRESH ConsoleRuntime (own canvas + core) for `consoleId`, boot it with
+// `bootOpts`, then atomically retire the old runtime and install the new one under
+// the SAME id — the reboot primitive both the secondary core-swap and the PRIMARY
+// live light-gun reboot share. A libretro core can't cleanly unload (it pins a
+// WebGL context past callMain), so re-attaching a boot-time peripheral / changing
+// the core means a fresh boot; the orphaned old context just lingers (bounded by
+// RackBudget.maxLive, like every rack teardown). routeVideo() re-points the TV to
+// the new canvas. bootOpts: { core:{name,url,style,coreOptions?}, romBuffer,
+// inputDevices?, coreOptions?, remapName? }. Returns the new runtime.
+async function bootFreshRuntime(consoleId, meta, bootOpts) {
+  const { core, romBuffer } = bootOpts;
   // Label the audio branch BEFORE boot so the new core's AudioContext (created
   // during load) lands on this console's TV, mirroring spawnConsole's ordering.
   const tvId = tvForConsole(consoleId);
@@ -4348,7 +4424,10 @@ async function swapConsoleCore(consoleId, meta) {
   // then atomically retire the old runtime and install the new one under this id.
   const next = new ConsoleRuntime({ id: consoleId });
   if (tvGroup) audioRouter.expect(consoleId, tvGroup);
-  await next.load(buf, { ...core, name: meta.core }, { system: meta.system, title: meta.title });
+  await next.load(romBuffer, core, {
+    system: meta.system, title: meta.title, contentExt: extOf(meta.file),
+    coreOptions: bootOpts.coreOptions, inputDevices: bootOpts.inputDevices, remapName: bootOpts.remapName,
+  });
   rackMgr.remove(consoleId);   // dispose old (pause + detach its canvas)
   rackMgr.add(next);
 
@@ -4370,9 +4449,60 @@ async function swapConsoleCore(consoleId, meta) {
 
   rackMgr.applyBudget();
   refreshAudioFocus();
-  // Persist so a later reload restores the game now on this console.
-  _updateSpawnedMeta(consoleId, meta);
-  persistRack();
+  return next;
+}
+
+// Live reboot of the PRIMARY console (CONSOLE_ID) — re-boot the SAME ROM with new
+// boot params WITHOUT a page reload. The light-gun device (and any boot-time
+// device/core-option change) attaches only at a fresh core boot, and the primary
+// historically owned the singleton #canvas, forcing a location.reload(). Instead
+// we reuse bootFreshRuntime to stand up a fresh runtime (own canvas + client) for
+// CONSOLE_ID, then re-point every consumer that captured the old singleton client
+// (rebindPrimaryClient) + wire its ready/error events. Because the page is KEPT,
+// the net/room session and host role survive untouched. The TV follows the new
+// canvas via routeVideo() (rackMgr.get(CONSOLE_ID).canvas) and the host-video
+// capture follows it via the primaryCanvas() getter. Returns the new runtime.
+async function rebootPrimaryConsole(meta, gun) {
+  const coreName = gun?.core || meta.core;
+  const core = CORES[coreName];
+  if (!core) throw new Error(`no core registered as "${coreName}"`);
+  const buf = await resolveRom(meta);
+  const coreOptions = gun ? { ...(core.coreOptions || {}), ...gun.coreOptions } : core.coreOptions;
+  const next = await bootFreshRuntime(CONSOLE_ID, meta, {
+    core: { name: coreName, url: core.url, style: core.style },
+    romBuffer: buf,
+    coreOptions,
+    inputDevices: gun?.inputDevices,
+    remapName: gun?.remapName ?? core.remapName,
+  });
+  // Re-point the singleton-bound consumers (keyboard / desktop pad / reset / save
+  // states / host-video pause-resume) at the new runtime's client, and wire its
+  // ready/error handlers (the old client's listeners don't carry over).
+  rebindPrimaryClient(next.client);
+  wireClientEvents(next.client);
+  next.client.resume?.();   // make sure the fresh core is actually running
+
+  // Mirror loadCartridge's post-boot bookkeeping so the rest of the app agrees on
+  // what's now running on the primary (and that the gun device is connected).
+  currentCore = coreName;
+  currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system };
+  _lastLoadedMeta = meta;
+  _lightgunArmedConsole = !!gun;
+  _twoGunPorts = (gun && gun.guns?.length > 1) ? gun.guns.map((x) => x.port) : [];
+  _assignGunPorts();
+  gameInput?.setSystem(meta.system);
+  consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
+  setSystemLabel(coreName);
+  updateControlsPanel();
+  nowPlayingPanel?.userData.setNowPlaying({
+    system: meta.system,
+    coreLabel: CORES[meta.core]?.label || meta.core,
+    title: meta.title,
+  });
+  // We are (still) the host of whatever was playing — keep the TV broadcast on the
+  // new canvas alive for any peers watching our stream.
+  if (net?.isHost?.()) net?.startVideoBroadcast?.();
+  return next;
 }
 
 // Rewrite the persisted meta for a spawned console after an in-place game swap so
@@ -4553,19 +4683,24 @@ function handleMemoryCardInserted(card) {
 }
 
 // --- Client event wiring -------------------------------------------------
-
-client.addEventListener('ready', () => {
-  setStatus('running');
-  resetBtn.disabled = false;
-  input.attach(window);
-  placeholder.stop();
-  scene.setScreenSource(emuCanvas);
-});
-
-client.addEventListener('error', (e) => {
-  setStatus('error: ' + e.detail);
-  resetBtn.disabled = true;
-});
+//
+// Extracted so a live primary reboot (rebootPrimaryConsole) can wire the SAME ready/error
+// behaviour onto the fresh client it boots. ready paints the client's OWN canvas
+// (c.emuCanvas) so a rebooted primary shows on the TV regardless of bind ordering.
+function wireClientEvents(c) {
+  c.addEventListener('ready', () => {
+    setStatus('running');
+    resetBtn.disabled = false;
+    input.attach(window);
+    placeholder.stop();
+    scene.setScreenSource(c.emuCanvas ?? primaryCanvas());
+  });
+  c.addEventListener('error', (e) => {
+    setStatus('error: ' + e.detail);
+    resetBtn.disabled = true;
+  });
+}
+wireClientEvents(client);
 
 // --- Local ROM file-picker path -------------------------------------------
 //
@@ -4676,8 +4811,8 @@ romInput.addEventListener('change', async (e) => {
   try {
     const buffer = await file.arrayBuffer();
     logger?.event?.('rom-picked', { file: meta.file, bytes: buffer?.byteLength ?? 0, core: coreInfo.name, coreUrl: coreInfo.url, opfs: opfsSupported() });
-    await client.start(emuCanvas, buffer, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style, contentExt: extOf(meta.file), coreOptions: coreInfo.coreOptions });
-    primaryRuntime.noteLoaded(coreInfo.name, { system: meta.system, title });
+    await client.start(primaryCanvas(), buffer, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style, contentExt: extOf(meta.file), coreOptions: coreInfo.coreOptions });
+    rackMgr.get(CONSOLE_ID)?.noteLoaded(coreInfo.name, { system: meta.system, title });
     currentCore = coreInfo.name;
     currentMeta = { core: coreInfo.name, file: meta.file, title, system: meta.system };
     gameInput?.setSystem(meta.system);

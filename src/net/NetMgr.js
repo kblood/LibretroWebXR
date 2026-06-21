@@ -95,7 +95,9 @@ export class NetMgr {
     // + host id. The capturable canvas is supplied by main.js (the emulator's).
     this.video = new VideoMgr({
       getSelfId: () => this.presence.selfId,
-      getCaptureCanvas: () => videoCanvas,
+      // videoCanvas may be a live getter (a fn) so the capture follows a primary
+      // console reboot's new canvas; a plain canvas is still accepted unchanged.
+      getCaptureCanvas: () => (typeof videoCanvas === 'function' ? videoCanvas() : videoCanvas),
       iceServers: this.iceServers ?? undefined,
       onHostVideo,
       onHostVideoEnded,
