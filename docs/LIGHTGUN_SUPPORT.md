@@ -262,11 +262,49 @@ expands to `((id+1)<<8)|base`; `RETRO_DEVICE_LIGHTGUN=4`, `RETRO_DEVICE_POINTER=
 Also (source): snes9x Justifier=516 / Justifier2=772 / MACS Rifle=1028; genesis
 Justifiers=772. All read SCREEN_X/Y + TRIGGER/AUX/OFFSCREEN, which the patch feeds.
 
-**Co-op caveat:** `rwebinput` has a single mouse, so the patch feeds the *same*
-position to every port that queries LIGHTGUN. Two guns on the **same** console (e.g.
-2-player Duck Hunt) would share one aim point — needs per-port pointer state in
-`rwebinput` (future patch). Two guns on **different** consoles are fine (separate
-clients/canvases/mice).
+**Co-op caveat — RESOLVED (2026-06-21):** the stock `rwebinput` has a single mouse,
+so two guns on the **same** console would share one aim point. The **multiport patch**
+(`docs/patches/rwebinput-lightgun-multiport.diff`) fixes this: it adds a per-PORT
+pointer slot + the exported setter `rwebinput_set_lightgun(port,x,y,buttons)`, so the
+frontend drives each gun's port independently. nestopia + snes9x are relinked with it.
+
+### SNES Konami Justifier two-gun co-op — VERIFIED ON THE REAL CORE (2026-06-21)
+
+Topology finding (read from `snes9x/libretro/libretro.cpp` + `controls.cpp`): although
+the *physical* Justifier daisy-chains both guns on SNES port 2, **snes9x reads the two
+guns from TWO DISTINCT libretro ports** at the `input_state_cb` boundary. The JUSTIFIER
+device (516) seats on libretro **port 1** and is read via `input_state_cb(1, LIGHTGUN, …)`
+→ `justifier.x[0]/y[0]` (gun A); JUSTIFIER_2 (772) seats on **port 2**, and the JUSTIFIER
+poll — seeing `snes_devices[port+1]==772` — reads `input_state_cb(2, LIGHTGUN, …)` →
+`justifier.x[1]/y[1]` (gun B). There is **no single-port strobe disambiguation at the
+frontend boundary**, so the existing **per-PORT** multiport patch is exactly right — no
+patch extension and **no snes9x rebuild** were needed. The `systems.js` `lightgun2`
+config already maps gun A→port 1 (device 516) and gun B→port 2 (device 772).
+
+Verified end-to-end on the **real patched snes9x core** (`tmp/verify-twogun-opwolf-snes9x.mjs`,
+**9/9**): booting `lwx-snes-opwolf.sfc` with the Justifier (twoGun), the core's own
+per-gun crosshairs (BLUE = justifier1/gun A from port 1, MAGENTA = justifier2/gun B from
+port 2 — drawn straight from `justifier.x[0]/x[1]`) land at the two commanded aim points,
+**swap** correctly when the aims swap (each follows its OWN port), and are **isolated**
+(moving gun B leaves gun A put). Single-gun regressions still pass: Super Scope 5/5
+(`verify-scope-snes9x`), NES gallery 5/5 (`verify-gallery-nestopia`), per-port mechanism
+7/7 (`verify-twogun`), single-gun opwolf 5/5 (`verify-opwolf-snes9x`), `npm test` all green.
+
+**Frontend wiring (in-app two guns):** `loadCartridge`/`__pickLocalRom` call
+`lightgunLoadConfig(system, { twoGun })` when the game is `twoGun`-flagged on a
+two-gun-capable system, seating both gun devices; `main.js` records the seated ports in
+`_twoGunPorts` and `_assignGunPorts()` stamps `userData.gunPort` on each registered gun
+in order (boot gun → port 1; a 2nd gun spawned via the Add menu / `addProp('lightgun')`
+→ port 2). `LightGunMgr.portForGun` reads `userData.gunPort`, so each gun drives its own
+per-port slot via `EmulatorClient.sendLightgun(u,v,t, port)`. Guns with no two-gun
+context have no `gunPort` → the legacy single-gun DOM-mouse path, **100% unchanged**.
+
+**Remaining (not blocking the multiport feature):** the `games/snes-opwolf` ROM's OWN raw
+Justifier reader (`jf_*` in `opwolf.c`) still resolves one gun per frame (its OPHCT/OPVCT
+read is gated by the SELECT strobe), so its *in-game* crosshairs/hit-scoring don't yet
+show both guns simultaneously even though the core delivers both positions correctly. That
+is a game-ROM fix in `opwolf.c`, independent of the frontend/core path proven above. Two
+guns on **different** consoles remain fine (separate clients/canvases/mice).
 
 ## App-side work — G1, DONE (2026-06-20)
 

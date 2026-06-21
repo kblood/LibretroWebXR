@@ -93,7 +93,7 @@ export const SYSTEMS = {
     // drives an independent libretro port. The patched multiport rwebinput feeds
     // each port its OWN aim point (webgun_set per port) — see LIGHTGUN_SUPPORT.md
     // "Co-op caveat". Requested via lightgunLoadConfig(systemId, { twoGun:true }).
-    lightgun2: { label: 'Justifier (2-gun)', core: 'snes9x', devices: [516, 772], ports: [1, 2], coreOptions: { snes9x_justifier_crosshair: 'enabled' } } },
+    lightgun2: { label: 'Justifier (2-gun)', core: 'snes9x', devices: [516, 772], ports: [1, 2], coreOptions: { snes9x_justifier1_crosshair: 'enabled', snes9x_justifier2_crosshair: 'enabled' } } },
   nes:       { label: 'Nintendo (NES)',     defaultCore: 'nestopia',         cores: ['nestopia','fceumm'],            exts: ['nes','fds','unf','unif'],     aliases: ['nes','nintendo','famicom','nintendo entertainment system'], thumbnailRepo: 'Nintendo_-_Nintendo_Entertainment_System',       medium: 'cartridge',
     // NES Zapper (nestopia). Device 262 = SUBCLASS(POINTER,0); nestopia hardcodes
     // reading the gun from port index 1 (player 2), and needs the zapper_device

@@ -34,7 +34,7 @@ import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, extOf } from './systems.js';
+import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, extOf } from './systems.js';
 import { Patchbay } from './Patchbay.js';
 import { RackMgr } from './RackMgr.js';
 import { ConsoleRuntime } from './ConsoleRuntime.js';
@@ -132,6 +132,14 @@ let currentMeta = null;
 // the rom-resolution fields (rom.source / sha1). null until a game loads.
 let _lastLoadedMeta = null;
 let _lightgunArmedConsole = false;  // primary console booted with the gun device
+// Two-gun (co-op) state: the ordered controller PORTs the active two-gun config
+// seats its guns on (e.g. SNES Justifier → [1, 2] = gun A on port 1, gun B on
+// port 2). Set at boot when a two-gun game connects its peripheral; empty []
+// for single-gun / no-gun boots. Drives _assignGunPorts(), which stamps each
+// registered gun's userData.gunPort so LightGunMgr routes it to its OWN per-port
+// aim slot in the patched multiport core (webgun_set). See [[src/systems.js]]
+// lightgunLoadConfig({twoGun}) and docs/LIGHTGUN_SUPPORT.md.
+let _twoGunPorts = [];
 const placeholder = new Placeholder(placeholderCanvas);
 placeholder.setMessage('Pick up a cartridge');
 placeholder.start();
@@ -541,6 +549,36 @@ function _registerLightGun(obj) {
   if (!obj) return;
   _lightGunObjs.add(obj);
   grabMgr?.addGrabbable(obj);
+  // (Re)assign per-gun ports so a gun added mid-session (Add menu / addProp) is
+  // immediately routed to its own slot when a two-gun game is active.
+  _assignGunPorts();
+}
+
+// Decide whether a boot should connect the TWO-gun co-op peripheral: the game
+// must declare twoGun, the system must actually have a two-gun device, and the
+// gun must be enabled (game-flagged or armed this session). When false the boot
+// uses the single-gun path (or none), 100% unchanged.
+function _twoGunActiveFor(meta) {
+  const armed = !!(meta?.lightgun || window.__lightgunArmed);
+  return armed && !!meta?.twoGun && isTwoGunCapable(meta?.system);
+}
+
+// Stamp each registered light gun with the controller PORT it drives, in
+// registration order: gun 0 → _twoGunPorts[0], gun 1 → _twoGunPorts[1], …. In
+// two-gun mode this gives gun A and gun B independent per-port aim slots; in
+// any other mode every gun's gunPort is cleared so LightGunMgr falls back to the
+// proven single-gun DOM-mouse path (shipped Zapper / Super Scope unchanged).
+// Idempotent — safe to call on every register/boot.
+function _assignGunPorts() {
+  const ports = _twoGunPorts;
+  let i = 0;
+  for (const g of _lightGunObjs) {
+    if (!g?.userData) continue;
+    const p = ports[i];
+    if (Number.isInteger(p)) g.userData.gunPort = p;
+    else delete g.userData.gunPort;
+    i++;
+  }
 }
 // Local-multiplayer patch graph: which gamepad is plugged into which console
 // port → which player it drives ([[src/Patchbay.js]]). Each gamepad object gets
@@ -2080,8 +2118,12 @@ async function buildCartridgeWorld() {
    *
    * @param {string} name     ROM filename (used for core detection + title)
    * @param {ArrayBuffer|Uint8Array} data  ROM bytes
+   * @param {object} [opts]    optional meta hints (e.g. { twoGun:true } to seat
+   *                           the two-gun Justifier when armed — used by the
+   *                           two-Justifier verify harness, since a picked file
+   *                           has no manifest twoGun flag).
    */
-  window.__pickLocalRom = async (name, data) => {
+  window.__pickLocalRom = async (name, data, opts = {}) => {
     const buf = data instanceof ArrayBuffer ? data : data.buffer;
     const coreInfo = detectCore(name, coreOverride);
     if (!coreInfo) throw new Error(`no core for "${name}"`);
@@ -2093,6 +2135,7 @@ async function buildCartridgeWorld() {
       system: system || 'unknown',
       title,
       rom: { source: 'pick' },
+      ...(opts.twoGun ? { twoGun: true } : {}),
     };
     // Boot the ROM (same as romInput handler — uses the in-hand buffer).
     // inputDevices: per-port libretro device overrides (e.g. light gun on p2).
@@ -2101,7 +2144,8 @@ async function buildCartridgeWorld() {
     // Light-gun wiring (same as loadCartridge): when armed/flagged, boot the
     // gun's core with the peripheral on its port. __force* are de-risk/test hooks
     // that override the registry-derived config.
-    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system) : null;
+    const twoGun = _twoGunActiveFor(meta);
+    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system, { twoGun }) : null;
     const inputDevices = window.__forceInputDevices || gun?.inputDevices || coreInfo.inputDevices;
     const coreOptions = window.__forceCoreOptions
       ? { ...(coreInfo.coreOptions || {}), ...window.__forceCoreOptions }
@@ -2123,6 +2167,9 @@ async function buildCartridgeWorld() {
     meta.rom = sha1 ? { sha1, sources: ['opfs', 'pick'] } : { source: 'pick' };
     _lastLoadedMeta = { ...meta };     // full meta (now OPFS-resolvable) for gun-reload
     _lightgunArmedConsole = !!gun;     // did this boot connect the gun device?
+    // Two-gun co-op: record seated ports + stamp each gun's port (mirrors loadCartridge).
+    _twoGunPorts = (gun && gun.guns?.length > 1) ? gun.guns.map((x) => x.port) : [];
+    _assignGunPorts();
     // Persist to local-ROM library (sha1 entries only, mirrors romInput handler).
     if (sha1) {
       persistLocalRom(meta);
@@ -4113,12 +4160,16 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // peripheral assigned to its port — the device only connects at boot, so it
     // must be present in this client.start(). lightgunLoadConfig picks the gun
     // core, which may differ from meta.core (e.g. SMS → genesis_plus_gx).
-    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system) : null;
+    // Two-gun co-op: a twoGun-flagged game on a two-gun-capable system seats TWO
+    // gun devices (Justifier 516/772 on ports 1+2) so each VR gun drives its own
+    // per-port aim slot; otherwise a single gun on one port (proven path).
+    const twoGun = _twoGunActiveFor(meta);
+    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system, { twoGun }) : null;
     const coreName = gun?.core || meta.core;
     const core = CORES[coreName];
     if (!core) throw new Error(`no core registered as "${coreName}"`);
     const coreOptions = gun ? { ...(core.coreOptions || {}), ...gun.coreOptions } : core.coreOptions;
-    logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url, lightgun: !!gun });
+    logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url, lightgun: !!gun, twoGun: !!(gun && gun.guns?.length > 1) });
     await client.start(emuCanvas, buf, {
       coreUrl: core.url, coreName, moduleStyle: core.style, contentExt: extOf(meta.file),
       coreOptions, inputDevices: gun?.inputDevices, remapName: gun?.remapName ?? core.remapName,
@@ -4128,6 +4179,11 @@ async function loadCartridge(meta, { echo = true } = {}) {
     currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system };
     _lastLoadedMeta = meta;            // full meta (keeps rom.source) for gun-reload
     _lightgunArmedConsole = !!gun;     // did this boot connect the gun device?
+    // Two-gun co-op: record the seated gun ports (e.g. [1,2]) and stamp each held
+    // gun's userData.gunPort so LightGunMgr routes A→port1, B→port2. Cleared (and
+    // gunPort removed) for single-gun / no-gun boots — DOM-mouse path unchanged.
+    _twoGunPorts = (gun && gun.guns?.length > 1) ? gun.guns.map((x) => x.port) : [];
+    _assignGunPorts();
     gameInput?.setSystem(meta.system);
     // Loading implies the primary console is on — sync power state + switch tint.
     setConsolePower(CONSOLE_ID, true, consoleObjs.get(CONSOLE_ID)?.userData?.powerBtn);
