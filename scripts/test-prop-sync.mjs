@@ -110,6 +110,20 @@ console.log('--- serializePropState');
   const shelfWithFile = { type: 'shelf', id: 'shelf-1', imageFile: 'art.png' };
   const sf = serializePropState(shelfWithFile, makeObj(0, 1, -3, 0, 0, 0));
   ok(sf.imageFile === undefined, 'imageFile not emitted for non-poster types');
+
+  // lightgun cableId carried through so a remote peer registers the gun under the
+  // SAME id its gun:<cableId> port binding is keyed by (links mesh ↔ port sync).
+  const gunWithCable = { type: 'lightgun', id: 'prop-p1-2', cableId: 'gun-p1-1' };
+  const gc = serializePropState(gunWithCable, makeObj(0, 1, -3, 0, 0, 0));
+  ok(gc.cableId === 'gun-p1-1', 'lightgun cableId carried through prop STATE');
+  // cableId absent when a gun prop has none (single-player / pre-session mesh).
+  const gunNoCable = { type: 'lightgun', id: 'lightgun-1' };
+  const gnc = serializePropState(gunNoCable, makeObj(0, 1, -3, 0, 0, 0));
+  ok(gnc.cableId === undefined, 'cableId absent from STATE when gun has none');
+  // cableId NOT emitted for non-lightgun types (channel hygiene).
+  const consoleWithCable = { type: 'console', id: 'console-1', cableId: 'gun-x' };
+  const cwc = serializePropState(consoleWithCable, makeObj(0, 1, -3, 0, 0, 0));
+  ok(cwc.cableId === undefined, 'cableId not emitted for non-lightgun types');
 }
 
 // ---------------------------------------------------------------------------

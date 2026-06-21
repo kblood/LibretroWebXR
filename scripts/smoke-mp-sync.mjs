@@ -155,6 +155,10 @@ try {
   // Add a light gun + a TV on A via the real menu actions (__add.*), then confirm
   // B receives both as synced props over the prop:* STATE channel.
   const addRes = await peerA.evaluate(() => {
+    // Free the default gun's port (boot seats default pad→port0, default gun→port1)
+    // so the newly-added gun has a free port to seat into — otherwise a 2-port
+    // console is full and the add correctly reports port -1 (unplugged).
+    window.__cable.unplugController('gun-1');
     const gun = window.__add.lightgun();
     const tv = window.__add.tv();
     return { gun: gun?.id || null, gunType: gun?.type || null, tv: tv?.id || null, tvType: tv?.type || null };
@@ -166,6 +170,52 @@ try {
     `PeerB sees the synced light-gun prop ${addRes.gun}`);
   ok(await waitFor(peerB, (id) => window.__props.list().some((p) => p.propId === id && p.type === 'tvset'), 10000, addRes.tv),
     `PeerB sees the synced TV prop ${addRes.tv}`);
+
+  // =========================================================================
+  // Section 5 (gun cable): the light gun is now a pluggable peripheral. Its
+  // PORT binding rides a dedicated gun:<cableId> STATE channel (the mesh rides
+  // prop:*). Prove: A's added gun has a cableId + seated port; the gun: key is
+  // published; B converges its OWN patchbay onto the same port (remote-create +
+  // _reconcileGunState); a re-plug on A re-routes B; a late joiner sees it.
+  // =========================================================================
+  console.log('\n--- Section 5: light-gun port binding sync (gun: channel)');
+  const gunCableId = await peerA.evaluate((pid) => {
+    const p = window.__props.list().find((q) => q.propId === pid);
+    return p?.cableId || null;
+  }, addRes.gun);
+  ok(typeof gunCableId === 'string' && gunCableId.startsWith('gun-'),
+    `PeerA's added gun has a peer-scoped cableId (${gunCableId})`);
+
+  if (gunCableId) {
+    // A seated the gun in a free port on its own patchbay.
+    const aPort = await peerA.evaluate((cid) => window.__cable.portOf(cid)?.port ?? null, gunCableId);
+    ok(typeof aPort === 'number' && aPort >= 0, `PeerA seated the gun in port ${aPort}`);
+
+    // The gun: STATE key is published with that port.
+    ok(await waitFor(peerA, (cid) => {
+      const v = window.__net.objectState(`gun:${cid}`);
+      return v && typeof v.port === 'number' && v.port >= 0;
+    }, 8000, gunCableId), `gun:${gunCableId} STATE published with the seated port`);
+
+    // B converges its OWN patchbay onto the same port (remote prop create →
+    // adopt cableId → _reconcileGunState seats the cord at the named jack).
+    ok(await waitFor(peerB, (args) => {
+      const seat = window.__cable.portOf(args.cid);
+      return seat != null && seat.port === args.port;
+    }, 12000, { cid: gunCableId, port: aPort }),
+      `PeerB's patchbay seats the gun at port ${aPort} (remote-create + reconcile)`);
+
+    // Re-plug on A: move the binding to a different port, confirm B re-routes.
+    const newPort = aPort === 0 ? 1 : 0;
+    await peerA.evaluate((args) => window.__net.setObjectState(`gun:${args.cid}`, { port: args.port }), { cid: gunCableId, port: newPort });
+    ok(await waitFor(peerB, (args) => window.__cable.portOf(args.cid)?.port === args.port, 8000, { cid: gunCableId, port: newPort }),
+      `PeerB re-routes the gun to port ${newPort} on re-plug (gun: apply path)`);
+
+    // Late joiner D converges on the gun's port binding from the server snapshot.
+    const peerD = await openPeer('PeerD');
+    ok(await waitFor(peerD, (args) => window.__cable.portOf(args.cid)?.port === args.port, 12000, { cid: gunCableId, port: newPort }),
+      `late-joining PeerD seats the gun at port ${newPort} from the STATE snapshot`);
+  }
 
 } catch (e) {
   failed++;

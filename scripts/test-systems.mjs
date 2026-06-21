@@ -7,7 +7,7 @@
 import {
   CORES, SYSTEMS, coreForFile, systemForFile, systemForName,
   portsForSystem, mediumFor, coreWeight,
-  lightgunLoadConfig, twoGunForSystem, isTwoGunCapable,
+  lightgunLoadConfig, twoGunForSystem, isTwoGunCapable, libretroGunPortFor,
 } from '../src/systems.js';
 
 let pass = 0, fail = 0;
@@ -106,6 +106,21 @@ eq('snes two-gun guns A/B → ports', snesTwo?.guns, [{ device: 516, port: 1 }, 
 eq('snes two-gun remapName', snesTwo?.remapName, 'Snes9x');
 // twoGun requested on a system without lightgun2 → null (no crash).
 eq('nes two-gun → null', lightgunLoadConfig('nes', { twoGun: true }), null);
+
+// --- libretroGunPortFor: cable-slot index → libretro gun port -----------------
+// The SNES Justifier seats its two guns on libretro ports [1, 2] (from
+// lightgunLoadConfig(...).guns.map(g => g.port)). The Kth gun in cable order maps
+// to the Kth of those ports — decoupling the in-world jack from the device port.
+const justPorts = snesTwo.guns.map((g) => g.port); // [1, 2]
+eq('libretroGunPortFor justPorts', justPorts, [1, 2]);
+eq('gun slot 0 → libretro port 1', libretroGunPortFor(0, justPorts), 1);
+eq('gun slot 1 → libretro port 2', libretroGunPortFor(1, justPorts), 2);
+// Out-of-range / single-gun / invalid → null (→ single-gun DOM-mouse path).
+eq('gun slot 2 (out of range) → null', libretroGunPortFor(2, justPorts), null);
+eq('empty twoGunPorts (single-gun) → null', libretroGunPortFor(0, []), null);
+eq('non-array twoGunPorts → null', libretroGunPortFor(0, null), null);
+eq('negative slot → null', libretroGunPortFor(-1, justPorts), null);
+eq('non-integer slot → null', libretroGunPortFor(0.5, justPorts), null);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

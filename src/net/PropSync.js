@@ -107,6 +107,12 @@ export function serializePropState(prop, object, { roundTo = 3 } = {}) {
     if (prop.scale     !== undefined) payload.scale     = prop.scale;
     if (prop.imageFile !== undefined) payload.imageFile = prop.imageFile; // FIX 3c: persist source filename
   }
+  // lightgun: carry the stable cableId so a remote peer registers the gun under
+  // the SAME id its port binding (gun:<cableId> STATE) is keyed by — that linkage
+  // is what lets the synced mesh draw its cord to the jack named by the gun: state.
+  if (prop.type === 'lightgun') {
+    if (prop.cableId !== undefined) payload.cableId = prop.cableId;
+  }
   // console: no extra fields needed (physical mesh only, game does not sync here)
   // tv: no extra fields — TV mesh exists on all peers from room.json
   // shelf/bookcase/cupboard/table: no extra fields needed for placement sync

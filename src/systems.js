@@ -232,6 +232,29 @@ export function lightgunLoadConfig(systemId, opts = {}) {
   };
 }
 
+/**
+ * Map a 0-based CABLE-slot index (which gun-in-port-order this is among the guns
+ * plugged into a console) to the libretro gun input PORT it should drive.
+ *
+ * The two namespaces differ: the cable port is 0-based and shared with gamepads
+ * (port 0 = player 1), whereas the two-gun device seats its guns on the libretro
+ * ports listed in `lightgun2.ports` (e.g. the SNES Justifier uses [1, 2]). So the
+ * Kth gun in cable-port order drives `twoGunPorts[K]` — this decouples the
+ * in-world jack the gun's plug sits in from the device's libretro port numbering,
+ * and lets physically swapping two guns' jacks swap their players.
+ *
+ * `twoGunPorts` is `_twoGunPorts` in main.js — the per-boot list of the active
+ * two-gun device's ports (empty outside two-gun mode). Returns null when there's
+ * no two-gun device or the slot index is out of range / invalid, which routes the
+ * gun to the single-gun DOM-mouse path (unchanged).
+ */
+export function libretroGunPortFor(cableSlotIndex, twoGunPorts) {
+  if (!Array.isArray(twoGunPorts) || twoGunPorts.length === 0) return null;
+  if (!Number.isInteger(cableSlotIndex) || cableSlotIndex < 0) return null;
+  const p = twoGunPorts[cableSlotIndex];
+  return Number.isInteger(p) ? p : null;
+}
+
 // .bin is ambiguous (Atari 2600 / Mega Drive / PSX / …). When detection sees a
 // bare .bin we default to Atari 2600, the only .bin system we ship sample
 // content for. Override with an explicit `core`/`system`, or ?core= in the URL.

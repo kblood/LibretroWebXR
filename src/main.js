@@ -34,7 +34,7 @@ import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, extOf } from './systems.js';
+import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, libretroGunPortFor, extOf } from './systems.js';
 import { Patchbay } from './Patchbay.js';
 import { RackMgr } from './RackMgr.js';
 import { ConsoleRuntime } from './ConsoleRuntime.js';
@@ -49,6 +49,9 @@ import {
   makeGamepadStateKey, isGamepadStateKey, cableIdFromStateKey,
   makePeerGamepadId, parseGamepadEntries, diffGamepadSync,
 } from './net/GamepadSync.js';
+import {
+  makeGunStateKey, isGunStateKey, makePeerGunId, parseGunEntries,
+} from './net/GunSync.js';
 import {
   makePropStateKey, isPropStateKey, propIdFromStateKey,
   makePeerPropId, serializePropState, parsePropEntries, diffPropSync,
@@ -139,13 +142,14 @@ let currentMeta = null;
 // the rom-resolution fields (rom.source / sha1). null until a game loads.
 let _lastLoadedMeta = null;
 let _lightgunArmedConsole = false;  // primary console booted with the gun device
-// Two-gun (co-op) state: the ordered controller PORTs the active two-gun config
-// seats its guns on (e.g. SNES Justifier → [1, 2] = gun A on port 1, gun B on
+// Two-gun (co-op) state: the ordered libretro gun PORTs the active two-gun config
+// seats its guns on (e.g. SNES Justifier → [1, 2] = first gun on port 1, second on
 // port 2). Set at boot when a two-gun game connects its peripheral; empty []
-// for single-gun / no-gun boots. Drives _assignGunPorts(), which stamps each
-// registered gun's userData.gunPort so LightGunMgr routes it to its OWN per-port
-// aim slot in the patched multiport core (webgun_set). See [[src/systems.js]]
-// lightgunLoadConfig({twoGun}) and docs/LIGHTGUN_SUPPORT.md.
+// for single-gun / no-gun boots. The Kth gun in CABLE-port order drives the Kth of
+// these (libretroGunPortFor) → LightGunMgr.portForGun, feeding its OWN per-port aim
+// slot in the patched multiport core (webgun_set). So which jack a gun's plug sits
+// in decides its player. See [[src/systems.js]] lightgunLoadConfig({twoGun}) and
+// docs/LIGHTGUN_SUPPORT.md.
 let _twoGunPorts = [];
 const placeholder = new Placeholder(placeholderCanvas);
 placeholder.setMessage('Pick up a cartridge');
@@ -191,6 +195,12 @@ let ghostGpMgr = null;
 let _reconcileGamepadState = () => {};
 // Per-peer counter for generating globally-unique gamepad ids.
 let _peerGamepadCounter = 0;
+// Light-gun port-binding reconciler (gun:<cableId> STATE) — the gun analogue of
+// _reconcileGamepadState, but port-only (the gun MESH rides prop:*). Replaced by
+// the real function once buildCartridgeWorld wires the gun cable pieces. No-op
+// until then. Per-peer counter for globally-unique gun cableIds.
+let _reconcileGunState = () => {};
+let _peerGunCounter = 0;
 
 // Prop room-layout sync: reconciler installed once buildCartridgeWorld sets up
 // the editor and built.placed. No-op stub until then.
@@ -291,6 +301,7 @@ function connectToRoom(room, nick, color) {
     onObjectState: (key, value) => {
       if (key === 'tv') applyRemoteTv(value);
       if (isGamepadStateKey(key)) _reconcileGamepadState();
+      if (isGunStateKey(key)) _reconcileGunState();
       if (isPropStateKey(key)) _reconcilePropState(key, value);
       if (isPowerStateKey(key)) _applyRemotePower(key, value);
     },
@@ -431,6 +442,18 @@ function _ensureMpTick() {
   scene.addTickCallback(updateMpWidget);
 }
 
+// The PRIMARY console's CURRENT video canvas. Starts as the adopted #canvas
+// (emuCanvas) but a live primary reboot (rebootPrimaryConsole) installs a fresh
+// runtime with its own canvas, so anything that must paint the live primary
+// picture (the host-video capture + the TV's idle-revert) reads this getter
+// rather than the captured emuCanvas const. Falls back to emuCanvas if the
+// runtime is missing. Declared HERE (not next to rackMgr/primaryRuntime below)
+// because the top-level auto-join block can call connectToRoom() during module
+// eval — which captures `primaryCanvas` as its videoCanvas — and a const
+// referenced before its declaration is a TDZ ReferenceError. It's a closure over
+// rackMgr/CONSOLE_ID/emuCanvas, so those resolve at call time, after full init.
+const primaryCanvas = () => rackMgr.get(CONSOLE_ID)?.canvas ?? emuCanvas;
+
 // --- Auto-join from ?session= URL param (backwards-compatible) -------------
 {
   let sessionRoom = urlParams.get('session');
@@ -554,15 +577,28 @@ let lightGunMgr = null;   // per-frame aim → console lightgun input ([[src/Lig
 // All light-gun objects (the boot gun + any added via the Add menu). LightGunMgr
 // already iterates a list, so two-player co-op just needs more than one gun here.
 const _lightGunObjs = new Set();
+// cableId -> gun Object3D. A gun is now a first-class cabled peripheral (like a
+// gamepad): it has a stable userData.cableId, registers with the Patchbay, and
+// gets a grabbable plug + cord that seats into a console port jack. This index
+// lets the shared cord helpers (_cabledObjFor) and the gun port-sync find a gun
+// by its cableId. The default boot gun is `gun-1` on every peer (deterministic,
+// local-only — like the default gamepad gp-1).
+const _lightGunObjsById = new Map();
+let _gunCableCount = 0;
+const DEFAULT_GUN_IDS = new Set(['gun-1']);
 // Register a gun object so it aims (LightGunMgr) and is grabbable (GrabMgr arms
-// gun-capable games on pickup via onObjectGrabbed's kind==='lightgun' check).
+// gun-capable games on pickup via onObjectGrabbed's kind==='lightgun' check), and
+// joins the cable system. Assigns a stable cableId if the caller didn't (the
+// addProp / remote-create paths pre-assign a peer-scoped or prop-derived id so all
+// peers agree). The gun's controller PORT now flows from the Patchbay
+// (LightGunMgr.portForGun reads cable.portOf), not from registration order.
 function _registerLightGun(obj) {
   if (!obj) return;
+  if (obj.userData.cableId == null) obj.userData.cableId = `gun-${++_gunCableCount}`;
   _lightGunObjs.add(obj);
+  _lightGunObjsById.set(obj.userData.cableId, obj);
+  cable.addController(obj.userData.cableId);
   grabMgr?.addGrabbable(obj);
-  // (Re)assign per-gun ports so a gun added mid-session (Add menu / addProp) is
-  // immediately routed to its own slot when a two-gun game is active.
-  _assignGunPorts();
 }
 
 // Decide whether a boot should connect the TWO-gun co-op peripheral: the game
@@ -574,23 +610,12 @@ function _twoGunActiveFor(meta) {
   return armed && !!meta?.twoGun && isTwoGunCapable(meta?.system);
 }
 
-// Stamp each registered light gun with the controller PORT it drives, in
-// registration order: gun 0 → _twoGunPorts[0], gun 1 → _twoGunPorts[1], …. In
-// two-gun mode this gives gun A and gun B independent per-port aim slots; in
-// any other mode every gun's gunPort is cleared so LightGunMgr falls back to the
-// proven single-gun DOM-mouse path (shipped Zapper / Super Scope unchanged).
-// Idempotent — safe to call on every register/boot.
-function _assignGunPorts() {
-  const ports = _twoGunPorts;
-  let i = 0;
-  for (const g of _lightGunObjs) {
-    if (!g?.userData) continue;
-    const p = ports[i];
-    if (Number.isInteger(p)) g.userData.gunPort = p;
-    else delete g.userData.gunPort;
-    i++;
-  }
-}
+// The libretro gun PORT each gun drives is now derived live from the cable
+// (which jack the gun's plug sits in) → see _gunSlotIndex + LightGunMgr.portForGun.
+// `_twoGunPorts` (set per boot) lists the active two-gun device's libretro ports;
+// the Kth gun in cable-port order drives the Kth of them (libretroGunPortFor).
+// This replaced the old registration-order `_assignGunPorts` stamping so that
+// physically swapping two guns' jacks swaps their players.
 // Local-multiplayer patch graph: which gamepad is plugged into which console
 // port → which player it drives ([[src/Patchbay.js]]). Each gamepad object gets
 // a stable userData.cableId; the default one auto-plugs into port 0 (player 1).
@@ -631,13 +656,6 @@ const rackMgr = new RackMgr({ logger });
 const primaryRuntime = new ConsoleRuntime({ id: CONSOLE_ID, adopt: { client, canvas: emuCanvas } });
 rackMgr.add(primaryRuntime);
 rackMgr.setFocus(CONSOLE_ID);
-
-// The PRIMARY console's CURRENT video canvas. Starts as the adopted #canvas
-// (emuCanvas) but a live primary reboot (rebootPrimaryConsole) installs a fresh runtime
-// with its own canvas, so anything that must paint the live primary picture (the
-// host-video capture + the TV's idle-revert) reads this getter rather than the
-// captured emuCanvas const. Falls back to emuCanvas if the runtime is missing.
-const primaryCanvas = () => rackMgr.get(CONSOLE_ID)?.canvas ?? emuCanvas;
 
 // Consumers that captured the singleton primary `client` register a re-point
 // callback here; a live primary reboot reassigns `client` to the new runtime's
@@ -1251,6 +1269,27 @@ const registerGamepad = (obj) => {
 const PLAYER_CORD_COLORS = [0x33cc55, 0x3388ff, 0xffaa33, 0xcc55dd]; // P1..P4
 const _gamepadObjs = new Map(); // cableId -> gamepad Object3D (for cord endpoints)
 
+// Resolve the live Object3D for a cableId across BOTH cabled peripheral kinds —
+// gamepads and light guns. The controller-plug/cord helpers below are otherwise
+// device-agnostic (they iterate every console's portJacks and read .cordAnchor),
+// so this single lookup is the only seam that makes them serve guns too.
+function _cabledObjFor(cableId) {
+  return _gamepadObjs.get(cableId) || _lightGunObjsById.get(cableId) || null;
+}
+
+// Which gun-in-jack-order this gun is among the GUNS plugged into a console (0,1,…),
+// or -1 if it isn't plugged there. cable.controllersOf returns occupants sorted by
+// port, so filtering to guns gives a stable jack-order index → libretroGunPortFor
+// maps it to the device's libretro gun port. This is what makes the LOWER jack gun
+// drive port 1 and the next drive port 2 (and swapping jacks swap players).
+function _gunSlotIndex(gun, consoleId) {
+  const myId = gun?.userData?.cableId;
+  if (myId == null || consoleId == null) return -1;
+  const guns = cable.controllersOf(consoleId)
+    .filter((c) => _lightGunObjsById.has(c.controllerId));
+  return guns.findIndex((c) => c.controllerId === myId);
+}
+
 function cordColorForPlayer(player) {
   return PLAYER_CORD_COLORS[(player - 1) % PLAYER_CORD_COLORS.length];
 }
@@ -1298,7 +1337,7 @@ function seatControllerPlug(cableId) {
     rec.plug.group.position.copy(_cpPos);
     rec.plug.group.quaternion.copy(_cpQuat);
   } else {
-    const gp = _gamepadObjs.get(cableId);
+    const gp = _cabledObjFor(cableId);
     if (gp) {
       (gp.userData.cordAnchor || gp).getWorldPosition(_cpPos);
       rec.plug.group.position.copy(_cpPos);
@@ -1307,16 +1346,20 @@ function seatControllerPlug(cableId) {
   }
 }
 
-// Re-broadcast a gamepad's current port so every peer agrees on its port→player
-// mapping after the pad (or its patch-cord plug) is dragged to a different jack.
-// The gamepad:<cableId> STATE carries { port } (see the spawn broadcast in
-// addProp); RoomObjects dedups, so an unchanged port is a no-op, as is a call
-// outside a session. -1 means "unplugged". Call this at discrete re-plug events
-// only — NOT from seatControllerPlug (that runs every frame).
-function _broadcastGamepadPort(cableId) {
+// Re-broadcast a cabled peripheral's current port so every peer agrees on its
+// port→player mapping after it (or its patch-cord plug) is dragged to a different
+// jack. Picks the channel by which kind owns the cableId: a light gun rides the
+// gun:<cableId> STATE (port-only; its mesh rides prop:*), a gamepad rides
+// gamepad:<cableId>. Both carry { port } (-1 = unplugged); RoomObjects dedups, so
+// an unchanged port is a no-op, as is a call outside a session. Call at discrete
+// re-plug events only — NOT from seatControllerPlug (that runs every frame).
+function _broadcastCablePort(cableId) {
   if (!net || !cableId) return;
   const port = cable.portOf(cableId)?.port ?? -1;
-  net.setObjectState(makeGamepadStateKey(cableId), { port });
+  const key = _lightGunObjsById.has(cableId)
+    ? makeGunStateKey(cableId)
+    : makeGamepadStateKey(cableId);
+  net.setObjectState(key, { port });
 }
 
 // GrabMgr release handler for a controller plug: snap to the nearest free port
@@ -1347,15 +1390,16 @@ function handleControllerPlugReleased(plugObj) {
   if (hit) cable.plugController(cableId, hit.anchor.consoleId, hit.anchor.port);
   else cable.unplugController(cableId);
   seatControllerPlug(cableId);
-  _broadcastGamepadPort(cableId);           // peers must agree on the new port→player
+  _broadcastCablePort(cableId);             // peers must agree on the new port→player
   gameInput?.flushReleases();               // drop keys held under the old seat
   logger?.event?.('controller-repatch', { cableId, seat: hit ? hit.id : null });
 }
 
-// Reshape each controller cord from its gamepad to its plug every frame.
+// Reshape each controller cord from its peripheral (gamepad OR light gun) to its
+// plug every frame.
 function syncControllerCords() {
   for (const [cableId, rec] of controllerPlugs) {
-    const gp = _gamepadObjs.get(cableId);
+    const gp = _cabledObjFor(cableId);
     if (!gp) { rec.cord.setVisible(false); continue; }
     // Re-snap the plug to its port jack every frame (unless it's in hand) so the
     // cord follows when the console it's plugged into is moved in Edit mode.
@@ -1850,7 +1894,7 @@ async function buildCartridgeWorld() {
     // Plugging/unplugging a gamepad changes which player it drives; flush so a
     // key held under the old assignment doesn't latch on the core. Also re-seat
     // its patch-cord plug so the cord follows the body-seated pad to its port.
-    onGamepadPlugged: (gp) => { gameInput?.flushReleases(); seatControllerPlug(gp?.userData?.cableId); _broadcastGamepadPort(gp?.userData?.cableId); },
+    onGamepadPlugged: (gp) => { gameInput?.flushReleases(); seatControllerPlug(gp?.userData?.cableId); _broadcastCablePort(gp?.userData?.cableId); },
     // Patch-cord plug released → snap to nearest TV jack + repatch video.
     onPlugReleased: (plug) => handlePlugReleased(plug),
     onMemoryCardInserted: handleMemoryCardInserted,
@@ -1920,24 +1964,34 @@ async function buildCartridgeWorld() {
   // Light-gun aiming: every frame, for each controller currently holding the gun,
   // raycast its barrel ray against the rack TV screens and drive the source
   // console's EmulatorClient.sendLightgun() with the hit's canvas u,v + trigger
-  // (off-screen = a reload shot). The gun is bound to the primary console for now;
-  // multi-console gun binding (plug the gun into a chosen console) is a follow-up.
+  // (off-screen = a reload shot). The gun's console + port now come from the CABLE
+  // (which console jack the gun's plug sits in), just like a gamepad.
   lightGunMgr = new LightGunMgr({
     getActiveGuns: () => scene.controllers
       .filter((ctrl) => _lightGunObjs.has(grabMgr.heldObject(ctrl)))
       .map((ctrl) => ({ gun: grabMgr.heldObject(ctrl), controller: ctrl })),
     getScreenTargets: () => scene._tvs.map((tv) => ({ tvId: tv.id, mesh: tv.mesh })),
     consoleIdForTV: (tvId) => cable.sourceOf(tvId),
-    clientForGun: () => rackMgr.get(CONSOLE_ID)?.client || null,
-    consoleIdForGun: () => CONSOLE_ID,
-    // Controller PORT (0-based) this gun drives, for TWO-GUN co-op only. A gun
-    // object in two-gun mode carries an explicit userData.gunPort (gun A→port X,
-    // gun B→port Y), which routes it to its OWN per-port aim slot in the patched
-    // multiport core (webgun_set). Returning null — the case for every single-gun
-    // game — leaves sendLightgun on the proven DOM-mouse path UNCHANGED, so the
-    // shipped Zapper / Super Scope behaviour is untouched. Two-gun registration
-    // (a follow-up that spawns a 2nd gun) sets userData.gunPort on each gun.
-    portForGun: (gun) => (gun?.userData && Number.isInteger(gun.userData.gunPort)) ? gun.userData.gunPort : null,
+    // The console the gun is plugged into (Patchbay), or null if unplugged.
+    consoleIdForGun: (gun) => cable.portOf(gun?.userData?.cableId)?.consoleId ?? null,
+    clientForGun: (gun) => {
+      const cid = cable.portOf(gun?.userData?.cableId)?.consoleId;
+      return cid ? (rackMgr.get(cid)?.client || null) : null;
+    },
+    // Libretro gun PORT this gun drives, for TWO-GUN co-op only. Derived live from
+    // the cable: the Kth gun (in cable-port / jack order) on the console drives the
+    // Kth of the active two-gun device's libretro ports (libretroGunPortFor). This
+    // routes each gun to its OWN per-port aim slot in the patched multiport core
+    // (webgun_set), and lets swapping the two guns' jacks swap their players.
+    // Returns null for every single-gun game (_twoGunPorts is []), an unplugged
+    // gun, or a gun plugged into a non-primary console (secondary two-gun device =
+    // a follow-up) — all of which leave sendLightgun on the proven DOM-mouse path
+    // UNCHANGED, so the shipped Zapper / Super Scope behaviour is untouched.
+    portForGun: (gun) => {
+      const seat = cable.portOf(gun?.userData?.cableId);
+      if (!seat || seat.consoleId !== CONSOLE_ID) return null;
+      return libretroGunPortFor(_gunSlotIndex(gun, seat.consoleId), _twoGunPorts);
+    },
     // Telemetry so a headset session is diagnosable from the logs without seeing
     // the screen (docs/HEADSET_LIGHTGUN_VALIDATION.md). Throttled aim + edge fire.
     log: (name, fields) => logger?.event?.(name, fields),
@@ -1951,6 +2005,11 @@ async function buildCartridgeWorld() {
   // The default gamepad (player 1) gets its grabbable controller patch-cord plug,
   // seated in console0's port-0 jack. New gamepads get theirs in addProp.
   addControllerPlug(gamepadObj);
+  // The default boot gun is a cabled peripheral too: seat it in the next free port
+  // (port 1, since the pad took port 0) and give it a grabbable plug + cord that
+  // runs gun → port jack. Its libretro aim port is derived live from this jack.
+  seatGunInFreePort(lightGunObj);
+  addControllerPlug(lightGunObj);
   // The primary keyboard gets its grabbable plug and auto-connects to the primary
   // console (like the default gamepad auto-plugs into port 0).
   addKeyboardPlug(c64kbd?.object3d);
@@ -1999,6 +2058,16 @@ async function buildCartridgeWorld() {
   // __gunArmedState reports whether the gun device is connected this boot.
   window.__armGun = () => armLightGunAndReload();
   window.__gunArmedState = () => ({ armed: !!window.__lightgunArmed, consoleArmed: _lightgunArmedConsole, system: currentMeta?.system || null, core: currentMeta?.core || null });
+  // Resolve the LIBRETRO gun port a cabled gun currently drives (the value the
+  // LightGunMgr feeds to sendLightgun), derived live from the gun's cable jack
+  // order via libretroGunPortFor(_gunSlotIndex(...), _twoGunPorts). Returns null
+  // for a single-gun config, an unplugged gun, or a gun on a non-primary console.
+  // Headless hook for the two-gun cable-routing verifier.
+  window.__gunLibretroPort = (cableId) => {
+    const obj = _lightGunObjsById.get(cableId);
+    if (!obj || !lightGunMgr?._portForGun) return null;
+    return lightGunMgr._portForGun(obj);
+  };
   window.__gunFire = (pos, look, trigger) => {
     if (!lightGunObj || !lightGunMgr) return 'no-gun';
     lightGunObj.position.set(pos.x, pos.y, pos.z);
@@ -2200,9 +2269,9 @@ async function buildCartridgeWorld() {
     meta.rom = sha1 ? { sha1, sources: ['opfs', 'pick'] } : { source: 'pick' };
     _lastLoadedMeta = { ...meta };     // full meta (now OPFS-resolvable) for gun-reload
     _lightgunArmedConsole = !!gun;     // did this boot connect the gun device?
-    // Two-gun co-op: record seated ports + stamp each gun's port (mirrors loadCartridge).
+    // Two-gun co-op: record the active device's seated libretro ports (mirrors
+    // loadCartridge). Per-gun routing is derived live from the cable (portForGun).
     _twoGunPorts = (gun && gun.guns?.length > 1) ? gun.guns.map((x) => x.port) : [];
-    _assignGunPorts();
     // Persist to local-ROM library (sha1 entries only, mirrors romInput handler).
     if (sha1) {
       persistLocalRom(meta);
@@ -2350,12 +2419,13 @@ async function buildCartridgeWorld() {
       _gamepadObjs.delete(cableId);
     }
 
-    // Apply a remote pad's current port to the LOCAL patchbay so its cord seats
-    // on the right console jack on this peer. diffGamepadSync only diffs existence
-    // (add/remove); a pad that merely moved ports (a re-plug) is in neither set,
-    // so without this its cord would stay drawn to the old jack. Reseats the plug
-    // and recolours the cord for the new player number.
-    function _applyRemoteGamepadPort(cableId, port) {
+    // Apply a remote cabled peripheral's current port to the LOCAL patchbay so its
+    // cord seats on the right console jack on this peer. The existence sync only
+    // diffs add/remove; a peripheral that merely moved ports (a re-plug) is in
+    // neither set, so without this its cord would stay drawn to the old jack.
+    // Reseats the plug and recolours the cord for the new player number. Device-
+    // agnostic — serves both gamepads (gamepad: sync) and light guns (gun: sync).
+    function _applyRemoteCablePort(cableId, port) {
       const curPort = cable.portOf(cableId)?.port ?? -1;
       if (curPort === port) return;                  // no change
       if (port >= 0) cable.plugController(cableId, CONSOLE_ID, port);
@@ -2379,13 +2449,29 @@ async function buildCartridgeWorld() {
       for (const { cableId, port } of desired) {
         if (DEFAULT_GAMEPAD_IDS.has(cableId)) continue; // our own default pad — local only
         if (!_gamepadObjs.has(cableId)) continue;        // creation handled by toAdd
-        _applyRemoteGamepadPort(cableId, port);
+        _applyRemoteCablePort(cableId, port);
       }
     };
 
     // Run once immediately: catch any `gamepad:*` state that arrived before
     // buildCartridgeWorld finished (e.g. late-join snapshot).
     _reconcileGamepadState();
+
+    // Light-gun port-binding reconciler. Port-ONLY: the gun MESH is created/removed
+    // by the prop sync (a gun is a placeable prop), so here we only apply the cable
+    // port from each `gun:*` entry to a gun that already exists locally. A binding
+    // that arrives before its prop is skipped (the guard) and re-applied when the
+    // prop lands (see _createRemoteProp's lightgun branch). The default boot gun is
+    // local-only on every peer (like the default pad), so it's never remote-applied.
+    _reconcileGunState = () => {
+      for (const { cableId, port } of parseGunEntries(net.objects.entries())) {
+        if (DEFAULT_GUN_IDS.has(cableId)) continue;     // our own default gun — local only
+        if (!_lightGunObjsById.has(cableId)) continue;  // mesh created by prop sync first
+        _applyRemoteCablePort(cableId, port);
+      }
+    };
+    // Run once for any `gun:*` state already in the late-join snapshot.
+    _reconcileGunState();
 
     // ── Prop room-layout sync (M-prop) ─────────────────────────────────────
     // When a remote peer adds a poster/console, moves a prop (onEditRelease),
@@ -2472,7 +2558,17 @@ async function buildCartridgeWorld() {
       if (r.kind === 'shelf') r.cartridges?.forEach((c) => grabMgr?.addGrabbable(c));
       if (r.kind === 'bookcase') r.cartridges?.forEach((c) => grabMgr?.addGrabbable(c));
       // A peer added a light gun → register it locally so it aims + is grabbable.
-      if (r.kind === 'lightgun') _registerLightGun(r.object);
+      // Adopt the peer's cableId (from the prop payload) BEFORE registering so this
+      // gun lands under the SAME id its port binding (gun:<cableId> STATE) is keyed
+      // by; then give it a cord plug and let _reconcileGunState seat it at the port
+      // the STATE names (do NOT seat into a local free port — the port is authored
+      // by the spawning peer, not chosen here).
+      if (r.kind === 'lightgun') {
+        if (payload.cableId != null) r.object.userData.cableId = payload.cableId;
+        _registerLightGun(r.object);
+        addControllerPlug(r.object);
+        _reconcileGunState();
+      }
       // A peer added a standalone TV → wire its patch-graph node + power switch.
       if (r.kind === 'tvset') _wireTvProp(propId, r.tv);
     }
@@ -2583,6 +2679,7 @@ async function buildCartridgeWorld() {
         rot: [rec.object.rotation.x, rec.object.rotation.y, rec.object.rotation.z],
         static: _staticPropIds.has(id),
         synced: _knownPropPayloads.has(id),
+        cableId: rec.object.userData?.cableId ?? null, // gun: links mesh ↔ port sync
       })),
       // Broadcast the current transform of a placed prop by its descriptor id.
       // Used headlessly to simulate a move without a VR grab/release.
@@ -3014,10 +3111,32 @@ function addProp(type, opts = {}) {
     // Fall through to the normal ensureEditMode / broadcast path below.
   }
 
-  // A new light gun: register it so it aims + arms gun games on pickup, and
-  // becomes the 2nd gun for co-op. Falls through to the prop:* broadcast so peers
-  // create it too.
-  if (r.kind === 'lightgun') _registerLightGun(r.object);
+  // A new light gun: give it a cable identity, register it (aims + arms gun games
+  // on pickup, becomes the 2nd gun for co-op), seat it in the next free port, and
+  // give it a grabbable patch-cord plug — mirroring the gamepad lifecycle. Unlike
+  // the gamepad path it does NOT early-return: it falls through to the prop:*
+  // broadcast so peers still create the gun MESH (the gun: channel carries only the
+  // port binding). The cableId is stamped on the descriptor so it rides prop sync.
+  if (r.kind === 'lightgun') {
+    // In a session, assign a globally-unique cableId BEFORE registering so all
+    // peers agree on the id (and therefore which gun drives which player).
+    if (net) {
+      const selfId = net.presence.selfId || 'local';
+      r.object.userData.cableId = makePeerGunId(selfId, ++_peerGunCounter);
+    }
+    _registerLightGun(r.object);
+    const gunPort = seatGunInFreePort(r.object);
+    addControllerPlug(r.object);
+    // Carry the cableId on the descriptor so serializePropState ships it to peers.
+    prop.cableId = r.object.userData.cableId;
+    // Broadcast the port binding on the dedicated gun: channel (mesh rides prop:*).
+    if (net && r.object.userData.cableId) {
+      net.setObjectState(
+        makeGunStateKey(r.object.userData.cableId),
+        { port: gunPort ?? -1 },
+      );
+    }
+  }
 
   ensureEditMode();
   setStatus(`added ${type} — grab to place`);
@@ -3099,6 +3218,18 @@ function seatGamepadInFreePort(obj) {
   anchor.getWorldQuaternion(q);
   obj.position.copy(p);
   obj.quaternion.copy(q);
+  cable.plugController(obj.userData.cableId, CONSOLE_ID, port);
+  return port;
+}
+
+// Plug a light gun into the lowest free, enabled console port. Unlike a gamepad,
+// the gun's MESH is NOT moved onto the port seat (you hold the gun; only its plug
+// seats in the jack — the cord runs gun.cordAnchor → plug). Returns the port index,
+// or null if all ports are taken (then its plug dangles until repatched by hand).
+function seatGunInFreePort(obj) {
+  const cu = consoleObj?.userData;
+  const port = cable.firstFreePort(CONSOLE_ID, cu?.activePorts);
+  if (port == null) return null;
   cable.plugController(obj.userData.cableId, CONSOLE_ID, port);
   return port;
 }
@@ -4237,11 +4368,11 @@ async function loadCartridge(meta, { echo = true } = {}) {
     currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system };
     _lastLoadedMeta = meta;            // full meta (keeps rom.source) for gun-reload
     _lightgunArmedConsole = !!gun;     // did this boot connect the gun device?
-    // Two-gun co-op: record the seated gun ports (e.g. [1,2]) and stamp each held
-    // gun's userData.gunPort so LightGunMgr routes A→port1, B→port2. Cleared (and
-    // gunPort removed) for single-gun / no-gun boots — DOM-mouse path unchanged.
+    // Two-gun co-op: record the active device's seated libretro ports (e.g. [1,2]).
+    // LightGunMgr.portForGun derives each held gun's port live from its cable jack
+    // (gun in the lower jack → port 1, next → port 2). Empty [] for single-gun /
+    // no-gun boots → DOM-mouse path unchanged.
     _twoGunPorts = (gun && gun.guns?.length > 1) ? gun.guns.map((x) => x.port) : [];
-    _assignGunPorts();
     gameInput?.setSystem(meta.system);
     // Loading implies the primary console is on — sync power state + switch tint.
     setConsolePower(CONSOLE_ID, true, consoleObjs.get(CONSOLE_ID)?.userData?.powerBtn);
@@ -4489,7 +4620,6 @@ async function rebootPrimaryConsole(meta, gun) {
   _lastLoadedMeta = meta;
   _lightgunArmedConsole = !!gun;
   _twoGunPorts = (gun && gun.guns?.length > 1) ? gun.guns.map((x) => x.port) : [];
-  _assignGunPorts();
   gameInput?.setSystem(meta.system);
   consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
   setSystemLabel(coreName);
