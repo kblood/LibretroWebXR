@@ -93,6 +93,14 @@ export class EmulatorClient extends EventTarget {
     // Tracks the synthetic light-gun trigger so sendLightgun() emits clean
     // mousedown/mouseup edges (RetroArch holds the button until the up event).
     this._gunDown = false;
+    // Multiport light-gun side-channel. The patched (multiport) cores export
+    // rwebinput_set_lightgun(port,x,y,buttons) so each controller port gets its
+    // OWN aim point — DOM MouseEvents can't express two guns on one canvas. When
+    // sendLightgun() is called WITH a port and this export exists, we drive that
+    // port directly through this setter and SKIP the shared mouse event. Resolved
+    // lazily on first use (the core must be initialised). false = looked up, not
+    // present (single-gun core → DOM-event fallback); null = not looked up yet.
+    this._webgunSet = null;
   }
 
   async start(emuCanvas, romBuffer, opts = {}) {
@@ -263,9 +271,33 @@ export class EmulatorClient extends EventTarget {
   // core's own canvas — the same per-canvas targeting sendInput() relies on, so
   // each console only hears its own gun. We hold the button down across frames
   // (edge-triggered mousedown/up) since RetroArch latches it until release.
-  sendLightgun(u, v, trigger) {
+  sendLightgun(u, v, trigger, port) {
     const canvas = this.emuCanvas;
     if (!canvas) return;
+    const offscreen = u < 0 || u > 1 || v < 0 || v > 1;
+
+    // Multiport path: a per-port aim point, written straight into the patched
+    // core's per-port light-gun slot (rwebinput_set_lightgun). This is the ONLY
+    // way two guns on the SAME console drive two ports independently — a single
+    // canvas can carry only one DOM mouse. Used when a `port` is supplied AND the
+    // core exports the setter. Single-gun callers omit `port` → DOM path below,
+    // so existing games are byte-for-byte unchanged. We pass framebuffer-pixel
+    // coords (u*width, v*height): rwebinput's mouse handler stores targetX*dpr,
+    // i.e. backing-store pixels, which canvas.width/.height already are.
+    if (port != null && this._resolveWebgun()) {
+      // buttons bitmask: bit0 (1) = left/trigger for an on-screen shot; bit2 (4)
+      // = right/offscreen-reload, matching the DOM path's left/right split.
+      let buttons = 0;
+      if (trigger) buttons = offscreen ? 4 : 1;
+      // Clamp into the framebuffer; an off-screen aim still needs valid pixels so
+      // the core's IS_OFFSCREEN test fires on the (held) reload button, not on a
+      // negative coordinate. Use a coord just inside the edge for off-screen.
+      const px = offscreen ? 0 : Math.max(0, Math.min(canvas.width - 1, Math.round(u * canvas.width)));
+      const py = offscreen ? 0 : Math.max(0, Math.min(canvas.height - 1, Math.round(v * canvas.height)));
+      try { this._webgunSet(port, px, py, buttons); } catch (e) { /* core gone */ }
+      return;
+    }
+
     const rect = canvas.getBoundingClientRect();
     // Map normalised coords onto the canvas's on-screen box. The canvas lives at
     // a large negative offset (off-viewport) but still has a real layout rect,
@@ -274,7 +306,6 @@ export class EmulatorClient extends EventTarget {
     const clientX = rect.left + u * rect.width;
     const clientY = rect.top + v * rect.height;
     const base = { clientX, clientY, bubbles: true, cancelable: true, view: window };
-    const offscreen = u < 0 || u > 1 || v < 0 || v > 1;
     canvas.dispatchEvent(new MouseEvent('mousemove', base));
     if (trigger && !this._gunDown) {
       // Off-screen shots use the right button (offscreen_shot_mbtn = 2); an
@@ -292,6 +323,27 @@ export class EmulatorClient extends EventTarget {
   }
 
   // ---- internals ----
+
+  // Resolve (once) the patched core's multiport light-gun setter. Returns a
+  // bound (port,x,y,buttons)=>void on a multiport core, or null on a single-gun
+  // core / before the runtime is ready. cwrap is preferred (handles arg
+  // marshalling); we fall back to the raw _rwebinput_set_lightgun export.
+  _resolveWebgun() {
+    if (this._webgunSet) return this._webgunSet;
+    if (this._webgunSet === false) return null;   // looked up, absent
+    const M = this._getModule();
+    if (!M) return null;                          // runtime not ready yet — retry later
+    let fn = null;
+    try {
+      if (typeof M.cwrap === 'function' && (M._rwebinput_set_lightgun || M.asm?.rwebinput_set_lightgun)) {
+        fn = M.cwrap('rwebinput_set_lightgun', null, ['number', 'number', 'number', 'number']);
+      } else if (typeof M._rwebinput_set_lightgun === 'function') {
+        fn = (p, x, y, b) => M._rwebinput_set_lightgun(p, x, y, b);
+      }
+    } catch (_) { fn = null; }
+    this._webgunSet = fn || false;
+    return fn || null;
+  }
 
   _getModule() {
     // Classic cores attach Module to window; modular cores hand it back from

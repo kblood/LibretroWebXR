@@ -8,6 +8,58 @@ real scene + load paths (screenshots: aim→blue, fire→green, Zapper crosshair
 Remaining: SMS core-switch handling, fceumm boot crash, 2-gun co-op, headset
 validation, deploy reproducibility of the patched cores. Started 2026-06-20.
 
+---
+
+## ✅ RESOLVED (2026-06-21): the NES Zapper works — the bug was GAME-SIDE, not the core
+
+An earlier correction here claimed the patched nestopia core's photodiode light bit was
+"stuck" (a core bug). **That was a misdiagnosis.** Reading the core's own source
+(`NstInpZapper.cpp`, the ground truth) and re-testing exhaustively shows the **patched
+nestopia core is correct** — the photodiode samples the pixel under the muzzle exactly
+as real hardware does. The failure was in the **test ROM (and my authored game)**, two
+game-side mistakes that compounded:
+
+1. **vblank-only polling.** Both my ROM and the `nes-zapper-test` diagnostic spin-read
+   `$4017` only in a short burst right after `ppu_wait_nmi` — i.e. during **vblank**,
+   when the CRT beam is *not* drawing the picture. The photodiode only senses light
+   during the brief window the beam scans the muzzle's pixel, so a vblank-only poll
+   **never overlaps the visible scanout** and always reads "no light." A game MUST
+   spin-read `$4017` **across the whole visible frame** (`POLL_READS=1500`, ~1.2 visible
+   frames of read loop) so one read coincides with the beam crossing the target.
+2. **inverted polarity.** The hit logic read D3 with the wrong sense. Real-HW polarity is
+   **D3 = 0 → light detected** (on a bright pixel), **D3 = 1 → no light**. The fixed
+   latch is `if (!(z & 0x08)) light = 1;`.
+
+Both are fixed in `games/nes-gallery/main.c` (see the long comment at the top of that
+file). This also means the broader light-gun feature works for any **correctly written**
+Zapper ROM (Duck Hunt etc.) — nothing in the core or the `rwebinput` patch needs changing.
+
+**Verified end-to-end (2026-06-21):**
+- `tmp/verify-gallery.mjs` — jsnes logic, **7/7**: boot, title, trigger-start, target
+  render, timeout→miss→game-over, restart (polarity-independent; jsnes Zapper polarity is
+  inverted vs nestopia, so this proves LOGIC only).
+- `tmp/verify-gallery-nestopia.mjs` — the **real shipped nestopia core**, driven through
+  `EmulatorClient.sendLightgun()` (the VR gun prop's entry point), **5/5 on BOTH boot
+  paths**: `BOOT=pick` (direct ROM + `__lightgunArmed`) and `BOOT=shelf` (the real
+  manifest entry — `__loadCartridge` with `lightgun:true` arms the Zapper). On-target
+  fire moves the SCORE counter only (Δscore≈1412, Δmiss=0); a dark-field shot moves the
+  MISS counter only (Δscore=0) — i.e. **no false hits**, the polarity proof. (A 16px
+  target near a screen edge can need an aim correction, like a real player — the harness
+  retries a few nudged shots; a polarity bug would make *every* on-target shot miss.)
+
+**Authored game status — SHIPPING (two guns).**
+- NES Zapper: `games/nes-gallery/` + `scripts/make-nes-gallery.mjs` build the CC0 Zapper
+  shooting gallery (`lwx-nes-gallery.nes`), **registered** as "LWX Zap Gallery"
+  (`"lightgun": true, "core": "nestopia"`). The `probe-light.mjs` "stuck light" finding
+  was an artifact of probing with the **buggy vblank-only test ROM**, not the core.
+- SNES Super Scope: `games/snes-scope/` + `scripts/make-snes-scope.mjs` build the CC0
+  Super Scope shooting gallery (`lwx-snes-scope.sfc`), **registered** as "LWX Scope Range"
+  (`"lightgun": true, "core": "snes9x"`). This is the clean POSITION-based gun game — snes9x
+  hands the ROM a stable latched coord (OPHCT/OPVCT), no beam-timing. Built with PVSnesLib's
+  built-in `detectSuperScope()` / `scope_*` API + a shoot-the-centre calibration that
+  cancels the core's +40 H offset. Verified 5/5 on the real snes9x core via
+  `tmp/verify-scope-snes9x.mjs` (on-target → green flash, dark → red flash), both boot paths.
+
 ## ✅ Proof the fix works (patched nestopia)
 
 Built nestopia from master with `docs/patches/rwebinput-lightgun.diff` applied, ran

@@ -7,6 +7,7 @@
 import {
   CORES, SYSTEMS, coreForFile, systemForFile, systemForName,
   portsForSystem, mediumFor, coreWeight,
+  lightgunLoadConfig, twoGunForSystem, isTwoGunCapable,
 } from '../src/systems.js';
 
 let pass = 0, fail = 0;
@@ -83,6 +84,28 @@ eq('sg1000 medium cartridge',  mediumFor({ file: 'demo.sg',  system: 'sg1000' })
 eq('sega32x medium cartridge', mediumFor({ file: 'demo.32x', system: 'sega32x' }), 'cartridge');
 eq('sg1000 weight (gearsystem) = 1',  coreWeight('gearsystem'), 1);
 eq('sega32x weight (picodrive) = 2',  coreWeight('picodrive'),  2);
+
+// --- Light-gun load config: single-gun unchanged + two-gun co-op -------------
+// Single-gun (NES Zapper) still yields one inputDevices port (player 2) + the
+// single-gun device, plus a `guns` list of one for the per-port mapping.
+const nesLg = lightgunLoadConfig('nes');
+eq('nes single-gun core', nesLg?.core, 'nestopia');
+eq('nes single-gun inputDevices', nesLg?.inputDevices, { 2: 262 });
+eq('nes single-gun guns', nesLg?.guns, [{ device: 262, port: 1 }]);
+// SNES single-gun = Super Scope (260) on port 1 — unchanged.
+eq('snes single-gun device', lightgunLoadConfig('snes')?.inputDevices, { 2: 260 });
+
+// SNES two-gun = Justifier (516 gun1 on port1, 772 gun2 on port2).
+ok('snes two-gun capable', isTwoGunCapable('snes'));
+ok('nes NOT two-gun capable', !isTwoGunCapable('nes'));
+eq('snes twoGunForSystem devices', twoGunForSystem('snes')?.devices, [516, 772]);
+const snesTwo = lightgunLoadConfig('snes', { twoGun: true });
+eq('snes two-gun core', snesTwo?.core, 'snes9x');
+eq('snes two-gun inputDevices (two ports)', snesTwo?.inputDevices, { 2: 516, 3: 772 });
+eq('snes two-gun guns A/B → ports', snesTwo?.guns, [{ device: 516, port: 1 }, { device: 772, port: 2 }]);
+eq('snes two-gun remapName', snesTwo?.remapName, 'Snes9x');
+// twoGun requested on a system without lightgun2 → null (no crash).
+eq('nes two-gun → null', lightgunLoadConfig('nes', { twoGun: true }), null);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

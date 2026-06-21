@@ -86,7 +86,14 @@ export const SYSTEMS = {
     // SNES Super Scope (snes9x). Reads the native RETRO_DEVICE_LIGHTGUN path the
     // rwebinput patch feeds, so no read-mode core option is needed — just the
     // crosshair. Device id 260 = (1<<8)|RETRO_DEVICE_LIGHTGUN. See LIGHTGUN_SUPPORT.md.
-    lightgun: { label: 'Super Scope', core: 'snes9x', device: 260, port: 1, coreOptions: { snes9x_superscope_crosshair: 'enabled' } } },
+    lightgun: { label: 'Super Scope', core: 'snes9x', device: 260, port: 1, coreOptions: { snes9x_superscope_crosshair: 'enabled' } },
+    // SNES Justifier — the TWO-GUN co-op peripheral (Lethal Enforcers). snes9x
+    // exposes Justifier=516 (gun 1) / Justifier2=772 (gun 2); we seat gun 1 on
+    // port index 1 (player 2) and gun 2 on port index 2 (player 3) so each gun
+    // drives an independent libretro port. The patched multiport rwebinput feeds
+    // each port its OWN aim point (webgun_set per port) — see LIGHTGUN_SUPPORT.md
+    // "Co-op caveat". Requested via lightgunLoadConfig(systemId, { twoGun:true }).
+    lightgun2: { label: 'Justifier (2-gun)', core: 'snes9x', devices: [516, 772], ports: [1, 2], coreOptions: { snes9x_justifier_crosshair: 'enabled' } } },
   nes:       { label: 'Nintendo (NES)',     defaultCore: 'nestopia',         cores: ['nestopia','fceumm'],            exts: ['nes','fds','unf','unif'],     aliases: ['nes','nintendo','famicom','nintendo entertainment system'], thumbnailRepo: 'Nintendo_-_Nintendo_Entertainment_System',       medium: 'cartridge',
     // NES Zapper (nestopia). Device 262 = SUBCLASS(POINTER,0); nestopia hardcodes
     // reading the gun from port index 1 (player 2), and needs the zapper_device
@@ -168,6 +175,21 @@ export function isLightgunCapable(systemId) {
 }
 
 /**
+ * Two-gun (co-op) light-gun descriptor for a system, or null. Shape:
+ *   { label, core, devices:[d1,d2], ports:[p1,p2], coreOptions }
+ * Only systems with a genuine two-gun peripheral (e.g. SNES Justifier) expose
+ * this. Drives the multiport rwebinput path — each port gets its own aim point.
+ */
+export function twoGunForSystem(systemId) {
+  return SYSTEMS[systemId]?.lightgun2 ?? null;
+}
+
+/** True if a system has a two-gun (co-op) light-gun peripheral. */
+export function isTwoGunCapable(systemId) {
+  return !!SYSTEMS[systemId]?.lightgun2;
+}
+
+/**
  * Build the EmulatorClient.start() light-gun wiring for a system, or null if it
  * has no gun. Returns { core, inputDevices, coreOptions, remapName } where:
  *   • core         — the (patched) core that implements the gun. May differ from
@@ -177,8 +199,27 @@ export function isLightgunCapable(systemId) {
  *   • coreOptions  — core options selecting the gun read path.
  *   • remapName    — the gun core's RA library name for its remap file.
  * The device only connects at boot, so this is applied at load time.
+ *
+ * With { twoGun:true } and a system that defines `lightgun2` (e.g. SNES
+ * Justifier), returns the TWO-GUN config instead: BOTH gun ports appear in
+ * inputDevices ({ p1: dev1, p2: dev2 }), and `guns` lists each gun's
+ * { device, port } so the caller can map gun A→portX, gun B→portY. The patched
+ * multiport rwebinput feeds each port its own aim point (webgun_set per port).
  */
-export function lightgunLoadConfig(systemId) {
+export function lightgunLoadConfig(systemId, opts = {}) {
+  if (opts.twoGun) {
+    const tg = SYSTEMS[systemId]?.lightgun2;
+    if (!tg) return null;
+    const remapName = CORES[tg.core]?.remapName ?? null;
+    const inputDevices = {};
+    const guns = [];
+    tg.ports.forEach((port, i) => {
+      const device = tg.devices[i];
+      inputDevices[port + 1] = device;
+      guns.push({ device, port });
+    });
+    return { core: tg.core, inputDevices, coreOptions: tg.coreOptions || {}, remapName, guns };
+  }
   const lg = SYSTEMS[systemId]?.lightgun;
   if (!lg) return null;
   const remapName = CORES[lg.core]?.remapName ?? null;
@@ -187,6 +228,7 @@ export function lightgunLoadConfig(systemId) {
     inputDevices: { [lg.port + 1]: lg.device },
     coreOptions: lg.coreOptions || {},
     remapName,
+    guns: [{ device: lg.device, port: lg.port }],
   };
 }
 

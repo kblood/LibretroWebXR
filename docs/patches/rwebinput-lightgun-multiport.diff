@@ -1,0 +1,150 @@
+--- a/input/drivers/rwebinput_input.c
++++ b/input/drivers/rwebinput_input.c
+@@ -95,11 +95,32 @@
+    bool enabled;
+ } rwebinput_motion_state_t;
+ 
++/* --- Multi-port light-gun support (added for WebXR 2-gun co-op) ----------
++ * rwebinput has a single DOM mouse, so the base RETRO_DEVICE_LIGHTGUN case
++ * feeds the SAME pointer to every port that queries a light gun: two guns on
++ * one console (2-player Duck Hunt) share one aim point. To drive each gun
++ * independently the frontend writes PER-PORT pointer state through the
++ * exported setter rwebinput_set_lightgun() (callable from JS as
++ * Module._rwebinput_set_lightgun). A port that has been set "active" reads its
++ * own x/y/buttons; ports never set fall back to the shared mouse, so the
++ * existing single-gun path is unchanged. */
++#define RWEBINPUT_MAX_LIGHTGUN 8
++
++typedef struct rwebinput_lightgun_state
++{
++   int     x;        /* canvas-relative pixel coords, same space as mouse.x/.y */
++   int     y;
++   uint8_t buttons;  /* bitmask, same bit layout as mouse.buttons             */
++   bool    active;   /* true once the frontend has set this port at least once */
++} rwebinput_lightgun_state_t;
++
+ typedef struct rwebinput_input
+ {
+    rwebinput_mouse_state_t mouse;                /* double alignment */
+    rwebinput_keyboard_event_queue_t keyboard;    /* ptr alignment */
+    rwebinput_pointer_state_t pointer[MAX_TOUCH]; /* int alignment */
++   rwebinput_lightgun_state_t
++      lightgun[RWEBINPUT_MAX_LIGHTGUN];          /* int alignment */
+    rwebinput_motion_state_t accelerometer;       /* float alignment */
+    rwebinput_motion_state_t gyroscope;           /* float alignment */
+    unsigned pointer_count;
+@@ -459,6 +480,38 @@
+    return EM_TRUE;
+ }
+ 
++/* Single rwebinput instance, captured at init so the exported per-port
++ * light-gun setter (driven from JS) can reach the live input state. */
++static rwebinput_input_t *g_rwebinput = NULL;
++
++/* Exported to JS (see EXPORTED_FUNCTIONS in Makefile.emscripten). The frontend
++ * calls Module._rwebinput_set_lightgun(port, x, y, buttons) each frame to drive
++ * gun `port` (0-based) independently of the DOM mouse. x/y are canvas-relative
++ * pixels in the same coordinate space as the mouse handler (targetX*dpr); they
++ * are run through the same viewport translation as the single-gun path. buttons
++ * is a bitmask matching mouse.buttons (bit RWEBINPUT_MOUSE_BTNL = trigger,
++ * BTNR = reload/aux, BTNM = start/aux_b). A negative port, or a port >=
++ * RWEBINPUT_MAX_LIGHTGUN, is ignored. To stop driving a port and fall back to
++ * the shared mouse, call rwebinput_clear_lightgun(port). */
++void rwebinput_set_lightgun(int port, int x, int y, int buttons)
++{
++   if (!g_rwebinput || port < 0 || port >= RWEBINPUT_MAX_LIGHTGUN)
++      return;
++   g_rwebinput->lightgun[port].x       = x;
++   g_rwebinput->lightgun[port].y       = y;
++   g_rwebinput->lightgun[port].buttons = (uint8_t)buttons;
++   g_rwebinput->lightgun[port].active  = true;
++}
++
++/* Exported to JS: revert `port` to the shared-mouse light-gun path. */
++void rwebinput_clear_lightgun(int port)
++{
++   if (!g_rwebinput || port < 0 || port >= RWEBINPUT_MAX_LIGHTGUN)
++      return;
++   g_rwebinput->lightgun[port].active  = false;
++   g_rwebinput->lightgun[port].buttons = 0;
++}
++
+ static void *rwebinput_input_init(const char *joypad_driver)
+ {
+    EMSCRIPTEN_RESULT r;
+@@ -569,6 +622,8 @@
+          "[EMSCRIPTEN/INPUT] Failed to create pointerlockchange callback: %d.\n", r);
+    }
+ 
++   g_rwebinput = rwebinput;
++
+    return rwebinput;
+ }
+ 
+@@ -728,6 +783,19 @@
+        * translation that yields the [-0x7fff, 0x7fff] light-gun range;
+        * trigger and the aux/reload buttons come from the mouse buttons. */
+       case RETRO_DEVICE_LIGHTGUN:
++      {
++         /* Resolve this port's aim + buttons. If the frontend has set
++          * per-port state for `port` (2-gun co-op), use it; otherwise fall
++          * back to the shared DOM mouse so the single-gun path is unchanged. */
++         int     gun_x       = rwebinput->mouse.x;
++         int     gun_y       = rwebinput->mouse.y;
++         uint8_t gun_buttons = rwebinput->mouse.buttons;
++         if (port < RWEBINPUT_MAX_LIGHTGUN && rwebinput->lightgun[port].active)
++         {
++            gun_x       = rwebinput->lightgun[port].x;
++            gun_y       = rwebinput->lightgun[port].y;
++            gun_buttons = rwebinput->lightgun[port].buttons;
++         }
+          switch (id)
+          {
+             /* aiming */
+@@ -744,7 +812,7 @@
+                   /* non-confined wrap: same call the native lightgun
+                    * drivers use; emits screen coords in lightgun range */
+                   if (video_driver_translate_coord_viewport_wrap(&vp,
+-                           rwebinput->mouse.x, rwebinput->mouse.y,
++                           gun_x, gun_y,
+                            &res_x, &res_y, &res_screen_x, &res_screen_y))
+                   {
+                      switch (id)
+@@ -763,14 +831,14 @@
+                break;
+             /* buttons: map to mouse buttons (left = trigger) */
+             case RETRO_DEVICE_ID_LIGHTGUN_TRIGGER:
+-               return !!(rwebinput->mouse.buttons & (1 << RWEBINPUT_MOUSE_BTNL));
++               return !!(gun_buttons & (1 << RWEBINPUT_MOUSE_BTNL));
+             case RETRO_DEVICE_ID_LIGHTGUN_RELOAD:
+             case RETRO_DEVICE_ID_LIGHTGUN_AUX_A:
+-               return !!(rwebinput->mouse.buttons & (1 << RWEBINPUT_MOUSE_BTNR));
++               return !!(gun_buttons & (1 << RWEBINPUT_MOUSE_BTNR));
+             case RETRO_DEVICE_ID_LIGHTGUN_AUX_B:
+             case RETRO_DEVICE_ID_LIGHTGUN_START:
+-               return !!(rwebinput->mouse.buttons & (1 << RWEBINPUT_MOUSE_BTNM));
+-            /* deprecated relative aim */
++               return !!(gun_buttons & (1 << RWEBINPUT_MOUSE_BTNM));
++            /* deprecated relative aim (shared mouse only) */
+             case RETRO_DEVICE_ID_LIGHTGUN_X:
+                return (int16_t)rwebinput->mouse.delta_x;
+             case RETRO_DEVICE_ID_LIGHTGUN_Y:
+@@ -778,6 +846,7 @@
+             default:
+                break;
+          }
++      }
+          break;
+       case RETRO_DEVICE_MOUSE:
+       case RARCH_DEVICE_MOUSE_SCREEN:
+--- a/Makefile.emscripten
++++ b/Makefile.emscripten
+@@ -141,7 +141,7 @@
+ EXPORTED_FUNCTIONS = _main,_malloc,_free,_cmd_savefiles,_cmd_save_state,_cmd_load_state,_cmd_undo_save_state,_cmd_undo_load_state,_cmd_toggle_fullscreen,_cmd_take_screenshot,\
+ _cmd_toggle_menu,_cmd_reload_config,_cmd_toggle_grab_mouse,_cmd_toggle_game_focus,_cmd_reset,_cmd_toggle_pause,_cmd_pause,_cmd_unpause,\
+ _cmd_set_volume,_cmd_set_shader,_cmd_cheat_set_code,_cmd_cheat_get_code,_cmd_cheat_toggle_index,_cmd_cheat_get_code_state,_cmd_cheat_realloc,\
+-_cmd_cheat_get_size,_cmd_cheat_apply_cheats,EmscriptenSendCommand,EmscriptenReceiveCommandReply
++_cmd_cheat_get_size,_cmd_cheat_apply_cheats,_rwebinput_set_lightgun,_rwebinput_clear_lightgun,EmscriptenSendCommand,EmscriptenReceiveCommandReply
+ 
+ EXPORTS := callMain,FS,PATH,ERRNO_CODES,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply
+ 

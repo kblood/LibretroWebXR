@@ -51,14 +51,21 @@ export class LightGunMgr {
    * @param {Function} opts.consoleIdForTV  (tvId) => consoleId|null     which console feeds a TV (Patchbay.sourceOf)
    * @param {Function} opts.clientForGun    (gun) => EmulatorClient|null  the console the gun is plugged into
    * @param {Function} opts.consoleIdForGun (gun) => consoleId|null       the console the gun is plugged into
+   * @param {Function} [opts.portForGun]    (gun) => number|null          the controller PORT (0-based) this gun drives.
+   *        Required for two-gun co-op: gun A → port X, gun B → port Y feed two
+   *        independent aim points into the patched multiport core. When it
+   *        returns null/absent, sendLightgun() is called without a port → the
+   *        single-gun DOM-mouse path (unchanged). Single-gun games can leave it
+   *        unset and still work via that fallback.
    * @param {number}   [opts.curvature]     CRT curvature (defaults to the shader's)
    */
-  constructor({ getActiveGuns, getScreenTargets, consoleIdForTV, clientForGun, consoleIdForGun, curvature = DEFAULT_CURVATURE, log = null }) {
+  constructor({ getActiveGuns, getScreenTargets, consoleIdForTV, clientForGun, consoleIdForGun, portForGun = null, curvature = DEFAULT_CURVATURE, log = null }) {
     this._getActiveGuns = getActiveGuns;
     this._getScreenTargets = getScreenTargets;
     this._consoleIdForTV = consoleIdForTV;
     this._clientForGun = clientForGun;
     this._consoleIdForGun = consoleIdForGun;
+    this._portForGun = typeof portForGun === 'function' ? portForGun : null;
     this._curvature = curvature;
     // Optional telemetry sink: log(name, fields). Used to diagnose headset aim
     // without seeing the screen (see docs/HEADSET_LIGHTGUN_VALIDATION.md). Aim is
@@ -88,6 +95,10 @@ export class LightGunMgr {
       const trigger = !!controller?.userData?.inputSource?.gamepad?.buttons?.[0]?.pressed;
       const client = this._clientForGun?.(gun) || null;
       const myConsole = this._consoleIdForGun?.(gun) ?? null;
+      // Per-gun controller port for two-gun co-op (gun A→portX, gun B→portY drive
+      // independent aim points via the patched multiport core). null/undefined →
+      // sendLightgun without a port = single-gun DOM-mouse path (unchanged).
+      const gunPort = this._portForGun ? this._portForGun(gun) : null;
 
       // Raycast the barrel ray against the TV screens.
       ud.getAimRay(this._ray);
@@ -105,13 +116,13 @@ export class LightGunMgr {
         const srcConsole = tvId != null ? this._consoleIdForTV?.(tvId) : null;
         if (myConsole == null || srcConsole == null || srcConsole === myConsole) {
           const { u, v } = surfaceUvToCanvasUv(hit.uv.x, hit.uv.y, this._curvature);
-          client?.sendLightgun(u, v, trigger);
+          client?.sendLightgun(u, v, trigger, gunPort);
           onScreen = true; aimU = u; aimV = v; aimTv = tvId; aimConsole = srcConsole;
         }
       }
       if (!onScreen) {
         // Off-screen: out-of-range coords so a held trigger reads as a reload.
-        client?.sendLightgun(-1, -1, trigger);
+        client?.sendLightgun(-1, -1, trigger, gunPort);
       }
 
       // Telemetry: fire on every trigger rising edge; aim throttled OR whenever

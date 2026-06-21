@@ -1859,6 +1859,14 @@ async function buildCartridgeWorld() {
     consoleIdForTV: (tvId) => cable.sourceOf(tvId),
     clientForGun: () => rackMgr.get(CONSOLE_ID)?.client || null,
     consoleIdForGun: () => CONSOLE_ID,
+    // Controller PORT (0-based) this gun drives, for TWO-GUN co-op only. A gun
+    // object in two-gun mode carries an explicit userData.gunPort (gun A→port X,
+    // gun B→port Y), which routes it to its OWN per-port aim slot in the patched
+    // multiport core (webgun_set). Returning null — the case for every single-gun
+    // game — leaves sendLightgun on the proven DOM-mouse path UNCHANGED, so the
+    // shipped Zapper / Super Scope behaviour is untouched. Two-gun registration
+    // (a follow-up that spawns a 2nd gun) sets userData.gunPort on each gun.
+    portForGun: (gun) => (gun?.userData && Number.isInteger(gun.userData.gunPort)) ? gun.userData.gunPort : null,
     // Telemetry so a headset session is diagnosable from the logs without seeing
     // the screen (docs/HEADSET_LIGHTGUN_VALIDATION.md). Throttled aim + edge fire.
     log: (name, fields) => logger?.event?.(name, fields),
