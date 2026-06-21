@@ -28,11 +28,20 @@
     the ROM reads a STABLE coordinate, no whole-frame photodiode polling.
 
     The Justifier read protocol (verified against snes9x controls.cpp, the core we
-    ship): each $4016 strobe TOGGLES which gun (0/1) latches its position to the PPU;
-    after the strobe, 32 serial bit-reads of $4017 return a 24-bit signature
-    (0xaa7000, present iff a Justifier is connected) followed by 8 button bits for
-    both guns (TRIGGER/START/SELECT). So one frame we select+read gun 0, the next we
-    select+read gun 1, ping-ponging - exactly how Lethal Enforcers does it.
+    ship): each $4016 strobe TOGGLES the core's internal SELECT line, choosing which
+    gun (0/1) latches its aimed pixel into the PPU H/V counters at the NEXT frame's
+    end (S9xControlEOF -> DoGunLatch). After the strobe, 32 serial bit-reads of $4017
+    return a 24-bit signature (0xaa7000, present iff a Justifier is connected) then 8
+    button bits carrying the SELECTED gun's TRIGGER/START plus the SELECT bit itself.
+
+    HARDWARE LIMIT (important): there is exactly ONE pair of PPU gun-latch counters
+    and ONE serial button byte, both multiplexed by SELECT. So BOTH the position AND
+    the trigger are inherently 30 Hz-per-gun: one frame we select+read gun 0, the
+    next gun 1, ping-ponging - exactly how real Lethal Enforcers does it. Reading
+    BOTH guns' fresh state in a SINGLE frame is physically impossible on this
+    hardware (and in snes9x). Each gun's last reading is HELD in jf_x/jf_y/jf_trig
+    between its updates, so co-op scoring uses both guns continuously; a gun's data
+    is just up to one frame stale, which is imperceptible for a rail shooter.
 
     PVSnesLib has NO Justifier driver (only Super Scope), so the Justifier path here
     is hand-written raw 65816-via-C register I/O (jf_* below). To keep the game both
@@ -45,12 +54,15 @@
         (tmp/verify-opwolf-snes9x.mjs) and what makes single-gun hit logic verifiable
         right now, because the shipped rwebinput feeds ONE mouse pointer to the gun
         port.
-      * JUSTIFIER backend (GUN_JUST): the raw two-gun reader above, for true
-        simultaneous two-player co-op. It needs the per-port "multiport" rwebinput
-        patch (docs/patches/rwebinput-lightgun-multiport.diff) to feed each gun its
-        own pointer - until that lands, both Justifier ports would see the same mouse,
-        so true-simultaneous two-gun can't be verified headlessly yet (flagged in the
-        README + verify script). The logic is correct and ready for it.
+      * JUSTIFIER backend (GUN_JUST): the raw two-gun reader above, for two-player
+        co-op. The per-port "multiport" rwebinput patch
+        (docs/patches/rwebinput-lightgun-multiport.diff) has LANDED and is verified:
+        tmp/verify-twogun-opwolf-snes9x.mjs drives gun A (libretro port 1, device
+        516) and gun B (port 2, device 772) to two distinct points and confirms the
+        core's blue/magenta crosshairs each follow their OWN port (independent aim),
+        AND that each gun scores an in-game kill through this reader. Per the
+        hardware limit above the two guns are read 30 Hz each (multiplexed by
+        SELECT), not both-fresh-per-frame; that's the faithful maximum.
 
     Built with PVSnesLib (MIT) - only this game-logic file is authored by us; the
     SNES boot/init boilerplate is the SDK + the frozen hdr.asm / data.asm. The

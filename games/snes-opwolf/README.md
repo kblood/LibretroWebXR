@@ -42,7 +42,7 @@ attached:
 | Backend | Device | Status |
 |---|---|---|
 | **Super Scope** (`GUN_SCOPE`) | 260, port 2 | The **verifiable** single-gun path today — PVSnesLib `detectSuperScope()` / `scope_*`. The shipped single-mouse `rwebinput` feeds this. Runs the full game loop with a real latched coordinate. |
-| **Justifier** (`GUN_JUST`) | 516 / 772, port 2 | True two-gun co-op via the raw reader above. **Needs the per-port multiport `rwebinput` patch** (`docs/patches/rwebinput-lightgun-multiport.diff`) to feed each gun its own pointer. The two-gun *logic* is in place and ready. |
+| **Justifier** (`GUN_JUST`) | 516 (port 1) / 772 (port 2) | Two-gun co-op via the raw reader above. The per-port multiport `rwebinput` patch (`docs/patches/rwebinput-lightgun-multiport.diff`) has **landed and is verified** — each gun gets its own pointer and scores independently (see Verifying). Both guns are read 30 Hz each (multiplexed by SELECT) — the hardware-faithful maximum; see below. |
 
 The game **auto-detects**: it tries `detectSuperScope()` first; if a Super Scope
 answered it runs single-gun, otherwise it strobes for the Justifier `0xaa7000`
@@ -84,7 +84,7 @@ sprite sheet are **CC0**, and the compiled ROM ships as **CC0**.
 - In VR: grab a light-gun prop — the frontend boots snes9x with the gun on port 2
   (`"lightgun": true` in the manifest) and feeds your aim via
   `EmulatorClient.sendLightgun()`. Two guns = `"twoGun": true` + the Justifier config
-  (`SYSTEMS.snes.lightgun2`), pending the multiport core.
+  (`SYSTEMS.snes.lightgun2`) on the multiport core (live + verified).
 
 ## Verifying
 
@@ -95,19 +95,35 @@ shot **kills an enemy (green flash)**, and an **off-screen shot reloads** so a k
 works again afterward. **5/5** on both paths.
 
 This exercises the full game loop and the per-gun **logic** through the single-gun
-Super Scope backend (the path the current single-mouse `rwebinput` feeds). **True
-simultaneous two-gun co-op** (two independent Justifier crosshairs) cannot be driven
-headlessly until `docs/patches/rwebinput-lightgun-multiport.diff` lands (per-port
-`webgun_set`); the two-gun logic + raw Justifier reader are in place and ready for it.
+Super Scope backend (the path a single-mouse `rwebinput` feeds).
+
+**True two-gun co-op is now verified** by `tmp/verify-twogun-opwolf-snes9x.mjs`
+against the **patched** snes9x core: it drives gun A (libretro port 1, device 516)
+and gun B (port 2, device 772) to two distinct points via the per-port multiport
+setter (`rwebinput_set_lightgun(port,…)`) and proves the core's blue/magenta
+crosshairs each follow their **own** port (independent aim + per-port isolation),
+**and** that each gun scores an in-game kill through this ROM's raw Justifier
+reader. **9/9.**
+
+### Hardware limit (why not "both guns per frame")
+
+snes9x (faithful to real Lethal Enforcers) has exactly **one** pair of PPU gun-latch
+counters and **one** serial button byte, both multiplexed by the `JUSTIFIER_SELECT`
+line that toggles on every `$4016` strobe. So **both** a gun's position **and** its
+trigger are inherently **30 Hz-per-gun** — one frame reads gun 0, the next reads gun
+1. Reading both guns' *fresh* state in a *single* frame is physically impossible on
+this hardware; the ping-pong reader is the faithful maximum. Each gun's last reading
+is held between updates, so co-op scoring uses both guns continuously (≤1 frame
+stale — imperceptible for a rail shooter).
 
 ## Notes / follow-ups
 
-- **Frontend two-gun port wiring to reconcile.** `src/systems.js` already defines a
-  SNES `lightgun2` Justifier config — but it seats the two guns on **separate
-  libretro ports 1 and 2** (devices 516 on p1, 772 on p2). Real snes9x two-Justifier
-  hardware daisy-chains **both** guns on **one** port (port 2 / index 1, device
-  `TWO_JUSTIFIERS`), which is what this ROM's reader expects. This needs reconciling
-  with whoever owns `systems.js` + the multiport patch before two-gun goes live.
+- **Port topology — resolved.** `src/systems.js`'s SNES `lightgun2` config seats the
+  two guns on **separate** libretro ports (516 on port 1, 772 on port 2). That is
+  **correct**: snes9x reads the two Justifier guns from two distinct libretro ports
+  at the `input_state_cb` boundary; the one-port daisy-chain / SELECT strobe is
+  internal to snes9x's emulation, not at the frontend boundary. Verified by the
+  two-gun harness above.
 - Crosshair tile palette: P1 should be cyan / P2 pink; under the single-Super-Scope
   path the crosshair currently reads magenta (a sprite-palette index nuance). Purely
   cosmetic — hit/reload/advance logic is unaffected (verified 5/5).
