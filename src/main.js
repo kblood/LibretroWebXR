@@ -60,6 +60,7 @@ import {
   fileSystemAccessSupported as imgFolderSupported,
 } from './ImageLibrary.js';
 import { parseRoom, defaultRoom, roomCollectionRefs } from './RoomLoader.js';
+import { serializeRoom } from './RoomSerializer.js';
 import {
   saveLastRoom, loadLastRoom, clearLastRoom,
   stashRoomBridge, consumeRoomBridge, looksLikeRoom,
@@ -180,6 +181,22 @@ let _peerGamepadCounter = 0;
 // the editor and built.placed. No-op stub until then.
 // Called whenever a `prop:*` STATE key arrives (including late-join snapshot).
 let _reconcilePropState = () => {};
+// Live-drag reconciler (M2 transient 'drag' channel): moves our copy of a prop
+// to a peer's in-flight transform each frame while they hold it. No-op stub until
+// buildCartridgeWorld wires it to the prop registry.
+let _applyLiveDrag = () => {};
+// Headless test tap: the last few WIRE messages received per channel (gp/drag/
+// reset), mirroring NetMgr.recvInputs() for the INPUT channel. Lets the
+// smoke harness confirm transient relay actually reaches the other peer (the
+// real effects — ghost-pad animation, live drag, console reset — are internal).
+// Exposed as window.__wireRx in buildCartridgeWorld. Capped so it can't grow.
+const _wireRxLog = { gp: [], drag: [], reset: [] };
+function _recordWireRx(ch, data) {
+  const buf = _wireRxLog[ch];
+  if (!buf) return;
+  buf.push(data);
+  if (buf.length > 32) buf.shift();
+}
 // Per-peer counter for generating globally-unique prop ids.
 let _peerPropCounter = 0;
 // Known synced payloads: propId → last payload applied from the network.
@@ -203,6 +220,35 @@ const _serverUrl = urlParams.get('server') || undefined; // default: wss://<host
 const _palette = ['#88aaff', '#ff8866', '#66dd99', '#ffd166', '#cc88ff', '#66ccee'];
 const _defaultNick = `Player-${randomRoomSuffix()}`;
 const _defaultColor = _palette[Math.floor(Math.random() * _palette.length)];
+
+// Session-rejoin bridge ----------------------------------------------------
+// A cross-core ROM swap and the light-gun arm both call location.reload() (the
+// libretro core can't hot-unload). A widget-joined session carries no ?session
+// in the URL, so without this the reload silently drops the user out of their
+// room AND lobby. Just before each reload we stash a one-shot record of the live
+// session; the auto-join block consumes it on the next boot so the session — and
+// the host role — survives the reload. `wasHost` lets the reloading host re-claim
+// authority instead of adopting a peer's (now staler) room snapshot.
+const SESSION_REJOIN_KEY = 'libretrowebxr.rejoin';
+// Set true at boot when we are resuming a session in which we were the host.
+let _resumeAsHost = false;
+function stashSessionRejoin() {
+  try {
+    if (!net) return;
+    sessionStorage.setItem(SESSION_REJOIN_KEY, JSON.stringify({
+      room: net.room, nick: net.nick, color: net.color, wasHost: !!net.isHost?.(),
+    }));
+  } catch (e) { console.warn('[main] session rejoin stash failed:', e); }
+}
+function consumeSessionRejoin() {
+  try {
+    const raw = sessionStorage.getItem(SESSION_REJOIN_KEY);
+    if (!raw) return null;
+    sessionStorage.removeItem(SESSION_REJOIN_KEY);
+    const obj = JSON.parse(raw);
+    return (obj && typeof obj.room === 'string' && obj.room) ? obj : null;
+  } catch (_) { return null; }
+}
 
 /**
  * Build and connect a new NetMgr for (room, nick, color). Tears down any
@@ -231,9 +277,19 @@ function connectToRoom(room, nick, color) {
       if (key === 'tv') applyRemoteTv(value);
       if (isGamepadStateKey(key)) _reconcileGamepadState();
       if (isPropStateKey(key)) _reconcilePropState(key, value);
+      if (isPowerStateKey(key)) _applyRemotePower(key, value);
     },
     // M1.1 host-authoritative input: inject remote buttons only when we are host.
     onGameInput: (ev) => { if (net?.isHost()) gameInput?.setRemoteButton(ev); },
+    // M2 transient relay: a peer's per-frame ephemera. 'gp' = a held pad's live
+    // button state → animate that pad's ghost in the holder's hand. 'drag' = a
+    // prop's live transform while held → move our copy in real time.
+    onWire: (ch, data) => {
+      _recordWireRx(ch, data);
+      if (ch === 'gp' && data?.cableId) ghostGpMgr?.applyInput(data.cableId, data);
+      else if (ch === 'drag' && data?.id) _applyLiveDrag(data);
+      else if (ch === 'reset' && data?.consoleId) resetConsole(data.consoleId);
+    },
     // M1.2 host video: paint the host's frames on the TV; pause our core while
     // watching (it isn't authoritative). Resume + revert when the stream ends.
     videoCanvas: emuCanvas,
@@ -358,10 +414,24 @@ function _ensureMpTick() {
 
 // --- Auto-join from ?session= URL param (backwards-compatible) -------------
 {
-  const sessionRoom = urlParams.get('session');
+  let sessionRoom = urlParams.get('session');
+  let nick = urlParams.get('nick') || _defaultNick;
+  let color = urlParams.get('color') || _defaultColor;
+
+  // No ?session in the URL but a rejoin record from our own cross-core reload?
+  // Resume that session so the reload doesn't eject us from the room/lobby. An
+  // explicit ?session always wins (the user navigated there deliberately).
+  if (!sessionRoom) {
+    const rejoin = consumeSessionRejoin();
+    if (rejoin) {
+      sessionRoom = rejoin.room;
+      if (rejoin.nick)  nick  = rejoin.nick;
+      if (rejoin.color) color = rejoin.color;
+      _resumeAsHost = !!rejoin.wasHost;   // keep the host the host across its own reload
+    }
+  }
+
   if (sessionRoom) {
-    const nick = urlParams.get('nick') || _defaultNick;
-    const color = urlParams.get('color') || _defaultColor;
     connectToRoom(sessionRoom, nick, color);
 
     // Pre-fill the widget inputs with the current session so the user can see
@@ -462,6 +532,16 @@ let consoleObj = null;
 let gamepadObj = null;
 let lightGunObj = null;   // grabbable light-gun prop ([[src/LightGun.js]])
 let lightGunMgr = null;   // per-frame aim → console lightgun input ([[src/LightGunMgr.js]])
+// All light-gun objects (the boot gun + any added via the Add menu). LightGunMgr
+// already iterates a list, so two-player co-op just needs more than one gun here.
+const _lightGunObjs = new Set();
+// Register a gun object so it aims (LightGunMgr) and is grabbable (GrabMgr arms
+// gun-capable games on pickup via onObjectGrabbed's kind==='lightgun' check).
+function _registerLightGun(obj) {
+  if (!obj) return;
+  _lightGunObjs.add(obj);
+  grabMgr?.addGrabbable(obj);
+}
 // Local-multiplayer patch graph: which gamepad is plugged into which console
 // port → which player it drives ([[src/Patchbay.js]]). Each gamepad object gets
 // a stable userData.cableId; the default one auto-plugs into port 0 (player 1).
@@ -750,6 +830,43 @@ function setTvPower(tvId, on, btn) {
   logger?.event?.('tv-power', { tvId, on });
 }
 
+// ── Power / reset network sync (Phase 3) ────────────────────────────────────
+// Power rides the persisted STATE channel (last-writer-wins, replayed to late
+// joiners) so an on/off toggle by ANY peer reflects everywhere and a late joiner
+// sees the current state. Because the host's authoritative core obeys the same
+// toggle, its video stream shows the result to clients. Reset is a one-shot event
+// (not a state), so it rides the transient WIRE channel — relayed, never stored,
+// so a late joiner doesn't replay a stale reset onto a freshly-booted core.
+function powerStateKey(kind, id) { return `power:${kind}:${id}`; }
+function isPowerStateKey(k) { return typeof k === 'string' && k.startsWith('power:'); }
+
+function _broadcastPower(kind, id, on) { net?.setObjectState(powerStateKey(kind, id), { on: !!on }); }
+function _broadcastReset(consoleId) { net?.sendWire('reset', { consoleId }); }
+
+// Locally reset a console's core + flash its RESET button. Used by the in-world
+// button and the remote-apply ('reset' wire) path.
+function resetConsole(consoleId) {
+  rackMgr.get(consoleId)?.client?.reset?.();
+  const rst = consoleObjs.get(consoleId)?.userData?.resetBtn;
+  rst?.userData.setColor?.('#5a7fb0');
+  setTimeout(() => rst?.userData.setColor?.('#33506e'), 180);
+  logger?.event?.('console-reset', { consoleId });
+}
+
+// Apply a peer's power STATE (no re-broadcast — only the toggling peer broadcasts).
+function _applyRemotePower(key, value) {
+  if (value == null) return;
+  const rest = key.slice('power:'.length);   // 'console:<id>' | 'tv:<id>'
+  const sep = rest.indexOf(':');
+  if (sep < 0) return;
+  const kind = rest.slice(0, sep), id = rest.slice(sep + 1);
+  if (kind === 'console') {
+    if (isConsoleOn(id) !== !!value.on) setConsolePower(id, !!value.on, consoleObjs.get(id)?.userData?.powerBtn);
+  } else if (kind === 'tv') {
+    if (isTvOn(id) !== !!value.on) setTvPower(id, !!value.on, scene.getTV(id)?.group?.userData?.powerBtn);
+  }
+}
+
 // Mount a power switch + reset button on a console's top-back surface and wire
 // them through MenuMgr. Console box is CON_W 0.52 × CON_H 0.08 × CON_D 0.30
 // (origin-centred), so the top is y≈+0.041 and the back half is z<0 (free of the
@@ -769,12 +886,15 @@ function addConsoleControls(consoleId, conObj) {
   rst.position.set(0.09, topY, backZ);
   rst.rotation.x = -Math.PI / 2.4;
   conObj.add(rst);
-  menuMgr.addItem(pwr, () => setConsolePower(consoleId, !isConsoleOn(consoleId), pwr));
+  conObj.userData.resetBtn = rst;                  // so the 'reset' wire can flash it
+  menuMgr.addItem(pwr, () => {
+    const on = !isConsoleOn(consoleId);
+    setConsolePower(consoleId, on, pwr);
+    _broadcastPower('console', consoleId, on);     // sync to the room
+  });
   menuMgr.addItem(rst, () => {
-    rackMgr.get(consoleId)?.client?.reset?.();
-    rst.userData.setColor?.('#5a7fb0');
-    setTimeout(() => rst.userData.setColor?.('#33506e'), 180);
-    logger?.event?.('console-reset', { consoleId });
+    resetConsole(consoleId);
+    _broadcastReset(consoleId);                    // sync to the room (host re-runs its core)
   });
 }
 
@@ -789,7 +909,11 @@ function addTvControls(tvId, tv) {
   pwr.position.set(2.2 / 2 - 0.2, -1.65 / 2 + 0.14, 0.03);
   tv.group.add(pwr);
   tv.group.userData.powerBtn = pwr;
-  menuMgr.addItem(pwr, () => setTvPower(tvId, !isTvOn(tvId), pwr));
+  menuMgr.addItem(pwr, () => {
+    const on = !isTvOn(tvId);
+    setTvPower(tvId, on, pwr);
+    _broadcastPower('tv', tvId, on);               // sync to the room
+  });
 }
 
 // Phase 3 — spawn a SECOND (third, …) console end-to-end: its own
@@ -1112,6 +1236,18 @@ function seatControllerPlug(cableId) {
   }
 }
 
+// Re-broadcast a gamepad's current port so every peer agrees on its port→player
+// mapping after the pad (or its patch-cord plug) is dragged to a different jack.
+// The gamepad:<cableId> STATE carries { port } (see the spawn broadcast in
+// addProp); RoomObjects dedups, so an unchanged port is a no-op, as is a call
+// outside a session. -1 means "unplugged". Call this at discrete re-plug events
+// only — NOT from seatControllerPlug (that runs every frame).
+function _broadcastGamepadPort(cableId) {
+  if (!net || !cableId) return;
+  const port = cable.portOf(cableId)?.port ?? -1;
+  net.setObjectState(makeGamepadStateKey(cableId), { port });
+}
+
 // GrabMgr release handler for a controller plug: snap to the nearest free port
 // jack across EVERY console and re-plug, or unplug if dropped in mid-air.
 const _ctrlPlugWorld = new THREE.Vector3();
@@ -1140,6 +1276,7 @@ function handleControllerPlugReleased(plugObj) {
   if (hit) cable.plugController(cableId, hit.anchor.consoleId, hit.anchor.port);
   else cable.unplugController(cableId);
   seatControllerPlug(cableId);
+  _broadcastGamepadPort(cableId);           // peers must agree on the new port→player
   gameInput?.flushReleases();               // drop keys held under the old seat
   logger?.event?.('controller-repatch', { cableId, seat: hit ? hit.id : null });
 }
@@ -1419,8 +1556,69 @@ async function loadRoomCollections(room, inline) {
   return { byKey, list };
 }
 
+// M-room: the shared STATE key the host publishes its serialized room under and
+// late joiners adopt (see _awaitHostRoom + buildCartridgeWorld).
+const ROOM_STATE_KEY = 'room';
+
+// Wait briefly for the room handoff to resolve when joining a session. Returns
+// the host's published room snapshot if one exists, else null when we appear to
+// be the first peer (the host) — or on timeout / no connection, so solo and
+// offline still build their local room. The server replays all shared STATE in
+// one burst right after HELLO, so once our selfId is assigned a short grace
+// window is enough to see a 'room' key (or conclude there isn't one yet).
+function _awaitHostRoom({ timeoutMs = 2000, graceMs = 500 } = {}) {
+  return new Promise((resolve) => {
+    const start = performance.now();
+    let settledAt = 0;
+    const poll = () => {
+      if (!net) return resolve(null);
+      const hostRoom = net.getObjectState(ROOM_STATE_KEY);
+      if (hostRoom) return resolve(hostRoom);          // a host already published → adopt
+      const now = performance.now();
+      if (net.selfId) {                                // HELLO seen → STATE replay delivered
+        if (!settledAt) settledAt = now;
+        if (now - settledAt >= graceMs) return resolve(null); // no host room → we are the host
+      }
+      if (now - start >= timeoutMs) return resolve(null);
+      setTimeout(poll, 40);
+    };
+    poll();
+  });
+}
+
 async function buildCartridgeWorld() {
-  const { room, inline } = await resolveWorld();
+  const resolved = await resolveWorld();
+  let room = resolved.room;
+  const inline = resolved.inline;
+
+  // M-room handoff: in a session, the first peer is the host and publishes its
+  // room (below); later joiners adopt that snapshot here instead of building
+  // their own (divergent) local default — the root cause of "the host's room
+  // setup isn't shared". Decided BEFORE collections load (so we fetch the
+  // adopted room's collections) and BEFORE buildRoom (so we build exactly once:
+  // no teardown/rebuild, and no page reload that would drop a VR user out of
+  // immersive). Ongoing edits still ride the existing prop:* deltas on top.
+  let _publishHostRoom = false;
+  if (net) {
+    if (_resumeAsHost) {
+      // We were the host before our OWN cross-core / gun-arm reload. Don't adopt a
+      // peer's snapshot — our bridged room (consumeRoomBridge, resolved above) is
+      // the authoritative layout. Republish it so the persisted 'room' STATE tracks
+      // our reload and we re-claim host, instead of being overwritten by the staler
+      // copy a peer may have echoed while we were briefly disconnected.
+      _publishHostRoom = true;
+      logger?.event?.('mp-room-resume-host', { props: room?.props?.length ?? 0 });
+    } else {
+      const hostRoom = await _awaitHostRoom();
+      if (hostRoom) {
+        room = parseRoom(hostRoom, { sourceLabel: 'mp-host' });
+        logger?.event?.('mp-room-adopt', { props: room?.props?.length ?? 0 });
+      } else {
+        _publishHostRoom = true;
+      }
+    }
+  }
+
   currentRoom = room;
   const collections = await loadRoomCollections(room, inline);
   currentCollections = collections; // Phase E.3: build a new shelf against these
@@ -1491,6 +1689,15 @@ async function buildCartridgeWorld() {
   consoleObj = built.consoleObj;
   gamepadObj = built.gamepadObj;
   roomPosters = built.placed.filter((e) => e.prop.type === 'poster');
+
+  // M-room handoff: if we resolved as the host (first peer in the session),
+  // publish our just-built room so later joiners adopt this exact layout.
+  // serializeRoom(currentRoom) with no live-transform map is an identity
+  // round-trip of the descriptor → the room@1 wire shape parseRoom() expects.
+  if (_publishHostRoom && net) {
+    net.setObjectState(ROOM_STATE_KEY, serializeRoom(currentRoom));
+    logger?.event?.('mp-room-publish', { props: currentRoom?.props?.length ?? 0 });
+  }
 
   // A room may omit a console/gamepad; the load + input wiring below needs
   // both, so fall back to the default placements.
@@ -1572,7 +1779,7 @@ async function buildCartridgeWorld() {
     // Plugging/unplugging a gamepad changes which player it drives; flush so a
     // key held under the old assignment doesn't latch on the core. Also re-seat
     // its patch-cord plug so the cord follows the body-seated pad to its port.
-    onGamepadPlugged: (gp) => { gameInput?.flushReleases(); seatControllerPlug(gp?.userData?.cableId); },
+    onGamepadPlugged: (gp) => { gameInput?.flushReleases(); seatControllerPlug(gp?.userData?.cableId); _broadcastGamepadPort(gp?.userData?.cableId); },
     // Patch-cord plug released → snap to nearest TV jack + repatch video.
     onPlugReleased: (plug) => handlePlugReleased(plug),
     onMemoryCardInserted: handleMemoryCardInserted,
@@ -1637,7 +1844,7 @@ async function buildCartridgeWorld() {
   });
   cartridges.forEach((c) => grabMgr.addGrabbable(c));
   grabMgr.addGrabbable(gamepadObj);
-  grabMgr.addGrabbable(lightGunObj);
+  _registerLightGun(lightGunObj);
 
   // Light-gun aiming: every frame, for each controller currently holding the gun,
   // raycast its barrel ray against the rack TV screens and drive the source
@@ -1646,8 +1853,8 @@ async function buildCartridgeWorld() {
   // multi-console gun binding (plug the gun into a chosen console) is a follow-up.
   lightGunMgr = new LightGunMgr({
     getActiveGuns: () => scene.controllers
-      .filter((ctrl) => grabMgr.heldObject(ctrl) === lightGunObj)
-      .map((ctrl) => ({ gun: lightGunObj, controller: ctrl })),
+      .filter((ctrl) => _lightGunObjs.has(grabMgr.heldObject(ctrl)))
+      .map((ctrl) => ({ gun: grabMgr.heldObject(ctrl), controller: ctrl })),
     getScreenTargets: () => scene._tvs.map((tv) => ({ tvId: tv.id, mesh: tv.mesh })),
     consoleIdForTV: (tvId) => cable.sourceOf(tvId),
     clientForGun: () => rackMgr.get(CONSOLE_ID)?.client || null,
@@ -1766,6 +1973,12 @@ async function buildCartridgeWorld() {
     },
     // Item 7 — toggle the room walls headlessly.
     walls: (on) => (on === undefined ? scene.wallsVisible() : scene.setWallsVisible(on)),
+    // Phase 3 power/reset — drive the REAL broadcast path headlessly (what the
+    // in-world power switch / RESET button do) so smokes can confirm a peer's
+    // toggle reaches the room. isOn observes the local power state.
+    powerConsole: (id, on) => { setConsolePower(id, on, consoleObjs.get(id)?.userData?.powerBtn); _broadcastPower('console', id, on); return isConsoleOn(id); },
+    isOn: (id) => isConsoleOn(id),
+    resetConsole: (id) => { resetConsole(id); _broadcastReset(id); return true; },
     // Items 2/3 — inspect + drive the CONTROLLER patch cords. seats() reports
     // which console+port each gamepad drives (null = unplugged → drives nothing).
     seats: () => [...controllerPlugs.keys()].map((cableId) => ({ cableId, seat: cable.portOf(cableId) })),
@@ -1925,6 +2138,8 @@ async function buildCartridgeWorld() {
     bookcase: (col) => addProp('bookcase', col ? { collection: col } : {}),
     cupboard: ()    => addProp('cupboard'),
     table:    ()    => addProp('table'),
+    lightgun: ()    => addProp('lightgun'),
+    tv:       ()    => addTvProp(),
     portal:   ()    => addPortal(),
     // Desktop/headless poster-image affordance. src = URL or data URL.
     // Usage: window.__add.setPosterImage('https://…') after selecting a poster.
@@ -1990,6 +2205,9 @@ async function buildCartridgeWorld() {
       heldBy: (cableId) => ghostGpMgr.heldBy(cableId),
       isRemotelyHeld: (cableId) => ghostGpMgr.isRemotelyHeld(cableId),
     };
+    // Headless test tap for the transient WIRE channel: returns a copy of the
+    // last received messages on a channel (gp/drag/reset). See _wireRxLog.
+    window.__wireRx = (ch) => (_wireRxLog[ch] ? _wireRxLog[ch].slice() : []);
 
     // GAP 1 — Gamepad existence sync: when any peer spawns a gamepad via the
     // Add menu it broadcasts `gamepad:<id>` → { port }. Every peer (including
@@ -2044,6 +2262,21 @@ async function buildCartridgeWorld() {
       _gamepadObjs.delete(cableId);
     }
 
+    // Apply a remote pad's current port to the LOCAL patchbay so its cord seats
+    // on the right console jack on this peer. diffGamepadSync only diffs existence
+    // (add/remove); a pad that merely moved ports (a re-plug) is in neither set,
+    // so without this its cord would stay drawn to the old jack. Reseats the plug
+    // and recolours the cord for the new player number.
+    function _applyRemoteGamepadPort(cableId, port) {
+      const curPort = cable.portOf(cableId)?.port ?? -1;
+      if (curPort === port) return;                  // no change
+      if (port >= 0) cable.plugController(cableId, CONSOLE_ID, port);
+      else cable.unplugController(cableId);
+      const rec = controllerPlugs.get(cableId);
+      if (rec) rec.cord.setColor?.(cordColorForPlayer((port >= 0 ? port : 0) + 1));
+      seatControllerPlug(cableId);
+    }
+
     // Install the real reconciler (replaces the no-op set at module level).
     _reconcileGamepadState = () => {
       const desired = parseGamepadEntries(net.objects.entries());
@@ -2054,6 +2287,12 @@ async function buildCartridgeWorld() {
       });
       for (const { cableId, port } of toAdd) _createRemoteGamepad(cableId, port);
       for (const cableId of toRemove) _removeRemoteGamepad(cableId);
+      // Re-plug sync: reconcile port changes for pads we already have.
+      for (const { cableId, port } of desired) {
+        if (DEFAULT_GAMEPAD_IDS.has(cableId)) continue; // our own default pad — local only
+        if (!_gamepadObjs.has(cableId)) continue;        // creation handled by toAdd
+        _applyRemoteGamepadPort(cableId, port);
+      }
     };
 
     // Run once immediately: catch any `gamepad:*` state that arrived before
@@ -2144,6 +2383,10 @@ async function buildCartridgeWorld() {
       // Track cartridges for shelf/bookcase so they're grabbable.
       if (r.kind === 'shelf') r.cartridges?.forEach((c) => grabMgr?.addGrabbable(c));
       if (r.kind === 'bookcase') r.cartridges?.forEach((c) => grabMgr?.addGrabbable(c));
+      // A peer added a light gun → register it locally so it aims + is grabbable.
+      if (r.kind === 'lightgun') _registerLightGun(r.object);
+      // A peer added a standalone TV → wire its patch-graph node + power switch.
+      if (r.kind === 'tvset') _wireTvProp(propId, r.tv);
     }
 
     // Remove a remote-spawned prop (state cleared, e.g. remote peer deleted it).
@@ -2223,6 +2466,19 @@ async function buildCartridgeWorld() {
         }
       }
       for (const pid of toRemove) _removeRemoteProp(pid);
+    };
+
+    // Live-drag (M2 'drag' wire): smoothly move our copy of a prop a peer is
+    // actively dragging, in the gaps between the authoritative prop:* STATE
+    // snapshots they send on release. Reuses the STATE transform applier with the
+    // identical serializePropState payload. Skips if WE are holding the object
+    // (don't fight the local hand) or if it's an id we don't have yet (the
+    // release STATE will create it).
+    _applyLiveDrag = (data) => {
+      const rec = _syncedProps.get(data?.id);
+      if (!rec?.object || !data?.payload) return;
+      if (grabMgr?.isHeld?.(rec.object)) return;
+      _applyRemotePropTransform(rec.object, data.payload);
     };
 
     // Run once immediately to reconcile any state that arrived before we built
@@ -2393,22 +2649,82 @@ async function buildCartridgeWorld() {
   // Drive the gamepad mesh's per-button depress + glow from the union of
   // both hands' inputs — so even a free-hand press lights up the
   // corresponding slot on the visual gamepad. Axis preference: holding
-  // hand wins, else free hand.
+  // hand wins, else free hand. Drives whichever pad is ACTUALLY held (not just
+  // the default one) so interactions show on the right pad, and broadcasts that
+  // pad's live button state over the 'gp' wire channel so peers animate its ghost.
+  let _lastGpWireSig = '';
   scene.addTickCallback(() => {
     const s = gameInput.getDebugState();
-    if (!s) { gamepadObj.userData.setInput?.({}); return; }
+    if (!s) {
+      // Nothing held → clear every local pad's visual (also cleans up the pad
+      // just released so its buttons don't stay lit).
+      for (const o of _gamepadObjs.values()) o.userData.setInput?.({});
+      gamepadObj.userData.setInput?.({});
+      _lastGpWireSig = '';
+      return;
+    }
     const h = s.holding, f = s.free;
     const or = (i) => !!(h?.buttons[i]?.pressed) || !!(f?.buttons[i]?.pressed);
-    const ax = (i) => (h?.axes[i] ?? 0) || (f?.axes[i] ?? 0);
-    gamepadObj.userData.setInput?.({
+    const axRaw = (i) => (h?.axes[i] ?? 0) || (f?.axes[i] ?? 0);
+    // Bucket axes to -1/0/1 at the same threshold the pad visual uses, so analog
+    // jitter doesn't spam the wire — we only send on a meaningful change.
+    const bucket = (v) => (v <= -0.4 ? -1 : v >= 0.4 ? 1 : 0);
+    const input = {
       a:      or(0),  // trigger
       b:      or(4),  // face A/X
       start:  or(5),  // face B/Y
       select: or(3),  // stick click
-      axisX:  ax(2),
-      axisY:  ax(3),
-    });
+      axisX:  bucket(axRaw(2)),
+      axisY:  bucket(axRaw(3)),
+    };
+    // Which local pad is actually in a hand? Drive THAT one (the long-standing
+    // "interactions show on the same pad" bug was driving only the default).
+    let heldPad = null;
+    for (const ctrl of scene.controllers) {
+      const o = grabMgr.heldObject?.(ctrl);
+      if (o?.userData?.kind === 'gamepad') { heldPad = o; break; }
+    }
+    (heldPad || gamepadObj).userData.setInput?.(input);
+    // Broadcast the held pad's button state to the room (on change only).
+    const cableId = heldPad?.userData?.cableId;
+    if (net && cableId) {
+      const sig = cableId + JSON.stringify(input);
+      if (sig !== _lastGpWireSig) { _lastGpWireSig = sig; net.sendWire('gp', { cableId, ...input }); }
+    } else if (_lastGpWireSig) {
+      _lastGpWireSig = '';
+    }
   });
+
+  // Live-drag broadcast (M2 'drag' wire): while a prop is held locally, stream its
+  // in-flight transform ~20 Hz so peers see it glide rather than teleport on
+  // release. The authoritative final pose still rides the prop:* STATE snapshot
+  // that _broadcastPropMove sends on release. On-change only (a still hand sends
+  // nothing). Uses the SAME serializePropState payload the STATE channel uses, so
+  // the receiver reuses _applyRemotePropTransform.
+  {
+    let _dragAcc = 0;
+    const _lastDragSig = new Map(); // propId -> last sent payload signature
+    scene.addTickCallback((dtMs) => {
+      if (!net) return;
+      _dragAcc += (Number.isFinite(dtMs) ? dtMs : 16);
+      if (_dragAcc < 50) return;     // ~20 Hz cap
+      _dragAcc = 0;
+      const seen = new Set();
+      for (const ctrl of scene.controllers) {
+        const o = grabMgr?.heldObject?.(ctrl);
+        const prop = o?.userData?.roomProp;
+        if (!prop?.id || seen.has(prop.id)) continue;
+        seen.add(prop.id);
+        const payload = serializePropState(prop, o);
+        const sig = JSON.stringify(payload);
+        if (_lastDragSig.get(prop.id) === sig) continue;  // not moving → don't spam
+        _lastDragSig.set(prop.id, sig);
+        net.sendWire('drag', { id: prop.id, payload });
+      }
+      // Drop signatures for props no longer held so a re-grab re-sends fresh.
+      if (seen.size === 0 && _lastDragSig.size) _lastDragSig.clear();
+    });
+  }
 
   activePortals = built.portals; // Phase E.3: addPortal() appends to this live list
   buildMenuAndControlsPanel();
@@ -2606,6 +2922,11 @@ function addProp(type, opts = {}) {
     // Fall through to the normal ensureEditMode / broadcast path below.
   }
 
+  // A new light gun: register it so it aims + arms gun games on pickup, and
+  // becomes the 2nd gun for co-op. Falls through to the prop:* broadcast so peers
+  // create it too.
+  if (r.kind === 'lightgun') _registerLightGun(r.object);
+
   ensureEditMode();
   setStatus(`added ${type} — grab to place`);
 
@@ -2632,6 +2953,44 @@ function addProp(type, opts = {}) {
     _broadcastPropMove(r.object);
   }
 
+  return prop;
+}
+
+// Wire a freshly-built standalone TV (the 'tvset' prop) into the patch graph +
+// controls so it behaves like a built-in TV: a Patchbay sink you can patch a
+// console's video-out into, a power switch, and movable in Move mode. Shared by
+// the local add and the remote-create paths.
+function _wireTvProp(tvId, tv) {
+  if (!tv) return;
+  cable.addTV(tvId);                         // patch-graph sink (idle until wired)
+  addTvControls(tvId, tv);                   // power switch
+  registerMovableProp(tv.group, 'tv');       // grabbable in Move mode
+  routeVideo();                              // render it (idle) immediately
+}
+
+// Add a standalone TV in front of the player. Bypasses the generic addProp so the
+// peer-scoped id is assigned BEFORE buildProp (the scene TV node is keyed by the
+// prop id, so all peers must agree on it before the TV is created). Syncs creation
+// + transform via the prop:* STATE channel like other added props.
+function addTvProp() {
+  if (!editor || !currentRoom) return null;
+  const t = spawnTransform('tvset');
+  const prop = createProp(currentRoom, 'tvset', t);
+  if (!prop) { setStatus("can't add TV"); return null; }
+  // Peer-scoped id up front (see above) so the TV node id matches across peers.
+  if (net) { const selfId = net.presence.selfId || 'local'; prop.id = makePeerPropId(selfId, ++_peerPropCounter); }
+  const r = buildProp(prop, { scene, collections: currentCollections });
+  if (!r || r.kind !== 'tvset') { setStatus('add TV failed'); return null; }
+  appendProp(currentRoom, prop);
+  editor.registerPlaced(prop, r.object);
+  _syncedProps.set(prop.id, { prop, object: r.object });
+  _wireTvProp(prop.id, r.tv);
+  ensureEditMode();
+  setStatus('added TV — grab to place; patch a console into it to show a game');
+  if (net) {
+    _knownPropPayloads.set(prop.id, serializePropState(prop, r.object));
+    _broadcastPropMove(r.object);
+  }
   return prop;
 }
 
@@ -3228,7 +3587,19 @@ function buildMenuAndControlsPanel() {
     { label: 'Spawn Console', onActivate: () => spawnNextConsole() },
     { label: 'Add Gamepad',  onActivate: () => addProp('gamepad') },
     { label: 'Add Poster',   onActivate: () => addProp('poster') },
+    { label: 'Add TV',       onActivate: () => addTvProp() },
+    { label: 'Add Light Gun', onActivate: () => addProp('lightgun') },
     { label: 'Add Portal',   onActivate: () => addPortal() },
+    // Persist the current layout as the default that auto-loads next session
+    // (same localStorage slot resolveWorld() reads), without the file download
+    // that 'Export Room' triggers. 'Reset to Built-in' clears it again.
+    { label: 'Save as Default Room', onActivate: () => {
+      try { saveLastRoom(JSON.stringify(editor.serialize())); setStatus('saved current room as the default layout'); }
+      catch (e) { setStatus('save-as-default failed'); console.warn('[room] save-as-default', e); }
+    } },
+    { label: 'Reset to Built-in', onActivate: () => {
+      clearLastRoom(); setStatus('default cleared — built-in room loads next session');
+    } },
   ]);
   // Stash button refs for label updates.
   _shelfCollBtns.shelf    = addPanel.userData.buttons[0];
@@ -3487,6 +3858,93 @@ function buildMenuAndControlsPanel() {
     }
   }
 
+  // Gamepad button click-to-test: point a controller at any virtual gamepad's
+  // buttons and pull the trigger to drive that pad's port — so you can test two
+  // different controllers/ports without physically grabbing each one. Mirrors the
+  // keyboard raycast above (separate Raycaster; gated on no pad being held so an
+  // in-game trigger press doesn't also click buttons).
+  {
+    const _gpRay = new THREE.Raycaster();
+    const _gpOrigin = new THREE.Vector3();
+    const _gpQuat = new THREE.Quaternion();
+    const _gpDir = new THREE.Vector3();
+    // Logical gamepad-button id → RetroPad button name for setRemoteButton.
+    const GP_BTN = { a: 'A', b: 'B', start: 'Start', select: 'Select', up: 'Up', down: 'Down', left: 'Left', right: 'Right' };
+    const _gpHover = new Map(); // ctrl → { gpObj, id }   (button currently under the laser)
+    const _gpHeld  = new Map(); // ctrl → { gpObj, id, player, btn, consoleId } (button being clicked)
+
+    // Walk up from a hit cap mesh to its gamepad root (the object registered in
+    // _gamepadObjs under its cableId).
+    const gpObjForMesh = (mesh) => {
+      let o = mesh;
+      while (o) {
+        const cid = o.userData?.cableId;
+        if (cid && _gamepadObjs.get(cid) === o) return o;
+        o = o.parent;
+      }
+      return null;
+    };
+    const clearHover = (ctrl) => {
+      const h = _gpHover.get(ctrl);
+      if (h) { h.gpObj.userData.hoverButton?.(h.id, false); _gpHover.delete(ctrl); }
+    };
+
+    scene.addTickCallback(() => {
+      if (_gamepadObjs.size === 0) return;
+      // A held pad means its trigger is driving the game — don't also click.
+      if (grabMgr?.isGamepadHeld?.()) { for (const c of scene.controllers) clearHover(c); return; }
+      const meshes = [];
+      for (const obj of _gamepadObjs.values()) {
+        if (!obj.visible) continue;
+        const cm = obj.userData.clickMeshes;
+        if (cm) for (const m of cm) meshes.push(m);
+      }
+      if (meshes.length === 0) { for (const c of scene.controllers) clearHover(c); return; }
+      for (const ctrl of scene.controllers) {
+        ctrl.updateMatrixWorld();
+        _gpOrigin.setFromMatrixPosition(ctrl.matrixWorld);
+        ctrl.getWorldQuaternion(_gpQuat);
+        _gpDir.set(0, 0, -1).applyQuaternion(_gpQuat).normalize();
+        _gpRay.set(_gpOrigin, _gpDir);
+        _gpRay.far = 8.0;
+        const hits = _gpRay.intersectObjects(meshes, false);
+        const hit = hits.length ? hits[0] : null;
+        const id = hit?.object?.userData?.gpButton || null;
+        const gpObj = hit ? gpObjForMesh(hit.object) : null;
+        const prev = _gpHover.get(ctrl);
+        if (!id || !gpObj) { clearHover(ctrl); continue; }
+        if (!prev || prev.gpObj !== gpObj || prev.id !== id) {
+          if (prev) prev.gpObj.userData.hoverButton?.(prev.id, false);
+          gpObj.userData.hoverButton?.(id, true);
+          _gpHover.set(ctrl, { gpObj, id });
+        }
+      }
+    });
+
+    for (const ctrl of scene.controllers) {
+      ctrl.addEventListener('selectstart', () => {
+        if (grabMgr?.isGamepadHeld?.()) return;
+        const h = _gpHover.get(ctrl);
+        if (!h) return;                          // not pointing at a button → don't consume
+        const btn = GP_BTN[h.id];
+        if (!btn) return;
+        const seat = cable.portOf(h.gpObj.userData.cableId); // { consoleId, port } | null
+        const player = (seat?.port ?? 0) + 1;
+        const consoleId = seat?.consoleId || CONSOLE_ID;
+        h.gpObj.userData.pressButton?.(h.id, true);
+        gameInput?.setRemoteButton?.({ player, btn, down: true, consoleId });
+        _gpHeld.set(ctrl, { gpObj: h.gpObj, id: h.id, player, btn, consoleId });
+      });
+      ctrl.addEventListener('selectend', () => {
+        const held = _gpHeld.get(ctrl);
+        if (!held) return;
+        _gpHeld.delete(ctrl);
+        held.gpObj.userData.pressButton?.(held.id, false);
+        gameInput?.setRemoteButton?.({ player: held.player, btn: held.btn, down: false, consoleId: held.consoleId });
+      });
+    }
+  }
+
   window.__menu = menuMgr;
   // Debug hooks: drive the Change-mode env edits headlessly (menu is raycast-only).
   window.__env = {
@@ -3574,6 +4032,9 @@ function handleCartridgeInserted(meta, { echo = true } = {}) {
       try { stashRoomBridge(JSON.stringify(editor.serialize())); }
       catch (e) { console.warn('[main] room bridge stash failed:', e); }
     }
+    // Keep the session (and host role) alive across the reload — a widget-joined
+    // room has no ?session in the URL to auto-rejoin from.
+    stashSessionRejoin();
     setStatus(`switching to ${meta.title}…`);
     location.reload();
     return;
@@ -3617,6 +4078,8 @@ async function armLightGunAndReload() {
       try { stashRoomBridge(JSON.stringify(editor.serialize())); }
       catch (e) { console.warn('[main] room bridge stash failed:', e); }
     }
+    // Keep the session (and host role) alive across the gun-arm reload.
+    stashSessionRejoin();
     location.reload();
   } catch (e) {
     console.warn('[lightgun] arm reload failed:', e);

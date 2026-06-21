@@ -22,6 +22,7 @@ export const MSG = Object.freeze({
   SIGNAL: 'signal', // M0.4 voice: WebRTC offer/answer/ICE, relayed peer→peer
   STATE: 'state',   // M0.5 room-object sync: a shared key→value (e.g. the loaded game)
   INPUT: 'input',   // M1 game sync: a remote player's RetroPad button, directed to the host
+  WIRE:  'wire',    // M2 transient relay: per-frame ephemera (live drag, pad buttons) — NOT persisted
 });
 
 // WebRTC signaling kinds carried inside a SIGNAL message.
@@ -133,6 +134,20 @@ export function makeInput({ to, player, btn, down = false, seq, from } = {}) {
 }
 
 /**
+ * Build a WIRE message (M2 transient relay). Carries per-frame ephemeral data on
+ * a named channel `ch` (e.g. 'gp' for a held pad's pressed-button bitmask, 'drag'
+ * for a live prop transform). Unlike STATE, the server does NOT persist it — it
+ * relays-but-forgets, so high-rate updates never pile up for late joiners. The
+ * server stamps `id` (the sender) on rebroadcast. `data` is passed through
+ * verbatim (any JSON value).
+ */
+export function makeWire({ ch, data = null, id } = {}) {
+  const msg = { type: MSG.WIRE, ch: String(ch), data: data ?? null };
+  if (id != null) msg.id = String(id);
+  return msg;
+}
+
+/**
  * M1.1 host-routing decision (pure): who, if anyone, a peer should forward its
  * captured game input to. The host is the owner of the shared `tv` state. Returns
  * the host id to send to, or null when there is no host yet, or when THIS peer is
@@ -182,6 +197,10 @@ export function validate(msg) {
       if (typeof msg.player !== 'number' || !Number.isFinite(msg.player)) return { ok: false, error: 'input.player' };
       if (typeof msg.btn !== 'string' || msg.btn === '') return { ok: false, error: 'input.btn' };
       if (typeof msg.down !== 'boolean') return { ok: false, error: 'input.down' };
+      return { ok: true };
+    case MSG.WIRE:
+      if (typeof msg.ch !== 'string' || msg.ch === '') return { ok: false, error: 'wire.ch' };
+      if (!('data' in msg)) return { ok: false, error: 'wire.data' };
       return { ok: true };
     default:
       return { ok: false, error: `unknown type: ${msg && msg.type}` };

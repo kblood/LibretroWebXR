@@ -34,6 +34,8 @@ export const SURFACE_KIND = {
   poster:   'wall',
   portal:   'floor',
   keyboard: 'floor',
+  lightgun: 'floor',
+  tvset:    'floor',
 };
 
 /**
@@ -55,6 +57,8 @@ export const RESTING_Y = {
   table:    0.0,    // floor-contact origin
   portal:   0.0,    // floor-level portal arch
   keyboard: 0.72,   // keyboard resting on a desk at comfortable typing height
+  lightgun: 0.78,   // gun resting on the desk next to the console
+  tvset:    1.5,    // standalone TV cabinet centre height (matches built-in TVs)
   default:  1.2,    // fallback for unknown kinds
 };
 
@@ -161,16 +165,17 @@ export function snapToSurface(pos, bounds, kind) {
   }
 
   // Wall snap: measure distance to each of the four wall planes, pick nearest.
-  // Wall normals point INTO the room:
-  //   back  (z = minZ): normal +Z → yaw = 0  (faces +Z, i.e. into the room)
+  // A poster plane faces +Z; after rotation.y = yaw its world normal is
+  // (sin yaw, 0, cos yaw). We want that normal to point INTO the room:
+  //   back  (z = minZ): normal +Z → yaw = 0
   //   front (z = maxZ): normal -Z → yaw = π
-  //   left  (x = minX): normal +X → yaw = -π/2
-  //   right (x = maxX): normal -X → yaw = +π/2
+  //   left  (x = minX): normal +X → yaw = +π/2
+  //   right (x = maxX): normal -X → yaw = -π/2
   const walls = [
     { axis: 'z', plane: bounds.minZ, dir: +1, yaw:          0 },   // back wall
     { axis: 'z', plane: bounds.maxZ, dir: -1, yaw:  Math.PI   },   // front wall
-    { axis: 'x', plane: bounds.minX, dir: +1, yaw: -Math.PI / 2 }, // left wall
-    { axis: 'x', plane: bounds.maxX, dir: -1, yaw:  Math.PI / 2 }, // right wall
+    { axis: 'x', plane: bounds.minX, dir: +1, yaw:  Math.PI / 2 }, // left wall  (face +X, into room)
+    { axis: 'x', plane: bounds.maxX, dir: -1, yaw: -Math.PI / 2 }, // right wall (face -X, into room)
   ];
 
   let bestWall = walls[0];
@@ -264,8 +269,8 @@ export function placeInRoom(pos, bounds, kind, opts = {}) {
   const walls = [
     { axis: 'z', plane: bounds.minZ, dir: +1, yaw:          0 },   // back wall
     { axis: 'z', plane: bounds.maxZ, dir: -1, yaw:  Math.PI   },   // front wall
-    { axis: 'x', plane: bounds.minX, dir: +1, yaw: -Math.PI / 2 }, // left wall
-    { axis: 'x', plane: bounds.maxX, dir: -1, yaw:  Math.PI / 2 }, // right wall
+    { axis: 'x', plane: bounds.minX, dir: +1, yaw:  Math.PI / 2 }, // left wall  (face +X, into room)
+    { axis: 'x', plane: bounds.maxX, dir: -1, yaw: -Math.PI / 2 }, // right wall (face -X, into room)
   ];
 
   let bestWall = walls[0];

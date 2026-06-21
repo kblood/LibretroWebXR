@@ -4,7 +4,7 @@
 
 import {
   MSG, POSE_LEN, SIGNAL_KINDS, isValidPart, roundPart, makePose, makeJoin, makeHello,
-  makeLeave, makeSignal, makeState, makeInput, hostInputTarget, validate, encode, decode,
+  makeLeave, makeSignal, makeState, makeInput, makeWire, hostInputTarget, validate, encode, decode,
   buildIceServers,
 } from '../src/net/NetProtocol.js';
 import { PresenceState } from '../src/net/PresenceState.js';
@@ -343,6 +343,32 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   ok(direct.msg.from === 'client' && direct.msg.player === 2 && direct.msg.btn === 'faceB', 'input stamped with the real sender id');
   ok(hub.input('r', 'client', makeInput({ to: 'ghost', player: 1, btn: 'Up', down: true })).direct === undefined, 'input to an absent host is dropped');
   ok(hub.input('r', 'x', makeInput({ to: 'host', player: 1, btn: 'Up', down: true })).direct === undefined, 'input from an absent peer is dropped');
+}
+
+// === NetProtocol: WIRE (transient relay) builder + validation ===============
+{
+  const w = makeWire({ ch: 'gp', data: { cableId: 'gp-1', btns: 5 } });
+  ok(w.type === MSG.WIRE && w.ch === 'gp' && w.data.btns === 5, 'makeWire builds a wire message');
+  ok(validate(w).ok, 'WIRE validates');
+  ok(validate(makeWire({ ch: 'drag', data: null })).ok, 'WIRE with null data validates (data key present)');
+  ok(!validate({ type: MSG.WIRE, ch: '', data: {} }).ok, 'WIRE with empty ch rejected');
+  ok(!validate({ type: MSG.WIRE, ch: 'gp' }).ok, 'WIRE without a data key rejected');
+  const back = decode(encode(makeWire({ ch: 'drag', data: { id: 'p7', p: [1, 2, 3] } })));
+  ok(back && back.ch === 'drag' && back.data.p[2] === 3, 'WIRE round-trips through encode/decode');
+}
+
+// === Hub: wire is a BROADCAST relay, sender-id stamped, NOT persisted =======
+{
+  const hub = new Hub();
+  hub.connect('r', 'a');
+  hub.connect('r', 'b');
+  const { broadcast } = hub.wire('r', 'a', makeWire({ ch: 'gp', data: { cableId: 'gp-1', btns: 3 } }));
+  ok(broadcast && broadcast.exclude === 'a', 'wire is broadcast to everyone except the sender');
+  ok(broadcast.msg.id === 'a' && broadcast.msg.ch === 'gp' && broadcast.msg.data.btns === 3, 'wire stamped with the real sender id');
+  ok(hub.wire('r', 'ghost', makeWire({ ch: 'gp', data: {} })).broadcast === undefined, 'wire from an unknown peer is dropped');
+  // A late joiner's snapshot must NOT include any transient wire data.
+  const snap = hub.connect('r', 'c').state;
+  ok(snap.length === 0, 'wire is never persisted into the late-join state snapshot');
 }
 
 // === NetMgr onPeerLeave: fires when a LEAVE message is applied ================

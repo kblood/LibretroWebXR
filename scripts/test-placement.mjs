@@ -159,7 +159,7 @@ for (const kind of ['shelf', 'console', 'gamepad', 'bookcase', 'cupboard', 'tabl
   const { pos, yaw } = snapToSurface(p, BOUNDS, 'poster');
   near('wall snap left: X = minX + offset', pos.x, BOUNDS.minX + POSTER_DEPTH_OFFSET);
   near('wall snap left: Z unchanged', pos.z, p.z);
-  near('wall snap left: yaw = -π/2', yaw, -Math.PI / 2);
+  near('wall snap left: yaw = +π/2 (faces +X, into room)', yaw, Math.PI / 2);
 }
 
 // Nearest wall: right (X = maxX = +3). Place point near right wall.
@@ -167,7 +167,7 @@ for (const kind of ['shelf', 'console', 'gamepad', 'bookcase', 'cupboard', 'tabl
   const p = { x: 2.9, y: 1.5, z: 0 };
   const { pos, yaw } = snapToSurface(p, BOUNDS, 'poster');
   near('wall snap right: X = maxX - offset', pos.x, BOUNDS.maxX - POSTER_DEPTH_OFFSET);
-  near('wall snap right: yaw = +π/2', yaw, Math.PI / 2);
+  near('wall snap right: yaw = -π/2 (faces -X, into room)', yaw, -Math.PI / 2);
 }
 
 // Wall snap Y is preserved (poster height stays as-is)
@@ -271,7 +271,7 @@ for (const kind of ['shelf', 'console', 'gamepad', 'bookcase', 'cupboard', 'tabl
   const p = { x: 2.8, y: 1.5, z: 0 };
   const { pos, yaw } = placeInRoom(p, BOUNDS, 'poster');
   near('placeInRoom poster near right wall: x', pos.x, BOUNDS.maxX - POSTER_DEPTH_OFFSET);
-  near('placeInRoom poster near right wall: yaw', yaw, Math.PI / 2);
+  near('placeInRoom poster near right wall: yaw', yaw, -Math.PI / 2);
   ok('placeInRoom poster near right wall: z inside', pos.z >= BOUNDS.minZ && pos.z <= BOUNDS.maxZ);
 }
 

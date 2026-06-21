@@ -18,7 +18,7 @@ import { RoomObjects } from './RoomObjects.js';
 import { AvatarMgr } from './AvatarMgr.js';
 import { VoiceMgr } from './VoiceMgr.js';
 import { VideoMgr } from './VideoMgr.js';
-import { MSG, makeJoin, makePose, makeSignal, makeState, makeInput, hostInputTarget, encode, decode } from './NetProtocol.js';
+import { MSG, makeJoin, makePose, makeSignal, makeState, makeInput, makeWire, hostInputTarget, encode, decode } from './NetProtocol.js';
 
 const _p = new THREE.Vector3();
 const _q = new THREE.Quaternion();
@@ -36,7 +36,7 @@ function defaultServerUrl() {
 }
 
 export class NetMgr {
-  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, onPeerLeave = null, videoCanvas = null, onHostVideo = null, onHostVideoEnded = null, iceServers = null, now = () => performance.now() }) {
+  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, onWire = null, onPeerLeave = null, videoCanvas = null, onHostVideo = null, onHostVideoEnded = null, iceServers = null, now = () => performance.now() }) {
     this.scene = scene;
     this.room = room || 'lobby';
     this.nick = nick || 'Player';
@@ -59,6 +59,10 @@ export class NetMgr {
     // M1 game sync: a host receives remote players' RetroPad inputs here.
     // onGameInput({ from, player, btn, down }) lets main.js feed them to its core.
     this._onGameInput = onGameInput;
+    // M2 transient relay: per-frame ephemera from peers (held-pad button bitmasks,
+    // live prop drag). onWire(ch, data, fromId) lets main.js animate ghosts / move
+    // props in real time. Not persisted — purely "what's happening right now".
+    this._onWire = onWire;
     // Keyboard-latch fix: fired with the departing peer's id whenever a peer
     // leaves cleanly (MSG.LEAVE) or is pruned as stale. main.js wires this to
     // gameInput.clearRemote() so mid-keypress disconnects don't latch remote keys.
@@ -145,6 +149,27 @@ export class NetMgr {
 
   getObjectState(key) { return this.objects.get(key); }
 
+  // --- M2 transient relay (non-persisted per-frame ephemera) ----------------
+
+  /**
+   * Broadcast a transient payload on channel `ch` to the rest of the room. Used
+   * for high-rate data that must NOT be persisted (a held pad's button bitmask,
+   * a prop's live drag transform). Fire-and-forget; dropped if disconnected.
+   */
+  sendWire(ch, data = null) {
+    if (!this._connected || !this.ws) return false;
+    try { this.ws.send(encode(makeWire({ ch, data }))); return true; }
+    catch { return false; }
+  }
+
+  // A peer's transient payload arrived. Hand it to main.js (no dedup/persist —
+  // it's "right now" data; a dropped packet just means a slightly stale frame).
+  _applyWire(msg) {
+    if (!this._onWire) return;
+    try { this._onWire(msg.ch, msg.data, msg.id || null); }
+    catch (e) { console.warn('[net] onWire', e); }
+  }
+
   // --- M1 game sync (host-authoritative input over the relay) ---------------
 
   // This peer's server-assigned id (null until HELLO arrives).
@@ -212,6 +237,7 @@ export class NetMgr {
       }
       else if (msg.type === MSG.STATE) this._applyState(msg);         // room-object sync
       else if (msg.type === MSG.INPUT) this._applyGameInput(msg);     // game sync (host side)
+      else if (msg.type === MSG.WIRE) this._applyWire(msg);           // transient ephemera
       else {
         // Roster + poses. For LEAVE we also fire the peer-leave callback so
         // callers (main.js) can clear any latched remote input from that peer.
@@ -298,6 +324,8 @@ export class NetMgr {
       hostId: () => this.hostId(),
       isHost: () => this.isHost(),
       recvInputs: () => this._recvInputs.slice(),
+      // M2 transient relay
+      sendWire: (ch, data) => this.sendWire(ch, data),
       // M1.2 host video stream
       video: this.video.debugApi(),
       startVideoBroadcast: () => this.startVideoBroadcast(),

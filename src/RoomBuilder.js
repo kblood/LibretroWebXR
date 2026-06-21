@@ -16,6 +16,7 @@ import { createShelf, lockShelfHomes } from './Shelf.js';
 import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
 import { createKeyboardDevice } from './Keyboard.js';
+import { createLightGun } from './LightGun.js';
 import {
   createBookcase, createCupboard, createTable,
   bookcaseShelfSurfaceYs, BOOKCASE_W, BOOKCASE_T,
@@ -360,6 +361,24 @@ export function buildProp(prop, { scene, collections }) {
       });
       scene.addObject(kbd.object3d);
       return { object: kbd.object3d, kind: 'keyboard', keyboard: kbd };
+    }
+    case 'lightgun': {
+      // A grabbable light-gun prop (Duck Hunt-style). Same factory the boot path
+      // uses; main.js registers it with GrabMgr + the LightGunMgr gun registry and
+      // arms gun-capable games when it's picked up.
+      const obj = createLightGun({ position: v3(prop.pos) });
+      applyRot(obj, prop.rot);
+      scene.addObject(obj);
+      return { object: obj, kind: 'lightgun' };
+    }
+    case 'tvset': {
+      // A standalone, movable TV cabinet (distinct from the 'tv' shader toggle).
+      // Keyed by the prop id so every peer's copy shares the same Patchbay TV node;
+      // main.js wires the cable node + power switch after build (it owns the cable).
+      // Shows idle until a console's video-out is patched into it.
+      const tv = scene.addTV({ id: prop.id, position: v3(prop.pos) });
+      applyRot(tv.group, prop.rot);
+      return { object: tv.group, kind: 'tvset', tv };
     }
     case 'tv':
       scene.applyTv?.(prop);

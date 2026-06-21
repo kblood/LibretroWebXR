@@ -42,21 +42,21 @@ export function createGamepad({ position = new THREE.Vector3(0.6, 0.78, -2.2) } 
 
   // Face A (red, labelled A): forwards Quest trigger → NES A. Front
   // position so the user reads it as the "primary" fire button.
-  const a = makeFaceButton({ color: 0xcc3333, label: 'A' });
+  const a = makeFaceButton({ color: 0xcc3333, label: 'A', id: 'a' });
   a.group.position.set(GP_W * 0.32, GP_H / 2 + 0.003, -0.012);
   group.add(a.group);
 
   // Face B (blue, labelled B): forwards Quest A/X → NES B (bomb).
-  const b = makeFaceButton({ color: 0x3366cc, label: 'B' });
+  const b = makeFaceButton({ color: 0x3366cc, label: 'B', id: 'b' });
   b.group.position.set(GP_W * 0.32, GP_H / 2 + 0.003, 0.012);
   group.add(b.group);
 
   // Start / Select strips in the middle. Two short slabs side by side so
   // each lights independently.
-  const start = makeStrip({ label: 'ST' });
+  const start = makeStrip({ label: 'ST', id: 'start' });
   start.group.position.set(0.012, GP_H / 2 + 0.001, 0);
   group.add(start.group);
-  const select = makeStrip({ label: 'SE' });
+  const select = makeStrip({ label: 'SE', id: 'select' });
   select.group.position.set(-0.012, GP_H / 2 + 0.001, 0);
   group.add(select.group);
 
@@ -68,9 +68,24 @@ export function createGamepad({ position = new THREE.Vector3(0.6, 0.78, -2.2) } 
   cordAnchor.position.set(0, GP_H / 2, GP_D / 2);
   group.add(cordAnchor);
 
+  // Click-to-test registry: maps each logical button id to its part (so a
+  // controller pointed at the pad can press it without grabbing the pad — see
+  // the gamepad-click raycast in main.js) and lists the raycastable cap meshes.
+  const clickButtons = {
+    a, b, start, select,
+    up: dpad.arms.up, down: dpad.arms.down, left: dpad.arms.left, right: dpad.arms.right,
+  };
+  const clickMeshes = [a.cap, b.cap, start.cap, select.cap,
+    dpad.arms.up.mesh, dpad.arms.down.mesh, dpad.arms.left.mesh, dpad.arms.right.mesh];
+
   group.userData = {
     kind: 'gamepad',
     cordAnchor,
+    // Exposed for the click-to-test path: the cap meshes to raycast and a way to
+    // drive a single button's pressed / hover visual by its logical id.
+    clickMeshes,
+    pressButton(id, pressed) { clickButtons[id]?.setPressed?.(!!pressed); },
+    hoverButton(id, hovered) { clickButtons[id]?.setHover?.(!!hovered); },
     setHeld(held) {
       bodyMat.emissive.setHex(held ? 0x004466 : 0x000000);
     },
@@ -88,10 +103,11 @@ export function createGamepad({ position = new THREE.Vector3(0.6, 0.78, -2.2) } 
   return group;
 }
 
-function makeFaceButton({ color, label }) {
+function makeFaceButton({ color, label, id }) {
   const g = new THREE.Group();
   const baseMat = new THREE.MeshStandardMaterial({ color, roughness: 0.4, emissive: color, emissiveIntensity: 0.0 });
   const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.010, 0.010, 0.006, 20), baseMat);
+  cap.userData.gpButton = id; // raycast target id for click-to-test
   g.add(cap);
 
   // Tiny etched label so the user can read "A"/"B" at close range.
@@ -101,32 +117,39 @@ function makeFaceButton({ color, label }) {
   g.add(labelMesh);
 
   const baseY = cap.position.y;
+  let pressed = false, hovered = false;
+  const apply = () => {
+    cap.position.y = baseY + (pressed ? -PRESS_DEPTH : 0);
+    baseMat.emissiveIntensity = pressed ? 1.2 : (hovered ? 0.45 : 0.0);
+  };
   return {
-    group: g,
-    setPressed(p) {
-      cap.position.y = baseY + (p ? -PRESS_DEPTH : 0);
-      baseMat.emissiveIntensity = p ? 1.2 : 0.0;
-    },
+    group: g, cap,
+    setPressed(p) { pressed = p; apply(); },
+    setHover(h) { hovered = h; apply(); },
   };
 }
 
-function makeStrip({ label }) {
+function makeStrip({ label, id }) {
   const g = new THREE.Group();
   const mat = new THREE.MeshStandardMaterial({ color: 0x555566, roughness: 0.5, emissive: 0xffffff, emissiveIntensity: 0.0 });
   const slab = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.004, 0.022), mat);
+  slab.userData.gpButton = id; // raycast target id for click-to-test
   g.add(slab);
   const labelMesh = makeLabel(label, 0.006);
   labelMesh.rotation.x = -Math.PI / 2;
   labelMesh.position.y = 0.003;
   g.add(labelMesh);
   const baseY = slab.position.y;
+  let pressed = false, hovered = false;
+  const apply = () => {
+    slab.position.y = baseY + (pressed ? -PRESS_DEPTH * 0.6 : 0);
+    mat.emissiveIntensity = pressed ? 0.8 : (hovered ? 0.35 : 0.0);
+    mat.color.setHex(pressed ? 0x88ddff : (hovered ? 0x6f8fa0 : 0x555566));
+  };
   return {
-    group: g,
-    setPressed(p) {
-      slab.position.y = baseY + (p ? -PRESS_DEPTH * 0.6 : 0);
-      mat.emissiveIntensity = p ? 0.8 : 0.0;
-      mat.color.setHex(p ? 0x88ddff : 0x555566);
-    },
+    group: g, cap: slab,
+    setPressed(p) { pressed = p; apply(); },
+    setHover(h) { hovered = h; apply(); },
   };
 }
 
@@ -138,20 +161,36 @@ function buildDpad() {
   const activeEmit = 0x88ddff;
 
   // Each arm is a small box offset from centre. Up/Down on Z (because
-  // the gamepad's "forward" is +Z); Left/Right on X.
+  // the gamepad's "forward" is +Z); Left/Right on X. Each arm tracks its own
+  // pressed/hover state so click-to-test can drive a single direction while the
+  // physical-axis path (setAxes) drives them as a set — they never run at once
+  // (axes only fire for the held pad; clicks only for an un-held pad).
   const armX = 0.013, armY = 0.008, armZ = 0.013;
-  const arms = {};
-  const make = (dx, dz) => {
+  const make = (dx, dz, id) => {
     const mat = new THREE.MeshStandardMaterial({ color: restColor, roughness: 0.7, emissive: restEmit, emissiveIntensity: 0.0 });
-    const m = new THREE.Mesh(new THREE.BoxGeometry(armX, armY, armZ), mat);
-    m.position.set(dx, 0, dz);
-    g.add(m);
-    return { mesh: m, mat };
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(armX, armY, armZ), mat);
+    mesh.position.set(dx, 0, dz);
+    mesh.userData.gpButton = id; // raycast target id for click-to-test
+    g.add(mesh);
+    let pressed = false, hovered = false;
+    const apply = () => {
+      mat.color.setHex(pressed ? activeColor : restColor);
+      mat.emissive.setHex(pressed ? activeEmit : restEmit);
+      mat.emissiveIntensity = pressed ? 1.0 : (hovered ? 0.4 : 0.0);
+      mesh.position.y = pressed ? -PRESS_DEPTH * 0.5 : 0;
+    };
+    return {
+      mesh,
+      setPressed(p) { pressed = p; apply(); },
+      setHover(h) { hovered = h; apply(); },
+    };
   };
-  arms.left  = make(-armX, 0);
-  arms.right = make( armX, 0);
-  arms.up    = make(0, -armZ); // -Z is "up" if gamepad faces away from user
-  arms.down  = make(0,  armZ);
+  const arms = {
+    left:  make(-armX, 0, 'left'),
+    right: make( armX, 0, 'right'),
+    up:    make(0, -armZ, 'up'),   // -Z is "up" if gamepad faces away from user
+    down:  make(0,  armZ, 'down'),
+  };
 
   // Centre cap so the cross looks coherent.
   const centre = new THREE.Mesh(
@@ -160,21 +199,14 @@ function buildDpad() {
   );
   g.add(centre);
 
-  const setArm = ({ mesh, mat }, active) => {
-    mat.color.setHex(active ? activeColor : restColor);
-    mat.emissive.setHex(active ? activeEmit : restEmit);
-    mat.emissiveIntensity = active ? 1.0 : 0.0;
-    const baseY = 0;
-    mesh.position.y = baseY + (active ? -PRESS_DEPTH * 0.5 : 0);
-  };
-
   return {
     group: g,
+    arms,
     setAxes(x, y) {
-      setArm(arms.left,  x <= -DPAD_THRESH);
-      setArm(arms.right, x >=  DPAD_THRESH);
-      setArm(arms.up,    y <= -DPAD_THRESH);
-      setArm(arms.down,  y >=  DPAD_THRESH);
+      arms.left.setPressed(x <= -DPAD_THRESH);
+      arms.right.setPressed(x >=  DPAD_THRESH);
+      arms.up.setPressed(y <= -DPAD_THRESH);
+      arms.down.setPressed(y >=  DPAD_THRESH);
     },
   };
 }

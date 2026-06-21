@@ -15,9 +15,8 @@
 // grab on a gamepad that a remote peer is using.
 
 import * as THREE from 'three';
+import { createGamepad } from './Gamepad.js';
 
-// A small controller-pad silhouette for the ghost: thin rounded-ish box.
-const GHOST_GEOM = new THREE.BoxGeometry(0.14, 0.06, 0.09);
 const HAND_OFFSET = new THREE.Vector3(0, 0, -0.06);   // just past the hand cone
 const HEAD_OFFSET = new THREE.Vector3(0.2, -0.1, -0.18); // desktop fallback
 
@@ -50,9 +49,12 @@ export class GhostGamepadMgr {
   constructor({ avatars, gamepadObjs }) {
     this.avatars = avatars;
     this.gamepadObjs = gamepadObjs;      // cableId -> Object3D
-    this._ghosts = new Map();            // cableId -> { mesh, holder }
+    this._ghosts = new Map();            // cableId -> { group, holder }
     this._heldBy = new Map();            // cableId -> holder peerId (for isRemotelyHeld)
     this._hidden = new Map();            // cableId -> Object3D we hid (real local gamepad)
+    // Last button state received for a pad (M2 'gp' wire). Replayed onto a ghost
+    // the moment it spawns, so a ghost created after the first packet isn't blank.
+    this._lastInput = new Map();         // cableId -> input object for setInput
   }
 
   /**
@@ -83,11 +85,28 @@ export class GhostGamepadMgr {
       const attach = this._attachPoint(h.holder, h.hand);
       if (!attach) continue; // avatar not spawned yet — retry next tick (gamepad stays hidden)
 
-      const mesh = new THREE.Mesh(GHOST_GEOM, this._ghostMat(h.objId));
-      mesh.position.copy(h.hand ? HAND_OFFSET : HEAD_OFFSET);
-      attach.add(mesh);
-      this._ghosts.set(h.objId, { mesh, holder: h.holder });
+      // A real gamepad mesh (not a bare box) so a remote peer's button presses
+      // animate on the ghost — driven by applyInput() from the 'gp' wire channel.
+      const group = createGamepad({ position: h.hand ? HAND_OFFSET : HEAD_OFFSET });
+      this._tintGhost(group, h.objId);
+      attach.add(group);
+      this._ghosts.set(h.objId, { group, holder: h.holder });
+      // Replay the last-known button state so it isn't blank for a frame.
+      const last = this._lastInput.get(h.objId);
+      if (last) group.userData.setInput?.(last);
     }
+  }
+
+  /**
+   * Drive a remotely-held pad's button visuals from a 'gp' wire payload
+   * ({ a, b, start, select, axisX, axisY }). Stored so a not-yet-spawned ghost
+   * picks it up on creation; applied immediately if the ghost exists.
+   */
+  applyInput(cableId, input) {
+    if (!input) return;
+    this._lastInput.set(cableId, input);
+    const g = this._ghosts.get(cableId);
+    if (g) g.group.userData.setInput?.(input);
   }
 
   /** True if the gamepad with the given cableId is held by a remote peer. */
@@ -100,19 +119,24 @@ export class GhostGamepadMgr {
     return handObj || this.avatars.getHead(holder) || null;
   }
 
-  _ghostMat(cableId) {
-    // Tint by which port/player this pad drives (matching PLAYER_CORD_COLORS).
+  // Make a full gamepad mesh read as a "ghost": semi-transparent, with the body
+  // emissively tinted by which port/player the pad drives (matching the cord
+  // colours). createGamepad builds fresh per-instance materials, so mutating them
+  // here never touches the real local pad.
+  _tintGhost(group, cableId) {
     const PLAYER_COLORS = [0x33cc55, 0x3388ff, 0xffaa33, 0xcc55dd];
-    // cableId is 'gp-N', port = N-1
-    const m = cableId.match(/^gp-(\d+)$/);
+    const m = cableId.match(/^gp-(\d+)$/);          // cableId is 'gp-N', port = N-1
     const port = m ? (parseInt(m[1], 10) - 1) : 0;
-    const hex = PLAYER_COLORS[port % PLAYER_COLORS.length];
-    return new THREE.MeshStandardMaterial({
-      color: new THREE.Color(hex),
-      roughness: 0.5,
-      metalness: 0.05,
-      transparent: true,
-      opacity: 0.65,
+    const tint = new THREE.Color(PLAYER_COLORS[port % PLAYER_COLORS.length]);
+    group.traverse((o) => {
+      const mat = o.material;
+      if (!mat) return;
+      for (const mm of Array.isArray(mat) ? mat : [mat]) {
+        mm.transparent = true;
+        mm.opacity = 0.7;
+        mm.depthWrite = false;
+        if (mm.emissive) { mm.emissive.copy(tint); mm.emissiveIntensity = Math.max(mm.emissiveIntensity ?? 0, 0.35); }
+      }
     });
   }
 
@@ -131,11 +155,16 @@ export class GhostGamepadMgr {
   _removeGhost(cableId) {
     const g = this._ghosts.get(cableId);
     if (g) {
-      g.mesh.parent?.remove(g.mesh);
-      g.mesh.material?.dispose();
+      g.group.parent?.remove(g.group);
+      g.group.traverse((o) => {
+        o.geometry?.dispose?.();
+        const mat = o.material;
+        if (mat) for (const mm of Array.isArray(mat) ? mat : [mat]) mm.dispose?.();
+      });
       this._ghosts.delete(cableId);
     }
     this._heldBy.delete(cableId);
+    this._lastInput.delete(cableId);
     this._unhideGamepad(cableId);
   }
 

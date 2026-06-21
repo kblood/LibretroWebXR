@@ -129,6 +129,19 @@ export class Hub {
     return { direct: { to: msg.to, msg: { ...msg, from: fromPeerId } } };
   }
 
+  /**
+   * Peer sent a WIRE (M2 transient relay). Stamp the real sender id and return a
+   * broadcast to everyone else — exactly like pose(), but for arbitrary per-frame
+   * ephemera (live drag, pad button bitmasks). Deliberately NOT persisted: late
+   * joiners don't replay it (it would be stale by the next frame). Dropped if the
+   * sender isn't in the room.
+   */
+  wire(roomId, peerId, msg) {
+    const room = this.rooms.get(roomId);
+    if (!room || !room.has(peerId)) return {};
+    return { broadcast: { msg: { ...msg, type: MSG.WIRE, id: peerId }, exclude: peerId } };
+  }
+
   /** Peer ids currently in a room (for the adapter's broadcast loop). */
   peerIds(roomId) {
     const room = this.rooms.get(roomId);
