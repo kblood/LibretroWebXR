@@ -16,6 +16,9 @@
     { "file": "freeware/lwx-nes-bomberman.nes", "system": "nes", "core": "fceumm", "title": "LWX Bomberman", "color": "#8a3a3a",
       "license": "CC0", "credits": "LibretroWebXR (game in games/nes-bomberman, built with cc65 + neslib; see scripts/make-nes-bomberman.mjs). Up to 4 players (Four Score): D-pad moves, A drops a bomb; power-ups under bricks; last one standing wins." },
 
+    { "file": "freeware/lwx-nes-gallery.nes", "system": "nes", "core": "nestopia", "title": "LWX Zap Gallery", "color": "#6a1a1a", "lightgun": true,
+      "license": "CC0", "credits": "LibretroWebXR (game in games/nes-gallery, built with cc65 + neslib; see scripts/make-nes-gallery.mjs). NES Zapper light-gun shooting gallery — grab the gun, shoot the bullseye for points (faster each hit); shooting the dark field or letting a target time out is a miss, 3 misses ends it. Boots with the Zapper on port 2. 2-player co-op: from the title, Zapper trigger = 1P; port-1 START = 2P shared-gun (alternating turns, one Zapper); a port-1 fire (2nd gun) = 2P duel (P1 on port 1, P2 on the Zapper) — duel's simultaneous two-gun aim awaits the multiport core." },
+
     { "file": "freeware/lwx-gb-snake.gb", "system": "gb", "core": "gambatte", "title": "LWX Snake (GB)", "color": "#3a8a3a",
       "license": "CC0", "credits": "LibretroWebXR (game in games/gb-snake, built with GBDK-2020; see scripts/make-gb-snake.mjs)" },
 
@@ -33,6 +36,12 @@
 
     { "file": "freeware/lwx-snes-demo.sfc", "system": "snes", "core": "snes9x", "title": "LWX SNES Demo", "color": "#3a2a6a",
       "license": "CC0", "credits": "LibretroWebXR (game in games/snes-demo, built with PVSnesLib 4.5.0; see scripts/make-snes-demo.mjs). LoROM 256K." },
+
+    { "file": "freeware/lwx-snes-scope.sfc", "system": "snes", "core": "snes9x", "title": "LWX Scope Range", "color": "#2a1a4a", "lightgun": true,
+      "license": "CC0", "credits": "LibretroWebXR (game in games/snes-scope, built with PVSnesLib + a generated CC0 sprite sheet; see scripts/make-snes-scope.mjs). SNES Super Scope shooting gallery — grab the Super Scope, shoot the centre dot to calibrate aim, then hit the bullseye targets for points (faster each hit); shooting the dark field or letting a target time out is a miss, 3 misses ends it. Boots with the Super Scope on port 2." },
+
+    { "file": "freeware/lwx-snes-opwolf.sfc", "system": "snes", "core": "snes9x", "title": "LWX Frontline Fury", "color": "#3a2a1a", "lightgun": true, "twoGun": true, "gunDevice": "justifier",
+      "license": "CC0", "credits": "LibretroWebXR (game in games/snes-opwolf, built with PVSnesLib + a generated CC0 sprite sheet; see scripts/make-snes-opwolf.mjs). Original CC0 Operation-Wolf-style on-rails two-gun shooter — advance through stages of enemy soldiers, drop them with the gun before they reach the front line, shoot OFF-screen to reload. Two-player co-op via the Konami Justifier (two guns on port 2: device 516 gun 1 / 772 gun 2). Falls back to a single Super Scope (device 260) when no Justifier is attached. Shoot the centre to calibrate + start." },
 
     { "file": "freeware/lwx-gba-paint.gba", "system": "gba", "core": "mgba", "title": "LWX Paint (GBA)", "color": "#3a5a8a",
       "license": "CC0", "credits": "LibretroWebXR (game in games/gba-paint, built with devkitARM + libtonc Mode 3; see scripts/make-gba-paint.mjs)" },
