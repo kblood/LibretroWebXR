@@ -202,6 +202,22 @@ let _peerGamepadCounter = 0;
 let _reconcileGunState = () => {};
 let _peerGunCounter = 0;
 
+// Net-session wiring bridge. ALL multiplayer-sync subsystems (ghosts, gamepad/
+// gun/prop reconcilers, the window.__ghost/__props hooks, etc.) are built inside
+// buildCartridgeWorld and need the build-local closures (cartridges, editor,
+// built.placed, ...). buildCartridgeWorld assigns the real wiring closure to
+// _wireNetSession so BOTH entry points can trigger it: the ?session= URL
+// auto-join (net exists at build → wired during build) AND the in-app Join
+// widget (net created AFTER the world is built → connectToRoom calls this to
+// wire post-build). No-op stub until buildCartridgeWorld runs.
+// FOLLOW-UP (known limitation, intentionally not fixed here): the wired managers
+// capture `net.avatars` etc. at first-wire, so a leave+widget-rejoin within one
+// build reads a stale net. The _netSessionWired guard blocks re-wire within a
+// build on purpose — first-join (the actual gap) is fixed; rejoin is no worse
+// than before this change.
+let _wireNetSession = () => {};
+let _netSessionWired = false;
+
 // Prop room-layout sync: reconciler installed once buildCartridgeWorld sets up
 // the editor and built.placed. No-op stub until then.
 // Called whenever a `prop:*` STATE key arrives (including late-join snapshot).
@@ -340,6 +356,13 @@ function connectToRoom(room, nick, color) {
   net = newNet;
   net.connect();
   window.__net = net.debugApi();
+
+  // Wire all multiplayer-sync subsystems for this session. On the ?session= URL
+  // auto-join this runs during module eval while _wireNetSession is still the
+  // no-op stub (buildCartridgeWorld wires once, later). On an in-app widget join
+  // the world is already built, so _wireNetSession is the real closure → this is
+  // what actually wires ghosts + the _reconcile* functions for a widget-joiner.
+  _wireNetSession();
 
   // Tag logger entries with this session for the /logs viewer.
   logger._sessionId = room;
@@ -2328,7 +2351,18 @@ async function buildCartridgeWorld() {
   // Held-object sync (M0): show a ghost cartridge in a remote peer's hand (and
   // hide our copy) for each cart they're holding. Reconciles each frame from the
   // shared STATE channel. Only in a session; exposed early for headless smokes.
-  if (net) {
+  //
+  // The whole block body is wrapped in _wireNetSession (a module-level closure)
+  // so it can be triggered EITHER at build (?session= auto-join, net already
+  // exists) OR after the world is built (in-app Join widget — connectToRoom calls
+  // _wireNetSession post-build). The body captures build-local vars (cartridges,
+  // editor, built.placed, ...) so it must be defined inline here. The
+  // _netSessionWired guard prevents double-registering scene tick callbacks /
+  // re-running within a single build.
+  _netSessionWired = false; // fresh build → allow (re)wiring this session
+  _wireNetSession = () => {
+    if (_netSessionWired) return; // already wired this build (no double ticks)
+    _netSessionWired = true;
     const getCartByObjId = (objId) => cartridges.find((c) => c.userData.file === objId) || null;
     const ghostMgr = new GhostCartMgr({ avatars: net.avatars, getCartByObjId });
     scene.addTickCallback(() => {
@@ -2711,7 +2745,10 @@ async function buildCartridgeWorld() {
         return true;
       },
     };
-  }
+  };
+  // ?session= URL auto-join path: net already exists at build → wire now, exactly
+  // as before this refactor. The widget-join path wires later via connectToRoom.
+  if (net) _wireNetSession();
 
   // Flat-screen controls: mouse-look + WASD + click-to-interact, so the in-VR
   // features are usable on a desktop. Inert while presenting (XR controllers win).
