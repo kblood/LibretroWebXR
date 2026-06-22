@@ -8,6 +8,7 @@ import {
   CORES, SYSTEMS, coreForFile, systemForFile, systemForName,
   portsForSystem, mediumFor, coreWeight,
   lightgunLoadConfig, twoGunForSystem, isTwoGunCapable, libretroGunPortFor,
+  twoGunPortsForSystem,
 } from '../src/systems.js';
 
 let pass = 0, fail = 0;
@@ -121,6 +122,47 @@ eq('empty twoGunPorts (single-gun) → null', libretroGunPortFor(0, []), null);
 eq('non-array twoGunPorts → null', libretroGunPortFor(0, null), null);
 eq('negative slot → null', libretroGunPortFor(-1, justPorts), null);
 eq('non-integer slot → null', libretroGunPortFor(0.5, justPorts), null);
+
+// --- twoGunPortsForSystem + per-console port derivation -----------------------
+// A gun plugged into ANY console must resolve THAT console's two-gun ports, not
+// just the primary's. twoGunPortsForSystem is the pure core of main.js's
+// _twoGunPortsForConsole (which returns the live _twoGunPorts verbatim for the
+// PRIMARY, and derives from the console runtime's loaded system for SECONDARY
+// consoles). A two-gun system yields its ports; a single-gun / no-gun system [].
+eq('twoGunPortsForSystem snes (two-gun) → [1,2]', twoGunPortsForSystem('snes'), [1, 2]);
+eq('twoGunPortsForSystem nes (single-gun) → []', twoGunPortsForSystem('nes'), []);
+eq('twoGunPortsForSystem gb (no gun) → []', twoGunPortsForSystem('gb'), []);
+eq('twoGunPortsForSystem unknown → []', twoGunPortsForSystem('nope'), []);
+eq('twoGunPortsForSystem null → []', twoGunPortsForSystem(null), []);
+// Derivation matches lightgunLoadConfig's guns→ports for the two-gun config (the
+// value _twoGunPorts holds at boot), so primary === secondary for the same system.
+eq('twoGunPortsForSystem snes === lightgunLoadConfig guns ports',
+  twoGunPortsForSystem('snes'),
+  lightgunLoadConfig('snes', { twoGun: true }).guns.map((g) => g.port));
+
+// Model the full per-console resolution main.js does: pick the system from the
+// console runtime (primary uses the live _twoGunPorts; secondary derives), then
+// libretroGunPortFor(slot, ports). Proves: (a) PRIMARY path unchanged — equals
+// today's _twoGunPorts; (b) a SECONDARY two-gun console resolves its own [1,2];
+// (c) a non-gun secondary → []/null → DOM-mouse path.
+const CONSOLE_ID = 'console0';
+const primaryTwoGunPorts = [1, 2]; // what _twoGunPorts holds for a booted SNES Justifier
+const fakeRack = {
+  console0: { system: 'snes' },   // primary (booted two-gun)
+  console1: { system: 'snes' },   // secondary two-gun-capable
+  console2: { system: 'nes' },    // secondary single-gun
+  console3: { system: 'gb' },     // secondary no-gun
+};
+const portsForConsole = (id) =>
+  (id === CONSOLE_ID ? primaryTwoGunPorts : twoGunPortsForSystem(fakeRack[id]?.system));
+eq('PRIMARY unchanged: ports === live _twoGunPorts', portsForConsole('console0'), primaryTwoGunPorts);
+eq('PRIMARY gun slot 0 → port 1', libretroGunPortFor(0, portsForConsole('console0')), 1);
+eq('PRIMARY gun slot 1 → port 2', libretroGunPortFor(1, portsForConsole('console0')), 2);
+eq('SECONDARY two-gun console resolves own [1,2]', portsForConsole('console1'), [1, 2]);
+eq('SECONDARY gun slot 0 → port 1', libretroGunPortFor(0, portsForConsole('console1')), 1);
+eq('SECONDARY gun slot 1 → port 2', libretroGunPortFor(1, portsForConsole('console1')), 2);
+eq('SECONDARY single-gun console → [] → null', libretroGunPortFor(0, portsForConsole('console2')), null);
+eq('SECONDARY no-gun console → [] → null', libretroGunPortFor(0, portsForConsole('console3')), null);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

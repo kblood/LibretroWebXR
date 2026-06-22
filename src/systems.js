@@ -190,6 +190,19 @@ export function isTwoGunCapable(systemId) {
 }
 
 /**
+ * The ordered libretro gun PORTs a system's two-gun device seats its guns on
+ * (e.g. SNES Justifier → [1, 2]), or [] for a single-gun / no-gun system. This is
+ * the per-system value `_twoGunPorts` holds at boot for the active two-gun config;
+ * exposed pure so a gun plugged into ANY console can resolve THAT console's ports
+ * from its loaded system (main.js `_twoGunPortsForConsole`). Always returns an
+ * array, so it feeds straight into libretroGunPortFor.
+ */
+export function twoGunPortsForSystem(systemId) {
+  const tg = SYSTEMS[systemId]?.lightgun2;
+  return tg ? [...tg.ports] : [];
+}
+
+/**
  * Build the EmulatorClient.start() light-gun wiring for a system, or null if it
  * has no gun. Returns { core, inputDevices, coreOptions, remapName } where:
  *   • core         — the (patched) core that implements the gun. May differ from

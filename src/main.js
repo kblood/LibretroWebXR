@@ -34,7 +34,7 @@ import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, libretroGunPortFor, extOf } from './systems.js';
+import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, libretroGunPortFor, twoGunPortsForSystem, extOf } from './systems.js';
 import { Patchbay } from './Patchbay.js';
 import { RackMgr } from './RackMgr.js';
 import { ConsoleRuntime } from './ConsoleRuntime.js';
@@ -1313,6 +1313,23 @@ function _gunSlotIndex(gun, consoleId) {
   return guns.findIndex((c) => c.controllerId === myId);
 }
 
+// The ordered libretro gun PORTs the two-gun device on `consoleId` seats its guns
+// on (e.g. SNES Justifier → [1, 2]), or [] when that console's core is single-gun /
+// no-gun. This is what makes a gun plugged into ANY console drive that console's
+// OWN game, not just the primary's. For the PRIMARY console we return the live
+// per-boot `_twoGunPorts` verbatim, so the shipped primary behaviour is byte-for-
+// byte unchanged (its value already encodes the per-game twoGun/armed decision via
+// _twoGunActiveFor at boot/reboot). For a SECONDARY console we derive the ports from
+// that console runtime's loaded system: a two-gun-capable core yields its lightgun2
+// ports, anything else yields [] → libretroGunPortFor returns null → the proven
+// single-gun DOM-mouse path (so a non-gun secondary simply doesn't route aim).
+function _twoGunPortsForConsole(consoleId) {
+  if (consoleId == null) return [];
+  if (consoleId === CONSOLE_ID) return _twoGunPorts;
+  const system = rackMgr.get(consoleId)?.system ?? _consoleSystems.get(consoleId) ?? null;
+  return twoGunPortsForSystem(system);
+}
+
 function cordColorForPlayer(player) {
   return PLAYER_CORD_COLORS[(player - 1) % PLAYER_CORD_COLORS.length];
 }
@@ -2006,14 +2023,18 @@ async function buildCartridgeWorld() {
     // Kth of the active two-gun device's libretro ports (libretroGunPortFor). This
     // routes each gun to its OWN per-port aim slot in the patched multiport core
     // (webgun_set), and lets swapping the two guns' jacks swap their players.
-    // Returns null for every single-gun game (_twoGunPorts is []), an unplugged
-    // gun, or a gun plugged into a non-primary console (secondary two-gun device =
-    // a follow-up) — all of which leave sendLightgun on the proven DOM-mouse path
-    // UNCHANGED, so the shipped Zapper / Super Scope behaviour is untouched.
+    // Routes to the gun's seated console's OWN two-gun device: the Kth gun on
+    // WHATEVER console it's plugged into drives the Kth of THAT console's two-gun
+    // ports (_twoGunPortsForConsole). For the primary this equals the live
+    // _twoGunPorts (unchanged); for a secondary it derives from that console
+    // runtime's loaded system. Returns null for every single-gun game ([] ports),
+    // an unplugged gun, or a non-gun secondary console — all of which leave
+    // sendLightgun on the proven DOM-mouse path UNCHANGED, so the shipped Zapper /
+    // Super Scope behaviour is untouched.
     portForGun: (gun) => {
       const seat = cable.portOf(gun?.userData?.cableId);
-      if (!seat || seat.consoleId !== CONSOLE_ID) return null;
-      return libretroGunPortFor(_gunSlotIndex(gun, seat.consoleId), _twoGunPorts);
+      if (!seat) return null;
+      return libretroGunPortFor(_gunSlotIndex(gun, seat.consoleId), _twoGunPortsForConsole(seat.consoleId));
     },
     // Telemetry so a headset session is diagnosable from the logs without seeing
     // the screen (docs/HEADSET_LIGHTGUN_VALIDATION.md). Throttled aim + edge fire.
