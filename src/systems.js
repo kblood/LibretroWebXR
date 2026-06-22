@@ -46,7 +46,7 @@ export const CORES = {
   mednafen_vb:       { url: 'cores/mednafen_vb_libretro.js',       exts: ['vb','vboy'],                  label: 'Virtual Boy (mednafen)',      style: 'module', license: 'GPLv2', weight: 2 },
   picodrive:         { url: 'cores/picodrive_libretro.js',         exts: ['sms','gg','md','gen','smd','32x','cue','iso'], label: 'Sega multi (picodrive)', style: 'module', license: 'Non-commercial', weight: 2 },
   gearsystem:        { url: 'cores/gearsystem_libretro.js',        exts: ['sms','gg','sg'],              label: 'SMS/GG (gearsystem)',         style: 'module', license: 'GPLv3', weight: 1 },
-  fceumm:            { url: 'cores/fceumm_libretro.js',            exts: [],                             label: 'NES (fceumm)',                style: 'module', license: 'GPLv2', weight: 1 },
+  fceumm:            { url: 'cores/fceumm_libretro.js',            exts: [],                             label: 'NES (fceumm)',                style: 'module', license: 'GPLv2', weight: 1, remapName: 'FCEUmm' },
   gambatte:          { url: 'cores/gambatte_libretro.js',          exts: ['gb','gbc'],                   label: 'Game Boy/Color (gambatte)',   style: 'module', license: 'GPLv2', weight: 1 },
   mednafen_pce_fast: { url: 'cores/mednafen_pce_fast_libretro.js', exts: ['pce'],                        label: 'PC Engine/TurboGrafx (mednafen_pce_fast)', style: 'module', license: 'GPLv2', weight: 1 },
   vice_x64:          { url: 'cores/vice_x64_libretro.js',          exts: ['d64','d71','d80','d81','d82','g64','x64','t64','tap','prg','p00','crt'], label: 'C64 (VICE)', style: 'module', license: 'GPLv2', weight: 2 },
@@ -253,6 +253,51 @@ export function libretroGunPortFor(cableSlotIndex, twoGunPorts) {
   if (!Number.isInteger(cableSlotIndex) || cableSlotIndex < 0) return null;
   const p = twoGunPorts[cableSlotIndex];
   return Number.isInteger(p) ? p : null;
+}
+
+// --- NES Four Score (4-player multitap) -------------------------------------
+// A real NES has only two controller ports; a 4-player NES ROM reads players
+// 3 and 4 over the Four Score multitap's serial protocol. For the fceumm core
+// to present that to the ROM, the libretro layer must connect a controller
+// device on the player-3/4 ports — fceumm enables its Four Score whenever
+// ports 2 and 3 (0-based; players 3 and 4) are set to RETRO_DEVICE_GAMEPAD and
+// disables it otherwise (verified from libretro-fceumm src/drivers/libretro/
+// libretro.c: `if (nes_input.type[2]==GAMEPAD || nes_input.type[3]==GAMEPAD)
+// FCEUI_DisableFourScore(0); else FCEUI_DisableFourScore(1);`). There is no
+// `fceumm_4player` core option — it is purely a port-device assignment.
+//
+// RETRO_DEVICE_GAMEPAD = RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 1), and
+// SUBCLASS(base,id) = ((id+1)<<8)|base, so with JOYPAD=1 → ((1+1)<<8)|1 = 513.
+// We assign 513 to players 3 and 4 (ports 2,3); players 1,2 stay on the core's
+// default JOYPAD/Auto, so 1- and 2-player NES games are unaffected (the ROM
+// only reads the pads it polls — an enabled-but-unused Four Score is inert).
+//
+// fceumm-only: the system's default core is nestopia (a different, proven
+// Zapper path that handles its own input wiring), and the shipped 4-player NES
+// homebrew (LWX Bomberman) pins fceumm anyway. Keeping this fceumm-scoped
+// leaves every nestopia and non-NES boot byte-for-byte unchanged.
+export const RETRO_DEVICE_NES_GAMEPAD = 513; // SUBCLASS(JOYPAD,1)
+
+/**
+ * Build the EmulatorClient.start() Four Score wiring for an NES boot, or null
+ * when it doesn't apply. Returns { inputDevices, remapName } where:
+ *   • inputDevices — { 3: 513, 4: 513 } connects players 3+4 as gamepads, which
+ *                    is what makes fceumm enable the Four Score multitap so the
+ *                    ROM can read P3/P4 over the serial protocol.
+ *   • remapName    — fceumm's RA library name ('FCEUmm') for its per-core remap
+ *                    file; the device only connects at boot via that .rmp.
+ * Applies only when systemId === 'nes', the boot core is fceumm, and the system
+ * exposes 4 ports (portsForSystem). Otherwise returns null (no-op) so single/
+ * two-player NES and every other system are untouched. Pure registry logic.
+ */
+export function fourScoreLoadConfig(systemId, coreName) {
+  if (systemId !== 'nes') return null;
+  if (coreName !== 'fceumm') return null;
+  if (portsForSystem(systemId) < 4) return null;
+  return {
+    inputDevices: { 3: RETRO_DEVICE_NES_GAMEPAD, 4: RETRO_DEVICE_NES_GAMEPAD },
+    remapName: CORES.fceumm?.remapName ?? null,
+  };
 }
 
 // .bin is ambiguous (Atari 2600 / Mega Drive / PSX / …). When detection sees a

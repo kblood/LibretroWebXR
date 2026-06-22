@@ -34,7 +34,7 @@ import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, libretroGunPortFor, extOf } from './systems.js';
+import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, libretroGunPortFor, fourScoreLoadConfig, extOf } from './systems.js';
 import { Patchbay } from './Patchbay.js';
 import { RackMgr } from './RackMgr.js';
 import { ConsoleRuntime } from './ConsoleRuntime.js';
@@ -2248,17 +2248,21 @@ async function buildCartridgeWorld() {
     // that override the registry-derived config.
     const twoGun = _twoGunActiveFor(meta);
     const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system, { twoGun }) : null;
-    const inputDevices = window.__forceInputDevices || gun?.inputDevices || coreInfo.inputDevices;
+    // The gun core can differ from the cart's detected core (e.g. SMS detects as
+    // picodrive but its Light Phaser is provided by genesis_plus_gx) — boot the
+    // gun core in that case, mirroring loadCartridge. Falls back to coreInfo.
+    const bootCore = (gun && CORES[gun.core]) ? { ...CORES[gun.core], name: gun.core } : coreInfo;
+    // NES Four Score: un-gunned NES/fceumm boots connect players 3+4 as gamepads
+    // so fceumm enables the multitap (P3/P4 over the serial protocol). No-op for
+    // nestopia, non-NES, and gun boots. __force* test hooks still win.
+    const fourScore = gun ? null : fourScoreLoadConfig(meta.system, bootCore.name);
+    const inputDevices = window.__forceInputDevices || gun?.inputDevices || fourScore?.inputDevices || coreInfo.inputDevices;
     const coreOptions = window.__forceCoreOptions
       ? { ...(coreInfo.coreOptions || {}), ...window.__forceCoreOptions }
       : (gun ? { ...(coreInfo.coreOptions || {}), ...gun.coreOptions } : coreInfo.coreOptions);
     // remapName: the RA library name for the per-core remap file that connects an
     // inputDevices port override at boot.
-    const remapName = window.__forceRemapName || gun?.remapName || coreInfo.remapName;
-    // The gun core can differ from the cart's detected core (e.g. SMS detects as
-    // picodrive but its Light Phaser is provided by genesis_plus_gx) — boot the
-    // gun core in that case, mirroring loadCartridge. Falls back to coreInfo.
-    const bootCore = (gun && CORES[gun.core]) ? { ...CORES[gun.core], name: gun.core } : coreInfo;
+    const remapName = window.__forceRemapName || gun?.remapName || fourScore?.remapName || coreInfo.remapName;
     await client.start(primaryCanvas(), buf, { coreUrl: bootCore.url, coreName: bootCore.name, moduleStyle: bootCore.style, contentExt: extOf(name), coreOptions, inputDevices, remapName });
     rackMgr.get(CONSOLE_ID)?.noteLoaded(bootCore.name, { system: meta.system, title });
     currentCore = bootCore.name;
@@ -4358,10 +4362,17 @@ async function loadCartridge(meta, { echo = true } = {}) {
     const core = CORES[coreName];
     if (!core) throw new Error(`no core registered as "${coreName}"`);
     const coreOptions = gun ? { ...(core.coreOptions || {}), ...gun.coreOptions } : core.coreOptions;
-    logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url, lightgun: !!gun, twoGun: !!(gun && gun.guns?.length > 1) });
+    // NES Four Score: when this is an (un-gunned) NES/fceumm boot, connect
+    // players 3+4 as gamepads so fceumm enables its Four Score multitap and the
+    // ROM can read P3/P4 over the serial protocol. No-op (null) for nestopia,
+    // non-NES systems, and gun boots — those keep their exact prior wiring.
+    const fourScore = gun ? null : fourScoreLoadConfig(meta.system, coreName);
+    const inputDevices = gun?.inputDevices ?? fourScore?.inputDevices;
+    const remapName = gun?.remapName ?? fourScore?.remapName ?? core.remapName;
+    logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url, lightgun: !!gun, twoGun: !!(gun && gun.guns?.length > 1), fourScore: !!fourScore });
     await client.start(primaryCanvas(), buf, {
       coreUrl: core.url, coreName, moduleStyle: core.style, contentExt: extOf(meta.file),
-      coreOptions, inputDevices: gun?.inputDevices, remapName: gun?.remapName ?? core.remapName,
+      coreOptions, inputDevices, remapName,
     });
     rackMgr.get(CONSOLE_ID)?.noteLoaded(coreName, { system: meta.system, title: meta.title });
     currentCore = coreName;
@@ -4527,8 +4538,13 @@ async function swapConsoleCore(consoleId, meta) {
   const core = CORES[meta.core];
   if (!core) throw new Error(`no core registered as "${meta.core}"`);
   const buf = await resolveRom(meta);
+  // NES Four Score on a secondary console: same fceumm-only P3/P4 gamepad wiring
+  // as the primary path. null (no-op) for nestopia / non-NES boots.
+  const fourScore = fourScoreLoadConfig(meta.system, meta.core);
   await bootFreshRuntime(consoleId, meta, {
     core: { ...core, name: meta.core }, romBuffer: buf,
+    inputDevices: fourScore?.inputDevices,
+    remapName: fourScore?.remapName ?? core.remapName,
   });
   // Persist so a later reload restores the game now on this console.
   _updateSpawnedMeta(consoleId, meta);

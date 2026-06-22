@@ -8,6 +8,7 @@ import {
   CORES, SYSTEMS, coreForFile, systemForFile, systemForName,
   portsForSystem, mediumFor, coreWeight,
   lightgunLoadConfig, twoGunForSystem, isTwoGunCapable, libretroGunPortFor,
+  fourScoreLoadConfig, RETRO_DEVICE_NES_GAMEPAD,
 } from '../src/systems.js';
 
 let pass = 0, fail = 0;
@@ -121,6 +122,35 @@ eq('empty twoGunPorts (single-gun) → null', libretroGunPortFor(0, []), null);
 eq('non-array twoGunPorts → null', libretroGunPortFor(0, null), null);
 eq('negative slot → null', libretroGunPortFor(-1, justPorts), null);
 eq('non-integer slot → null', libretroGunPortFor(0.5, justPorts), null);
+
+// --- NES Four Score (4-player multitap) --------------------------------------
+// The libretro device id is RETRO_DEVICE_GAMEPAD = SUBCLASS(JOYPAD,1) =
+// ((1+1)<<8)|1 = 513. fceumm enables its Four Score whenever players 3/4 (ports
+// 2,3) are set to GAMEPAD (verified from libretro-fceumm src/drivers/libretro/
+// libretro.c). We seat 513 on players 3 and 4; players 1,2 keep their default.
+eq('RETRO_DEVICE_NES_GAMEPAD = 513 (SUBCLASS(JOYPAD,1))', RETRO_DEVICE_NES_GAMEPAD, 513);
+eq('fourScore arithmetic', ((1 + 1) << 8) | 1, 513);
+
+// fceumm core carries the RA library_name 'FCEUmm' so its per-core remap .rmp
+// (the only thing that connects a port device at boot in this web build) can be
+// written. Adding it is inert for plain fceumm boots (no inputDevices → no .rmp).
+eq('fceumm remapName = FCEUmm', CORES.fceumm?.remapName, 'FCEUmm');
+
+// Applies for NES + fceumm (the 4-player homebrew pins fceumm): P3+P4 → 513.
+const fs = fourScoreLoadConfig('nes', 'fceumm');
+ok('nes/fceumm four score non-null', !!fs);
+eq('nes/fceumm four score inputDevices', fs?.inputDevices, { 3: 513, 4: 513 });
+eq('nes/fceumm four score remapName', fs?.remapName, 'FCEUmm');
+
+// No-op everywhere else: nestopia (its own Zapper/input path), non-NES systems,
+// and unknown cores all return null so their boots stay byte-for-byte unchanged.
+eq('nes/nestopia four score → null', fourScoreLoadConfig('nes', 'nestopia'), null);
+eq('snes/snes9x four score → null', fourScoreLoadConfig('snes', 'snes9x'), null);
+eq('md/genesis four score → null', fourScoreLoadConfig('md', 'genesis_plus_gx'), null);
+eq('nes/unknown-core four score → null', fourScoreLoadConfig('nes', 'puae'), null);
+eq('non-nes/fceumm four score → null', fourScoreLoadConfig('gb', 'fceumm'), null);
+// nes still exposes the full 4-port row so the gate (portsForSystem >= 4) holds.
+eq('nes ports = 4', portsForSystem('nes'), 4);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
