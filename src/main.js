@@ -1689,7 +1689,29 @@ async function resolveWorld() {
 
   // Default: the built-in two-shelf layout (original behaviour).
   const collectionUrl = urlParams.get('collection') || 'roms/manifest.json';
-  return { room: defaultRoom(collectionUrl), inline: [] };
+  const room = defaultRoom(collectionUrl);
+  // Optional local overlay: if a GITIGNORED roms/local/local.collection.json is
+  // present on THIS server, add a shelf for it so the bare base URL surfaces the
+  // user's own sideloaded games (no long ?collection= to type on a headset).
+  // Absent on a clean git clone → loadCollection returns {games:[]} → skipped,
+  // so default behaviour is unchanged. Skipped when ?collection= is given (that's
+  // an explicit override of what to show).
+  if (!urlParams.get('collection')) {
+    try {
+      const localRef = 'roms/local/local.collection.json';
+      const localCol = await loadCollection(localRef);
+      if (localCol?.games?.length) {
+        room.collections.push(localRef);
+        // A freestanding bookcase (3 rows × 5 = up to 15 carts) on the open floor
+        // front-left, angled toward the player — compact + clearly in the initial
+        // eyeline (a wide wall shelf of 10 carts was too big / out of view).
+        room.props.push({ type: 'bookcase', id: 'bookcase-local', collection: localRef,
+          pos: [-1.5, 0, -1.4], rot: [0, 32, 0] });
+        console.log(`[main] local overlay: +${localCol.games.length} games on a bookcase (${localRef})`);
+      }
+    } catch (e) { /* no local overlay → default room unchanged */ }
+  }
+  return { room, inline: [] };
 }
 
 // Load every collection a room references into a { byKey, list } the builder
