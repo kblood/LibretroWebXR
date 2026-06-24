@@ -381,7 +381,9 @@ function disconnectFromRoom() {
   net.disconnect();
   net = null;
   window.__net = null;
-  logger._sessionId = null;
+  // Back to a findable solo bucket (not null → the shared 'default') so post-leave
+  // solo play stays diagnosable. See Logger.soloSession().
+  logger._sessionId = logger.soloSession();
   logger._nick = null;
 }
 
@@ -631,6 +633,32 @@ function _registerLightGun(obj) {
 function _twoGunActiveFor(meta) {
   const armed = !!(meta?.lightgun || window.__lightgunArmed);
   return armed && !!meta?.twoGun && isTwoGunCapable(meta?.system);
+}
+
+// Emit rich light-gun boot telemetry so a HEADSET session is diagnosable from the
+// remote log (dionysus.dk/logs) without seeing the screen. The thin rom-resolved
+// booleans (lightgun:true/false) couldn't answer "WHY didn't the gun connect" or
+// "on what device/port/options" — this records both the DECISION INPUTS
+// (cart-flagged? session-armed? two-gun?) and the RESOLVED wiring (gun core,
+// per-port devices, core-option keys, remap file). `where` tags the boot path so
+// the load / pick / arm-reboot / resume routes are distinguishable.
+function logLightgunBoot(where, meta, gun, extra = {}) {
+  logger?.event?.('lightgun-boot', {
+    where,
+    file: meta?.file ?? null,
+    system: meta?.system ?? null,
+    cartCore: meta?.core ?? null,
+    metaLightgun: !!meta?.lightgun,        // the cart/collection flag
+    armed: !!window.__lightgunArmed,       // session-armed (gun was grabbed)
+    metaTwoGun: !!meta?.twoGun,
+    gunConnected: !!gun,                   // did this boot seat a gun device?
+    gunCore: gun?.core ?? null,            // may differ from cartCore (SMS→genesis)
+    inputDevices: gun?.inputDevices ?? null, // { player: deviceId }
+    guns: gun?.guns ?? null,               // [{ device, port }]
+    coreOptions: gun?.coreOptions ? Object.keys(gun.coreOptions) : null,
+    remapName: gun?.remapName ?? null,
+    ...extra,
+  });
 }
 
 // The libretro gun PORT each gun drives is now derived live from the cable
@@ -2329,6 +2357,7 @@ async function buildCartridgeWorld() {
     // remapName: the RA library name for the per-core remap file that connects an
     // inputDevices port override at boot.
     const remapName = window.__forceRemapName || gun?.remapName || fourScore?.remapName || coreInfo.remapName;
+    logLightgunBoot('pickLocalRom', meta, gun, { forcedInputDevices: !!window.__forceInputDevices });
     await client.start(primaryCanvas(), buf, { coreUrl: bootCore.url, coreName: bootCore.name, moduleStyle: bootCore.style, contentExt: extOf(name), coreOptions, inputDevices, remapName });
     rackMgr.get(CONSOLE_ID)?.noteLoaded(bootCore.name, { system: meta.system, title });
     currentCore = bootCore.name;
@@ -4349,6 +4378,11 @@ function handleCartridgeInserted(meta, { echo = true } = {}) {
     // Keep the session (and host role) alive across the reload — a widget-joined
     // room has no ?session in the URL to auto-rejoin from.
     stashSessionRejoin();
+    // Telemetry: the cross-core reload is otherwise invisible in the remote log
+    // (the page restarts), yet it's exactly the path that used to drop the gun
+    // flags. Record it (and that they're now preserved) so a gun game booted via
+    // a core swap is diagnosable. Flushed keepalive across the reload.
+    logger?.event?.('boot-reload', { file: meta.file, fromCore: currentCore, toCore: meta.core, lightgun: !!meta.lightgun, twoGun: !!meta.twoGun });
     setStatus(`switching to ${meta.title}…`);
     location.reload();
     return;
@@ -4457,6 +4491,7 @@ async function loadCartridge(meta, { echo = true } = {}) {
     const inputDevices = gun?.inputDevices ?? fourScore?.inputDevices;
     const remapName = gun?.remapName ?? fourScore?.remapName ?? core.remapName;
     logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url, lightgun: !!gun, twoGun: !!(gun && gun.guns?.length > 1), fourScore: !!fourScore });
+    logLightgunBoot('loadCartridge', meta, gun);
     await client.start(primaryCanvas(), buf, {
       coreUrl: core.url, coreName, moduleStyle: core.style, contentExt: extOf(meta.file),
       coreOptions, inputDevices, remapName,
@@ -4702,6 +4737,7 @@ async function rebootPrimaryConsole(meta, gun) {
   if (!core) throw new Error(`no core registered as "${coreName}"`);
   const buf = await resolveRom(meta);
   const coreOptions = gun ? { ...(core.coreOptions || {}), ...gun.coreOptions } : core.coreOptions;
+  logLightgunBoot('arm-reboot', meta, gun, { live: true });
   const next = await bootFreshRuntime(CONSOLE_ID, meta, {
     core: { name: coreName, url: core.url, style: core.style },
     romBuffer: buf,

@@ -114,10 +114,26 @@ export class Logger {
       ? serverUrl
       : _detectServerUrl();
 
+    // Solo play (no room joined yet) otherwise dumps every entry into the shared
+    // 'default' bucket, where one device's boot/gun telemetry is indistinguishable
+    // from every other solo session — so it's effectively unfindable. Give each
+    // device a stable, unique solo session so its logs are greppable at
+    // /logs?session=solo-<id>. connectToRoom() later overrides this with the room
+    // name; disconnect falls back to it (see soloSession()).
+    if (this._sessionId === 'default') this._sessionId = this.soloSession();
+
     _installConsoleHooks(this);
     _installWindowHooks(this);
-    this._push('info', ['[Logger] remote logging ' + (this._serverUrl ? 'active → ' + this._serverUrl : 'console-only')]);
+    // Announce the active session + the exact read URL so a developer (or the user)
+    // can find THIS run's logs without guessing the bucket name.
+    const readUrl = this._serverUrl ? `${this._serverUrl}/logs?session=${this._sessionId}` : null;
+    this._push('info', [this._serverUrl
+      ? `[Logger] remote logging active → ${this._serverUrl} | session=${this._sessionId} | read: ${readUrl}`
+      : `[Logger] console-only | session=${this._sessionId}`]);
   }
+
+  /** Stable per-device solo session id (used until a room is joined). */
+  soloSession() { return 'solo-' + this._clientId; }
 
   /** Log a plain message at the given level (chains to the real console). */
   log  (...args) { this._push('log',   args); }
