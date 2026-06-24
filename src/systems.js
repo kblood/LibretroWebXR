@@ -106,13 +106,23 @@ export const SYSTEMS = {
   vb:        { label: 'Virtual Boy',        defaultCore: 'mednafen_vb',      cores: ['mednafen_vb'],                  exts: ['vb','vboy'],                  aliases: ['vb','virtual boy','virtualboy'],                         thumbnailRepo: 'Nintendo_-_Virtual_Boy',                         medium: 'cartridge' },
   md:        { label: 'Sega Genesis',       defaultCore: 'genesis_plus_gx',  cores: ['genesis_plus_gx','picodrive'],  exts: ['md','gen','smd'],             aliases: ['md','genesis','mega drive','megadrive','sega genesis'],  thumbnailRepo: 'Sega_-_Mega_Drive_-_Genesis',                    medium: 'cartridge',
     // Genesis Menacer (genesis_plus_gx). Device 516 = SUBCLASS(LIGHTGUN,1) on port
-    // index 1; reads the native RETRO_DEVICE_LIGHTGUN path (no read-mode option).
-    lightgun: { label: 'Menacer', core: 'genesis_plus_gx', device: 516, port: 1, coreOptions: {} } },
+    // index 1; reads the native RETRO_DEVICE_LIGHTGUN path. genesis_plus_gx defaults
+    // gun_input to the touchscreen path on a no-mouse (web) build, which never sees
+    // our synthetic mouse aim — force 'lightgun' so SCREEN_X/Y track the gun. The
+    // cursor option draws the in-game crosshair so the player can aim (NES/SNES guns
+    // enable their own crosshair; without it the SMS/MD gun aims blind).
+    lightgun: { label: 'Menacer', core: 'genesis_plus_gx', device: 516, port: 1, coreOptions: { genesis_plus_gx_gun_input: 'lightgun', genesis_plus_gx_gun_cursor: 'enabled' } } },
   sms:       { label: 'Sega Master System', defaultCore: 'picodrive',        cores: ['picodrive','gearsystem'],       exts: ['sms'],                        aliases: ['sms','master system','sega master system','mark iii'],   thumbnailRepo: 'Sega_-_Master_System_-_Mark_III',                medium: 'cartridge',
     // SMS Light Phaser. Device 260 = SUBCLASS(LIGHTGUN,0) on port index 0. Provided
     // by genesis_plus_gx (the patched, gun-capable SMS core) — NOT the system's
     // default picodrive core, so the gun forces a core switch when seated.
-    lightgun: { label: 'Light Phaser', core: 'genesis_plus_gx', device: 260, port: 0, coreOptions: {} } },
+    // genesis_plus_gx defaults gun_input to a touchscreen path on a no-mouse (web)
+    // build, which ignores our synthetic mouse aim → the gun "fires" (trigger is a
+    // button) but never hits (position dead). Force 'lightgun' so SCREEN_X/Y read
+    // the mouse. gun_cursor draws the crosshair so the player can actually aim —
+    // the NES Zapper / SNES Super Scope enable theirs; the Phaser had none, so it
+    // aimed blind (the user's "no crosshair, couldn't hit, but trigger used bullets").
+    lightgun: { label: 'Light Phaser', core: 'genesis_plus_gx', device: 260, port: 0, coreOptions: { genesis_plus_gx_gun_input: 'lightgun', genesis_plus_gx_gun_cursor: 'enabled' } } },
   gg:        { label: 'Sega Game Gear',     defaultCore: 'picodrive',        cores: ['picodrive','gearsystem'],       exts: ['gg'],                         aliases: ['gg','game gear','gamegear'],                             thumbnailRepo: 'Sega_-_Game_Gear',                               medium: 'cartridge' },
   sg1000:    { label: 'Sega SG-1000',       defaultCore: 'gearsystem',       cores: ['gearsystem','genesis_plus_gx'], exts: ['sg'],                         aliases: ['sg1000','sg-1000','sega sg-1000','sega sg1000','game 1000'], thumbnailRepo: 'Sega_-_SG-1000',                              medium: 'cartridge' },
   sega32x:   { label: 'Sega 32X',           defaultCore: 'picodrive',        cores: ['picodrive'],                    exts: ['32x'],                        aliases: ['sega32x','sega 32x','32x','mega 32x','super 32x'],        thumbnailRepo: 'Sega_-_32X',                                     medium: 'cartridge' },

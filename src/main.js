@@ -4332,6 +4332,13 @@ function handleCartridgeInserted(meta, { echo = true } = {}) {
       // Preserve ROM provenance across the reload so a picked/local cart
       // re-resolves from its OPFS cache (sha1) rather than a 404ing url fetch.
       rom: meta.rom,
+      // Preserve the light-gun flags too. A cross-core swap into a gun game
+      // (e.g. NES/nestopia → SNES/snes9x) reloads the page, and loadCartridge
+      // only connects the gun device when meta.lightgun (or a session-armed gun)
+      // is set. Dropping them here booted the gun game with NO gun device — the
+      // game saw only the regular controller. twoGun keeps the Justifier co-op
+      // boot (Lethal Enforcers) across the same reload.
+      lightgun: meta.lightgun, twoGun: meta.twoGun, gunDevice: meta.gunDevice,
     }));
     // Goal A: serialize the live room and bridge it across the reload so any
     // in-VR edits (moved shelves, added props, env changes) are not lost.
