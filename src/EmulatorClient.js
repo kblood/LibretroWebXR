@@ -45,6 +45,12 @@ const CORE_OPTIONS_PATH = RETROARCH_CFG_DIR + '/retroarch-core-options.cfg';
 const REMAP_DIR = RETROARCH_CFG_DIR + '/config/remaps';
 const STATE_DIR = '/home/web_user/retroarch/userdata/states';
 const STATE_PATH = STATE_DIR + '/rom.state';
+// RetroArch system directory — where cores look for BIOS / firmware. Some cores
+// (notably PUAE/Amiga) need a real boot ROM (Kickstart) here to run actual games
+// instead of a built-in replacement. We set it EXPLICITLY (RA otherwise derives a
+// default) and provision any opts.systemFiles into it before callMain. Empty for
+// cores that need nothing — identical to the prior unset/empty-default behaviour.
+const SYSTEM_DIR = '/home/web_user/retroarch/system';
 // `-c PATH` explicitly tells RA which config file to load. RA's default
 // search order is $XDG_CONFIG_HOME/retroarch/, $HOME/.config/retroarch/,
 // and $HOME/.retroarch.cfg — none of which is /home/web_user/retroarch/
@@ -101,6 +107,11 @@ export class EmulatorClient extends EventTarget {
     // lazily on first use (the core must be initialised). false = looked up, not
     // present (single-gun core → DOM-event fallback); null = not looked up yet.
     this._webgunSet = null;
+    // Optional per-core system/BIOS files to provision into SYSTEM_DIR before
+    // callMain ([{ name, url }] — e.g. PUAE's Kickstart so an Amiga boots the real
+    // OS, not the AROS replacement). Fetched lazily in start(); a 404/failed fetch
+    // is non-fatal (the core falls back to its built-in default). Null = none.
+    this._systemFiles = null;
     // Synthetic mouse button state for sendMouse()'s DOM path — mirrors _gunDown.
     // A bitmask of currently-held DOM buttons (1=left, 2=right, 4=middle) so we
     // emit clean mousedown/mouseup edges (the core latches a button until release).
@@ -122,6 +133,7 @@ export class EmulatorClient extends EventTarget {
     if (opts.coreOptions && Object.keys(opts.coreOptions).length) this._coreOptions = opts.coreOptions;
     if (opts.inputDevices && Object.keys(opts.inputDevices).length) this._inputDevices = opts.inputDevices;
     if (opts.remapName) this._remapName = opts.remapName;
+    if (opts.systemFiles && opts.systemFiles.length) this._systemFiles = opts.systemFiles;
     if (!this._coreLoaded) {
       if (opts.coreUrl) this.coreUrl = opts.coreUrl;
       if (opts.coreName) this.coreName = opts.coreName;
@@ -145,6 +157,7 @@ export class EmulatorClient extends EventTarget {
 
     await this._waitForRuntime();
     this._writeRetroArchConfig();
+    await this._provisionSystemFiles();
     this._writeRom(romBuffer);
     try {
       this._getModule().callMain(['-c', RA_CFG_PATH, this._romPath]);
@@ -510,6 +523,9 @@ export class EmulatorClient extends EventTarget {
     // When the core needs non-default options, point RA at an explicit
     // single-file core-options path and write the requested key/values there.
     let cfg = RETROARCH_CFG;
+    // Point cores at an explicit system dir so _provisionSystemFiles() (a BIOS /
+    // Kickstart) is found. Harmless for cores that need nothing (empty dir).
+    cfg += `system_directory = "${SYSTEM_DIR}"\n`;
     if (this._coreOptions) {
       cfg += `core_options_path = "${CORE_OPTIONS_PATH}"\n`;
       const body = Object.entries(this._coreOptions)
@@ -598,6 +614,31 @@ export class EmulatorClient extends EventTarget {
     // uses this to force a re-parse after they rewrite the file from the
     // GUI. Worth trying as a post-callMain nudge too.
     this._reloadConfig = () => { try { M._cmd_reload_config?.(); } catch (_) {} };
+  }
+
+  // Fetch any per-core system/BIOS files (opts.systemFiles = [{ name, url }]) and
+  // write them into SYSTEM_DIR before callMain so the core finds them at boot.
+  // Used for PUAE's Kickstart: with a real Kickstart present an Amiga boots the
+  // genuine OS (and real games like Settlers) instead of the AROS replacement.
+  // Every step is best-effort: a missing/failed file is logged and skipped so a
+  // clean clone (no user-owned ROMs on the server → 404) still boots via AROS.
+  async _provisionSystemFiles() {
+    if (!this._systemFiles?.length) return;
+    const M = this._getModule();
+    if (!M?.FS) return;
+    try { M.FS.mkdirTree(SYSTEM_DIR); } catch (_) {}
+    for (const f of this._systemFiles) {
+      if (!f?.name || !f?.url) continue;
+      try {
+        const res = await fetch(f.url, { cache: 'force-cache' });
+        if (!res.ok) { console.warn(`[EmulatorClient] system file ${f.name} not available (${res.status}) — core uses its built-in default`); continue; }
+        const data = new Uint8Array(await res.arrayBuffer());
+        M.FS.writeFile(`${SYSTEM_DIR}/${f.name}`, data);
+        console.log(`[EmulatorClient] provisioned system file ${f.name} (${data.length} bytes)`);
+      } catch (e) {
+        console.warn(`[EmulatorClient] failed to provision system file ${f.name}:`, e?.message || e);
+      }
+    }
   }
 
   _writeRom(romBuffer) {

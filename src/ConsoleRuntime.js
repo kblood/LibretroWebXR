@@ -83,6 +83,9 @@ export class ConsoleRuntime {
       coreOptions: meta.coreOptions ?? core.coreOptions,
       inputDevices: meta.inputDevices,
       remapName: meta.remapName,
+      // Per-core BIOS/Kickstart (e.g. PUAE Amiga). meta wins when the caller
+      // strips `core` to {name,url,style}; else read it off the full core entry.
+      systemFiles: meta.systemFiles ?? core.systemFiles,
     });
     this.coreName = core.name;
     this.system = meta.system ?? null;

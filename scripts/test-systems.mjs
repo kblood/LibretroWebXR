@@ -65,7 +65,13 @@ eq('amiga thumbnailRepo',       SYSTEMS.amiga.thumbnailRepo, 'Commodore_-_Amiga'
 eq('amiga medium = floppy',     SYSTEMS.amiga.medium, 'floppy');
 ok('amiga keyboard-capable',    SYSTEMS.amiga.keyboard === true);
 eq('puae core registered',      CORES.puae?.url, 'cores/puae_libretro.js');
-eq('puae selects AROS kickstart', CORES.puae?.coreOptions?.puae_kickstart, 'aros');
+// PUAE boots a REAL Kickstart when one is on the server: Automatic resolution +
+// a pinned A500 v1.3 floppy model + the KS1.3 ROM provisioned via systemFiles
+// (under PUAE's canonical name). Clean clones (no ROM → 404) fall back to AROS.
+eq('puae kickstart = Automatic', CORES.puae?.coreOptions?.puae_kickstart, 'Automatic');
+eq('puae floppy model = A500 v1.3', CORES.puae?.coreOptions?.puae_model_fd, 'A500 (v1.3, 0.5M Chip + 0.5M Slow)');
+ok('puae provisions KS1.3 (kick34005.A500)', CORES.puae?.systemFiles?.some((f) => f.name === 'kick34005.A500'));
+ok('puae provisions KS3.1 (kick40068.A1200)', CORES.puae?.systemFiles?.some((f) => f.name === 'kick40068.A1200'));
 eq('coreForFile .adf → puae',   coreForFile('game.adf')?.name, 'puae');
 eq('coreForFile .lha → puae',   coreForFile('game.lha')?.name, 'puae');
 eq('systemForFile .adf → amiga', systemForFile('game.adf'), 'amiga');

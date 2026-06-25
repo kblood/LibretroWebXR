@@ -64,7 +64,18 @@ export const CORES = {
   // RETRO_DEVICE_MOUSE (id 2) on a PUAE port works via synthetic DOM mouse events
   // (movementX/movementY relative motion + button bitmask), no core rebuild —
   // proven by dragging an AROS Workbench window in headless puae (tmp/derisk-mouse5).
-  puae:              { url: 'cores/puae_libretro.js',              exts: ['adf','adz','dms','fdi','ipf','hdf','hdz','lha','uae'], label: 'Amiga (PUAE)', style: 'module', license: 'GPLv2', weight: 2, coreOptions: { puae_kickstart: 'aros' }, remapName: 'PUAE' },
+  // coreOptions/systemFiles: boot a REAL Kickstart when one is on the server.
+  //   • systemFiles provisions the user-owned KS1.3 ROM (decrypted from their
+  //     Amiga Forever rom.key) into RA's system dir under PUAE's canonical name
+  //     `kick34005.A500` (KS1.3 rev 34.5 A500, md5 82a21c18…). EmulatorClient
+  //     fetches it before callMain; a clean clone (no ROM on server → 404) skips
+  //     it and PUAE falls back to the built-in AROS replacement (prior behaviour).
+  //   • puae_model_fd pins the floppy model to the 1 MB A500 v1.3 preset (what
+  //     Settlers and most A500 floppy games expect); puae_kickstart 'Automatic'
+  //     then resolves to KS1.3 and loads kick34005.A500 from the system dir.
+  //   The ROM lives under public/roms/local/ (gitignored, user-owned) so git stays
+  //   copyright-clean; it ships only to the user's own server. See [[mouse-peripheral-amiga-dos-epic]].
+  puae:              { url: 'cores/puae_libretro.js',              exts: ['adf','adz','dms','fdi','ipf','hdf','hdz','lha','uae'], label: 'Amiga (PUAE)', style: 'module', license: 'GPLv2', weight: 2, coreOptions: { puae_kickstart: 'Automatic', puae_model_fd: 'A500 (v1.3, 0.5M Chip + 0.5M Slow)' }, systemFiles: [{ name: 'kick34005.A500', url: 'roms/local/amiga/kick34005.A500' }, { name: 'kick40068.A1200', url: 'roms/local/amiga/kick40068.A1200' }], remapName: 'PUAE' },
 };
 
 // Rack budget calibration (see RackBudget.js). Tuned to the Phase-0 Quest-3

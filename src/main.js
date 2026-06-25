@@ -2506,7 +2506,7 @@ async function buildCartridgeWorld() {
     // inputDevices port override at boot.
     const remapName = window.__forceRemapName || gun?.remapName || fourScore?.remapName || coreInfo.remapName;
     logLightgunBoot('pickLocalRom', meta, gun, { forcedInputDevices: !!window.__forceInputDevices });
-    await client.start(primaryCanvas(), buf, { coreUrl: bootCore.url, coreName: bootCore.name, moduleStyle: bootCore.style, contentExt: extOf(name), coreOptions, inputDevices, remapName });
+    await client.start(primaryCanvas(), buf, { coreUrl: bootCore.url, coreName: bootCore.name, moduleStyle: bootCore.style, contentExt: extOf(name), coreOptions, inputDevices, remapName, systemFiles: bootCore.systemFiles });
     rackMgr.get(CONSOLE_ID)?.noteLoaded(bootCore.name, { system: meta.system, title });
     currentCore = bootCore.name;
     currentMeta = { core: bootCore.name, file: meta.file, title, system: meta.system };
@@ -4760,7 +4760,7 @@ async function loadCartridge(meta, { echo = true } = {}) {
     if (mouse) logger?.event?.('mouse-boot', { where: 'loadCartridge', system: meta.system, inputDevices: mouse.inputDevices, mice: mouse.mice, remapName: mouse.remapName });
     await client.start(primaryCanvas(), buf, {
       coreUrl: core.url, coreName, moduleStyle: core.style, contentExt: extOf(meta.file),
-      coreOptions, inputDevices, remapName,
+      coreOptions, inputDevices, remapName, systemFiles: core.systemFiles,
     });
     rackMgr.get(CONSOLE_ID)?.noteLoaded(coreName, { system: meta.system, title: meta.title });
     currentCore = coreName;
@@ -4967,6 +4967,7 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
   await next.load(romBuffer, core, {
     system: meta.system, title: meta.title, contentExt: extOf(meta.file),
     coreOptions: bootOpts.coreOptions, inputDevices: bootOpts.inputDevices, remapName: bootOpts.remapName,
+    systemFiles: bootOpts.systemFiles,
   });
   rackMgr.remove(consoleId);   // dispose old (pause + detach its canvas)
   rackMgr.add(next);
@@ -5020,6 +5021,7 @@ async function rebootPrimaryConsole(meta, gun, mouse = null) {
     coreOptions,
     inputDevices: dev?.inputDevices,
     remapName: dev?.remapName ?? core.remapName,
+    systemFiles: core.systemFiles,
   });
   // Re-point the singleton-bound consumers (keyboard / desktop pad / reset / save
   // states / host-video pause-resume) at the new runtime's client, and wire its
@@ -5358,7 +5360,7 @@ romInput.addEventListener('change', async (e) => {
   try {
     const buffer = await file.arrayBuffer();
     logger?.event?.('rom-picked', { file: meta.file, bytes: buffer?.byteLength ?? 0, core: coreInfo.name, coreUrl: coreInfo.url, opfs: opfsSupported() });
-    await client.start(primaryCanvas(), buffer, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style, contentExt: extOf(meta.file), coreOptions: coreInfo.coreOptions });
+    await client.start(primaryCanvas(), buffer, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style, contentExt: extOf(meta.file), coreOptions: coreInfo.coreOptions, systemFiles: coreInfo.systemFiles });
     rackMgr.get(CONSOLE_ID)?.noteLoaded(coreInfo.name, { system: meta.system, title });
     currentCore = coreInfo.name;
     currentMeta = { core: coreInfo.name, file: meta.file, title, system: meta.system };
