@@ -51,6 +51,11 @@ const CORES = [
   'snes9x', 'nestopia', 'stella2014', 'genesis_plus_gx', 'mgba', 'mednafen_vb',
   'picodrive', 'gearsystem', 'fceumm', 'gambatte', 'mednafen_pce_fast',
   'vice_x64', 'vice_xvic', 'puae',
+  // DOS (VirtualXT). Prebuilt module-style on the buildbot. NOTE: the current
+  // buildbot binary boot-traps in this loader (RuntimeError: unreachable after
+  // mounting the disk) — see docs/DOS_CORE_BUILD.md. Listed so deploy fetches it
+  // alongside the others once a working build is available.
+  'virtualxt',
 ];
 
 // Candidate local source dirs, in priority order.

@@ -59,6 +59,17 @@ export const CORES = {
   // tier; the 68k + cycle-exact chipset is heavy in no-JIT wasm — bump to 3 if
   // it can't hold a rack slot on the headset. See [[amiga-puae-blocked]].
   puae:              { url: 'cores/puae_libretro.js',              exts: ['adf','adz','dms','fdi','ipf','hdf','hdz','lha','uae'], label: 'Amiga (PUAE)', style: 'module', license: 'GPLv2', weight: 2, coreOptions: { puae_kickstart: 'aros' } },
+  // DOS / IBM PC. virtualxt is the libretro buildbot's PREBUILT MODULARIZE ES6
+  // core (`export default libretro_virtualxt`, fetched from RetroArch.7z like
+  // every other `module` core — no custom build needed). It emulates an Intel
+  // 8088 @ 4.77 MHz (IBM 5150/5160 PC/XT) with a BUILT-IN GLaBIOS, so it boots
+  // with NO external BIOS and runs .com/.exe booters + FAT disk images directly.
+  // Scope caveat: XT-class only (CGA, no 386/486) — fine for .COM/simple .EXE
+  // DOS programs and 80s titles; later 386+ games (and anything needing a VxD or
+  // protected mode) need DOSBox Pure, which the buildbot does NOT ship prebuilt
+  // (it would require a heavy WSL2 emscripten build — see the dos system note).
+  // weight 3 = heavy tier (full x86 + 18 MB wasm); cap to one live rack slot.
+  virtualxt:         { url: 'cores/virtualxt_libretro.js',         exts: ['img','com','exe','ini'], label: 'DOS (VirtualXT)', style: 'module', license: 'MPL-2.0', weight: 3 },
 };
 
 // Rack budget calibration (see RackBudget.js). Tuned to the Phase-0 Quest-3
@@ -131,6 +142,17 @@ export const SYSTEMS = {
   c64:       { label: 'Commodore 64',       defaultCore: 'vice_x64',         cores: ['vice_x64'],                     exts: ['d64','d71','d80','d81','d82','g64','x64','t64','tap','prg','p00','crt'], aliases: ['c64','commodore 64','commodore64'], thumbnailRepo: 'Commodore_-_64',  medium: 'floppy', keyboard: true },
   vic20:     { label: 'Commodore VIC-20',   defaultCore: 'vice_xvic',        cores: ['vice_xvic'],                    exts: ['20','40','60','a0','b0','rom'], aliases: ['vic20','vic-20','commodore vic-20'],                    thumbnailRepo: 'Commodore_-_VIC-20',                             medium: 'floppy', keyboard: true },
   amiga:     { label: 'Commodore Amiga',    defaultCore: 'puae',             cores: ['puae'],                         exts: ['adf','adz','dms','fdi','ipf','hdf','hdz','lha','uae'], aliases: ['amiga','commodore amiga','a500','a1200','amiga 500','amiga 1200'], thumbnailRepo: 'Commodore_-_Amiga', medium: 'floppy', keyboard: true },
+  // DOS / IBM PC. Computer-class system (keyboard:true, like c64/amiga). Runs on
+  // virtualxt (prebuilt buildbot core; XT/8088-class — see CORES.virtualxt).
+  // exts: virtualxt loads .com/.exe booters and FAT .img disk images directly. We
+  // also list the common DOSBox archive/disc exts (zip/dosz/iso/cue/conf/bat) so
+  // that IF a DOSBox-class core is later added (DOSBox Pure would need a WSL2
+  // build; the buildbot ships none), those games still auto-detect as `dos` — the
+  // current virtualxt core ignores them. medium 'floppy' mirrors the other
+  // disk-based computers. DOS uses a MOUSE + keyboard; the mouse path is the
+  // shared EmulatorClient.sendMouse primitive owned by the parallel mouse agent —
+  // see the "DOS mouse" follow-up comment below SYSTEM_PORTS.
+  dos:       { label: 'DOS / IBM PC',       defaultCore: 'virtualxt',        cores: ['virtualxt'],                    exts: ['exe','com','bat','conf','img','dosz','zip','iso','cue'], aliases: ['dos','ms-dos','msdos','pc','ibm pc','dosbox','virtualxt'], thumbnailRepo: null, medium: 'floppy', keyboard: true },
 };
 
 // Controller ports per system — how many controllers the base hardware
@@ -147,7 +169,18 @@ const SYSTEM_PORTS = {
   pce: 2, c64: 2, vic20: 1,
   sg1000: 2, sega32x: 2,
   amiga: 2,   // two DB9 joystick/mouse ports
+  dos: 2,     // mouse (port 0) + keyboard / second device
 };
+// --- DOS mouse follow-up (do NOT implement here) -------------------------
+// DOS games are mouse-driven. The mouse transport is the SHARED
+// `EmulatorClient.sendMouse(dx, dy, buttons)` primitive being built by the
+// parallel mouse-peripheral agent (branch feat/mouse-peripheral). When that
+// lands, wire `dos` to it: virtualxt reads RETRO_DEVICE_MOUSE on port 0, so a
+// `dos` boot should route the room's mouse prop / aim-ray through sendMouse to
+// the active DOS console's EmulatorClient (relative-motion + L/R buttons). No
+// core option is needed — virtualxt enables the PS/2 mouse by default. This file
+// intentionally does NOT touch the mouse path to avoid colliding with that
+// agent's EmulatorClient changes; this comment is the hook/TODO.
 const DEFAULT_PORTS = 2;   // unknown system / no game loaded yet
 export const MAX_PORTS = 4; // hardware ceiling the console mesh renders
 
