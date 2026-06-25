@@ -18,6 +18,8 @@ import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
 import { createLightGun } from './LightGun.js';
 import { LightGunMgr } from './LightGunMgr.js';
+import { createMouse } from './Mouse.js';
+import { MouseMgr } from './MouseMgr.js';
 import { Cord } from './Cord.js';
 import { Plug } from './Plug.js';
 import { nearestAnchor } from './Snap.js';
@@ -34,7 +36,7 @@ import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, libretroGunPortFor, twoGunPortsForSystem, fourScoreLoadConfig, extOf } from './systems.js';
+import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, libretroGunPortFor, twoGunPortsForSystem, isMouseCapable, mouseLoadConfig, isTwoMouseCapable, libretroMousePortFor, twoMousePortsForSystem, fourScoreLoadConfig, extOf } from './systems.js';
 import { Patchbay } from './Patchbay.js';
 import { RackMgr } from './RackMgr.js';
 import { ConsoleRuntime } from './ConsoleRuntime.js';
@@ -52,6 +54,9 @@ import {
 import {
   makeGunStateKey, isGunStateKey, makePeerGunId, parseGunEntries,
 } from './net/GunSync.js';
+import {
+  makeMouseStateKey, isMouseStateKey, makePeerMouseId, parseMouseEntries,
+} from './net/MouseSync.js';
 import {
   makePropStateKey, isPropStateKey, propIdFromStateKey,
   makePeerPropId, serializePropState, parsePropEntries, diffPropSync,
@@ -142,6 +147,7 @@ let currentMeta = null;
 // the rom-resolution fields (rom.source / sha1). null until a game loads.
 let _lastLoadedMeta = null;
 let _lightgunArmedConsole = false;  // primary console booted with the gun device
+let _mouseArmedConsole = false;     // primary console booted with the mouse device
 // Two-gun (co-op) state: the ordered libretro gun PORTs the active two-gun config
 // seats its guns on (e.g. SNES Justifier → [1, 2] = first gun on port 1, second on
 // port 2). Set at boot when a two-gun game connects its peripheral; empty []
@@ -151,6 +157,14 @@ let _lightgunArmedConsole = false;  // primary console booted with the gun devic
 // in decides its player. See [[src/systems.js]] lightgunLoadConfig({twoGun}) and
 // docs/LIGHTGUN_SUPPORT.md.
 let _twoGunPorts = [];
+// Two-mouse (split-pointer) state: the ordered libretro mouse PORTs the active
+// two-mouse config seats its mice on (Amiga → [0, 1]). Set at boot when a 2-mouse
+// game connects its peripheral; [] otherwise. The Kth mouse in cable-port order
+// drives the Kth of these (libretroMousePortFor) → MouseMgr.portForMouse. See
+// [[src/systems.js]] mouseLoadConfig({twoMouse}). NOTE: two INDEPENDENT pointers
+// need a multiport rwebinput patch on puae (the stock core reads both ports from
+// mouse_index 0); without it both ports follow the same pointer — see docs/MOUSE_SUPPORT.md.
+let _twoMousePorts = [];
 const placeholder = new Placeholder(placeholderCanvas);
 placeholder.setMessage('Pick up a cartridge');
 placeholder.start();
@@ -201,6 +215,11 @@ let _peerGamepadCounter = 0;
 // until then. Per-peer counter for globally-unique gun cableIds.
 let _reconcileGunState = () => {};
 let _peerGunCounter = 0;
+// Mouse port-binding reconciler (mouse:<cableId> STATE) — the mouse analogue of
+// _reconcileGunState, port-only (the mouse MESH rides prop:*). No-op until
+// buildCartridgeWorld wires it. Per-peer counter for globally-unique mouse cableIds.
+let _reconcileMouseState = () => {};
+let _peerMouseCounter = 0;
 
 // Net-session wiring bridge. ALL multiplayer-sync subsystems (ghosts, gamepad/
 // gun/prop reconcilers, the window.__ghost/__props hooks, etc.) are built inside
@@ -318,6 +337,7 @@ function connectToRoom(room, nick, color) {
       if (key === 'tv') applyRemoteTv(value);
       if (isGamepadStateKey(key)) _reconcileGamepadState();
       if (isGunStateKey(key)) _reconcileGunState();
+      if (isMouseStateKey(key)) _reconcileMouseState();
       if (isPropStateKey(key)) _reconcilePropState(key, value);
       if (isPowerStateKey(key)) _applyRemotePower(key, value);
     },
@@ -624,6 +644,49 @@ function _registerLightGun(obj) {
   _lightGunObjsById.set(obj.userData.cableId, obj);
   cable.addController(obj.userData.cableId);
   grabMgr?.addGrabbable(obj);
+}
+
+// --- In-world mouse: a first-class cabled peripheral (mirrors the light gun) --
+let mouseObj = null;       // the default grabbable mouse prop ([[src/Mouse.js]])
+let mouseMgr = null;       // per-frame motion → console mouse input ([[src/MouseMgr.js]])
+// All mouse props (boot mouse + any added). MouseMgr iterates this; a second one
+// gives split-pointer 2-player. cableId index lets the cord helpers + port-sync
+// find a mouse by its cableId. The default boot mouse is `mouse-1` on every peer.
+const _mouseObjs = new Set();
+const _mouseObjsById = new Map();
+let _mouseCableCount = 0;
+const DEFAULT_MOUSE_IDS = new Set(['mouse-1']);
+// Register a mouse object so it drives input (MouseMgr), is grabbable, and joins
+// the cable system. Assigns a stable cableId if the caller didn't (addProp /
+// remote-create pre-assign a peer-scoped id so all peers agree). Its libretro
+// mouse PORT flows from the Patchbay (MouseMgr.portForMouse reads cable.portOf).
+function _registerMouse(obj) {
+  if (!obj) return;
+  if (obj.userData.cableId == null) obj.userData.cableId = `mouse-${++_mouseCableCount}`;
+  _mouseObjs.add(obj);
+  _mouseObjsById.set(obj.userData.cableId, obj);
+  cable.addController(obj.userData.cableId);
+  grabMgr?.addGrabbable(obj);
+}
+
+// Which mouse-in-jack-order this mouse is among the MICE plugged into a console
+// (0,1,…), or -1 if not plugged there. Mirrors _gunSlotIndex.
+function _mouseSlotIndex(mouse, consoleId) {
+  const myId = mouse?.userData?.cableId;
+  if (myId == null || consoleId == null) return -1;
+  const mice = cable.controllersOf(consoleId).filter((c) => _mouseObjsById.has(c.controllerId));
+  return mice.findIndex((c) => c.controllerId === myId);
+}
+
+// The ordered libretro mouse PORTs the two-mouse device on `consoleId` seats its
+// mice on (Amiga → [0,1]), or [] when single-mouse / no-mouse. Mirrors
+// _twoGunPortsForConsole: PRIMARY returns the live per-boot _twoMousePorts; a
+// SECONDARY derives from its console runtime's loaded system.
+function _twoMousePortsForConsole(consoleId) {
+  if (consoleId == null) return [];
+  if (consoleId === CONSOLE_ID) return _twoMousePorts;
+  const system = rackMgr.get(consoleId)?.system ?? _consoleSystems.get(consoleId) ?? null;
+  return twoMousePortsForSystem(system);
 }
 
 // Decide whether a boot should connect the TWO-gun co-op peripheral: the game
@@ -1325,7 +1388,7 @@ const _gamepadObjs = new Map(); // cableId -> gamepad Object3D (for cord endpoin
 // device-agnostic (they iterate every console's portJacks and read .cordAnchor),
 // so this single lookup is the only seam that makes them serve guns too.
 function _cabledObjFor(cableId) {
-  return _gamepadObjs.get(cableId) || _lightGunObjsById.get(cableId) || null;
+  return _gamepadObjs.get(cableId) || _lightGunObjsById.get(cableId) || _mouseObjsById.get(cableId) || null;
 }
 
 // Which gun-in-jack-order this gun is among the GUNS plugged into a console (0,1,…),
@@ -1426,7 +1489,9 @@ function _broadcastCablePort(cableId) {
   const port = cable.portOf(cableId)?.port ?? -1;
   const key = _lightGunObjsById.has(cableId)
     ? makeGunStateKey(cableId)
-    : makeGamepadStateKey(cableId);
+    : _mouseObjsById.has(cableId)
+      ? makeMouseStateKey(cableId)
+      : makeGamepadStateKey(cableId);
   net.setObjectState(key, { port });
 }
 
@@ -1921,6 +1986,13 @@ async function buildCartridgeWorld() {
     lightGunObj = createLightGun({ position: new THREE.Vector3(-0.62, 0.78, -2.15) });
     scene.addObject(lightGunObj);
   }
+  // In-world mouse prop: a grabbable mouse you move to drive a console's libretro
+  // MOUSE device (Amiga point-and-click, The Settlers). Rests on the desk; wired
+  // into the grab system + MouseMgr below (see _registerMouse / new MouseMgr).
+  if (!mouseObj) {
+    mouseObj = createMouse({ position: new THREE.Vector3(-0.30, 0.745, -2.05) });
+    scene.addObject(mouseObj);
+  }
   // The default gamepad is player 1: logically plug it into port 0 (it stays at
   // its rest spot — only explicit re-plugging moves the mesh). This also marks
   // port 0 taken so the first "Add Gamepad" auto-plugs into port 1 (player 2).
@@ -2035,6 +2107,9 @@ async function buildCartridgeWorld() {
       if (obj?.userData?.kind === 'lightgun') {
         logger?.event?.('lightgun-grab', { hand, system: currentMeta?.system || null, consoleId: CONSOLE_ID, alreadyArmed: _lightgunArmedConsole });
         armLightGunAndReload();
+      } else if (obj?.userData?.kind === 'mouse') {
+        logger?.event?.('mouse-grab', { hand, system: currentMeta?.system || null, consoleId: CONSOLE_ID, alreadyArmed: _mouseArmedConsole });
+        armMouseAndReload();
       }
     },
     // Remote-hold lock: refuse grab of a gamepad currently held by a remote peer.
@@ -2050,6 +2125,7 @@ async function buildCartridgeWorld() {
   cartridges.forEach((c) => grabMgr.addGrabbable(c));
   grabMgr.addGrabbable(gamepadObj);
   _registerLightGun(lightGunObj);
+  _registerMouse(mouseObj);
 
   // Light-gun aiming: every frame, for each controller currently holding the gun,
   // raycast its barrel ray against the rack TV screens and drive the source
@@ -2091,6 +2167,48 @@ async function buildCartridgeWorld() {
     log: (name, fields) => logger?.event?.(name, fields),
   });
 
+  // In-world mouse driving: every frame, for each controller holding a mouse prop,
+  // track the prop's world-position delta → relative libretro mouse motion + the
+  // controller's trigger/squeeze → L/R buttons, and feed the plugged console's
+  // EmulatorClient.sendMouse(dx,dy,buttons,port). Console + port come from the
+  // CABLE (which jack the mouse's plug sits in), like a gamepad. portForMouse routes
+  // each mouse to its OWN libretro port for split-pointer 2-player (two-mouse cores).
+  mouseMgr = new MouseMgr({
+    getActiveMice: () => scene.controllers
+      .filter((ctrl) => _mouseObjs.has(grabMgr.heldObject(ctrl)))
+      .map((ctrl) => ({ mouse: grabMgr.heldObject(ctrl), controller: ctrl })),
+    clientForMouse: (mouse) => {
+      const cid = cable.portOf(mouse?.userData?.cableId)?.consoleId;
+      return cid ? (rackMgr.get(cid)?.client || null) : null;
+    },
+    // Libretro mouse PORT for split-pointer 2-player: the Kth mouse (cable-jack
+    // order) on its seated console drives the Kth of that console's two-mouse ports.
+    // Returns null for single-mouse / unplugged / non-mouse console → the shared
+    // DOM-mouse path (one pointer), which is the proven, working single-mouse case.
+    portForMouse: (mouse) => {
+      const seat = cable.portOf(mouse?.userData?.cableId);
+      if (!seat) return null;
+      return libretroMousePortFor(_mouseSlotIndex(mouse, seat.consoleId), _twoMousePortsForConsole(seat.consoleId));
+    },
+    log: (name, fields) => logger?.event?.(name, fields),
+  });
+  // Desktop fallback: when NOT in VR, the computer mouse drives the primary mouse
+  // via Pointer Lock (relative movementX/Y). Bind it to the app canvas; it only
+  // fires while pointer-locked, so it never interferes with the VR positional path.
+  mouseMgr.attachDesktop({
+    getEl: () => scene.renderer?.domElement || document.querySelector('canvas'),
+    getClient: () => {
+      const seat = cable.portOf(mouseObj?.userData?.cableId);
+      const cid = seat?.consoleId ?? CONSOLE_ID;
+      return rackMgr.get(cid)?.client || null;
+    },
+    getPort: () => {
+      const seat = cable.portOf(mouseObj?.userData?.cableId);
+      if (!seat) return null;
+      return libretroMousePortFor(_mouseSlotIndex(mouseObj, seat.consoleId), _twoMousePortsForConsole(seat.consoleId));
+    },
+  });
+
   // Phase 4: the primary console's physical object + its grabbable video-out
   // plug, seated in the primary TV's jack. consoleObjs maps each consoleId to
   // its physical Console so the video cord can anchor at its video-out.
@@ -2104,6 +2222,11 @@ async function buildCartridgeWorld() {
   // runs gun → port jack. Its libretro aim port is derived live from this jack.
   seatGunInFreePort(lightGunObj);
   addControllerPlug(lightGunObj);
+  // The default mouse is a cabled peripheral too: seat it in the next free port and
+  // give it a grabbable plug + cord that runs mouse → port jack. Its libretro mouse
+  // port is derived live from this jack. grabMgr.addGrabbable was done by _registerMouse.
+  seatMouseInFreePort(mouseObj);
+  addControllerPlug(mouseObj);
   // The primary keyboard gets its grabbable plug and auto-connects to the primary
   // console (like the default gamepad auto-plugs into port 0).
   addKeyboardPlug(c64kbd?.object3d);
@@ -2152,6 +2275,31 @@ async function buildCartridgeWorld() {
   // __gunArmedState reports whether the gun device is connected this boot.
   window.__armGun = () => armLightGunAndReload();
   window.__gunArmedState = () => ({ armed: !!window.__lightgunArmed, consoleArmed: _lightgunArmedConsole, system: currentMeta?.system || null, core: currentMeta?.core || null });
+  // --- Mouse debug hooks (mirror the gun hooks) ---
+  window.__mouse = () => mouseObj;
+  window.__mouseMgr = () => mouseMgr;
+  window.__armMouse = () => armMouseAndReload();
+  window.__mouseArmedState = () => ({ armed: !!window.__mouseArmed, consoleArmed: _mouseArmedConsole, twoMousePorts: _twoMousePorts.slice(), system: currentMeta?.system || null });
+  // Resolve the libretro mouse PORT a cabled mouse currently drives (the value
+  // MouseMgr.portForMouse feeds to sendMouse). Returns null for single-mouse.
+  window.__mouseLibretroPort = (cableId) => {
+    const obj = _mouseObjsById.get(cableId);
+    if (!obj || !mouseMgr?._portForMouse) return null;
+    return mouseMgr._portForMouse(obj);
+  };
+  // Drive the in-world mouse one synthetic frame: feed relative motion + buttons
+  // to whatever console the (default) mouse is plugged into, without an XR
+  // controller. Used by the headless verifier. dx/dy in libretro pixels.
+  window.__moveMouse = (dx, dy, buttons = 0) => {
+    const seat = cable.portOf(mouseObj?.userData?.cableId);
+    const cid = seat?.consoleId ?? CONSOLE_ID;
+    const client = rackMgr.get(cid)?.client;
+    if (!client) return 'no-client';
+    const port = seat ? libretroMousePortFor(_mouseSlotIndex(mouseObj, cid), _twoMousePortsForConsole(cid)) : null;
+    client.sendMouse(dx, dy, buttons, port);
+    mouseObj?.userData?.setButtons?.(buttons & 0x3);
+    return 'moved';
+  };
   // Resolve the LIBRETRO gun port a cabled gun currently drives (the value the
   // LightGunMgr feeds to sendLightgun), derived live from the gun's cable jack
   // order via libretroGunPortFor(_gunSlotIndex(...), _twoGunPorts). Returns null
@@ -2395,6 +2543,7 @@ async function buildCartridgeWorld() {
     cupboard: ()    => addProp('cupboard'),
     table:    ()    => addProp('table'),
     lightgun: ()    => addProp('lightgun'),
+    mouse:    ()    => addProp('mouse'),
     tv:       ()    => addTvProp(),
     portal:   ()    => addPortal(),
     // Desktop/headless poster-image affordance. src = URL or data URL.
@@ -2583,6 +2732,19 @@ async function buildCartridgeWorld() {
     // Run once for any `gun:*` state already in the late-join snapshot.
     _reconcileGunState();
 
+    // Mouse port-binding reconciler — the mouse analogue. The mouse MESH rides
+    // prop:*; this seats each remote mouse at the port its mouse:<cableId> STATE
+    // names (so every peer agrees which mouse drives which Amiga port/player —
+    // essential for split-pointer 2-player). The default boot mouse is local-only.
+    _reconcileMouseState = () => {
+      for (const { cableId, port } of parseMouseEntries(net.objects.entries())) {
+        if (DEFAULT_MOUSE_IDS.has(cableId)) continue;     // our own default mouse — local only
+        if (!_mouseObjsById.has(cableId)) continue;       // mesh created by prop sync first
+        _applyRemoteCablePort(cableId, port);
+      }
+    };
+    _reconcileMouseState();
+
     // ── Prop room-layout sync (M-prop) ─────────────────────────────────────
     // When a remote peer adds a poster/console, moves a prop (onEditRelease),
     // or removes one, we receive a `prop:<id>` STATE update. The reconciler
@@ -2678,6 +2840,14 @@ async function buildCartridgeWorld() {
         _registerLightGun(r.object);
         addControllerPlug(r.object);
         _reconcileGunState();
+      }
+      // A peer added an in-world mouse — mirror the gun path (mesh under the SAME
+      // id its mouse:<cableId> port binding is keyed by; _reconcileMouseState seats it).
+      if (r.kind === 'mouse') {
+        if (payload.cableId != null) r.object.userData.cableId = payload.cableId;
+        _registerMouse(r.object);
+        addControllerPlug(r.object);
+        _reconcileMouseState();
       }
       // A peer added a standalone TV → wire its patch-graph node + power switch.
       if (r.kind === 'tvset') _wireTvProp(propId, r.tv);
@@ -2915,6 +3085,7 @@ async function buildCartridgeWorld() {
   scene.addTickCallback((dt) => desktop.tick(dt));
   scene.addTickCallback((dt) => grabMgr.tick(dt));
   scene.addTickCallback((dt) => lightGunMgr.tick(dt));
+  scene.addTickCallback((dt) => mouseMgr.tick(dt));
   scene.addTickCallback(() => syncControllerCords());
   scene.addTickCallback(() => syncVideoCords());
   scene.addTickCallback(() => syncKeyboardCord());
@@ -3063,6 +3234,9 @@ async function buildCartridgeWorld() {
   // Restore the light-gun arm across a page reload (gun stays "out" for the
   // session) BEFORE the resume so the bridged game boots with the gun device.
   try { if (sessionStorage.getItem(LIGHTGUN_ARM_KEY)) window.__lightgunArmed = true; }
+  catch (_) { /* sessionStorage unavailable */ }
+  // Same for the mouse arm: the in-world mouse stays "out" across a reload.
+  try { if (sessionStorage.getItem(MOUSE_ARM_KEY)) window.__mouseArmed = true; }
   catch (_) { /* sessionStorage unavailable */ }
 
   // After everything's built, see if we're resuming a cross-system swap.
@@ -3251,6 +3425,23 @@ function addProp(type, opts = {}) {
     }
   }
 
+  // A new in-world mouse — mirrors the light-gun lifecycle. A 2nd mouse gives
+  // split-pointer 2-player. Falls through to the prop:* broadcast (mesh rides
+  // prop:*; the mouse: channel carries only the port binding).
+  if (r.kind === 'mouse') {
+    if (net) {
+      const selfId = net.presence.selfId || 'local';
+      r.object.userData.cableId = makePeerMouseId(selfId, ++_peerMouseCounter);
+    }
+    _registerMouse(r.object);
+    const mousePort = seatMouseInFreePort(r.object);
+    addControllerPlug(r.object);
+    prop.cableId = r.object.userData.cableId;
+    if (net && r.object.userData.cableId) {
+      net.setObjectState(makeMouseStateKey(r.object.userData.cableId), { port: mousePort ?? -1 });
+    }
+  }
+
   ensureEditMode();
   setStatus(`added ${type} — grab to place`);
 
@@ -3340,6 +3531,17 @@ function seatGamepadInFreePort(obj) {
 // seats in the jack — the cord runs gun.cordAnchor → plug). Returns the port index,
 // or null if all ports are taken (then its plug dangles until repatched by hand).
 function seatGunInFreePort(obj) {
+  const cu = consoleObj?.userData;
+  const port = cable.firstFreePort(CONSOLE_ID, cu?.activePorts);
+  if (port == null) return null;
+  cable.plugController(obj.userData.cableId, CONSOLE_ID, port);
+  return port;
+}
+
+// Plug a mouse into the lowest free, enabled console port (like seatGunInFreePort).
+// The mouse is held; only its plug seats in the jack, with the cord running
+// mouse.cordAnchor → plug. Returns the port index, or null if all ports are taken.
+function seatMouseInFreePort(obj) {
   const cu = consoleObj?.userData;
   const port = cable.firstFreePort(CONSOLE_ID, cu?.activePorts);
   if (port == null) return null;
@@ -3925,6 +4127,7 @@ function buildMenuAndControlsPanel() {
     { label: 'Add Poster',   onActivate: () => addProp('poster') },
     { label: 'Add TV',       onActivate: () => addTvProp() },
     { label: 'Add Light Gun', onActivate: () => addProp('lightgun') },
+    { label: 'Add Mouse',    onActivate: () => addProp('mouse') },
     { label: 'Add Portal',   onActivate: () => addPortal() },
     // Persist the current layout as the default that auto-loads next session
     // (same localStorage slot resolveWorld() reads), without the file download
@@ -4330,6 +4533,7 @@ const PENDING_KEY = 'libretrowebxr.pending';
 // Set once the light gun has been picked up; survives the arm page-reload and
 // keeps later gun-capable boots armed for the rest of the session.
 const LIGHTGUN_ARM_KEY = 'libretrowebxr.lightgun';
+const MOUSE_ARM_KEY = 'libretrowebxr.mouse';
 
 // `echo` controls whether a successful load re-announces the TV state to the
 // room (M0.5). Local inserts echo (true, default); a load that is itself
@@ -4456,6 +4660,58 @@ async function armLightGunAndReload() {
   }
 }
 
+// Mouse arming: picking up the in-world mouse connects the libretro MOUSE device.
+// Mirrors armLightGunAndReload — a libretro peripheral attaches only at a fresh
+// boot, so we LIVE-reboot the same game with the mouse device on (XR + net session
+// survive). A persisted session flag keeps later mouse-capable boots armed. Picking
+// up the mouse with no mouse-capable game running just sets the flag for next time.
+async function armMouseAndReload() {
+  try { sessionStorage.setItem(MOUSE_ARM_KEY, '1'); } catch (_) {}
+  window.__mouseArmed = true;                  // arm future mouse-capable boots
+  if (_mouseArmedConsole) return;              // current game already has the mouse
+  const sys = currentMeta?.system;
+  if (!sys || !isMouseCapable(sys) || !_lastLoadedMeta) return;
+  const m = _lastLoadedMeta;
+  // Build the SAME mouse boot config the load path uses. A twoMouse game on a
+  // two-mouse-capable system (Amiga) seats a mouse on both ports (split-pointer).
+  const twoMouse = !!m.twoMouse && isTwoMouseCapable(m.system);
+  const mouse = mouseLoadConfig(m.system, { twoMouse });
+  if (!mouse) return;
+  // Seat the default mouse on its libretro port (Amiga mouse = port 0 / player 1),
+  // superseding whatever sat there, so the cable jack order matches the device's
+  // port and (for the patched two-mouse path) the 2nd mouse can take port 1. The
+  // single-mouse DOM path drives the console regardless of seat, but seating keeps
+  // the in-world cord + port-sync coherent. Best-effort.
+  try {
+    const port0 = mouse.mice?.[0]?.port ?? 0;
+    cable.plugController(mouseObj.userData.cableId, CONSOLE_ID, port0);
+    seatControllerPlug(mouseObj.userData.cableId);
+    _broadcastCablePort(mouseObj.userData.cableId);
+  } catch (_) {}
+  setStatus(`connecting mouse${twoMouse ? ' (2-player)' : ''}…`);
+  logger?.event?.('mouse-arm-reboot', { system: sys, file: m.file, core: m.core, title: m.title, twoMouse: !!(mouse && mouse.mice?.length > 1) });
+  try {
+    await rebootPrimaryConsole(m, null, mouse);
+    const cart = cartridges.find((c) => c.userData.file === m.file);
+    if (cart && grabMgr) grabMgr.setInsertedCart(cart);
+    setStatus('mouse connected');
+  } catch (e) {
+    console.warn('[mouse] live arm failed, falling back to reload:', e);
+    logger?.event?.('mouse-arm-reboot-fallback', { error: String(e?.message || e) });
+    try {
+      sessionStorage.setItem(PENDING_KEY, JSON.stringify({
+        file: m.file, core: m.core, system: m.system, title: m.title, rom: m.rom, mouse: true, twoMouse: m.twoMouse || false,
+      }));
+      if (editor) { try { stashRoomBridge(JSON.stringify(editor.serialize())); } catch (_) {} }
+      stashSessionRejoin();
+      location.reload();
+    } catch (e2) {
+      console.warn('[mouse] arm reload fallback failed:', e2);
+      setStatus('could not connect the mouse');
+    }
+  }
+}
+
 async function loadCartridge(meta, { echo = true } = {}) {
   setStatus(`loading ${meta.title}…`);
   // Boot telemetry (diagnoses headset boot failures): how the ROM resolves +
@@ -4488,10 +4744,20 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // ROM can read P3/P4 over the serial protocol. No-op (null) for nestopia,
     // non-NES systems, and gun boots — those keep their exact prior wiring.
     const fourScore = gun ? null : fourScoreLoadConfig(meta.system, coreName);
-    const inputDevices = gun?.inputDevices ?? fourScore?.inputDevices;
-    const remapName = gun?.remapName ?? fourScore?.remapName ?? core.remapName;
-    logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url, lightgun: !!gun, twoGun: !!(gun && gun.guns?.length > 1), fourScore: !!fourScore });
+    // Mouse wiring: when this load is mouse-enabled (game flagged, or a mouse was
+    // armed this session by grabbing the prop) on a mouse-capable system, connect
+    // the libretro MOUSE device on its port(s). A twoMouse-flagged game on a
+    // two-mouse-capable system (Amiga) seats a mouse on BOTH ports (split-pointer
+    // 2-player); otherwise one mouse on port 0. Mutually exclusive with the gun
+    // (Amiga has no light gun), so this only applies on non-gun boots.
+    const wantMouse = !gun && isMouseCapable(meta.system) && (meta.mouse || window.__mouseArmed);
+    const twoMouse = wantMouse && !!meta.twoMouse && isTwoMouseCapable(meta.system);
+    const mouse = wantMouse ? mouseLoadConfig(meta.system, { twoMouse }) : null;
+    const inputDevices = gun?.inputDevices ?? mouse?.inputDevices ?? fourScore?.inputDevices;
+    const remapName = gun?.remapName ?? mouse?.remapName ?? fourScore?.remapName ?? core.remapName;
+    logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url, lightgun: !!gun, twoGun: !!(gun && gun.guns?.length > 1), mouse: !!mouse, twoMouse: !!(mouse && mouse.mice?.length > 1), fourScore: !!fourScore });
     logLightgunBoot('loadCartridge', meta, gun);
+    if (mouse) logger?.event?.('mouse-boot', { where: 'loadCartridge', system: meta.system, inputDevices: mouse.inputDevices, mice: mouse.mice, remapName: mouse.remapName });
     await client.start(primaryCanvas(), buf, {
       coreUrl: core.url, coreName, moduleStyle: core.style, contentExt: extOf(meta.file),
       coreOptions, inputDevices, remapName,
@@ -4506,6 +4772,11 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // (gun in the lower jack → port 1, next → port 2). Empty [] for single-gun /
     // no-gun boots → DOM-mouse path unchanged.
     _twoGunPorts = (gun && gun.guns?.length > 1) ? gun.guns.map((x) => x.port) : [];
+    _mouseArmedConsole = !!mouse;      // did this boot connect the mouse device?
+    // Two-mouse split-pointer: record the active device's seated libretro ports
+    // (Amiga → [0,1]); MouseMgr.portForMouse derives each held mouse's port live
+    // from its cable jack. Empty [] for single-mouse → shared DOM-mouse path.
+    _twoMousePorts = (mouse && mouse.mice?.length > 1) ? mouse.mice.map((x) => x.port) : [];
     gameInput?.setSystem(meta.system);
     // Loading implies the primary console is on — sync power state + switch tint.
     setConsolePower(CONSOLE_ID, true, consoleObjs.get(CONSOLE_ID)?.userData?.powerBtn);
@@ -4731,19 +5002,24 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
 // the net/room session and host role survive untouched. The TV follows the new
 // canvas via routeVideo() (rackMgr.get(CONSOLE_ID).canvas) and the host-video
 // capture follows it via the primaryCanvas() getter. Returns the new runtime.
-async function rebootPrimaryConsole(meta, gun) {
-  const coreName = gun?.core || meta.core;
+async function rebootPrimaryConsole(meta, gun, mouse = null) {
+  // `gun` and `mouse` are mutually-exclusive device configs of the same shape
+  // ({ core, inputDevices, coreOptions, remapName }). Either (or neither) seats a
+  // peripheral on a fresh boot — the gun path is unchanged; the mouse path reuses it.
+  const dev = gun || mouse;
+  const coreName = dev?.core || meta.core;
   const core = CORES[coreName];
   if (!core) throw new Error(`no core registered as "${coreName}"`);
   const buf = await resolveRom(meta);
-  const coreOptions = gun ? { ...(core.coreOptions || {}), ...gun.coreOptions } : core.coreOptions;
+  const coreOptions = dev ? { ...(core.coreOptions || {}), ...dev.coreOptions } : core.coreOptions;
   logLightgunBoot('arm-reboot', meta, gun, { live: true });
+  if (mouse) logger?.event?.('mouse-boot', { where: 'arm-reboot', system: meta.system, inputDevices: mouse.inputDevices, mice: mouse.mice, remapName: mouse.remapName, live: true });
   const next = await bootFreshRuntime(CONSOLE_ID, meta, {
     core: { name: coreName, url: core.url, style: core.style },
     romBuffer: buf,
     coreOptions,
-    inputDevices: gun?.inputDevices,
-    remapName: gun?.remapName ?? core.remapName,
+    inputDevices: dev?.inputDevices,
+    remapName: dev?.remapName ?? core.remapName,
   });
   // Re-point the singleton-bound consumers (keyboard / desktop pad / reset / save
   // states / host-video pause-resume) at the new runtime's client, and wire its
@@ -4759,6 +5035,8 @@ async function rebootPrimaryConsole(meta, gun) {
   _lastLoadedMeta = meta;
   _lightgunArmedConsole = !!gun;
   _twoGunPorts = (gun && gun.guns?.length > 1) ? gun.guns.map((x) => x.port) : [];
+  _mouseArmedConsole = !!mouse;
+  _twoMousePorts = (mouse && mouse.mice?.length > 1) ? mouse.mice.map((x) => x.port) : [];
   gameInput?.setSystem(meta.system);
   consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
   setSystemLabel(coreName);

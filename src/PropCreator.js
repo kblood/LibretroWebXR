@@ -18,7 +18,7 @@ import { normalizeProp, normalizePortal } from './RoomLoader.js';
 // RoomBuilder can build standalone. `tv` is excluded (it has no object — it only
 // toggles the CRT shader) and `model` is excluded (it needs an asset URL there's
 // no in-VR way to supply yet).
-export const CREATABLE_PROP_TYPES = ['shelf', 'console', 'gamepad', 'poster', 'bookcase', 'cupboard', 'table', 'keyboard', 'lightgun', 'tvset'];
+export const CREATABLE_PROP_TYPES = ['shelf', 'console', 'gamepad', 'poster', 'bookcase', 'cupboard', 'table', 'keyboard', 'lightgun', 'mouse', 'tvset'];
 
 // Per-type non-spatial defaults baked into a freshly created prop.
 // - shelf: no `collection` → RoomBuilder falls back to the room's first
@@ -40,6 +40,7 @@ const PROP_DEFAULTS = {
   table:    {},
   keyboard: { layout: 'standard' },  // standard full PC layout; switch via setLayout('c64')
   lightgun: {},                      // grabbable gun; extra guns enable 2-player co-op
+  mouse:    {},                      // grabbable mouse; extra mice enable split-pointer 2-player (Amiga)
   tvset:    {},                      // standalone movable TV; patch a console into it
 };
 

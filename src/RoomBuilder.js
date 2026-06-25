@@ -17,6 +17,7 @@ import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
 import { createKeyboardDevice } from './Keyboard.js';
 import { createLightGun } from './LightGun.js';
+import { createMouse } from './Mouse.js';
 import {
   createBookcase, createCupboard, createTable,
   bookcaseShelfSurfaceYs, BOOKCASE_W, BOOKCASE_T,
@@ -370,6 +371,15 @@ export function buildProp(prop, { scene, collections }) {
       applyRot(obj, prop.rot);
       scene.addObject(obj);
       return { object: obj, kind: 'lightgun' };
+    }
+    case 'mouse': {
+      // A grabbable in-world mouse prop. Same factory the boot path uses; main.js
+      // registers it with GrabMgr + the MouseMgr registry and arms the mouse device
+      // on mouse-capable games (Amiga) when it's picked up.
+      const obj = createMouse({ position: v3(prop.pos) });
+      applyRot(obj, prop.rot);
+      scene.addObject(obj);
+      return { object: obj, kind: 'mouse' };
     }
     case 'tvset': {
       // A standalone, movable TV cabinet (distinct from the 'tv' shader toggle).

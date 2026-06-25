@@ -9,6 +9,8 @@ import {
   portsForSystem, mediumFor, coreWeight,
   lightgunLoadConfig, twoGunForSystem, isTwoGunCapable, libretroGunPortFor,
   twoGunPortsForSystem,
+  mouseForSystem, isMouseCapable, twoMouseForSystem, isTwoMouseCapable,
+  twoMousePortsForSystem, mouseLoadConfig, libretroMousePortFor,
   fourScoreLoadConfig, RETRO_DEVICE_NES_GAMEPAD,
 } from '../src/systems.js';
 
@@ -164,6 +166,51 @@ eq('SECONDARY gun slot 0 → port 1', libretroGunPortFor(0, portsForConsole('con
 eq('SECONDARY gun slot 1 → port 2', libretroGunPortFor(1, portsForConsole('console1')), 2);
 eq('SECONDARY single-gun console → [] → null', libretroGunPortFor(0, portsForConsole('console2')), null);
 eq('SECONDARY no-gun console → [] → null', libretroGunPortFor(0, portsForConsole('console3')), null);
+
+// --- Mouse peripheral (Amiga) ------------------------------------------------
+// puae carries remapName 'PUAE' so a MOUSE port-device override is written into
+// its per-core .rmp and connects at boot (the same path the guns use).
+eq('puae remapName = PUAE', CORES.puae?.remapName, 'PUAE');
+
+// Single mouse: RETRO_DEVICE_MOUSE (2) on port 0 → player 1.
+ok('amiga mouse-capable', isMouseCapable('amiga'));
+ok('nes NOT mouse-capable', !isMouseCapable('nes'));
+eq('amiga mouseForSystem device', mouseForSystem('amiga')?.device, 2);
+eq('amiga mouseForSystem port', mouseForSystem('amiga')?.port, 0);
+const amMouse = mouseLoadConfig('amiga');
+eq('amiga single-mouse core', amMouse?.core, 'puae');
+eq('amiga single-mouse inputDevices', amMouse?.inputDevices, { 1: 2 });
+eq('amiga single-mouse mice', amMouse?.mice, [{ device: 2, port: 0 }]);
+eq('amiga single-mouse remapName', amMouse?.remapName, 'PUAE');
+eq('non-mouse system → null', mouseLoadConfig('nes'), null);
+
+// Two-mouse (split-pointer 2-player): a mouse on each DB9 port [0,1], devices [2,2].
+ok('amiga two-mouse capable', isTwoMouseCapable('amiga'));
+ok('nes NOT two-mouse capable', !isTwoMouseCapable('nes'));
+eq('amiga twoMouseForSystem devices', twoMouseForSystem('amiga')?.devices, [2, 2]);
+eq('amiga twoMousePortsForSystem → [0,1]', twoMousePortsForSystem('amiga'), [0, 1]);
+eq('nes twoMousePortsForSystem → []', twoMousePortsForSystem('nes'), []);
+eq('unknown twoMousePortsForSystem → []', twoMousePortsForSystem('nope'), []);
+const amTwo = mouseLoadConfig('amiga', { twoMouse: true });
+eq('amiga two-mouse core', amTwo?.core, 'puae');
+eq('amiga two-mouse inputDevices (two ports)', amTwo?.inputDevices, { 1: 2, 2: 2 });
+eq('amiga two-mouse mice A/B → ports', amTwo?.mice, [{ device: 2, port: 0 }, { device: 2, port: 1 }]);
+eq('twoMouse on non-2mouse system → null', mouseLoadConfig('nes', { twoMouse: true }), null);
+
+// libretroMousePortFor: Kth mouse in cable order → Kth two-mouse port.
+const amPorts = amTwo.mice.map((m) => m.port); // [0, 1]
+eq('libretroMousePortFor amPorts', amPorts, [0, 1]);
+eq('mouse slot 0 → libretro port 0', libretroMousePortFor(0, amPorts), 0);
+eq('mouse slot 1 → libretro port 1', libretroMousePortFor(1, amPorts), 1);
+eq('mouse slot 2 (out of range) → null', libretroMousePortFor(2, amPorts), null);
+eq('empty twoMousePorts (single) → null', libretroMousePortFor(0, []), null);
+eq('non-array → null', libretroMousePortFor(0, null), null);
+eq('negative slot → null', libretroMousePortFor(-1, amPorts), null);
+eq('non-integer slot → null', libretroMousePortFor(0.5, amPorts), null);
+// Derivation matches mouseLoadConfig's mice→ports (the value _twoMousePorts holds).
+eq('twoMousePortsForSystem === mouseLoadConfig ports',
+  twoMousePortsForSystem('amiga'),
+  mouseLoadConfig('amiga', { twoMouse: true }).mice.map((m) => m.port));
 
 // --- NES Four Score (4-player multitap) --------------------------------------
 // The libretro device id is RETRO_DEVICE_GAMEPAD = SUBCLASS(JOYPAD,1) =

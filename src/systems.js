@@ -58,7 +58,13 @@ export const CORES = {
   // proprietary Kickstart is supplied (partial A500 compat). weight 2 = 16-bit
   // tier; the 68k + cycle-exact chipset is heavy in no-JIT wasm — bump to 3 if
   // it can't hold a rack slot on the headset. See [[amiga-puae-blocked]].
-  puae:              { url: 'cores/puae_libretro.js',              exts: ['adf','adz','dms','fdi','ipf','hdf','hdz','lha','uae'], label: 'Amiga (PUAE)', style: 'module', license: 'GPLv2', weight: 2, coreOptions: { puae_kickstart: 'aros' } },
+  // remapName 'PUAE' = the RA library_name; needed so a port-device override
+  // (a MOUSE on a DB9 port) is written into the per-core .rmp and connects at
+  // boot — the same mechanism the light guns use. DE-RISK VERIFIED (2026-06-25):
+  // RETRO_DEVICE_MOUSE (id 2) on a PUAE port works via synthetic DOM mouse events
+  // (movementX/movementY relative motion + button bitmask), no core rebuild —
+  // proven by dragging an AROS Workbench window in headless puae (tmp/derisk-mouse5).
+  puae:              { url: 'cores/puae_libretro.js',              exts: ['adf','adz','dms','fdi','ipf','hdf','hdz','lha','uae'], label: 'Amiga (PUAE)', style: 'module', license: 'GPLv2', weight: 2, coreOptions: { puae_kickstart: 'aros' }, remapName: 'PUAE' },
 };
 
 // Rack budget calibration (see RackBudget.js). Tuned to the Phase-0 Quest-3
@@ -130,7 +136,21 @@ export const SYSTEMS = {
   pce:       { label: 'PC Engine / TG-16',  defaultCore: 'mednafen_pce_fast',cores: ['mednafen_pce_fast'],            exts: ['pce'],                        aliases: ['pce','pc engine','turbografx','turbografx-16','tg16'],   thumbnailRepo: 'NEC_-_PC_Engine_-_TurboGrafx_16',                medium: 'cartridge' },
   c64:       { label: 'Commodore 64',       defaultCore: 'vice_x64',         cores: ['vice_x64'],                     exts: ['d64','d71','d80','d81','d82','g64','x64','t64','tap','prg','p00','crt'], aliases: ['c64','commodore 64','commodore64'], thumbnailRepo: 'Commodore_-_64',  medium: 'floppy', keyboard: true },
   vic20:     { label: 'Commodore VIC-20',   defaultCore: 'vice_xvic',        cores: ['vice_xvic'],                    exts: ['20','40','60','a0','b0','rom'], aliases: ['vic20','vic-20','commodore vic-20'],                    thumbnailRepo: 'Commodore_-_VIC-20',                             medium: 'floppy', keyboard: true },
-  amiga:     { label: 'Commodore Amiga',    defaultCore: 'puae',             cores: ['puae'],                         exts: ['adf','adz','dms','fdi','ipf','hdf','hdz','lha','uae'], aliases: ['amiga','commodore amiga','a500','a1200','amiga 500','amiga 1200'], thumbnailRepo: 'Commodore_-_Amiga', medium: 'floppy', keyboard: true },
+  amiga:     { label: 'Commodore Amiga',    defaultCore: 'puae',             cores: ['puae'],                         exts: ['adf','adz','dms','fdi','ipf','hdf','hdz','lha','uae'], aliases: ['amiga','commodore amiga','a500','a1200','amiga 500','amiga 1200'], thumbnailRepo: 'Commodore_-_Amiga', medium: 'floppy', keyboard: true,
+    // Amiga mouse. The DB9 ports take a mouse just like a joystick; PUAE reads it
+    // as RETRO_DEVICE_MOUSE (id 2). One mouse on port 0 is the single-player default
+    // (Workbench, point-and-click games). DE-RISK VERIFIED: relative motion + buttons
+    // reach the core via DOM mouse events (see CORES.puae note).
+    mouse: { label: 'Amiga Mouse', core: 'puae', device: 2, port: 0 },
+    // TWO-MOUSE variant: one mouse on each of the two DB9 ports so two players each
+    // drive their OWN pointer — the path The Settlers' 2-player mode needs. PUAE
+    // accepts a mouse on ports 0 and 1 (devices [2,2], ports [0,1]). NOTE: feeding
+    // two INDEPENDENT pointers needs a multiport rwebinput patch on puae (the same
+    // kind the light guns got) — the stock core reads both ports from mouse_index 0,
+    // so without the patch both ports follow the SAME pointer. EmulatorClient.sendMouse
+    // is future-proofed to use a patched per-port setter when present, else the shared
+    // DOM path. See docs/MOUSE_SUPPORT.md "Two-mouse caveat".
+    mouse2: { label: 'Amiga 2-Mouse', core: 'puae', devices: [2, 2], ports: [0, 1] } },
 };
 
 // Controller ports per system — how many controllers the base hardware
@@ -275,6 +295,108 @@ export function libretroGunPortFor(cableSlotIndex, twoGunPorts) {
   if (!Array.isArray(twoGunPorts) || twoGunPorts.length === 0) return null;
   if (!Number.isInteger(cableSlotIndex) || cableSlotIndex < 0) return null;
   const p = twoGunPorts[cableSlotIndex];
+  return Number.isInteger(p) ? p : null;
+}
+
+// --- Mouse peripheral (Amiga, later DOS) ------------------------------------
+// The mouse mirrors the light-gun descriptors, but feeds RELATIVE motion (dx,dy)
+// + L/R buttons into RETRO_DEVICE_MOUSE on a port instead of an absolute aim.
+// One mouse → one port is the proven path. A two-mouse variant seats a mouse on
+// each of two ports for split-pointer 2-player (e.g. The Settlers on Amiga).
+
+/**
+ * Single-mouse descriptor for a system, or null. Shape:
+ *   { label, core, device, port }
+ * `device` is the libretro controller-device id (RETRO_DEVICE_MOUSE = 2) to
+ * assign on `port` (0-based), `core` the core that runs it. Pure registry lookup.
+ */
+export function mouseForSystem(systemId) {
+  return SYSTEMS[systemId]?.mouse ?? null;
+}
+
+/** True if a system has a mouse peripheral wired up. */
+export function isMouseCapable(systemId) {
+  return !!SYSTEMS[systemId]?.mouse;
+}
+
+/**
+ * Two-mouse descriptor for a system, or null. Shape:
+ *   { label, core, devices:[d1,d2], ports:[p1,p2] }
+ * Only systems with a genuine two-mouse use (Amiga split-pointer 2-player) expose
+ * this. Drives the (patched) multiport mouse path — each port its own pointer.
+ */
+export function twoMouseForSystem(systemId) {
+  return SYSTEMS[systemId]?.mouse2 ?? null;
+}
+
+/** True if a system has a two-mouse peripheral. */
+export function isTwoMouseCapable(systemId) {
+  return !!SYSTEMS[systemId]?.mouse2;
+}
+
+/**
+ * The ordered libretro mouse PORTs a system's two-mouse device seats its mice on
+ * (Amiga → [0, 1]), or [] for a single-mouse / no-mouse system. The per-console
+ * analogue of twoGunPortsForSystem: a mouse plugged into ANY console resolves
+ * THAT console's ports from its loaded system. Always returns an array.
+ */
+export function twoMousePortsForSystem(systemId) {
+  const tm = SYSTEMS[systemId]?.mouse2;
+  return tm ? [...tm.ports] : [];
+}
+
+/**
+ * Build the EmulatorClient.start() mouse wiring for a system, or null if it has
+ * no mouse. Returns { core, inputDevices, coreOptions, remapName, mice } where:
+ *   • core         — the core that runs the mouse (== defaultCore for Amiga).
+ *   • inputDevices — { player: deviceId } to assign (player = mouse port + 1).
+ *   • coreOptions  — any core options (none needed for PUAE mouse; PUAE auto-reads
+ *                    a connected mouse device).
+ *   • remapName    — the core's RA library name for its per-core remap file (the
+ *                    only thing that connects a port device at boot in this build).
+ *   • mice         — each mouse's { device, port } so the caller can map mouse A→
+ *                    portX, mouse B→portY (mirrors lightgunLoadConfig's `guns`).
+ *
+ * With { twoMouse:true } and a system that defines `mouse2` (Amiga), returns the
+ * TWO-MOUSE config: BOTH ports in inputDevices and both mice in `mice`.
+ */
+export function mouseLoadConfig(systemId, opts = {}) {
+  if (opts.twoMouse) {
+    const tm = SYSTEMS[systemId]?.mouse2;
+    if (!tm) return null;
+    const remapName = CORES[tm.core]?.remapName ?? null;
+    const inputDevices = {};
+    const mice = [];
+    tm.ports.forEach((port, i) => {
+      const device = tm.devices[i];
+      inputDevices[port + 1] = device;
+      mice.push({ device, port });
+    });
+    return { core: tm.core, inputDevices, coreOptions: {}, remapName, mice };
+  }
+  const m = SYSTEMS[systemId]?.mouse;
+  if (!m) return null;
+  const remapName = CORES[m.core]?.remapName ?? null;
+  return {
+    core: m.core,
+    inputDevices: { [m.port + 1]: m.device },
+    coreOptions: {},
+    remapName,
+    mice: [{ device: m.device, port: m.port }],
+  };
+}
+
+/**
+ * Map a 0-based CABLE-slot index (which mouse-in-port-order this is among the mice
+ * plugged into a console) to the libretro mouse input PORT it should drive. The
+ * mouse analogue of libretroGunPortFor: the Kth mouse in cable-port order drives
+ * `twoMousePorts[K]`. Returns null when there's no two-mouse device or the slot
+ * is out of range/invalid → routes to the single-mouse DOM path (unchanged).
+ */
+export function libretroMousePortFor(cableSlotIndex, twoMousePorts) {
+  if (!Array.isArray(twoMousePorts) || twoMousePorts.length === 0) return null;
+  if (!Number.isInteger(cableSlotIndex) || cableSlotIndex < 0) return null;
+  const p = twoMousePorts[cableSlotIndex];
   return Number.isInteger(p) ? p : null;
 }
 

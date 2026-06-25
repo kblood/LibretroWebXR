@@ -101,6 +101,16 @@ export class EmulatorClient extends EventTarget {
     // lazily on first use (the core must be initialised). false = looked up, not
     // present (single-gun core → DOM-event fallback); null = not looked up yet.
     this._webgunSet = null;
+    // Synthetic mouse button state for sendMouse()'s DOM path — mirrors _gunDown.
+    // A bitmask of currently-held DOM buttons (1=left, 2=right, 4=middle) so we
+    // emit clean mousedown/mouseup edges (the core latches a button until release).
+    this._mouseButtons = 0;
+    // Multiport mouse side-channel (future-proofing, mirrors _webgunSet). A
+    // multiport-patched core would export rwebinput_set_mouse(port,dx,dy,buttons)
+    // so two mice on one console drive two ports independently — DOM movementX/Y
+    // can't express two pointers on one canvas. Resolved lazily; false = absent
+    // (single-mouse DOM fallback), null = not looked up yet.
+    this._webmouseSet = null;
   }
 
   async start(emuCanvas, romBuffer, opts = {}) {
@@ -322,7 +332,87 @@ export class EmulatorClient extends EventTarget {
     }
   }
 
+  // Feed RELATIVE mouse motion + buttons to this core's RETRO_DEVICE_MOUSE.
+  //   dx, dy   — relative motion since the last call, in framebuffer pixels (the
+  //              same units rwebinput integrates from pointer-lock movementX/Y).
+  //   buttons  — bitmask of held buttons: bit0 (1)=left, bit1 (2)=right,
+  //              bit2 (4)=middle. The core latches each until released.
+  //   port     — optional libretro mouse PORT (0-based). Two mice on the SAME
+  //              console drive two ports only via a patched multiport setter
+  //              (rwebinput_set_mouse); a single DOM mouse can carry one pointer.
+  //
+  // Single-mouse path (no `port`, or no multiport core): synthesise a DOM
+  // `mousemove` carrying movementX/movementY against this core's own canvas — the
+  // exact field rwebinput reads (DE-RISK VERIFIED on PUAE) — plus mousedown/mouseup
+  // edges for button changes. Per-canvas targeting (like sendInput/sendLightgun)
+  // means each console only hears its own mouse.
+  sendMouse(dx, dy, buttons = 0, port = null) {
+    const canvas = this.emuCanvas;
+    if (!canvas) return;
+    const mask = buttons & 0x7;
+
+    // Multiport path: write straight into the patched core's per-port mouse slot.
+    // The ONLY way two mice on one console drive two ports independently.
+    if (port != null && this._resolveWebmouse()) {
+      try { this._webmouseSet(port, Math.round(dx), Math.round(dy), mask); } catch (_) { /* core gone */ }
+      return;
+    }
+
+    // DOM path. Motion: emit a mousemove with movementX/Y when there's any motion.
+    // MouseEvent's constructor leaves movementX/Y read-only at 0, so define them.
+    const rect = canvas.getBoundingClientRect();
+    const clientX = rect.left + rect.width / 2;
+    const clientY = rect.top + rect.height / 2;
+    if (dx || dy) {
+      const ev = new MouseEvent('mousemove', { clientX, clientY, bubbles: true, cancelable: true, view: window });
+      try {
+        Object.defineProperty(ev, 'movementX', { value: dx });
+        Object.defineProperty(ev, 'movementY', { value: dy });
+      } catch (_) { /* some envs lock these — motion still no-ops gracefully */ }
+      canvas.dispatchEvent(ev);
+    }
+
+    // Buttons: diff against the held mask and emit edges. DOM `button` is the index
+    // (0=left,1=middle,2=right); `buttons` is the resulting held bitmask.
+    if (mask !== this._mouseButtons) {
+      const changed = mask ^ this._mouseButtons;
+      // Map each DOM button index to its bitmask bit (left=1<<0, right=1<<1→idx2,
+      // middle=1<<2→idx1). rwebinput uses the same 1=left/2=right/4=middle layout.
+      const BIT_TO_BUTTON = { 1: 0, 2: 2, 4: 1 };
+      for (const bit of [1, 2, 4]) {
+        if (!(changed & bit)) continue;
+        const button = BIT_TO_BUTTON[bit];
+        const goingDown = (mask & bit) !== 0;
+        const newMask = goingDown ? (this._mouseButtons | bit) : (this._mouseButtons & ~bit);
+        canvas.dispatchEvent(new MouseEvent(goingDown ? 'mousedown' : 'mouseup', {
+          clientX, clientY, button, buttons: newMask, bubbles: true, cancelable: true, view: window,
+        }));
+        this._mouseButtons = newMask;
+      }
+    }
+  }
+
   // ---- internals ----
+
+  // Resolve (once) the patched core's multiport mouse setter. Returns a bound
+  // (port,dx,dy,buttons)=>void on a multiport-patched core, or null otherwise (so
+  // sendMouse falls back to the shared DOM path). Mirrors _resolveWebgun.
+  _resolveWebmouse() {
+    if (this._webmouseSet) return this._webmouseSet;
+    if (this._webmouseSet === false) return null;
+    const M = this._getModule();
+    if (!M) return null;
+    let fn = null;
+    try {
+      if (typeof M.cwrap === 'function' && (M._rwebinput_set_mouse || M.asm?.rwebinput_set_mouse)) {
+        fn = M.cwrap('rwebinput_set_mouse', null, ['number', 'number', 'number', 'number']);
+      } else if (typeof M._rwebinput_set_mouse === 'function') {
+        fn = (p, x, y, b) => M._rwebinput_set_mouse(p, x, y, b);
+      }
+    } catch (_) { fn = null; }
+    this._webmouseSet = fn || false;
+    return fn || null;
+  }
 
   // Resolve (once) the patched core's multiport light-gun setter. Returns a
   // bound (port,x,y,buttons)=>void on a multiport core, or null on a single-gun
@@ -438,7 +528,7 @@ export class EmulatorClient extends EventTarget {
       // those synthetic mouse events. A "gun" port is one whose device base class
       // is LIGHTGUN (4) — or POINTER (6), which covers nestopia's Zapper (id 262 =
       // SUBCLASS(POINTER,0)) that is nonetheless read via the LIGHTGUN path.
-      const RETRO_DEVICE_MASK = 0xff, RETRO_DEVICE_LIGHTGUN = 4, RETRO_DEVICE_POINTER = 6;
+      const RETRO_DEVICE_MASK = 0xff, RETRO_DEVICE_MOUSE = 2, RETRO_DEVICE_LIGHTGUN = 4, RETRO_DEVICE_POINTER = 6;
       const validPorts = Object.entries(this._inputDevices)
         .filter(([player]) => Number.isInteger(Number(player)) && Number(player) >= 1);
       // Main cfg: enable the per-core remap dir (so the .rmp below is honoured at
@@ -454,6 +544,13 @@ export class EmulatorClient extends EventTarget {
           cfg += `input_player${p}_mouse_index = "0"\n`;
           cfg += `input_player${p}_gun_trigger_mbtn = "1"\n`;
           cfg += `input_player${p}_gun_offscreen_shot_mbtn = "2"\n`;
+        } else if (base === RETRO_DEVICE_MOUSE) {
+          // A MOUSE port reads its motion + buttons from a physical mouse index.
+          // In a web build there is only one (index 0); sendMouse() feeds the
+          // canvas-targeted DOM mouse events (movementX/Y + L/R buttons) the core
+          // integrates. Two mice on one console reading distinct pointers needs a
+          // multiport rwebinput patch (see sendMouse / docs/MOUSE_SUPPORT.md).
+          cfg += `input_player${p}_mouse_index = "0"\n`;
         }
       }
       // The per-core remap FILE is what actually connects the device at boot.
