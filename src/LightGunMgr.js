@@ -20,7 +20,14 @@
 import * as THREE from 'three';
 
 const DEFAULT_CURVATURE = 0.18; // must match CrtShader's uCurvature default
-const AIM_LOG_INTERVAL = 0.25;  // seconds — throttle aim telemetry to ~4 Hz
+// Aim heartbeat throttle. This was 0.25s (~4 Hz), which while a gun is HELD floods
+// the remote log with hundreds of aim entries and pushes the rare-but-vital boot /
+// lightgun-boot / fire events out of the server's retained window — i.e. the spam
+// buried exactly the events needed to diagnose a gun boot. The meaningful signal is
+// carried by hit/miss FLIPS (always logged) and FIREs (per trigger edge); the
+// periodic heartbeat only needs to confirm "still aiming", so 5s is ample and keeps
+// the log readable. See docs/LIGHTGUN_SUPPORT.md telemetry notes.
+const AIM_LOG_INTERVAL = 5.0;   // seconds — slow heartbeat; flips + fires carry signal
 
 /**
  * Replicate the CRT shader's barrel `curve()` and convert a screen-surface UV
