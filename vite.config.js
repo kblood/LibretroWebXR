@@ -38,10 +38,17 @@ export default defineConfig({
   // Vite's dep pre-scan otherwise picks up every .html under source-projects/
   // and chokes on webretro's massive webxr.js. We only want our own index.html.
   optimizeDeps: {
-    entries: ['index.html'],
+    entries: ['index.html', 'desktop.html'],
   },
   build: {
     rollupOptions: {
+      // Two entry points: the VR app (index.html) and the flat-screen desktop
+      // build (desktop.html). They share src/ modules; the desktop entry never
+      // imports three, so its chunk stays three-free automatically.
+      input: {
+        main: 'index.html',
+        desktop: 'desktop.html',
+      },
       output: {
         // Split the bulky, rarely-changing three.js out of the app chunk
         // (Phase C polish). The prod bundle was one ~702 kB chunk; three is the

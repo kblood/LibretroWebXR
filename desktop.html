@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <title>LibretroWebXR — Desktop</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; padding: 0; height: 100%; background: #0e0e10; color: #eee; font-family: system-ui, sans-serif; }
+      body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+      header { padding: 10px 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+               background: #1b1b1e; border-bottom: 1px solid #2a2a2e; z-index: 2; }
+      header h1 { margin: 0 8px 0 0; font-size: 14px; font-weight: 600; letter-spacing: .03em; color: #9aa; }
+      header .sp { flex: 1; }
+      header button, header label, header select {
+        font: inherit; font-size: 13px; background: #2a2a2e; color: #eee;
+        border: 1px solid #3a3a40; border-radius: 6px; padding: 6px 10px; cursor: pointer;
+      }
+      header button:hover, header label:hover { background: #34343a; }
+      header select { max-width: 260px; }
+      header input[type=file] { display: none; }
+      input[type=text] { font: inherit; font-size: 13px; background: #161618; color: #eee;
+        border: 1px solid #3a3a40; border-radius: 6px; padding: 6px 8px; }
+      #mp-nick { width: 90px; } #mp-room { width: 120px; }
+      .group { display: flex; gap: 6px; align-items: center; }
+      .lbl { font-size: 11px; color: #667; text-transform: uppercase; letter-spacing: .05em; }
+
+      #mp-status { font-size: 12px; white-space: nowrap; }
+      #mp-status.online { color: #6d9; } #mp-status.offline { color: #667; }
+
+      #screen { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+                background: #000; position: relative; }
+      #emu, .host-video {
+        max-width: 100%; max-height: 100%; image-rendering: pixelated;
+        background: #000; display: block;
+      }
+      .host-video { object-fit: contain; }
+
+      footer { padding: 6px 14px; font-size: 11px; color: #778; background: #1b1b1e;
+               border-top: 1px solid #2a2a2e; display: flex; gap: 18px; flex-wrap: wrap; }
+      footer b { color: #9aa; font-weight: 600; }
+      #status { padding: 6px 14px; font-size: 12px; color: #99a; background: #141416;
+                border-top: 1px solid #222; }
+    </style>
+  </head>
+  <body class="mp-disconnected">
+    <header>
+      <h1>LibretroWebXR</h1>
+
+      <div class="group">
+        <span class="lbl">Game</span>
+        <select id="game-select" title="Pick a bundled game"><option value="">— loading —</option></select>
+        <label for="file-input" title="Load a ROM file from your computer">Load ROM…</label>
+        <input id="file-input" type="file" />
+      </div>
+
+      <div class="group">
+        <button id="save-state" title="Download a save state">Save</button>
+        <button id="load-state" title="Load a save state file">Load</button>
+      </div>
+
+      <span class="sp"></span>
+
+      <div class="group">
+        <span class="lbl">2-Player</span>
+        <input id="mp-nick" type="text" placeholder="Name" value="Player" />
+        <input id="mp-room" type="text" placeholder="Room code" />
+        <button id="mp-connect">Join / Host</button>
+        <span id="mp-status" class="offline">offline</span>
+      </div>
+    </header>
+
+    <div id="screen">
+      <canvas id="emu" width="320" height="240"></canvas>
+    </div>
+
+    <div id="status">Loading…</div>
+
+    <footer>
+      <span><b>Keyboard:</b> Arrows = D-pad · Z/X = B/A · A/S = Y/X · Q/W = L/R · Enter = Start · Shift = Select</span>
+      <span><b>Gamepad:</b> plug in a controller — standard mapping</span>
+      <span><b>2-Player:</b> one player picks a game (hosts), the other enters the same room code &amp; joins</span>
+    </footer>
+
+    <script type="module" src="/src/desktop/main.js"></script>
+  </body>
+</html>
