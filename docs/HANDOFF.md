@@ -1,13 +1,61 @@
 # Handoff
 
-Single orientation doc for picking this project up cold. Last updated 2026-06-13.
-**Current focus: polish + diagnosis. A large batch of quality-of-life work
-(remote logging, room persistence, C64 keyboard, placement snapping, image
-picker, configurable posters, multiplayer join/leave UI, Now Playing panel, and
-Load-ROM fix) was completed and DEPLOYED today (2026-06-13, commit `aad39dd`).**
+Single orientation doc for picking this project up cold. Last updated
+2026-07-02 (code @ `a7aac29`, branch `main`).
+
+**Current focus: a lot landed since the last refresh (2026-06-13, `aad39dd`)
+and needs deploying + headset validation.** Highlights, newest first:
+- **Flat-screen desktop build (2026-06-30, `c591895`).** `desktop.html` — a
+  non-VR entry point (`src/desktop/`) that runs the same emulator core in a
+  plain browser tab with the existing host-authoritative netplay, so two
+  people can play over the Internet without a headset. Reuses the
+  three-free shared modules verbatim (EmulatorClient, systems/Collection/
+  RomResolver, NetProtocol/PresenceState/RoomObjects/VideoMgr, room-server).
+  **Real-GPU verified 2026-07-02** (`scripts/verify-desktop-netplay.mjs`,
+  `npm run verify-desktop-netplay`, 8/8): two headed Chrome windows connect
+  to the same room, the host boots a bundled NES game, and the client
+  receives a genuinely live WebRTC video track (advancing `currentTime`,
+  independently-verified differing frame content) — closing the gap the
+  original commit flagged (headless software-GL can't exercise
+  `captureStream()` pixels).
+- **DOS registered on VirtualXT (2026-06-25, merged 2026-07-02).** `dos` is a
+  system in `src/systems.js` running the buildbot's prebuilt VirtualXT core,
+  but it's **blocked**: the buildbot binary boot-traps right after mounting
+  the disk (`RuntimeError: unreachable`), a buildbot build defect, not a
+  wiring bug. Parked like Atari 2600/stella2014. Full de-risk writeup:
+  `docs/DOS_CORE_BUILD.md`.
+- **Amiga boots a real Kickstart (2026-06-30, `6089ebe`).** `puae_kickstart:
+  'Automatic'` + `systemFiles` provisions the user's own KS1.3 ROM
+  (gitignored, `public/roms/local/`) into RetroArch's system dir before boot;
+  falls back to the built-in AROS replacement when no ROM is on the server.
+- **Mouse as a first-class connectable peripheral (2026-06-25/30,
+  `c184a73`).** Amiga PUAE reads `RETRO_DEVICE_MOUSE` via synthetic DOM
+  mouse events (de-risk verified); single-mouse and two-mouse (`mouse2`,
+  needs a multiport core patch to be truly independent) variants registered.
+  See `docs/MOUSE_SUPPORT.md`.
+- **Multiplayer full-sync epic + light guns (mid-late June, several
+  commits).** A real fix for "sync subsystems didn't wire on an in-app
+  widget join" (only `?session=` URL joins got full MP sync before); NES
+  Four Score 4-player multitap; light guns are a pluggable, networked,
+  cord-attached peripheral with VR aim/fire, breadth across NES/SNES
+  (incl. two-gun Justifier co-op)/Genesis/SMS, and remote-diagnosable
+  telemetry (`docs/LIGHTGUN_SUPPORT.md`, `docs/HEADSET_LIGHTGUN_VALIDATION.md`).
+- **Rack / multi-console (mid June).** Live cross-core swap on a secondary
+  console without a page reload; power/reset switches; rack layout persists
+  across the (still-needed, for the primary console) cross-core reload.
+
+**None of this is deployed yet.** The live site at
+https://dionysus.dk/webxr/libretrowebxr2/ is still the 2026-06-13 `aad39dd`
+build — confirmed 2026-07-02: its bundled JS has no `virtualxt`/`DesktopNet`
+strings, and `desktop.html` 404s live. `npm run deploy` is the next step but
+wasn't run this session (outward-facing deploys get confirmed with the user
+first — see the `commit-push-policy` memory). Everything above is
+committed + pushed to `origin/main`.
+
 The **controls bug** (Quest users sometimes can't control the console after a
-cross-core reload) is **instrumented for remote diagnosis via the new Logger**
-but is NOT confirmed fixed — a headset test is needed. Built on top of networked
+cross-core reload), called out in the prior handoff as instrumented-but-
+unconfirmed, has seen **no headset re-test since** — still open, still
+diagnosable via the Logger as described below. Built on top of networked
 multiplayer Phase M0 + M1 (presence/voice/TV/held-object + host-authoritative
 input + host video stream — all live), the **three in-VR edit modes (Move /
 Change / Add)** + desktop controls + **local multiplayer (couch co-op)**, Phase
@@ -637,37 +685,52 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   (`window.__editor`/`__grab` are deliberately exposed *before* the await as a
   headless probe workaround — that's a patch, not the fix.)
 
-## Immediate next actions (2026-06-13 batch deployed)
+## Immediate next actions (as of 2026-07-02, code @ `a7aac29`)
 
-Code @ `aad39dd` is **live as of 2026-06-13** (COOP/COEP + `crossOriginIsolated`
-verified; M1.1/M1.2 smokes pass live). Sensible next steps, in rough priority:
+The live site is still the **2026-06-13 `aad39dd`** build — three-plus weeks of
+merged work (see the top summary) has never been deployed. Sensible next steps,
+in rough priority:
 
-1. **Diagnose + fix the controls bug on a real Quest.** The input pipeline is now
-   instrumented — Logger emits 'input' events on every key press and throttled
-   'input-state' (gamepad held? XR gamepad visible? controller count? system map?)
-   on change. Reproduce the bug on a headset, watch `https://dionysus.dk/logs?session=<room>`
-   from a desktop, and read the state log to pin the failure mode. The NowPlayingPanel
-   in-scene input pulse is a secondary visual aid. Fix → `npm run deploy`.
-2. **Resolve the blob: URL poster limitation.** Picked images (from ImageLibrary)
+1. **Deploy.** `npm run deploy` publishes `main` (code @ `a7aac29`) to
+   `/webxr/libretrowebxr2/`. This is the highest-leverage next action — nothing
+   below is visible to the user until this happens. Outward-facing, so confirm
+   with the user first unless they're asking why a landed feature isn't visible
+   (see the `commit-push-policy` memory) — then it's a "just deploy" situation.
+   After deploying, spot-check the flat-screen build too: it needs its own entry
+   point at `/webxr/libretrowebxr2/desktop.html` (confirm `vite.config.js`'s
+   second rollup entry actually publishes there — untested through the real
+   `deploy.ps1` pipeline, only through local `vite build`/`vite preview`).
+2. **Diagnose + fix the controls bug on a real Quest.** Unchanged from the prior
+   handoff — still open, still just instrumented, not reproduced or fixed since.
+   The input pipeline emits Logger 'input'/'input-state' events; reproduce on a
+   headset, watch `https://dionysus.dk/logs?session=<room>` from a desktop, read
+   the state log to pin the failure mode. Fix → `npm run deploy`.
+3. **Real-headset validation backlog** — several features have shipped logic-
+   verified but headset-unverified since the last handoff: light-gun aim/fire in
+   VR (checklist: `docs/HEADSET_LIGHTGUN_VALIDATION.md`), two-gun co-op, the
+   mouse peripheral's in-VR feel/gain, C64/VIC-20 key mappings, the raycast
+   edit-mode menus (Play/Move/Change/Add), and two-headset multiplayer (avatars/
+   voice/TV sync/roster — use `npm run dummy-player -- --session=<room>` as a
+   lightweight desktop observer). None of these are exercisable headlessly;
+   they need an actual Quest session once the site is redeployed.
+4. **Resolve the blob: URL poster limitation.** Picked images (from ImageLibrary)
    are blob: URLs and are lost on reload. Store the folder-relative filename in the
    poster descriptor (`prop.imageFile`) and re-resolve against the granted
    ImageLibrary handle on load. The `RoomSerializer` already round-trips `texture`
    — extend it to carry `imageFile` too.
-3. **Real-VR smoke of edit modes + multiplayer** — still the gating headset test:
-   raycast menus (Play/Move/Change/Add), C64 keyboard point-to-type, in-VR
-   Multiplayer join panel, and one live XR `inputSource.gamepad` per held
-   controller. The underlying logic is all unit-tested; only the headset UX is
-   unverified.
-4. **Two-headset multiplayer smoke test** (needs hardware): join the same
-   `?session=` room from two Quest headsets, verify avatars, voice, TV sync, held
-   carts, and the in-VR roster. Use `npm run dummy-player -- --session=<room>`
-   from a desktop as a lightweight room observer while one headset plays.
-5. **Phase M2 — research spike done.** Confirmed: genuine rewrite, not a slice.
-   Recommendation: keep M1 host-authoritative streaming as the shipped default;
-   do a bare-core spike on `fceumm` (NES only) as an opt-in PoC before deciding
-   on full M2. Read `docs/research/M2-rollback-feasibility.md` first.
-6. **Phase C** — remaining: open prop-package schema, community gallery, BIOS
-   systems (PSX/N64), PWA install. Bundle chunking is already done.
+5. **DOS core** — blocked on the buildbot VirtualXT boot-trap (see the top
+   summary + `docs/DOS_CORE_BUILD.md`). Building VirtualXT ourselves needs an
+   Odin toolchain with no proven emscripten path; DOSBox Pure (the better
+   long-term core) needs a heavy from-scratch WSL2 build, unassessed for effort.
+   Not worth picking up without a specific reason to prioritize DOS.
+6. **Phase M2 — research spike done.** Confirmed: genuine rewrite, not a slice.
+   Recommendation: keep M1 host-authoritative streaming (now also available via
+   the desktop-netplay build) as the shipped default; do a bare-core spike on
+   `fceumm` (NES only) as an opt-in PoC before deciding on full M2. Read
+   `docs/research/M2-rollback-feasibility.md` first.
+7. **Phase C** — remaining: open prop-package schema, community gallery, BIOS
+   systems (PSX/N64 — feasibility assessed 2026-06-15, N64 not viable on
+   standalone Quest 3, PSX marginal), PWA install. Bundle chunking is done.
 
 E.3 specifics worth knowing for whoever extends it:
 - `window.__add.{shelf,console,gamepad,poster,portal}()` drive prop creation
@@ -721,6 +784,15 @@ E.3 specifics worth knowing for whoever extends it:
 Persistent memory notes: `canonical-repo-moved` (`C:\LLM\LibretroWebXR` is canonical,
 old path historical); `test-game-authoring-goal` (the CC0 test-game effort, its
 status, the classic-core fix, and installed-toolchain locations);
-`libretrowebxr-deploy` (deploy method); and `libretrowebxr-concurrent-dev` (this
-repo gets concurrent edits/WIP from other agent sessions — re-check git state
-before assuming the roadmap position, and never commit files you didn't change).
+`libretrowebxr-deploy` (deploy method); `libretrowebxr-concurrent-dev` (this
+repo gets concurrent edits/WIP from other agent sessions, often in sibling
+worktrees under `.claude/worktrees/` or `../LibretroWebXR-wt-*` — re-check git
+state before assuming the roadmap position, and never commit files you didn't
+change); and `commit-push-policy` (commit when a feature lands, push once
+verified, but confirm before an outward-facing `npm run deploy` — this is why
+the extensive work above is pushed but not yet live). Newer, feature-specific
+memories: `lightgun-derisk`/`nes-zapper-light-stuck`/`snes-justifier-twogun-limit`/
+`gun-cable-peripheral` (light guns); `mouse-peripheral-amiga-dos-epic` (mouse +
+the DOS de-risk); `widget-join-and-parallel-features` (the MP full-sync fix);
+`lightgun-local-test-wall` (gitignored commercial gun-ROM sideload for local
+testing only, never committed).
