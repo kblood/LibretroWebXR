@@ -32,6 +32,7 @@
     "smoke-log": "node scripts/smoke-log.mjs",
     "smoke-gamepad-share": "node scripts/smoke-gamepad-share.mjs",
     "smoke-prop-sync": "node scripts/smoke-prop-sync.mjs",
+    "verify-desktop-netplay": "node scripts/verify-desktop-netplay.mjs",
     "deploy": "pwsh scripts/deploy.ps1",
     "dummy-player": "node scripts/dummy-player.mjs",
     "probe-local-rom": "node scripts/probe-local-rom.mjs",
