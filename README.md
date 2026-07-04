@@ -4,20 +4,33 @@ A **browser-based WebXR libretro frontend** — play retro console games inside 
 3D room, on **desktop browsers** and **standalone Meta Quest**, with no install.
 Think [EmuVR](https://emuvr.net), but open-source and running in a web page.
 
-> **Status:** working prototype, freshly re-homed into a clean, shareable repo.
-> See `docs/ROADMAP.md` for where it's going (JSON-defined rooms & collections,
-> an in-VR room editor, and multiplayer).
+> **Status:** live at `dionysus.dk/webxr/libretrowebxr2/` — rooms/collections as
+> JSON, an in-VR room editor, and networked multiplayer are all built and
+> deployed. See `docs/ROADMAP.md` for what's shipped vs. still in progress and
+> `docs/HANDOFF.md` for the current state of the world.
 
 ## What it does today
 
 - A 3D room you can enter in VR (Quest browser / PCVR) or explore on a flat
-  screen.
-- Grabbable **cartridges** on a **shelf**; slot one into the **console** and it
-  boots on the in-world **CRT TV**.
-- ~13 systems via libretro cores: SNES, NES, Atari 2600, Genesis / Master System
-  / Game Gear, GBA, Virtual Boy, PC Engine / TurboGrafx-16, C64, VIC-20.
+  screen — plus a **flat-screen-only `desktop.html` build** with the same
+  netplay for players without a headset.
+- Grabbable **cartridges** on **shelves/bookcases**; slot one into a **console**
+  and it boots on the in-world **CRT TV**. A **patchable AV rack** lets you spawn
+  more consoles/TVs and repatch video, controller, and keyboard cords between
+  them, EmuVR-style.
+- **17 systems** via libretro cores: SNES, NES, Game Boy / Color / Advance,
+  Genesis / Master System / Game Gear / SG-1000 / Sega 32X, Virtual Boy,
+  PC Engine / TurboGrafx-16, Atari 2600, C64, VIC-20, and **Amiga** (real
+  Kickstart boot). DOS (VirtualXT) is registered but currently blocked — see
+  `docs/DOS_CORE_BUILD.md`.
 - Keyboard, gamepad, and WebXR-controller input with per-core RetroPad mapping;
-  save states, spatial audio, in-VR menus.
+  local couch co-op (up to 4 players, NES Four Score included); **light-gun**
+  peripherals (Zapper, Super Scope, Justifier 2-gun, Menacer, Light Phaser) and
+  a **mouse** peripheral (Amiga point-and-click) as grabbable, cord-connected,
+  net-synced props — see `docs/LIGHTGUN_SUPPORT.md` / `docs/MOUSE_SUPPORT.md`.
+- Save states, spatial audio, in-VR menus, a C64/VIC-20 virtual keyboard.
+- **Networked multiplayer**: shared room presence, voice, room-object sync,
+  and host-authoritative 2-player game streaming — see `docs/MULTIPLAYER.md`.
 
 ## Important: no ROMs, no bundled cores
 

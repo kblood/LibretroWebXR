@@ -133,6 +133,15 @@ enabled with `a2enconf libretrowebxr`.
 - **Audio**: puppeteer can capture audio events via CDP but we don't yet.
 - **Controller input mapping**: synthesised `selectstart`/`squeezestart`
   events would need a fake XR session; out of scope today.
+- **`canvas.captureStream()` video frames (WebRTC netplay).** Headless
+  Chrome's software-GL renderer doesn't reliably produce real, sampleable
+  frames from `captureStream()` — a headless smoke test can get as far as
+  "the peer connection reached ice=connected" without ever proving a
+  non-host client actually *sees* live pixels. When a bug (or a claim of
+  "verified") depends on real video content, launch **headed** Chrome
+  (`headless: false`, real GPU) instead — see
+  `scripts/verify-desktop-netplay.mjs` for the pattern (sample host-canvas
+  pixel data + assert `<video>.currentTime` advances over a sleep).
 
 ## Common failure modes seen so far
 

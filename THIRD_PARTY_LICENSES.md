@@ -50,6 +50,8 @@ build knows their obligations.
 | mednafen_vb (Beetle VB) | Virtual Boy | GPLv2 | GPL |
 | stella2014 | Atari 2600 | GPLv2 | GPL |
 | vice_x64 / vice_xvic | C64 / VIC-20 | GPLv2 | GPL |
+| puae | Amiga | GPLv2 | GPL (needs Kickstart) |
+| virtualxt | DOS / IBM PC | MPL-2.0 | Permissive (GPL-compatible) — registered, currently blocked (see `docs/DOS_CORE_BUILD.md`) |
 | beetle_psx / beetle_psx_hw | PlayStation | GPLv2 | GPL (needs BIOS) |
 | mupen64plus_next | Nintendo 64 | GPLv2 | GPL |
 | mame2003_plus / fbneo | Arcade | Non-commercial | ⚠️ NON-COMMERCIAL (+ROM/BIOS issues) |

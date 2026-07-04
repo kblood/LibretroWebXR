@@ -1,10 +1,11 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated
-2026-07-02 (code @ `a7aac29`, branch `main`).
+2026-07-04 (code @ `b8a7d03`, branch `main`).
 
-**Current focus: a lot landed since the last refresh (2026-06-13, `aad39dd`)
-and needs deploying + headset validation.** Highlights, newest first:
+**Current focus: everything below is now live — real-headset validation is
+what's left.** Deployed 2026-07-02 (see "Live build" below). Highlights,
+newest first:
 - **Flat-screen desktop build (2026-06-30, `c591895`).** `desktop.html` — a
   non-VR entry point (`src/desktop/`) that runs the same emulator core in a
   plain browser tab with the existing host-authoritative netplay, so two
@@ -44,13 +45,13 @@ and needs deploying + headset validation.** Highlights, newest first:
   console without a page reload; power/reset switches; rack layout persists
   across the (still-needed, for the primary console) cross-core reload.
 
-**None of this is deployed yet.** The live site at
-https://dionysus.dk/webxr/libretrowebxr2/ is still the 2026-06-13 `aad39dd`
-build — confirmed 2026-07-02: its bundled JS has no `virtualxt`/`DesktopNet`
-strings, and `desktop.html` 404s live. `npm run deploy` is the next step but
-wasn't run this session (outward-facing deploys get confirmed with the user
-first — see the `commit-push-policy` memory). Everything above is
-committed + pushed to `origin/main`.
+**Deployed 2026-07-02, confirmed live.** `npm run deploy` published code @
+`a7aac29` (the HANDOFF.md refresh commit on top, `b8a7d03`, is docs-only) to
+`/webxr/libretrowebxr2/`; verified via chunk-hash matching, per-chunk string
+greps for `virtualxt`/`DesktopNet` (code-splitting scatters them across
+non-`main` chunks — check the right chunk), and live screenshots of both
+`/webxr/libretrowebxr2/` and `/webxr/libretrowebxr2/desktop.html`. Everything
+above is committed + pushed to `origin/main` and live.
 
 The **controls bug** (Quest users sometimes can't control the console after a
 cross-core reload), called out in the prior handoff as instrumented-but-
@@ -206,18 +207,20 @@ forward-set.** Crosshair + control hint live in `index.html`. Verified headless
 (movement + room-clamp + synthetic grab/release of a prop) + screenshot.
 
 **Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, **code @
-`aad39dd`, re-deployed 2026-06-13** — edit modes, desktop controls, local
-multiplayer, networked Phase M0 + M1 (presence/voice/TV/held-object sync, host
-input + video stream), remote logging, room persistence, C64 keyboard, placement
-snapping, configurable posters, image picker, multiplayer join/leave UI, Now
-Playing panel, Load-ROM fix, gamepad-port-plug fix — all live. COOP/COEP +
-`crossOriginIsolated` verified; M1.1/M1.2 smokes pass live against
-`wss://dionysus.dk/ws/`. **The in-headset smoke-test checklist is live at
-`/webxr/libretrowebxr2/headset-test.html`** (linked from the app header — "🧪
-Headset Test"). Headset logs viewable at **`https://dionysus.dk/logs?session=<room>`**.
-The original https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and
-is left untouched — `libretrowebxr2` is a deliberate separate folder. User
-confirmed E.1 works in VR; the gamepad-pickup regression is fixed + redeployed.
+`a7aac29`, deployed 2026-07-02** — everything in the summary above plus
+everything from the prior 2026-06-13 deploy: edit modes, desktop controls,
+local multiplayer, networked Phase M0 + M1 (presence/voice/TV/held-object
+sync, host input + video stream), remote logging, room persistence, C64
+keyboard, placement snapping, configurable posters, image picker, multiplayer
+join/leave UI, Now Playing panel — all live. COOP/COEP + `crossOriginIsolated`
+verified; M1.1/M1.2 smokes pass live against `wss://dionysus.dk/ws/`. The
+flat-screen build is also live at
+**`/webxr/libretrowebxr2/desktop.html`**. **The in-headset smoke-test
+checklist is live at `/webxr/libretrowebxr2/headset-test.html`** (linked from
+the app header — "🧪 Headset Test"). Headset logs viewable at
+**`https://dionysus.dk/logs?session=<room>`**. The original
+https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and is left
+untouched — `libretrowebxr2` is a deliberate separate folder.
 
 ## What this is
 
@@ -685,50 +688,43 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   (`window.__editor`/`__grab` are deliberately exposed *before* the await as a
   headless probe workaround — that's a patch, not the fix.)
 
-## Immediate next actions (as of 2026-07-02, code @ `a7aac29`)
+## Immediate next actions (as of 2026-07-04, code @ `b8a7d03`)
 
-The live site is still the **2026-06-13 `aad39dd`** build — three-plus weeks of
-merged work (see the top summary) has never been deployed. Sensible next steps,
-in rough priority:
+The site is **deployed and current** (see "Live build" above — code @
+`a7aac29`, 2026-07-02; nothing has landed on `main` since except this docs
+pass). Sensible next steps, in rough priority:
 
-1. **Deploy.** `npm run deploy` publishes `main` (code @ `a7aac29`) to
-   `/webxr/libretrowebxr2/`. This is the highest-leverage next action — nothing
-   below is visible to the user until this happens. Outward-facing, so confirm
-   with the user first unless they're asking why a landed feature isn't visible
-   (see the `commit-push-policy` memory) — then it's a "just deploy" situation.
-   After deploying, spot-check the flat-screen build too: it needs its own entry
-   point at `/webxr/libretrowebxr2/desktop.html` (confirm `vite.config.js`'s
-   second rollup entry actually publishes there — untested through the real
-   `deploy.ps1` pipeline, only through local `vite build`/`vite preview`).
-2. **Diagnose + fix the controls bug on a real Quest.** Unchanged from the prior
+1. **Diagnose + fix the controls bug on a real Quest.** Unchanged from the prior
    handoff — still open, still just instrumented, not reproduced or fixed since.
    The input pipeline emits Logger 'input'/'input-state' events; reproduce on a
    headset, watch `https://dionysus.dk/logs?session=<room>` from a desktop, read
    the state log to pin the failure mode. Fix → `npm run deploy`.
-3. **Real-headset validation backlog** — several features have shipped logic-
-   verified but headset-unverified since the last handoff: light-gun aim/fire in
-   VR (checklist: `docs/HEADSET_LIGHTGUN_VALIDATION.md`), two-gun co-op, the
-   mouse peripheral's in-VR feel/gain, C64/VIC-20 key mappings, the raycast
-   edit-mode menus (Play/Move/Change/Add), and two-headset multiplayer (avatars/
-   voice/TV sync/roster — use `npm run dummy-player -- --session=<room>` as a
-   lightweight desktop observer). None of these are exercisable headlessly;
-   they need an actual Quest session once the site is redeployed.
-4. **Resolve the blob: URL poster limitation.** Picked images (from ImageLibrary)
+2. **Real-headset validation backlog** — several features have shipped logic-
+   verified but headset-unverified: light-gun aim/fire in VR (checklist:
+   `docs/HEADSET_LIGHTGUN_VALIDATION.md`), two-gun co-op, the mouse
+   peripheral's in-VR feel/gain, C64/VIC-20 key mappings, the raycast
+   edit-mode menus (Play/Move/Change/Add), the patchable AV rack (controller
+   cord repatch + cross-core swap — see the 2026-06-14 feedback doc), and
+   two-headset multiplayer (avatars/voice/TV sync/roster — use
+   `npm run dummy-player -- --session=<room>` as a lightweight desktop
+   observer). None of these are exercisable headlessly; they need an actual
+   Quest session — the site is deployed and ready for it now.
+3. **Resolve the blob: URL poster limitation.** Picked images (from ImageLibrary)
    are blob: URLs and are lost on reload. Store the folder-relative filename in the
    poster descriptor (`prop.imageFile`) and re-resolve against the granted
    ImageLibrary handle on load. The `RoomSerializer` already round-trips `texture`
    — extend it to carry `imageFile` too.
-5. **DOS core** — blocked on the buildbot VirtualXT boot-trap (see the top
+4. **DOS core** — blocked on the buildbot VirtualXT boot-trap (see the top
    summary + `docs/DOS_CORE_BUILD.md`). Building VirtualXT ourselves needs an
    Odin toolchain with no proven emscripten path; DOSBox Pure (the better
    long-term core) needs a heavy from-scratch WSL2 build, unassessed for effort.
    Not worth picking up without a specific reason to prioritize DOS.
-6. **Phase M2 — research spike done.** Confirmed: genuine rewrite, not a slice.
+5. **Phase M2 — research spike done.** Confirmed: genuine rewrite, not a slice.
    Recommendation: keep M1 host-authoritative streaming (now also available via
    the desktop-netplay build) as the shipped default; do a bare-core spike on
    `fceumm` (NES only) as an opt-in PoC before deciding on full M2. Read
    `docs/research/M2-rollback-feasibility.md` first.
-7. **Phase C** — remaining: open prop-package schema, community gallery, BIOS
+6. **Phase C** — remaining: open prop-package schema, community gallery, BIOS
    systems (PSX/N64 — feasibility assessed 2026-06-15, N64 not viable on
    standalone Quest 3, PSX marginal), PWA install. Bundle chunking is done.
 

@@ -1,12 +1,18 @@
 # Light-gun support (NES Zapper, Super Scope, Light Phaser, GunCon…)
 
-Status: **G1 COMPLETE** (NES, 2026-06-20) — the full VR gun loop works end-to-end in
-the browser: pick up a grabbable light-gun prop, aim it at the TV, pull the trigger,
-and the in-game light-gun registers the hit. Built on the proven core fix (patched
-`rwebinput`, `docs/patches/rwebinput-lightgun.diff`). Verified headlessly through the
-real scene + load paths (screenshots: aim→blue, fire→green, Zapper crosshair tracks).
-Remaining: SMS core-switch handling, fceumm boot crash, 2-gun co-op, headset
-validation, deploy reproducibility of the patched cores. Started 2026-06-20.
+Status: **Feature-complete across NES/SNES/Genesis/SMS, deployed** (last landed
+2026-06-22). The full VR gun loop works end-to-end in the browser: pick up a
+grabbable light-gun prop — now a first-class, cord-connected, net-synced
+peripheral like the gamepad (commit `14fd173`) — aim it at the TV, pull the
+trigger, and the in-game light-gun registers the hit. Built on the proven core
+fix (patched `rwebinput`, `docs/patches/rwebinput-lightgun.diff`). Covers NES
+Zapper, SNES Super Scope, SNES Justifier (2-gun co-op), Genesis Menacer, and SMS
+Light Phaser — including simultaneous two-gun co-op (own port per gun) and
+live core-switch reboot without a page reload. Verified headlessly through the
+real scene + load paths and with real ROMs (see `docs/LIGHTGUN_SUPPORT.md`
+verification scripts + `docs/HEADSET_LIGHTGUN_VALIDATION.md`). **Remaining:**
+real-headset validation (aim feel, two-gun co-op on hardware) — see
+`docs/HEADSET_LIGHTGUN_VALIDATION.md` for the plan.
 
 ---
 

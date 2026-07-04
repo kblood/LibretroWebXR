@@ -45,8 +45,14 @@ non-commercial-friendly and keep cores easy to drop.
 
 ## BIOS — never distributed
 PSX (`scph550x.bin`, Sony), GBA (`gba_bios.bin`, Nintendo, optional with mGBA's
-HLE BIOS), Sega CD (`bios_CD_*.bin`, Sega), arcade system BIOS — all copyrighted,
-all user-supplied. NES/SNES/GB/GBC/Genesis-cart/N64 need no BIOS.
+HLE BIOS), Sega CD (`bios_CD_*.bin`, Sega), arcade system BIOS, Amiga Kickstart
+(`kickXXXXX.A500`/`.A1200`, Commodore/Cloanto) — all copyrighted, all
+user-supplied. NES/SNES/GB/GBC/Genesis-cart/N64 need no BIOS. The Amiga core
+falls back to the open-source AROS Kickstart replacement when no user file is
+supplied. `src/systems.js`'s `systemFiles` mechanism (a `CORES` entry field)
+provisions a user-owned firmware file — gitignored, under `public/roms/local/`
+— into the core's RetroArch system dir before boot; this is the general
+mechanism any future BIOS-needing core (PSX, N64) would also use.
 
 ## ROMs — never distributed
 Only free/homebrew/public-domain/CC content ships, each with its license and

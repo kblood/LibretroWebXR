@@ -40,11 +40,14 @@ This is **not** a greenfield plan; a working app was carried over (see
   thumbnail gallery.
 - **Placement preview + snapping** (`Placement`): new props clamp to room bounds
   and snap to floor or nearest wall; ghost preview in Move mode.
-- ~13 systems wired (SNES, NES, Atari 2600, Genesis/SMS/GG, GBA, Virtual Boy,
-  PC Engine, C64, VIC-20) via the `CORES` map / `systems.js`.
+- **17 systems** wired (SNES, NES, GB/GBC/GBA, Genesis/SMS/GG/SG-1000/Sega 32X,
+  Virtual Boy, PC Engine, Atari 2600, C64, VIC-20, Amiga) via the `CORES` map /
+  `systems.js`; DOS (VirtualXT) is registered but currently blocked — see
+  **Mouse peripheral + new systems** and **DOS / VirtualXT** below.
 - COOP/COEP for SharedArrayBuffer (`vite.config.js`, `deploy/`), and a puppeteer
   health-check harness (`scripts/debug.js`, `DEBUGGING.md`).
-- Test suite: **1225 assertions** (`npm test`).
+- Test suite: grows every phase (`npm test`; see `package.json` for the current
+  script list — one `test-*.mjs` per pure module).
 
 So the foundation EmuVR took years to build (room + emulator-on-a-TV + grabbable
 games) largely exists. The roadmap is about **making it open, declarative, and
@@ -316,17 +319,16 @@ players. **VR controller routing still needs a real-headset smoke test; not yet
 redeployed.** Follow-ons: physical USB-gamepad routing, per-pad mesh animation +
 DebugHud for players 2-4, in-VR port retargeting.
 
-> **Four Score gap (surfaced by LWX Bomberman, 2026-06-16).** Routing P2-4 keys
-> via `EXTRA_PLAYER_KEYS` is necessary but **not sufficient on the NES**: a real
-> NES only has two controller ports, so a 4-player ROM reads P3/P4 over the
-> **Four Score** multitap serial protocol. For fceumm to present that to the
-> ROM, the libretro layer must put the NES ports into the Four Score *device*
-> (`input_libretro_device_pN` in `RetroArchConfig.js`, and/or
-> `retro_set_controller_port_device`). This is **not** a core option — verified
-> there is no `fceumm_4player` in the shipped core. LWX Bomberman already reads
-> all four pads and auto-detects the Four Score (falling back to 2-player), so it
-> is the ready-made test case once the device is wired; needs headset
-> verification. Same applies to any genuinely-4-port console (SNES multitap, etc.).
+> **Four Score gap — ✅ closed (2026-06-30).** Routing P2-4 keys via
+> `EXTRA_PLAYER_KEYS` was necessary but not sufficient on the NES: a real NES
+> only has two controller ports, so a 4-player ROM reads P3/P4 over the **Four
+> Score** multitap serial protocol. Fixed by putting the NES ports into the
+> Four Score *device* (`retro_set_controller_port_device`, wired in
+> `RetroArchConfig.js`/`main.js`), since there is no `fceumm_4player` core
+> option. **NES Bomberman** (an authored 4-player CC0 ROM with a Four Score
+> auto-detect + power-ups) is the verified test case (commits `ad17131`,
+> `61b5826`, merged `5a060fc`); headset confirmation still pending. Same
+> mechanism would apply to any genuinely-4-port console (SNES multitap, etc.).
 
 ## Phase M — Multiplayer, networked (see `docs/MULTIPLAYER.md`)  ← in progress
 
@@ -477,6 +479,31 @@ remote INPUT, held-object). CLI: `--session/--url/--nick/--color/--move`.
     always runs). No point emulating something it isn't authoritative for and isn't
     displaying — saves Quest CPU/battery. Verified by `scripts/smoke-video.mjs`
     (now 16: two clients pause while watching, one resumes after becoming host).
+  - **Widget-join full-sync fix ✅ done (2026-06-22)** — joining via the header
+    Join button (not just booting with `?session=` already in the URL) now
+    wires *every* MP subsystem (voice, held-cart ghosts, gamepad/gun/mouse
+    sync), not just presence. This was a real "nothing synced" root cause for
+    anyone who joined mid-session rather than on initial load. Also fixed a
+    TDZ bug that was silently breaking all MP auto-join. Landed alongside NES
+    Four Score support (see the callout above) and secondary-console gun aim —
+    three agents in parallel worktrees, merged + deployed together.
+  - **Peripheral sync (gamepads/guns/mice) ✅ done** — `src/net/GamepadSync.js`
+    / `GunSync.js` / `MouseSync.js` extend the same generic `STATE` channel
+    (`RoomObjects`) so every peer agrees which physical peripheral drives which
+    console/port/player — essential for guests to see the right controls, and
+    for guns/mice specifically (see **Light guns** and **Mouse peripheral**
+    below).
+  - **Desktop (flat-screen) netplay build ✅ done (2026-07-01)** — `desktop.html`
+    + `src/desktop/` is a second, VR-free entry point for players without a
+    headset: no three.js/avatars/head-tracking, but the same room server, wire
+    protocol, and host-authoritative video-stream netplay (`DesktopNet.js`
+    reuses `PresenceState`/`RoomObjects`/`VideoMgr`/`NetProtocol` verbatim from
+    `src/net/`). Verified with a **real-GPU** two-browser Puppeteer harness
+    (`scripts/verify-desktop-netplay.mjs`, `npm run verify-desktop-netplay`) —
+    headless software-GL can't exercise real `canvas.captureStream()` pixels,
+    so this always launches headed Chrome windows; confirms the host's canvas
+    renders real frames and the client's `<video>` receives and plays a live
+    (not frozen) WebRTC stream. 8/8 passing.
 - **M2:** rollback game sync for deterministic cores (adapt netplayjs +
   `SaveState`). **⚠ Feasibility spike DONE (2026-06-13):
   `docs/research/M2-rollback-feasibility.md`.** Confirmed: a genuine rewrite, not
@@ -491,6 +518,101 @@ remote INPUT, held-object). CLI: `--session/--url/--nick/--color/--move`.
   bare-core spike on **`fceumm` (NES) only** as an opt-in PoC before deciding on
   full M2; do not convert the whole core library.
 - **M3:** multiple simultaneous games, mid-session join, VR↔desktop crossplay.
+
+## Phase RACK — Multi-console patchable AV rack  ✅ shipped (2026-06-13 → 06-30)
+EmuVR-style: spawn more than one console/TV in the same room and patch cords
+between them, instead of being locked to a single fixed console. Built in
+gated phases so a real perf ceiling (multiple wasm cores running at once on
+Quest) was de-risked before committing to the UI.
+- **Phase 0 — de-risk spike:** `?rack=N` boots N live module cores side by side
+  headlessly, proving multi-instance + input isolation before any UI
+  (`src/RackSpike.js`; memory `rack-spike-result`). Quest perf ceiling
+  (how many concurrent cores a Quest 3 can actually run) is read from
+  `rack-perf` log entries, not assumed.
+- **Phase 1 — pure graph:** `src/Patchbay.js`, a pure cord/jack graph (no
+  THREE/DOM), wires the existing single console through it as N=1 — the
+  no-rewrite seam every later phase builds on.
+- **Phase 2 — weighted runtime:** `src/ConsoleRuntime.js` (the per-console unit
+  Phase 2+ multiplies) + `src/RackMgr.js` (owns N runtimes) + `src/RackBudget.js`
+  (an admission policy — each core declares a relative `weight` in `systems.js`;
+  RackBudget refuses to spin up a console that would blow the perf budget).
+  `ConsoleRuntime.dispose()` pauses + detaches rather than truly freeing, so
+  RackBudget can reclaim/recreate cheaply.
+- **Phase 4 — EmuVR-style patch cords:** `src/Cord.js` (visual cable curve) +
+  `src/Plug.js` (a grabbable plug end, `plugKind`: `'video'` | `'controller'` |
+  `'keyboard'`) + `src/Snap.js` (nearest-jack snap-on-release). Console→TV video
+  cords, gamepad→console controller cords, and the keyboard-device cord (see
+  **Keyboard device** below) all repatch by grab-and-drop onto any console's
+  front-face jacks (`Console.js` `portJacks`) — this is what closed the
+  previously-parked "controller cords" item (see Parked, above).
+- **Phase 5 — persistence + power:** `src/RackPersistence.js` persists spawned
+  consoles/TVs (position + power state) and cord patches across the
+  cross-core `location.reload()` boot (`33b1ae9`); power/reset switches on
+  consoles and TVs (`18f8ddb`); **live cross-core swap on a secondary
+  console** — loading a different-core game on console #2 no longer reloads
+  the whole page (`b6282ec`); cords now follow a prop when it's moved, and any
+  console (not just the primary) can load a game (`ee2d441`).
+- **Rack feedback round ✅ done (2026-06-14 feedback → fixed by 2026-06-30):**
+  a real Quest 3 session surfaced 7 issues (`docs/handoff-2026-06-14-rack-feedback.md`)
+  — ROM-boot telemetry, per-console (not global) input routing, room-aware
+  placement so spawned consoles/TVs/posters land against a wall instead of
+  through it, a grabbable controller-cord plug, movable consoles/TVs, and a
+  hide-walls toggle. All 7 items landed (`3f7b73e`, `9857c9f`,
+  `9240235` end-to-end headless probe).
+- **Status:** full patchable rack shipped + headless-verified; **real-headset
+  validation of the rack UX is still open** (controller cords + cross-core
+  swap in particular need hands-on confirmation). See `rack-epic-status` /
+  `rack-spike-result` for the de-risk trail if picking this back up.
+
+## Light guns  ✅ shipped (2026-06-20 → 06-22)
+A grabbable **light-gun peripheral** — pick it up, aim at the TV, pull the
+trigger — for every system that had one historically. Full design + status:
+`docs/LIGHTGUN_SUPPORT.md`; validation plan: `docs/HEADSET_LIGHTGUN_VALIDATION.md`.
+- Core-level fix: a patched `rwebinput` (`docs/patches/rwebinput-lightgun.diff`)
+  feeds real light-gun *position* under emscripten, where upstream doesn't.
+- Ships across **NES Zapper**, **SNES Super Scope**, **SNES Justifier**
+  (2-gun co-op — hardware limit: one PPU latch, so "both guns hit the exact
+  same frame" is physically impossible on real hardware too, not a bug —
+  see `games/snes-opwolf/README.md`), **Genesis Menacer**, and **SMS Light
+  Phaser**. Three authored CC0 test games ship with it: `games/nes-gallery`
+  (Zapper), `games/snes-scope` (Super Scope), and `games/snes-opwolf`
+  (Justifier 2-gun co-op).
+- **First-class peripheral** (`14fd173`): the gun is a grabbable prop with a
+  real cord/plug into a console's port (mirrors the gamepad, uses the Phase
+  RACK cord system above) and its console/port binding is net-synced
+  (`src/net/GunSync.js`) so every peer agrees who's holding which gun.
+- Live core-switch reboot: arming the gun on a system that needs a different
+  core reboots the primary console in place, no page reload (`0c973d8`).
+- **Remaining:** real-headset validation (aim feel, two-gun co-op timing) —
+  everything else is headless- and real-core-verified.
+
+## Mouse peripheral + new systems (Amiga, SG-1000, Sega 32X)  ✅ shipped
+A grabbable **mouse peripheral** (`src/Mouse.js`/`src/MouseMgr.js`), built to
+unlock Amiga point-and-click games and reusable later by DOS. Mirrors the
+light-gun architecture (cord/plug into a console port, net-synced binding via
+`src/net/MouseSync.js`). Full design + status: `docs/MOUSE_SUPPORT.md`.
+- **Amiga (PUAE)** joined the system list with a real Kickstart boot — not just
+  the AROS fallback: `systems.js`'s `systemFiles` mechanism (a general,
+  reusable "provision a user-owned firmware file into the core's system dir
+  before boot" hook — see `docs/LICENSING.md`) wires `kick34005.A500` /
+  `kick40068.A1200` so **The Settlers** boots the real game (`6089ebe`).
+- Single-mouse → one console port verified end-to-end (buttons + relative
+  motion) through the stock `puae` core, no core rebuild needed. **Two
+  independent mice (2-player split-pointer)** needs a multiport `rwebinput`
+  patch that doesn't exist yet for `puae` — the code is future-proofed for it
+  (`amiga.mouse2` descriptor, `EmulatorClient.sendMouse(...,port)` already
+  takes a port) but it's a parked, separate core-rebuild effort.
+- **SG-1000** and **Sega 32X** also joined the system list (via `gearsystem`
+  and `picodrive` respectively) as part of the same content-aware core-loading
+  pass that added Amiga.
+
+## DOS / VirtualXT  ⚠ registered, blocked
+A `virtualxt` core entry + `dos` system exist in `systems.js` (MPL-2.0,
+floppy/keyboard-capable), and `docs/DOS_CORE_BUILD.md` documents the build
+recipe — but the core currently **boot-traps under emscripten** and is not
+shippable yet. This is a parked spike, not a regression: `fetch-cores` doesn't
+fail on it (the core simply isn't fetched), so it costs nothing to leave
+registered for whenever the upstream issue is fixed or worked around.
 
 ## Phase C — Content & polish
 - **Bundle chunking ✅ done (2026-06-13)** — `vite.config.js` `manualChunks`
@@ -508,9 +630,10 @@ remote INPUT, held-object). CLI: `--session/--url/--nick/--color/--move`.
 - PWA install; per-headset storage UX; performance passes on Quest.
 
 ## Parked (user-deferred, low priority)
-- **Controller cords + spawnable screens** — visual cable between gamepad and
-  console; spawnable secondary TV/screen props. No implementation started.
-  Explicitly deferred by the user; revisit when Phase M and C polish are done.
+- ✅ **Controller cords + spawnable screens — done**, superseded by the
+  patchable AV rack: every gamepad/gun/keyboard has a real grabbable cord +
+  plug (`src/Plug.js`, `src/Cord.js`), and consoles/TVs are spawnable
+  (`Add Console`) with their own patch cords. See **Phase RACK** above.
 
 ## Cross-cutting principles
 - **Ship no ROMs, bundle no cores** (`docs/LICENSING.md`).

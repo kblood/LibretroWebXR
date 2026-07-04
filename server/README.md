@@ -10,6 +10,10 @@ This is a **long-running Node process**, not a static asset. The web app stays a
 static site; this runs alongside it and the web server reverse-proxies a path to
 it.
 
+The same server also backs `desktop.html`, the flat-screen (non-VR) build's
+netplay (`src/desktop/DesktopNet.js`) — it's a second client of this same
+room/wire protocol, not a separate server.
+
 ## Run
 
 ```bash

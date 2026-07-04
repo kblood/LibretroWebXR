@@ -114,6 +114,8 @@ controllers, two mice) and, even then, needs the multiport core patch above.
 ## Follow-ups
 
 1. **Multiport `rwebinput_set_mouse` puae build** → true split-pointer 2-player.
-2. **Wire KICK13.ROM as the PUAE Kickstart** (CRC/system-dir) so Settlers boots the
-   real game, not just the AROS cracktro. (AROS already proves the mouse path.)
+2. ✅ **done** — Kickstart wired as the PUAE system firmware via `src/systems.js`'s
+   `systemFiles` mechanism (`puae_kickstart: 'Automatic'` + `kick34005.A500`/
+   `kick40068.A1200` provisioned into the core's system dir before boot; commit
+   `6089ebe`), so Settlers boots the real game, not just the AROS cracktro.
 3. **Headset validation** of the in-VR grab + positional-motion feel + gain tuning.

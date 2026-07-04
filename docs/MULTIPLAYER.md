@@ -64,7 +64,18 @@ HTTPS + COOP/COEP, which threaded wasm cores need.
 The current build implements M1: one peer (the one that last set the shared `tv`
 state) is the **host** and runs the core; it streams its TV video to the others
 over WebRTC and accepts their forwarded input as extra players. Only the focused
-console0 game is shared — the multi-console patch rack is local to each player.
+console0 game is shared — the multi-console patch rack (`docs/ROADMAP.md` Phase
+RACK) is local to each player.
+
+Two things generalized beyond this section's original scope, both covered in
+`docs/ROADMAP.md`'s Phase M: the shared `STATE` channel now also carries
+**peripheral bindings** (which gamepad/light-gun/mouse drives which
+console/port/player — `GamepadSync.js`/`GunSync.js`/`MouseSync.js`), and
+joining **mid-session via the header widget** (not just `?session=` at load)
+now wires every subsystem, not only presence. There's also a second Layer-2
+client, `desktop.html` (flat-screen only, no VR/avatars), which reuses this
+same server/protocol/host-authoritative video path — see
+`scripts/verify-desktop-netplay.mjs`.
 
 ### Test games
 The host-authoritative model only shows its worth with a game that actually
@@ -81,6 +92,10 @@ they only exercise the *video* half of MP. Two options:
    (WTFPL). In `roms/homebrew.collection.json`; download
    `super-tilt-bro.nes` into `public/roms/freeware/` and load that wall with
    `?collection=roms/homebrew.collection.json`. Best for a "real game" co-op test.
+3. **LWX Bomberman (ships, no download).** Authored CC0 4-player NES cart that
+   auto-detects the **Four Score** multitap (falls back to 2-player without
+   it) — the test case for the Four Score fix in `docs/ROADMAP.md`'s Phase M.
+   `games/nes-bomberman/main.c`, rebuilt via `npm run make-nes-bomberman`.
 
 ### Headless verification
 The MP transport + host-resolution are covered by smoke tests against a local
