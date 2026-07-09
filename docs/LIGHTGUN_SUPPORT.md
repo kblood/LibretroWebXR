@@ -65,6 +65,46 @@ Zapper ROM (Duck Hunt etc.) — nothing in the core or the `rwebinput` patch nee
   built-in `detectSuperScope()` / `scope_*` API + a shoot-the-centre calibration that
   cancels the core's +40 H offset. Verified 5/5 on the real snes9x core via
   `tmp/verify-scope-snes9x.mjs` (on-target → green flash, dark → red flash), both boot paths.
+- NES Zapper, Operation-Wolf-style: `games/nes-opwolf/` + `scripts/make-nes-opwolf.mjs`
+  build the CC0 "LWX Frontline Fury (NES)" on-rails wave shooter (`lwx-nes-opwolf.nes`),
+  **registered** as "LWX Frontline Fury (NES)" (`"lightgun": true, "core": "nestopia"`).
+  Design reference-port (not a code port) of our own `games/snes-opwolf/opwolf.c`, reworked
+  for the Zapper's light-sense-only protocol (see the long header comment in
+  `games/nes-opwolf/main.c`): the nestopia Zapper gives the ROM **no X/Y**, only a
+  light-sensed bit and a trigger bit, so — same constraint `nes-gallery` already works
+  within, and why real Duck Hunt needs a multi-frame flash-index scheme (out of scope
+  here) — at most ONE object on screen can ever be "shootable" at a time. Several
+  soldiers march toward the front line at once, but only the frontmost alive one renders
+  in the bright sprite palette (senses light); the rest render in a dim palette that stays
+  below the light threshold. Reload maps onto "trigger pulled while nothing is lit" — the
+  Zapper-protocol-native equivalent of Operation Wolf's off-screen reload. 2-player reuses
+  `nes-gallery`'s proven SHARE (alternating turns, one Zapper, hand off at stage-clear) /
+  DUEL (P1 = port-1 pad A, P2 = the Zapper, both resolved against the same shared light
+  read, `hit_claimed`-guarded so one light-sense event can't credit both players) pattern —
+  true simultaneous two-Zapper aim is still not possible on NES (nestopia only ever reads
+  the gun from port index 1). Verified 12/12 headless (jsnes, `tmp/verify-nes-opwolf.mjs`,
+  polarity-independent: boot/title, mode-select via HUD signature, breach-driven game over,
+  restart) and on the real nestopia core (`tmp/verify-nes-opwolf-nestopia.mjs`), both boot
+  paths. **Found and fixed during verification:** the Zapper spin-read's scratch byte was
+  declared as a *local* inside the 1500-iteration poll loop instead of a global static
+  (unlike `nes-gallery`'s proven `static u8 z;`); cc65's default codegen makes local access
+  far more expensive than a global's, and multiplied by 1500 reads/frame that alone blew
+  the NTSC per-frame cycle budget several times over, making the whole game — including
+  edge-triggered pad input like the SHARE/DUEL mode-select — silently run in slow motion.
+  Moving `z` to a global fixed it; worth remembering for any future NES game that spin-reads
+  a port in a tight loop. **Also found and fixed:** the bottom HUD row (HP/STAGE/MAG,
+  originally row 27) never visibly updated on the real core, even though `kill_active()`/
+  `reload()`/breaches correctly mutate the underlying values every time (confirmed via the
+  green/red flash always firing correctly) — only the FIRST `NT_UPD_HORZ` chunk in a
+  `set_vram_update()` buffer reliably reaches VRAM once a SECOND chunk in the same buffer
+  targets a different nametable page (i.e. a different address high byte); row 1 (score,
+  page `0x20`) and row 27 (HP/STAGE/MAG, page `0x23`) are different pages, so every chunk
+  after the score chunk was silently dropped. `nes-gallery`'s own 2-chunk HUD never
+  exercised this because both of its chunks target the same row/page. Fixed by moving HP/
+  STAGE/MAG from row 27 to row 2 (still clear of enemy sprites, which spawn at row 3+) so
+  every dynamic HUD chunk in the buffer shares page `0x20` with the score chunk — worth
+  remembering for any future NES game whose HUD spans more than one on-screen row via a
+  single `set_vram_update()` buffer.
 
 ## ✅ Proof the fix works (patched nestopia)
 

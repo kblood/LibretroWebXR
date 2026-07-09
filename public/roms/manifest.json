@@ -19,6 +19,9 @@
     { "file": "freeware/lwx-nes-gallery.nes", "system": "nes", "core": "nestopia", "title": "LWX Zap Gallery", "color": "#6a1a1a", "lightgun": true,
       "license": "CC0", "credits": "LibretroWebXR (game in games/nes-gallery, built with cc65 + neslib; see scripts/make-nes-gallery.mjs). NES Zapper light-gun shooting gallery — grab the gun, shoot the bullseye for points (faster each hit); shooting the dark field or letting a target time out is a miss, 3 misses ends it. Boots with the Zapper on port 2. 2-player co-op: from the title, Zapper trigger = 1P; port-1 START = 2P shared-gun (alternating turns, one Zapper); a port-1 fire (2nd gun) = 2P duel (P1 on port 1, P2 on the Zapper) — duel's simultaneous two-gun aim awaits the multiport core." },
 
+    { "file": "freeware/lwx-nes-opwolf.nes", "system": "nes", "core": "nestopia", "title": "LWX Frontline Fury (NES)", "color": "#5a1a1a", "lightgun": true,
+      "license": "CC0", "credits": "LibretroWebXR (game in games/nes-opwolf, built with cc65 + neslib; see scripts/make-nes-opwolf.mjs). NES-native Operation-Wolf-style on-rails wave shooter — soldiers march toward the front line; only the frontmost one is ever lit (the real Zapper has no aim position, only a light/trigger bit, so at most one target can ever be shootable), shoot it to score, shoot while nothing is lit to reload. Clear each stage's quota before health runs out. Boots with the Zapper on port 2. 2-player: from the title, Zapper trigger = 1P; port-1 START = 2P shared-gun (alternating turns, hand off at stage-clear); port-1 A = 2P duel (P1 fires with pad A, P2 with the Zapper, against the same shared target)." },
+
     { "file": "freeware/lwx-gb-snake.gb", "system": "gb", "core": "gambatte", "title": "LWX Snake (GB)", "color": "#3a8a3a",
       "license": "CC0", "credits": "LibretroWebXR (game in games/gb-snake, built with GBDK-2020; see scripts/make-gb-snake.mjs)" },
 

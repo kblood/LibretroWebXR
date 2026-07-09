@@ -40,6 +40,7 @@
     "probe-media": "node scripts/probe-media.mjs"
   },
   "devDependencies": {
+    "jsnes": "^2.1.0",
     "puppeteer-core": "^25.0.2",
     "vite": "^7.0.0"
   },
