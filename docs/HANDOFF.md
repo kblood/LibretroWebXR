@@ -1,12 +1,12 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated
-2026-07-10 (code @ `93d3de2`, branch `main`).
+2026-07-10 (code @ `b25abdc`, branch `main`).
 
 **Current focus: everything below is now live — real-headset validation is
 what's left.** Deployed 2026-07-10 (see "Live build" below). Highlights,
 newest first:
-- **"Fix everything" pass (2026-07-10, `76325d3`..`93d3de2`, not yet deployed).**
+- **"Fix everything" pass (2026-07-10, `76325d3`..`b25abdc`, deployed).**
   Four code-only gaps closed in one sweep: shelf/bookcase cover plaques
   (derive the label from the collection's own `title`); a pre-flight "you
   don't own this ROM" badge on cartridges a multiplayer peer can't resolve
@@ -63,10 +63,12 @@ newest first:
   console without a page reload; power/reset switches; rack layout persists
   across the (still-needed, for the primary console) cross-core reload.
 
-**Deployed 2026-07-10, confirmed live.** `npm run deploy` published code @
-`e2a0ab3` (adds "LWX Frontline Fury") to `/webxr/libretrowebxr2/`; verified by
-fetching the live `roms/manifest.json` and confirming `lwx-nes-opwolf.nes`
-resolves 200. Prior deploy was 2026-07-02 @ `a7aac29`. Everything above is
+**Deployed 2026-07-10, confirmed live (two deploys today).** First deploy
+published code @ `e2a0ab3` ("LWX Frontline Fury"); a second deploy the same
+day published code @ `b25abdc` (the "fix everything" pass above) to
+`/webxr/libretrowebxr2/` — verified by fetching the live `roms/manifest.json`
+(now carrying its new `title` field) and `npm run debug` against the live URL
+(verdict OK). Prior deploy was 2026-07-02 @ `a7aac29`. Everything above is
 committed + pushed to `origin/main` and live.
 
 The **controls bug** (Quest users sometimes can't control the console after a
@@ -223,9 +225,11 @@ forward-set.** Crosshair + control hint live in `index.html`. Verified headless
 (movement + room-clamp + synthetic grab/release of a prop) + screenshot.
 
 **Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, **code @
-`e2a0ab3`, deployed 2026-07-10** — adds "LWX Frontline Fury" (NES Zapper) on
-top of the 2026-07-02 deploy (`a7aac29`), which carried everything in the
-summary above plus everything from the prior 2026-06-13 deploy: edit modes, desktop controls,
+`b25abdc`, deployed 2026-07-10** — the "fix everything" pass (cover plaques,
+unresolvable-ROM badge, in-VR folder grants + Load Collection, portal
+retarget) on top of the same day's earlier deploy (`e2a0ab3`, "LWX Frontline
+Fury"), on top of the 2026-07-02 deploy (`a7aac29`), which carried everything
+in the summary above plus everything from the prior 2026-06-13 deploy: edit modes, desktop controls,
 local multiplayer, networked Phase M0 + M1 (presence/voice/TV/held-object
 sync, host input + video stream), remote logging, room persistence, C64
 keyboard, placement snapping, configurable posters, image picker, multiplayer
@@ -755,21 +759,17 @@ inline. If you're picking up stale-looking doc claims again, check `git log
   `saved = []` so a stalled headless-Chrome IndexedDB open can no longer wedge
   init.
 
-## Immediate next actions (as of 2026-07-10, code @ `93d3de2`)
+## Immediate next actions (as of 2026-07-10, code @ `b25abdc`)
 
-The code is **committed + pushed but not yet redeployed** (see "Live build"
-above — live is still `e2a0ab3`). Sensible next steps, in rough priority:
+The code is **committed, pushed, and deployed** (see "Live build" above —
+live is `b25abdc`). Sensible next steps, in rough priority:
 
-1. **`npm run deploy`** to publish the "fix everything" pass (cover plaques,
-   unresolvable badge, in-VR folder grants + Load Collection, portal
-   retarget) — see the top summary. Verify per the usual checklist (fetch the
-   live manifest, `curl -sI … | grep -i cross-origin`).
-2. **Diagnose + fix the controls bug on a real Quest.** Unchanged from the prior
+1. **Diagnose + fix the controls bug on a real Quest.** Unchanged from the prior
    handoff — still open, still just instrumented, not reproduced or fixed since.
    The input pipeline emits Logger 'input'/'input-state' events; reproduce on a
    headset, watch `https://dionysus.dk/logs?session=<room>` from a desktop, read
    the state log to pin the failure mode. Fix → `npm run deploy`.
-3. **Real-headset validation backlog** — several features have shipped logic-
+2. **Real-headset validation backlog** — several features have shipped logic-
    verified but headset-unverified: light-gun aim/fire in VR (checklist:
    `docs/HEADSET_LIGHTGUN_VALIDATION.md`), two-gun co-op, the mouse
    peripheral's in-VR feel/gain, C64/VIC-20 key mappings, the raycast
@@ -780,17 +780,17 @@ above — live is still `e2a0ab3`). Sensible next steps, in rough priority:
    `npm run dummy-player -- --session=<room>` as a lightweight desktop
    observer). None of these are exercisable headlessly; they need an actual
    Quest session — the site is deployed and ready for it now.
-4. **DOS core** — blocked on the buildbot VirtualXT boot-trap (see the top
+3. **DOS core** — blocked on the buildbot VirtualXT boot-trap (see the top
    summary + `docs/DOS_CORE_BUILD.md`). Building VirtualXT ourselves needs an
    Odin toolchain with no proven emscripten path; DOSBox Pure (the better
    long-term core) needs a heavy from-scratch WSL2 build, unassessed for effort.
    Not worth picking up without a specific reason to prioritize DOS.
-5. **Phase M2 — research spike done.** Confirmed: genuine rewrite, not a slice.
+4. **Phase M2 — research spike done.** Confirmed: genuine rewrite, not a slice.
    Recommendation: keep M1 host-authoritative streaming (now also available via
    the desktop-netplay build) as the shipped default; do a bare-core spike on
    `fceumm` (NES only) as an opt-in PoC before deciding on full M2. Read
    `docs/research/M2-rollback-feasibility.md` first.
-6. **Phase C** — remaining: open prop-package schema, community gallery, BIOS
+5. **Phase C** — remaining: open prop-package schema, community gallery, BIOS
    systems (PSX/N64 — feasibility assessed 2026-06-15, N64 not viable on
    standalone Quest 3, PSX marginal), PWA install. Bundle chunking is done.
 
@@ -811,7 +811,8 @@ tested; one real bug caught in the process (portal descriptors have no
 never matched — fixed by keying off `object.userData.kind` instead). Explicitly
 did **not** touch: TURN/coturn server provisioning (live infra, needs separate
 confirmation) or the DOS core (blocked, not worth picking up without a reason
-— see item 4 above). Not yet deployed — that's the new item 1.
+— see item 3 above). **Deployed 2026-07-10 (`b25abdc`), confirmed live** via
+the manifest fetch + `npm run debug` against the production URL.
 
 E.3 specifics worth knowing for whoever extends it:
 - `window.__add.{shelf,console,gamepad,poster,portal}()` drive prop creation
