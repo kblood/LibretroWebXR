@@ -87,6 +87,12 @@ Turn today's imperative scene-building into a declarative layer (no rewrite).
 - OPFS caching is purely content-addressed (only entries with a declared `sha1`
   are cached/served), so a hit can never be stale — filename-only entries (our
   relative CC0 games, which rebuild in place) are never cached.
+- **sha1 is enforced, not just a cache key (2026-07-10).** `verifyRomIntegrity`
+  hashes freshly-fetched `url`/`local`/`pick` bytes and rejects a mismatch
+  against a declared `rom.sha1`, folded into `resolve()`'s source-fallback
+  loop; `opfs` hits skip re-hashing (already correct by construction). A
+  no-op for entries with no declared sha1 — every shipping CC0 ROM is
+  unaffected.
 - Wired behind `main.js`'s `loadCartridge()` seam (replaced the old
   `romUrl()`+`fetch`). A "ROM folder…" header button (shown only where the FSA
   API exists) grants the local library.

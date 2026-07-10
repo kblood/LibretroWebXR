@@ -12,6 +12,8 @@ import {
   resolutionPlan,
   resolve,
   isLocalRomMeta,
+  verifyRomIntegrity,
+  sha1Hex,
 } from '../src/RomResolver.js';
 
 let pass = 0, fail = 0;
@@ -274,6 +276,75 @@ const notFoundFetch = async (_url) => ({ ok: false, status: 404, arrayBuffer: as
     ok('resolve pick-in-Node throws', e instanceof Error);
     ok('resolve pick-in-Node message contains "pick:"', e.message.includes('pick:'));
     ok('resolve pick-in-Node message contains title', e.message.includes('No URL Game'));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// verifyRomIntegrity / resolve() — declared sha1 is actually enforced, not
+// just used as a cache key.
+// ---------------------------------------------------------------------------
+
+console.log('--- verifyRomIntegrity ---');
+{
+  // No declared sha1 → no-op, whatever the bytes are.
+  try {
+    await verifyRomIntegrity(FAKE_BUF, { rom: {} });
+    ok('verifyRomIntegrity no-op with no declared sha1', true);
+  } catch (e) {
+    fail++; console.error(`FAIL  verifyRomIntegrity no-op threw: ${e.message}`);
+  }
+
+  const trueSha1 = await sha1Hex(FAKE_BUF);
+
+  try {
+    await verifyRomIntegrity(FAKE_BUF, { rom: { sha1: trueSha1 } });
+    ok('verifyRomIntegrity passes on matching sha1', true);
+  } catch (e) {
+    fail++; console.error(`FAIL  verifyRomIntegrity matching threw: ${e.message}`);
+  }
+
+  try {
+    await verifyRomIntegrity(FAKE_BUF, { rom: { sha1: trueSha1.toUpperCase() } });
+    ok('verifyRomIntegrity is case-insensitive', true);
+  } catch (e) {
+    fail++; console.error(`FAIL  verifyRomIntegrity case-insensitive threw: ${e.message}`);
+  }
+
+  try {
+    await verifyRomIntegrity(FAKE_BUF, { rom: { sha1: '0000000000000000000000000000000000000a' } });
+    fail++; console.error('FAIL  verifyRomIntegrity should have thrown on mismatch');
+  } catch (e) {
+    ok('verifyRomIntegrity throws on mismatch', e instanceof Error);
+    ok('verifyRomIntegrity mismatch message mentions sha1', e.message.includes('sha1 mismatch'));
+  }
+}
+
+console.log('--- resolve() enforces declared sha1 ---');
+{
+  const trueSha1 = await sha1Hex(FAKE_BUF);
+
+  // Correct declared sha1 alongside a url source → resolves normally.
+  {
+    const meta = { title: 'Verified Game', file: 'test.sfc', rom: { sha1: trueSha1 } };
+    try {
+      const buf = await resolve(meta, { fetchImpl: okFetch });
+      ok('resolve succeeds when fetched bytes match declared sha1', buf instanceof ArrayBuffer);
+    } catch (e) {
+      fail++; console.error(`FAIL  resolve with matching sha1 threw: ${e.message}`);
+    }
+  }
+
+  // Wrong declared sha1 → resolve rejects even though the fetch itself succeeded (200 OK).
+  {
+    const meta = { title: 'Tampered Game', file: 'test.sfc', rom: { sha1: '1111111111111111111111111111111111111a' } };
+    try {
+      await resolve(meta, { fetchImpl: okFetch });
+      fail++; console.error('FAIL  resolve should reject bytes that fail sha1 verification');
+    } catch (e) {
+      ok('resolve rejects sha1-mismatched bytes', e instanceof Error);
+      ok('resolve mismatch message names the source', e.message.includes('url:'));
+      ok('resolve mismatch message mentions sha1', e.message.includes('sha1 mismatch'));
+    }
   }
 }
 

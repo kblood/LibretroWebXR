@@ -266,6 +266,23 @@ export async function cacheRom(buf) {
   }
 }
 
+/**
+ * If `meta.rom.sha1` is declared, verify freshly-fetched bytes actually match
+ * it before trusting them — catches a corrupted download, a stale/wrong file
+ * sharing the same name in a local folder, or a tampered response. Throws on
+ * mismatch so the `resolve()` source loop treats it like any other fetch
+ * failure and falls through to the next declared source. No-ops when no sha1
+ * is declared, matching today's trust-the-bytes behaviour.
+ */
+export async function verifyRomIntegrity(buf, meta) {
+  const declared = meta?.rom?.sha1;
+  if (!declared) return;
+  const actual = await sha1Hex(buf);
+  if (actual !== String(declared).toLowerCase()) {
+    throw new Error(`sha1 mismatch (expected ${declared}, got ${actual})`);
+  }
+}
+
 // --- Per-source fetchers ----------------------------------------------------
 
 async function fromUrl(meta, { fetchImpl } = {}) {
@@ -336,14 +353,23 @@ export async function resolve(meta, opts = {}) {
   const srcErrors = []; // aggregated per-source diagnostics
   for (const src of order) {
     try {
-      if (src === 'url') buf = await fromUrl(meta, opts);
-      else if (src === 'local') buf = await fromLocal(meta);
-      else if (src === 'pick') buf = await fromPick(meta);
-      else if (src === 'opfs') buf = await opfsGet(key);
+      let got;
+      if (src === 'url') got = await fromUrl(meta, opts);
+      else if (src === 'local') got = await fromLocal(meta);
+      else if (src === 'pick') got = await fromPick(meta);
+      else if (src === 'opfs') got = await opfsGet(key);
       else throw new Error(`unknown ROM source "${src}"`);
-      if (buf) break;
-      // Source returned a falsy value (e.g. opfsGet miss returns null).
-      srcErrors.push(`${src}: not cached`);
+      if (!got) {
+        // Source returned a falsy value (e.g. opfsGet miss returns null).
+        srcErrors.push(`${src}: not cached`);
+        continue;
+      }
+      // opfs is already content-addressed by sha1 (the cache key), so a hit
+      // is correct by construction; every other source fetched bytes fresh
+      // and must be checked against a declared sha1, if any.
+      if (src !== 'opfs') await verifyRomIntegrity(got, meta);
+      buf = got;
+      break;
     } catch (e) {
       srcErrors.push(`${src}: ${e.message}`);
     }

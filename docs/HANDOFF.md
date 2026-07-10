@@ -1,11 +1,18 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated
-2026-07-04 (code @ `b8a7d03`, branch `main`).
+2026-07-10 (code @ `e2a0ab3` + the uncommitted sha1-verification work below,
+branch `main`).
 
 **Current focus: everything below is now live — real-headset validation is
-what's left.** Deployed 2026-07-02 (see "Live build" below). Highlights,
+what's left.** Deployed 2026-07-10 (see "Live build" below). Highlights,
 newest first:
+- **NES light-gun shooter #2: "LWX Frontline Fury" (2026-07-09, `e2a0ab3`).**
+  An Operation-Wolf-style on-rails wave shooter for the Zapper — soldiers
+  march toward the front line, only the frontmost is ever lit (matches real
+  Zapper hardware: a light/trigger bit only, no aim position). 2-player reuses
+  `nes-gallery`'s SHARE/DUEL pattern. Verified 12/12 headless (jsnes) + 12/12
+  on the real nestopia core, both boot paths. Deployed 2026-07-10.
 - **Flat-screen desktop build (2026-06-30, `c591895`).** `desktop.html` — a
   non-VR entry point (`src/desktop/`) that runs the same emulator core in a
   plain browser tab with the existing host-authoritative netplay, so two
@@ -45,13 +52,11 @@ newest first:
   console without a page reload; power/reset switches; rack layout persists
   across the (still-needed, for the primary console) cross-core reload.
 
-**Deployed 2026-07-02, confirmed live.** `npm run deploy` published code @
-`a7aac29` (the HANDOFF.md refresh commit on top, `b8a7d03`, is docs-only) to
-`/webxr/libretrowebxr2/`; verified via chunk-hash matching, per-chunk string
-greps for `virtualxt`/`DesktopNet` (code-splitting scatters them across
-non-`main` chunks — check the right chunk), and live screenshots of both
-`/webxr/libretrowebxr2/` and `/webxr/libretrowebxr2/desktop.html`. Everything
-above is committed + pushed to `origin/main` and live.
+**Deployed 2026-07-10, confirmed live.** `npm run deploy` published code @
+`e2a0ab3` (adds "LWX Frontline Fury") to `/webxr/libretrowebxr2/`; verified by
+fetching the live `roms/manifest.json` and confirming `lwx-nes-opwolf.nes`
+resolves 200. Prior deploy was 2026-07-02 @ `a7aac29`. Everything above is
+committed + pushed to `origin/main` and live.
 
 The **controls bug** (Quest users sometimes can't control the console after a
 cross-core reload), called out in the prior handoff as instrumented-but-
@@ -207,8 +212,9 @@ forward-set.** Crosshair + control hint live in `index.html`. Verified headless
 (movement + room-clamp + synthetic grab/release of a prop) + screenshot.
 
 **Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, **code @
-`a7aac29`, deployed 2026-07-02** — everything in the summary above plus
-everything from the prior 2026-06-13 deploy: edit modes, desktop controls,
+`e2a0ab3`, deployed 2026-07-10** — adds "LWX Frontline Fury" (NES Zapper) on
+top of the 2026-07-02 deploy (`a7aac29`), which carried everything in the
+summary above plus everything from the prior 2026-06-13 deploy: edit modes, desktop controls,
 local multiplayer, networked Phase M0 + M1 (presence/voice/TV/held-object
 sync, host input + video stream), remote logging, room persistence, C64
 keyboard, placement snapping, configurable posters, image picker, multiplayer
@@ -648,21 +654,36 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
 
 ## Deferred follow-ups
 
+**Note (2026-07-10):** this list had drifted — several items below were already
+fixed in the code before this doc's last "refresh" but never got marked done.
+Re-verified against actual source (not prior doc text) on 2026-07-10; corrected
+inline. If you're picking up stale-looking doc claims again, check `git log
+-S"<distinctive string>"` before trusting the doc.
+
 - **Controls bug (open item):** Quest users sometimes can't control the console
   after a cross-core reload. The input pipeline is now **instrumented** (`logger`
   'input' + 'input-state' events in main.js) but the bug is not confirmed fixed.
   Diagnose from `https://dionysus.dk/logs?session=<room>` during a headset session:
   `held:false` → gamepad not grabbed; `held:true xr:0` → no XR gamepad visible;
   'input-state' reading but no 'input' events → dispatch issue.
-- **Picked poster images are blob: URLs** — don't survive a reload. To fix: store
-  the folder-relative filename in the poster descriptor and re-resolve against the
-  ImageLibrary handle on load. The blob: path is functional for the session.
-- **Held-cart ghosts only wire on the `?session=` path**, not a post-build button
-  join — `GhostCartMgr` is built during `buildCartridgeWorld()`. A runtime join
-  (the new header widget) sees the room but no ghost carts.
-- **Shelf/bookcase cover image (P3)** not done — needs a Furniture front-plane.
-- **Local-file carts are not persisted to the room descriptor** — manually loaded
-  ROMs (via "Load ROM") appear on a shelf for the session but won't survive a reload.
+- ~~Picked poster images are blob: URLs~~ **✅ already fixed (`0d8a75d`,
+  2026-06-14).** `imageFile` (the source filename) round-trips through
+  `RoomSerializer`/`PropSync`; on load, `src/main.js` (~line 3210, "FIX 3d")
+  re-resolves it against the granted `ImageLibrary` folder and rebuilds the
+  `blob:` URL. Tested: `scripts/test-imagelibrary.mjs`.
+- ~~Held-cart ghosts only wire on the `?session=` path~~ **✅ already fixed
+  (`4987eb5`, 2026-06-22 — "Wire MP sync subsystems on in-app widget join, not
+  just ?session=").** `GhostCartMgr` construction now lives inside
+  `_wireNetSession()` (`src/main.js:2588`), called from `connectToRoom()`
+  (`src/main.js:385`) on both the auto-join and the header-widget join paths.
+- **Shelf/bookcase cover image (P3)** still not done — needs a Furniture
+  front-plane. `src/Furniture.js`/`src/Shelf.js` have no cover-art hook yet.
+- ~~Local-file carts are not persisted to the room descriptor~~ **✅
+  functionally fixed (`47fa5b3`, 2026-06-14 — `src/LocalRomLibrary.js`).**
+  Not literally round-tripped through `*.room.json`, but ROMs loaded via
+  "Load ROM" are sha1-keyed into `localStorage` (`persistLocalRom`) and
+  re-minted as shelf cartridges on boot (`restoreLocalRoms`, called from
+  `src/main.js:2248`) — they do survive a reload now.
 - **C64/VIC-20 key mappings to verify on a real headset:** CTRL, RUN/STOP,
   RESTORE, C=, £, up-arrow, = are best-effort VICE mappings isolated in
   `C64KeyLayout.js` for tuning.
@@ -674,25 +695,33 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   `pick` + `opfs` are the guaranteed fallbacks, but Quest support is unverified.
 - **In-VR** library grant + room/collection drop are still flat-screen only
   (desktop drag-drop + the grant button work; no in-VR equivalent yet).
-- **sha1 verification** of fetched/local bytes is not enforced (the field is
-  only used as the OPFS cache key today).
-- **R.3 specifics:** `tv` prop only toggles the CRT shader (no TV reposition);
-  portal targets are room URLs (no local-id registry); no "you don't own this"
-  affordance on cartridges whose ROM can't resolve. See `docs/ROADMAP.md`.
-- **Harden `buildMemoryCards()` / input init.** It awaits IndexedDB (`listStates`)
-  during `buildCartridgeWorld()`, which *hangs* in headless Chrome — so everything
-  after the await (`__locomotion/__gameInput/__menu/__room` exposure, grab/input
-  tick registration) never runs in `npm run debug`. Real browsers are fine, but
-  the init shouldn't be able to wedge on one IndexedDB call: wrap it in a
-  timeout/try-catch and/or move it off the critical path so input always wires up.
-  (`window.__editor`/`__grab` are deliberately exposed *before* the await as a
-  headless probe workaround — that's a patch, not the fix.)
+- ~~sha1 verification of fetched/local bytes is not enforced~~ **✅ done
+  (2026-07-10).** `RomResolver.verifyRomIntegrity(buf, meta)` hashes freshly
+  fetched (`url`/`local`/`pick`) bytes and throws on mismatch against a
+  declared `rom.sha1`, folded into the `resolve()` source-fallback loop
+  (a mismatch is treated like any other source failure — the next declared
+  source is tried). `opfs` cache hits are trusted without re-hashing (already
+  content-addressed by the sha1-keyed cache filename, correct by construction).
+  A no-op when no sha1 is declared, so every shipping CC0 ROM (none of which
+  declare one) is unaffected — this only activates for locally-picked/cached
+  ROMs or any collection that opts in by declaring `rom.sha1`. Tested in
+  `scripts/test-romresolver.mjs`; `npm test` + `npm run debug` still green.
+- **R.3 specifics:** `tv` prop only toggles the CRT shader (no TV reposition —
+  this is intentional now, not just unfinished: the later `tvset` prop type
+  from Phase RACK already covers "a movable, patchable TV"; `tv` is the
+  legacy single fixed TV baked into the base room); portal targets are room
+  URLs (no local-id registry); no "you don't own this" affordance on
+  cartridges whose ROM can't resolve. See `docs/ROADMAP.md`.
+- ~~Harden `buildMemoryCards()` / input init~~ **✅ already fixed (`0d8a75d`,
+  2026-06-14).** `src/main.js:5108` races `listStates()` against a 2s timeout
+  (`MEMORY_CARD_TIMEOUT_MS`, "FIX 2") inside a try/catch, falling back to
+  `saved = []` so a stalled headless-Chrome IndexedDB open can no longer wedge
+  init.
 
-## Immediate next actions (as of 2026-07-04, code @ `b8a7d03`)
+## Immediate next actions (as of 2026-07-10, code @ `e2a0ab3` + uncommitted sha1 work)
 
 The site is **deployed and current** (see "Live build" above — code @
-`a7aac29`, 2026-07-02; nothing has landed on `main` since except this docs
-pass). Sensible next steps, in rough priority:
+`e2a0ab3`, 2026-07-10). Sensible next steps, in rough priority:
 
 1. **Diagnose + fix the controls bug on a real Quest.** Unchanged from the prior
    handoff — still open, still just instrumented, not reproduced or fixed since.
@@ -709,11 +738,8 @@ pass). Sensible next steps, in rough priority:
    `npm run dummy-player -- --session=<room>` as a lightweight desktop
    observer). None of these are exercisable headlessly; they need an actual
    Quest session — the site is deployed and ready for it now.
-3. **Resolve the blob: URL poster limitation.** Picked images (from ImageLibrary)
-   are blob: URLs and are lost on reload. Store the folder-relative filename in the
-   poster descriptor (`prop.imageFile`) and re-resolve against the granted
-   ImageLibrary handle on load. The `RoomSerializer` already round-trips `texture`
-   — extend it to carry `imageFile` too.
+3. **Shelf/bookcase cover image** — still open (see Deferred follow-ups above);
+   needs a `Furniture.js` front-plane + material hook.
 4. **DOS core** — blocked on the buildbot VirtualXT boot-trap (see the top
    summary + `docs/DOS_CORE_BUILD.md`). Building VirtualXT ourselves needs an
    Odin toolchain with no proven emscripten path; DOSBox Pure (the better
@@ -727,6 +753,15 @@ pass). Sensible next steps, in rough priority:
 6. **Phase C** — remaining: open prop-package schema, community gallery, BIOS
    systems (PSX/N64 — feasibility assessed 2026-06-15, N64 not viable on
    standalone Quest 3, PSX marginal), PWA install. Bundle chunking is done.
+
+**2026-07-10 session:** deployed the pending "LWX Frontline Fury" game
+(`e2a0ab3`) that was committed but not yet live; audited the "Deferred
+follow-ups" list against actual code (not doc text) and found 3 of the ~10
+items were already fixed weeks earlier but never marked done (see the
+strikethroughs above); implemented and shipped the sha1-verification item for
+real (was a genuine gap). Remaining code-only (non-headset) work: shelf/
+bookcase cover image, the R.3 portal-id-registry / "you don't own this"
+affordance, DOS, Phase C polish.
 
 E.3 specifics worth knowing for whoever extends it:
 - `window.__add.{shelf,console,gamepad,poster,portal}()` drive prop creation
