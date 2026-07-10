@@ -13,8 +13,8 @@
 //
 // Key split that makes this safe: gameplay keys (arrows, Enter, Space, H/G/Y/T/
 // E/P/R/O) are forwarded to the core by [[src/InputMgr.js]]; movement uses W/A/
-// S/D, which that forward-set deliberately excludes — so walking never reaches
-// the emulator.
+// S/D and duck uses C, which that forward-set deliberately excludes — so
+// walking/ducking never reach the emulator.
 
 import * as THREE from 'three';
 
@@ -22,6 +22,8 @@ const LOOK_SENS = 0.0022;          // radians per pixel of mouse motion
 const MOVE_SPEED = 2.0;            // m/s walking
 const PITCH_LIMIT = THREE.MathUtils.degToRad(85);
 const WALL_MARGIN = 0.5;           // keep the rig this far from the walls
+const DUCK_OFFSET = 0.5;           // m the rig drops while KeyC is held
+const DUCK_LERP_SPEED = 8;         // 1/s — smoothed so the drop isn't a snap
 
 export class DesktopControls {
   constructor({ renderer, camera, playerRig, controller, domElement, scene }) {
@@ -84,7 +86,7 @@ export class DesktopControls {
     window.addEventListener('keydown', (e) => {
       if (this.renderer.xr.isPresenting) return;
       const k = e.code;
-      if (k === 'KeyW' || k === 'KeyA' || k === 'KeyS' || k === 'KeyD') this.keys.add(k);
+      if (k === 'KeyW' || k === 'KeyA' || k === 'KeyS' || k === 'KeyD' || k === 'KeyC') this.keys.add(k);
     });
     window.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
@@ -128,14 +130,16 @@ export class DesktopControls {
     this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
   }
 
-  // Per-frame: apply look rotation, walk with WASD, keep the controller synced.
+  // Per-frame: apply look rotation, walk with WASD, duck with C, keep the
+  // controller synced.
   tick(dtMs) {
     if (this.renderer.xr.isPresenting) return;
     if (!this._initialized && this.locked) this._initFromCamera();
     if (this._initialized) this._applyCameraRotation();
 
+    const dt = Math.min(dtMs || 16, 50) / 1000;
+
     if (this.keys.size) {
-      const dt = Math.min(dtMs || 16, 50) / 1000;
       // forward on the XZ plane from yaw: (-sinY, 0, -cosY); right = (-fwd.z,0,fwd.x).
       this._fwd.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
       this._right.set(-this._fwd.z, 0, this._fwd.x);
@@ -146,6 +150,12 @@ export class DesktopControls {
       if (this.keys.has('KeyA')) this.playerRig.position.addScaledVector(this._right, -step);
       this._clampToRoom();
     }
+
+    // Duck: smoothed so releasing C eases back to standing instead of
+    // snapping (checked every frame, not gated on `keys.size`, so standing
+    // back up still animates on the frame C is released).
+    const duckTarget = this.keys.has('KeyC') ? -DUCK_OFFSET : 0;
+    this.playerRig.position.y += (duckTarget - this.playerRig.position.y) * Math.min(1, DUCK_LERP_SPEED * dt);
 
     this._syncController();
   }
@@ -184,6 +194,7 @@ export class DesktopControls {
       },
       leftClick: () => { this._dispatch('selectstart'); this._dispatch('selectend'); },
       rightClick: () => this._toggleGrab(),
+      duck: (on) => { if (on) this.keys.add('KeyC'); else this.keys.delete('KeyC'); },
       state: () => ({
         yaw: this.yaw, pitch: this.pitch, locked: this.locked, grabbed: this.grabbed,
         rig: this.playerRig.position.toArray(),

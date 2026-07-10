@@ -829,6 +829,42 @@ E.3 specifics worth knowing for whoever extends it:
   curated-cycle pattern as shelf collections, cycling through `KNOWN_ROOMS`.
 - Keep `npm test` + `npm run debug` green and screenshot-verify any UI change.
 
+**2026-07-10 session (third pass — user feedback on the just-deployed build):**
+two reports: "you need a way to duck or set your height" and "turning off a
+console only seems to pause it." Both fixed:
+- **Duck.** Neither `LocomotionMgr.js` (VR) nor `DesktopControls.js` (desktop)
+  ever touched `playerRig.position.y` — physically crouching already lowers
+  the VR view (headset pose is read live off the XR camera), but there was no
+  way to do it on desktop, and no comfort/seated-play option in VR. Added a
+  smoothed (lerp, not snap — VR comfort) `-0.5m` hold-to-duck: `KeyC` on
+  desktop, either controller's thumbstick-click (button 3) in VR when hands
+  are free. Thumbstick-click is claimed for RetroPad `stickClick` input while
+  the virtual gamepad prop is held (`GameInputMgr.js`), so duck only reads it
+  when `isGamepadHeld()` is false — but the *release* lerp back to standing
+  still runs even if the gamepad gets grabbed mid-duck, so it can't get stuck
+  low. Headless-verified: VR math in plain Node (`tmp/verify-duck-locomotion.mjs`
+  — LocomotionMgr has no DOM dependency, so no browser needed) and desktop via
+  `window.__desktop.duck()` + real rAF frames in Puppeteer
+  (`tmp/verify-power-and-duck.mjs`).
+- **Power off was really just pause.** `setConsolePower()` only called
+  `client.pause()/resume()` — turning off then back on resumed the exact
+  suspended state, not a cold boot, and a **solo console's audio was never
+  muted at all** (`SpatialAudio`'s focus-mute only engages with 2+ TVs;
+  `updateFocus()` no-ops below that, so a single-console room's `focusedId`
+  stays `null` forever and gain stays 1 regardless of power state — silence
+  depended entirely on the specific core's build actually honouring
+  `pauseMainLoop`). Fixed: off→on now also calls `client.reset()` (a real
+  power switch has no battery backing a suspended state, unlike the separate
+  RESET button — cold boot is the correct default; on→on when already on does
+  *not* re-reset, so this doesn't fire redundantly on every ROM load), and
+  `SpatialAudio` gained a `setPower(consoleId, on)` that force-zeroes a
+  console's gain independent of focus, called from `setConsolePower`.
+  Headless-verified against a real booted core in Puppeteer
+  (`tmp/verify-power-and-duck.mjs`): gain 1→0→1, reset called exactly once on
+  the off→on edge, not on redundant on→on.
+- Not yet deployed as of writing this entry — `npm test` (all green, no
+  regressions) and both headless verifications pass; deploy is the next step.
+
 ## Gotchas already hit (so you don't re-hit them)
 
 - **Remote log viewer Apache config:** ProxyPass matches on whole path segments —

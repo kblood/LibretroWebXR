@@ -1017,9 +1017,25 @@ function _tintPowerBtn(btn, on) {
 }
 
 function setConsolePower(consoleId, on, btn) {
+  const wasOn = isConsoleOn(consoleId);
   consolePowered.set(consoleId, on);
   const rt = rackMgr.get(consoleId);
-  if (on) rt?.resume?.(); else rt?.pause?.();
+  if (on) {
+    // A power switch isn't a pause button: a real console has no battery
+    // backing its running state, so flipping OFF then ON again is a cold
+    // boot, not a resume-from-suspend. Only reset on an actual off->on
+    // transition — this also fires right after a fresh ROM load (which marks
+    // the console "on"), and re-resetting a console that never went off
+    // would be a surprise flicker. RESET stays the separate in-game action.
+    if (!wasOn) rt?.client?.reset?.();
+    rt?.resume?.();
+  } else {
+    rt?.pause?.();
+  }
+  // Force silence regardless of whether this core's build honours
+  // pauseMainLoop — a solo console never gets muted by audio focus (see
+  // [[src/SpatialAudio.js]]), so without this "off" could still be audible.
+  audioRouter?.setPower?.(consoleId, on);
   _tintPowerBtn(btn, on);
   routeVideo();
   persistRack();

@@ -29,6 +29,19 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
   const byConsole = new Map();    // consoleId -> branch
   let pending = null;             // { consoleId, sourceObject } for the next core
   let focusedId = null;
+  // Consoles explicitly powered off (see [[src/main.js]] setConsolePower). A
+  // single-console room never calls setFocus (updateFocus no-ops below 2 TVs),
+  // so without this a powered-off solo console's audio only stops if its core
+  // actually honours pauseMainLoop — this makes silence unconditional.
+  const poweredOff = new Set();
+
+  function gainFor(consoleId) {
+    if (poweredOff.has(consoleId)) return 0;
+    return (focusedId == null || consoleId === focusedId) ? 1 : 0;
+  }
+  function applyGains() {
+    for (const b of branches) b.sink.gain.value = gainFor(b.consoleId);
+  }
 
   function makeBranch(sourceObject, consoleId) {
     const sink = ctx.createGain();
@@ -42,8 +55,7 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
     const branch = { consoleId, sink, positional, sourceObject };
     branches.push(branch);
     if (consoleId != null) byConsole.set(consoleId, branch);
-    // New branch starts audible only if it's the focused console (or none set).
-    sink.gain.value = (focusedId == null || consoleId === focusedId) ? 1 : 0;
+    sink.gain.value = gainFor(consoleId);
     return branch;
   }
 
@@ -79,9 +91,12 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
     // Make only `consoleId` audible; mute the rest. null → unmute all.
     setFocus(consoleId) {
       focusedId = consoleId;
-      for (const b of branches) {
-        b.sink.gain.value = (consoleId == null || b.consoleId === consoleId) ? 1 : 0;
-      }
+      applyGains();
+    },
+    // Force a console's branch silent independent of focus (power switch).
+    setPower(consoleId, on) {
+      if (on) poweredOff.delete(consoleId); else poweredOff.add(consoleId);
+      applyGains();
     },
     focusedId: () => focusedId,
     branches,

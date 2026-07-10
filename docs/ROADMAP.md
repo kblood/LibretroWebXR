@@ -646,6 +646,25 @@ shippable yet. This is a parked spike, not a regression: `fetch-cores` doesn't
 fail on it (the core simply isn't fetched), so it costs nothing to leave
 registered for whenever the upstream issue is fixed or worked around.
 
+## Comfort/UX fixes — duck + real power-off  ✅ shipped (2026-07-10)
+User feedback on the just-deployed build: "you need a way to duck or set
+your height" and "turning off a console only seems to pause it."
+- **Duck.** Neither `LocomotionMgr.js` nor `DesktopControls.js` ever touched
+  `playerRig.position.y`. Added a smoothed `-0.5m` hold-to-duck: `KeyC` on
+  desktop, either controller's free-hand thumbstick-click in VR (physical
+  crouch already worked in VR via headset pose — this covers desktop and
+  seated/limited-space VR play). Full detail: `docs/HANDOFF.md`'s "third
+  pass" entry.
+- **Power off was really just pause.** `setConsolePower()` only paused the
+  core — off→on resumed exactly where suspended (not a cold boot), and a
+  solo console's audio was never actually muted (focus-mute only engages
+  with 2+ TVs). Fixed: off→on now resets the core (real power switches don't
+  preserve state), and `SpatialAudio.setPower()` force-mutes regardless of
+  focus. Full detail: `docs/HANDOFF.md`.
+- Headless-verified (`tmp/verify-duck-locomotion.mjs` — plain Node, no
+  browser; `tmp/verify-power-and-duck.mjs` — Puppeteer against a real booted
+  core); not yet headset-tested for VR duck feel.
+
 ## Phase C — Content & polish
 - **Bundle chunking ✅ done (2026-06-13)** — `vite.config.js` `manualChunks`
   splits three.js into its own cache-stable vendor chunk (app ~134 kB / 42 kB gz

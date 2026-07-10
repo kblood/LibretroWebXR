@@ -22,6 +22,8 @@ const DEAD_ZONE    = 0.15;
 const SNAP_DEG     = 30;
 const SNAP_DZ      = 0.7;     // higher threshold on the turn stick to avoid accidental snaps
 const SNAP_DEBOUNCE_MS = 250;
+const DUCK_OFFSET  = 0.5;     // m the rig drops while a thumbstick is clicked
+const DUCK_LERP_SPEED = 8;    // 1/s — smoothed so the drop isn't a snap (VR comfort)
 
 export class LocomotionMgr {
   constructor({ renderer, playerRig, camera, controllers, isHandFree, isGamepadHeld }) {
@@ -44,8 +46,28 @@ export class LocomotionMgr {
 
   tick(dtMs) {
     if (!this.renderer.xr.isPresenting) return;
-    if (this.isGamepadHeld()) return;
     const dt = Math.min(dtMs, 50) / 1000; // clamp for hitch protection
+
+    // Duck: hold either thumbstick-click to crouch — physically crouching
+    // already lowers the view via the headset pose, but this covers seated
+    // play / limited room-scale space. Computed outside the gamepad-held
+    // gate below so releasing the virtual gamepad while still ducked eases
+    // back to standing instead of freezing mid-lerp; while the gamepad IS
+    // held, button 3 is claimed for RetroPad stickClick input instead (see
+    // [[src/GameInputMgr.js]]), so no new duck can start.
+    let wantDuck = false;
+    if (!this.isGamepadHeld()) {
+      for (let i = 0; i < this.controllers.length; i++) {
+        const ctrl = this.controllers[i];
+        if (!this.isHandFree(ctrl)) continue;
+        const gp = ctrl.userData.inputSource?.gamepad;
+        if (gp?.buttons?.[3]?.pressed) { wantDuck = true; break; }
+      }
+    }
+    const duckTarget = wantDuck ? -DUCK_OFFSET : 0;
+    this.playerRig.position.y += (duckTarget - this.playerRig.position.y) * Math.min(1, DUCK_LERP_SPEED * dt);
+
+    if (this.isGamepadHeld()) return;
 
     this._readHeadPose(this._headPos, this._headQuat);
     // Forward = -Z under the head quaternion, projected onto XZ plane.
