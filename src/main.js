@@ -2547,6 +2547,9 @@ async function buildCartridgeWorld() {
     mouse:    ()    => addProp('mouse'),
     tv:       ()    => addTvProp(),
     portal:   ()    => addPortal(),
+    // Task #3 in-VR affordance: load the next not-yet-loaded known collection
+    // onto a new shelf (mirrors the "Load Collection" Add-panel button).
+    loadCollection: () => loadExtraCollection(),
     // Desktop/headless poster-image affordance. src = URL or data URL.
     // Usage: window.__add.setPosterImage('https://…') after selecting a poster.
     setPosterImage: (src) => {
@@ -3572,6 +3575,50 @@ function addPortal() {
   return portal;
 }
 
+// Known collections shipped on the server but not necessarily referenced by
+// the current room — the in-VR equivalent of dragging a *.collection.json
+// onto the page. Drag-drop is flat-screen only, and this codebase avoids
+// free-text URL entry in VR (see the "Set Poster Image…" prompt() comment in
+// the desktop-affordances section below, which explicitly punts to Change →
+// Cycle Selected in VR instead), so the fix is the same curated-cycle pattern
+// used for shelf collections and portal targets (KNOWN_ROOMS) rather than a
+// text field. Wired to the "Load Collection" Add-panel button below, and
+// exposed on window.__add for headless testing.
+// HEADSET-UNVERIFIED: exercised headless only; real Quest raycast-trigger
+// behaviour for this button is unconfirmed (see docs/HANDOFF.md).
+const KNOWN_EXTRA_COLLECTIONS = ['roms/homebrew.collection.json', 'roms/snes-demo.collection.json'];
+let _extraCollIdx = 0;
+let loadCollectionBtn = null; // filled in once the Add panel is built
+function pendingExtraCollections() {
+  const loaded = collectionKeys();
+  return KNOWN_EXTRA_COLLECTIONS.filter((u) => !loaded.includes(u));
+}
+function loadCollectionBtnLabel() {
+  const pending = pendingExtraCollections();
+  if (!pending.length) return 'Load Collection: (all loaded)';
+  const url = pending[_extraCollIdx % pending.length];
+  const shortName = url.replace(/.*[/\\]/, '').replace(/\.collection\.json$/, '');
+  return `Load Collection: ${shortName}`;
+}
+async function loadExtraCollection() {
+  const pending = pendingExtraCollections();
+  if (!pending.length) { setStatus('all known collections already loaded'); return null; }
+  const url = pending[_extraCollIdx % pending.length];
+  setStatus(`loading ${url}…`);
+  const col = await loadCollection(url);
+  if (!col.games.length) { setStatus(`"${url}" has no games`); return null; }
+  currentCollections.byKey.set(url, col);
+  if (col.id) currentCollections.byKey.set(col.id, col);
+  currentCollections.list.push(col);
+  currentRoom.collections = currentRoom.collections || [];
+  if (!currentRoom.collections.includes(url)) currentRoom.collections.push(url);
+  const prop = addProp('shelf', { collection: url });
+  _extraCollIdx = 0; // pendingExtraCollections() drops the just-loaded one on its own
+  loadCollectionBtn?.setLabel(loadCollectionBtnLabel());
+  setStatus(`loaded "${col.title}" onto a new shelf`);
+  return prop;
+}
+
 // --- Change mode: cycle a selected prop's options -------------------------
 
 // Drop the `builtin:` prefix for terse status lines.
@@ -3764,10 +3811,18 @@ function buildMenuAndControlsPanel() {
       // M0 hardening: in-VR voice toggle (the 🎤 header button is desktop-only).
       // Appended after the rack toggles and only in a networked session (idx 12).
       ...(net ? [{ label: 'Voice: Off', onActivate: () => {} }] : []),
+      // In-VR equivalents of the desktop header's folder-grant buttons. This
+      // codebase avoids free-text URL/prompt() entry in VR (see "Set Poster
+      // Image…" below, which explicitly punts to Cycle Selected in VR instead),
+      // but a directory grant needs no typing — just the trigger click, which is
+      // a real user-gesture event (same as vrVoiceBtn's getUserMedia call above).
+      // HEADSET-UNVERIFIED: exercised headless only (see docs/HANDOFF.md).
+      { label: 'Grant ROM Folder',    onActivate: () => {} },
+      { label: 'Grant Images Folder', onActivate: () => {} },
       // Multiplayer status + quick-join: always present so Quest users can join
-      // a room without removing the headset to type in the URL bar. Index is
-      // 10 (no session) or 11 (with session, after the Voice button). We read
-      // it by .at(-1) so the index shift is invisible to the mode-selector code.
+      // a room without removing the headset to type in the URL bar. We read it
+      // by .at(-1) so the index shift from the two buttons above (and Voice's
+      // conditional presence) is invisible to the mode-selector code.
       { label: 'Multiplayer', onActivate: () => {} },
     ],
   });
@@ -3776,8 +3831,10 @@ function buildMenuAndControlsPanel() {
   const rackPauseBtn = menu.userData.buttons[10];
   const wallsBtn = menu.userData.buttons[11];
   const vrVoiceBtn = net ? menu.userData.buttons[12] : null;
-  // Always the last button regardless of whether Voice is present.
+  // Always the last three buttons regardless of whether Voice is present.
   const vrMpBtn = menu.userData.buttons.at(-1);
+  const vrImagesFolderBtn = menu.userData.buttons.at(-2);
+  const vrRomFolderBtn = menu.userData.buttons.at(-3);
 
   // Build a per-mode action sub-panel (hidden until its mode is active). All its
   // buttons are registered with menuMgr up front; MenuMgr's effVisible check
@@ -4139,6 +4196,7 @@ function buildMenuAndControlsPanel() {
     { label: 'Add Light Gun', onActivate: () => addProp('lightgun') },
     { label: 'Add Mouse',    onActivate: () => addProp('mouse') },
     { label: 'Add Portal',   onActivate: () => addPortal() },
+    { label: loadCollectionBtnLabel(), onActivate: () => loadExtraCollection() },
     // Persist the current layout as the default that auto-loads next session
     // (same localStorage slot resolveWorld() reads), without the file download
     // that 'Export Room' triggers. 'Reset to Built-in' clears it again.
@@ -4153,6 +4211,7 @@ function buildMenuAndControlsPanel() {
   // Stash button refs for label updates.
   _shelfCollBtns.shelf    = addPanel.userData.buttons[0];
   _shelfCollBtns.bookcase = addPanel.userData.buttons[1];
+  loadCollectionBtn = addPanel.userData.buttons[12]; // after Add Portal (index 11)
 
   // Mode selector: set editor mode, show the matching sub-panel, mark the
   // active button with a ► . Replaces the module-level applyMode stub so
@@ -4256,6 +4315,32 @@ function buildMenuAndControlsPanel() {
       }
     };
   }
+
+  // In-VR folder grants: same File System Access flow as the desktop header
+  // buttons (romFolderBtn/imagesFolderBtn below), fired from a raycast trigger
+  // instead of a DOM click. HEADSET-UNVERIFIED — showDirectoryPicker() from an
+  // XR selectstart handler is exercised headless only; see docs/HANDOFF.md.
+  vrRomFolderBtn.onActivate = async () => {
+    if (!fileSystemAccessSupported()) { setStatus('ROM folder grant not supported here'); return; }
+    try {
+      await pickLibraryDirectory();
+      setStatus('ROM library folder granted');
+    } catch (e) {
+      if (e?.name !== 'AbortError') setStatus(`folder grant failed: ${e.message || e}`);
+    }
+  };
+  vrImagesFolderBtn.onActivate = async () => {
+    if (!imgFolderSupported()) { setStatus('Images folder grant not supported here'); return; }
+    try {
+      await pickImagesDirectory();
+      setStatus('Images folder granted — open Change → Poster Images… to browse');
+      if (window.__gallery && typeof window.__gallery.refresh === 'function') window.__gallery.refresh();
+    } catch (e) {
+      if (e?.name !== 'AbortError') setStatus(`images folder grant failed: ${e.message || e}`);
+    }
+  };
+  // Expose headlessly for testing (mirrors window.__gallery below).
+  window.__vrGrants = { rom: () => vrRomFolderBtn.onActivate(), images: () => vrImagesFolderBtn.onActivate() };
 
   // In-VR Multiplayer panel: shows current room state + a one-tap quick-join.
   // Full text-entry in VR is impractical with the canvas-based menu; the primary
