@@ -1,12 +1,23 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated
-2026-07-10 (code @ `e2a0ab3` + the uncommitted sha1-verification work below,
-branch `main`).
+2026-07-10 (code @ `93d3de2`, branch `main`).
 
 **Current focus: everything below is now live — real-headset validation is
 what's left.** Deployed 2026-07-10 (see "Live build" below). Highlights,
 newest first:
+- **"Fix everything" pass (2026-07-10, `76325d3`..`93d3de2`, not yet deployed).**
+  Four code-only gaps closed in one sweep: shelf/bookcase cover plaques
+  (derive the label from the collection's own `title`); a pre-flight "you
+  don't own this ROM" badge on cartridges a multiplayer peer can't resolve
+  locally (`RomResolver.isUnresolvableHere`); in-VR menu equivalents for the
+  ROM/Images folder grants and loading a not-yet-referenced known collection
+  (`Load Collection`, cycling like the existing shelf-collection/portal-target
+  pickers); and portal retargeting via Change mode's Cycle Selected
+  (`EnvEditor.cyclePortalTarget`). All four are real-headless-browser verified
+  (not just unit-tested) — see "Deferred follow-ups" below for what's now
+  struck through. **HEADSET-UNVERIFIED**, same as the rest of the raycast-only
+  menu surface.
 - **NES light-gun shooter #2: "LWX Frontline Fury" (2026-07-09, `e2a0ab3`).**
   An Operation-Wolf-style on-rails wave shooter for the Zapper — soldiers
   march toward the front line, only the frontmost is ever lit (matches real
@@ -342,7 +353,7 @@ npm install
 npm run fetch-cores     # copies cores into public/cores/ (gitignored). Auto-finds
                         # them in the old scratch workspace; else see the script.
 npm run dev             # http://localhost:5173  (Vite sets COOP/COEP)
-npm test                # 1225 pure-logic assertions (collection/room/serializer/
+npm test                # 4252 pure-logic assertions (collection/room/serializer/
                         # env-editor/prop-creator/placement/logger/image-library/…)
 npm run debug           # headless-Chrome health check (see DEBUGGING.md)
 ```
@@ -676,8 +687,14 @@ inline. If you're picking up stale-looking doc claims again, check `git log
   just ?session=").** `GhostCartMgr` construction now lives inside
   `_wireNetSession()` (`src/main.js:2588`), called from `connectToRoom()`
   (`src/main.js:385`) on both the auto-join and the header-widget join paths.
-- **Shelf/bookcase cover image (P3)** still not done — needs a Furniture
-  front-plane. `src/Furniture.js`/`src/Shelf.js` have no cover-art hook yet.
+- ~~Shelf/bookcase cover image (P3)~~ **✅ done (2026-07-10, `76325d3`).**
+  `src/CoverPlaque.js` mounts a small canvas-texture plaque naming the
+  collection (derived from the collection's own `title`, so it round-trips
+  through `RoomSerializer` for free — only `prop.collection` is persisted).
+  Wired in both `RoomBuilder.js` (initial shelf/bookcase build) and
+  `main.js`'s `rebuildBookcase()` (collection-cycle refresh). Screenshot- and
+  headless-probe-verified on default shelves, a local-overlay bookcase, and a
+  freshly `window.__add.bookcase()`-spawned one.
 - ~~Local-file carts are not persisted to the room descriptor~~ **✅
   functionally fixed (`47fa5b3`, 2026-06-14 — `src/LocalRomLibrary.js`).**
   Not literally round-tripped through `*.room.json`, but ROMs loaded via
@@ -693,8 +710,18 @@ inline. If you're picking up stale-looking doc claims again, check `git log
 - **Verify File System Access on the Quest browser** with a real headset — the
   "ROM folder…" button self-hides where `showDirectoryPicker` is absent, and
   `pick` + `opfs` are the guaranteed fallbacks, but Quest support is unverified.
-- **In-VR** library grant + room/collection drop are still flat-screen only
-  (desktop drag-drop + the grant button work; no in-VR equivalent yet).
+- ~~In-VR library grant + room/collection drop are still flat-screen only~~
+  **✅ done (2026-07-10, `1b984f1`).** "Grant ROM Folder" / "Grant Images
+  Folder" main-menu buttons call the same `pickLibraryDirectory()`/
+  `pickImagesDirectory()` flows from a raycast trigger click. Free-text URL
+  entry stays out of VR (matching the existing "Set Poster Image…" `prompt()`
+  precedent, which already punts to Cycle Selected in VR) — instead a "Load
+  Collection" Add-panel button cycles through known collections the room
+  doesn't reference yet (`roms/homebrew.collection.json`,
+  `roms/snes-demo.collection.json`) and spawns a shelf for the chosen one.
+  Real-headless-browser verified: folder grants resolve without hanging when
+  FSA is unsupported; Load Collection loads each known collection in order
+  and safely no-ops once exhausted.
 - ~~sha1 verification of fetched/local bytes is not enforced~~ **✅ done
   (2026-07-10).** `RomResolver.verifyRomIntegrity(buf, meta)` hashes freshly
   fetched (`url`/`local`/`pick`) bytes and throws on mismatch against a
@@ -710,36 +737,49 @@ inline. If you're picking up stale-looking doc claims again, check `git log
   this is intentional now, not just unfinished: the later `tvset` prop type
   from Phase RACK already covers "a movable, patchable TV"; `tv` is the
   legacy single fixed TV baked into the base room); portal targets are room
-  URLs (no local-id registry); no "you don't own this" affordance on
-  cartridges whose ROM can't resolve. See `docs/ROADMAP.md`.
+  URLs (no local-id registry, but now retargetable in-VR — see below). See
+  `docs/ROADMAP.md`.
+- ~~No "you don't own this" affordance on cartridges whose ROM can't
+  resolve~~ **✅ done (2026-07-10, `76325d3`).**
+  `RomResolver.isUnresolvableHere(meta)` gives a multiplayer peer a
+  pre-flight signal — mainly for a cart another peer loaded from THEIR local
+  folder/pick, which this browser has never cached in OPFS. `Cartridge.js`
+  composites a "YOU DON'T HAVE THIS ROM" badge (`MediaLabel.
+  drawUnavailableBadge`) onto the label when it fires, instead of only
+  failing reactively at load time. Real-headless-browser verified: a
+  synthetic local-only/uncached ROM flags true, a normal shipped
+  `url`-sourced cart stays false (no false-positive for the common case).
 - ~~Harden `buildMemoryCards()` / input init~~ **✅ already fixed (`0d8a75d`,
   2026-06-14).** `src/main.js:5108` races `listStates()` against a 2s timeout
   (`MEMORY_CARD_TIMEOUT_MS`, "FIX 2") inside a try/catch, falling back to
   `saved = []` so a stalled headless-Chrome IndexedDB open can no longer wedge
   init.
 
-## Immediate next actions (as of 2026-07-10, code @ `e2a0ab3` + uncommitted sha1 work)
+## Immediate next actions (as of 2026-07-10, code @ `93d3de2`)
 
-The site is **deployed and current** (see "Live build" above — code @
-`e2a0ab3`, 2026-07-10). Sensible next steps, in rough priority:
+The code is **committed + pushed but not yet redeployed** (see "Live build"
+above — live is still `e2a0ab3`). Sensible next steps, in rough priority:
 
-1. **Diagnose + fix the controls bug on a real Quest.** Unchanged from the prior
+1. **`npm run deploy`** to publish the "fix everything" pass (cover plaques,
+   unresolvable badge, in-VR folder grants + Load Collection, portal
+   retarget) — see the top summary. Verify per the usual checklist (fetch the
+   live manifest, `curl -sI … | grep -i cross-origin`).
+2. **Diagnose + fix the controls bug on a real Quest.** Unchanged from the prior
    handoff — still open, still just instrumented, not reproduced or fixed since.
    The input pipeline emits Logger 'input'/'input-state' events; reproduce on a
    headset, watch `https://dionysus.dk/logs?session=<room>` from a desktop, read
    the state log to pin the failure mode. Fix → `npm run deploy`.
-2. **Real-headset validation backlog** — several features have shipped logic-
+3. **Real-headset validation backlog** — several features have shipped logic-
    verified but headset-unverified: light-gun aim/fire in VR (checklist:
    `docs/HEADSET_LIGHTGUN_VALIDATION.md`), two-gun co-op, the mouse
    peripheral's in-VR feel/gain, C64/VIC-20 key mappings, the raycast
-   edit-mode menus (Play/Move/Change/Add), the patchable AV rack (controller
-   cord repatch + cross-core swap — see the 2026-06-14 feedback doc), and
-   two-headset multiplayer (avatars/voice/TV sync/roster — use
+   edit-mode menus (Play/Move/Change/Add — now including the two new folder-
+   grant buttons and Load Collection/portal-retarget), the patchable AV rack
+   (controller cord repatch + cross-core swap — see the 2026-06-14 feedback
+   doc), and two-headset multiplayer (avatars/voice/TV sync/roster — use
    `npm run dummy-player -- --session=<room>` as a lightweight desktop
    observer). None of these are exercisable headlessly; they need an actual
    Quest session — the site is deployed and ready for it now.
-3. **Shelf/bookcase cover image** — still open (see Deferred follow-ups above);
-   needs a `Furniture.js` front-plane + material hook.
 4. **DOS core** — blocked on the buildbot VirtualXT boot-trap (see the top
    summary + `docs/DOS_CORE_BUILD.md`). Building VirtualXT ourselves needs an
    Odin toolchain with no proven emscripten path; DOSBox Pure (the better
@@ -754,14 +794,24 @@ The site is **deployed and current** (see "Live build" above — code @
    systems (PSX/N64 — feasibility assessed 2026-06-15, N64 not viable on
    standalone Quest 3, PSX marginal), PWA install. Bundle chunking is done.
 
-**2026-07-10 session:** deployed the pending "LWX Frontline Fury" game
-(`e2a0ab3`) that was committed but not yet live; audited the "Deferred
-follow-ups" list against actual code (not doc text) and found 3 of the ~10
-items were already fixed weeks earlier but never marked done (see the
-strikethroughs above); implemented and shipped the sha1-verification item for
-real (was a genuine gap). Remaining code-only (non-headset) work: shelf/
-bookcase cover image, the R.3 portal-id-registry / "you don't own this"
-affordance, DOS, Phase C polish.
+**2026-07-10 session (first pass):** deployed the pending "LWX Frontline
+Fury" game (`e2a0ab3`) that was committed but not yet live; audited the
+"Deferred follow-ups" list against actual code (not doc text) and found 3 of
+the ~10 items were already fixed weeks earlier but never marked done;
+implemented and shipped the sha1-verification item for real (was a genuine
+gap).
+
+**2026-07-10 session (second pass — "fix all the things"):** worked through
+every remaining code-only, non-headset, non-infra gap: shelf/bookcase cover
+plaques, the "you don't own this ROM" pre-flight badge, in-VR folder-grant +
+Load Collection menu buttons, and portal retargeting via Cycle Selected — see
+the top summary. All four real-headless-browser verified, not just unit-
+tested; one real bug caught in the process (portal descriptors have no
+`.type` field, so the first cut of the Change-mode portal branch silently
+never matched — fixed by keying off `object.userData.kind` instead). Explicitly
+did **not** touch: TURN/coturn server provisioning (live infra, needs separate
+confirmation) or the DOS core (blocked, not worth picking up without a reason
+— see item 4 above). Not yet deployed — that's the new item 1.
 
 E.3 specifics worth knowing for whoever extends it:
 - `window.__add.{shelf,console,gamepad,poster,portal}()` drive prop creation
@@ -772,9 +822,10 @@ E.3 specifics worth knowing for whoever extends it:
 - A new prop spawns ~1.4 m in front of the player at a per-type height
   (`SPAWN_Y` in main.js) and force-enables Edit mode so it's immediately movable.
 - A new **portal** aims at an example room that isn't the current one
-  (`KNOWN_ROOMS`) so walk-through is verifiable; the *in-VR* way to retarget a
-  portal (vs editing the exported JSON) is still open — a local-id/known-room
-  picker would pair well with the R.3 portal work.
+  (`KNOWN_ROOMS`) so walk-through is verifiable. Retargeting in-VR (vs editing
+  the exported JSON) is now done: select the portal in Change mode and use
+  Cycle Selected (`EnvEditor.cyclePortalTarget`, 2026-07-10) — same
+  curated-cycle pattern as shelf collections, cycling through `KNOWN_ROOMS`.
 - Keep `npm test` + `npm run debug` green and screenshot-verify any UI change.
 
 ## Gotchas already hit (so you don't re-hit them)

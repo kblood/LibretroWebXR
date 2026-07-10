@@ -95,7 +95,16 @@ Turn today's imperative scene-building into a declarative layer (no rewrite).
   unaffected.
 - Wired behind `main.js`'s `loadCartridge()` seam (replaced the old
   `romUrl()`+`fetch`). A "ROM folder…" header button (shown only where the FSA
-  API exists) grants the local library.
+  API exists) grants the local library — now with an in-VR menu equivalent too
+  (see R.3/E.3 below).
+- **"You don't own this ROM" pre-flight badge (2026-07-10).**
+  `isUnresolvableHere(meta)` flags a local-only cart (`sources` restricted to
+  `opfs`/`pick`, no `url` fallback) whose bytes aren't in THIS browser's OPFS
+  cache — the common case being a multiplayer peer looking at a cart another
+  peer loaded from their own local folder/pick. `Cartridge.js` composites a
+  badge onto the label instead of only failing reactively at load time.
+  Real-headless-browser verified: a synthetic uncached local-only ROM flags
+  true, a normal shipped `url`-sourced cart stays false.
 - Tests: `npm test` now 45 assertions (RomResolver pure helpers +
   fetch-injected `resolve()` url path). `npm run debug --boot=<system>` boots a
   collection game through the real resolver/core-start path; verdict OK with NES
@@ -231,6 +240,21 @@ buttons in hidden panels).
   A new portal aims at an example room that isn't the current one and is appended
   to the live proximity-nav list so walk-through works. `window.__add.*` drives it
   headlessly (exposed before the `buildMemoryCards` stall, like `__editor`).
+  **Portal retargeting in-VR done (2026-07-10):** select the portal in Change
+  mode, then Cycle Selected (`EnvEditor.cyclePortalTarget`, same
+  advance-through-an-ordered-list shape as `cycleShelfCollection`) cycles
+  `prop.target` through `KNOWN_ROOMS` and keeps the live `activePortals`
+  proximity-nav record in sync. Portal descriptors have no `.type` field
+  (`normalizePortal` doesn't set one — only `room.props[]` entries do), so
+  Cycle Selected keys this branch off `object.userData.kind === 'portal'`.
+  **Also done (2026-07-10): in-VR "Grant ROM Folder" / "Grant Images Folder"
+  main-menu buttons** (same `pickLibraryDirectory()`/`pickImagesDirectory()`
+  flows as the desktop header buttons, fired from a raycast trigger) **and a
+  "Load Collection" Add-panel button** that cycles through known collections
+  not yet referenced by the room (`roms/homebrew.collection.json`,
+  `roms/snes-demo.collection.json`) and spawns a shelf for the chosen one —
+  the in-VR equivalent of drag-dropping a `*.collection.json` onto the page,
+  without free-text URL entry (VR avoids that throughout this codebase).
 - Tests: `npm test` now 121 assertions (PropCreator id/mint/append + created
   prop/portal serialize round-trip). `npm run debug --probe-file=…` verifies
   adding poster+shelf+portal grows props/portals/placed/grabbables, auto-enters
@@ -278,7 +302,9 @@ repeat/offset. In-VR Change panel gains a 3×3 thumbnail gallery, Fit cycle, and
 Scale+/Scale−. `EnvEditor.cycleFitMode`/`stepScale` (pure, tested). Poster
 descriptor gains `fit`/`scale` fields (default contain/1), round-tripping via
 `RoomSerializer`. +61 tests (1225 total).
-Follow-up: blob: URLs lost on reload; shelf/bookcase cover image not done.
+Follow-up: blob: URLs lost on reload (later fixed, see HANDOFF.md);
+shelf/bookcase cover image **done 2026-07-10** — `src/CoverPlaque.js`, a
+canvas-texture plaque naming the shelf/bookcase's collection.
 
 #### C64 virtual keyboard  ✅ done
 `src/C64KeyLayout.js` (pure, Node-importable): full C64 layout + per-key
