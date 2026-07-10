@@ -5,7 +5,8 @@
 // up elsewhere.
 
 import * as THREE from 'three';
-import { drawTextLabel, drawBoxartLabel, loadFirstBoxart } from './MediaLabel.js';
+import { drawTextLabel, drawBoxartLabel, drawUnavailableBadge, loadFirstBoxart } from './MediaLabel.js';
+import { isUnresolvableHere } from './RomResolver.js';
 
 const CART_W = 0.12;
 const CART_H = 0.13;
@@ -50,6 +51,17 @@ export function createCartridge(meta) {
       labelTex.needsUpdate = true;
     }).catch(() => { /* keep text label */ });
   }
+
+  // Pre-flight "you don't have this" affordance (see RomResolver.js) — mainly
+  // for a multiplayer peer looking at a cart another peer loaded from THEIR
+  // local folder/pick. Runs after the label/boxart drawing above so the badge
+  // always composites on top, regardless of which finishes first.
+  isUnresolvableHere(meta).then((unresolvable) => {
+    if (!unresolvable) return;
+    group.userData.unresolvable = true;
+    drawUnavailableBadge(labelCanvas);
+    labelTex.needsUpdate = true;
+  }).catch(() => { /* not worth failing the cart over */ });
 
   // Top "shoulder" — a slightly darker strip above the label, like a SNES
   // cart's molded top. Reads as a cartridge silhouette at a glance.

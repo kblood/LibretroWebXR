@@ -63,6 +63,30 @@ export function drawBoxartLabel(c, img, title) {
   ctx.textBaseline = 'alphabetic';
 }
 
+/**
+ * Overlay a "you don't have this ROM" ribbon on an already-drawn label canvas
+ * (composited on top, not a replacement, so the title/boxart underneath stays
+ * legible). Used for cartridges [[src/RomResolver.js]] `isUnresolvableHere`
+ * flags — a pre-flight affordance so a multiplayer peer sees a cart is
+ * unplayable for them before walking it to the console, not just after the
+ * load throws.
+ */
+export function drawUnavailableBadge(c) {
+  const ctx = c.getContext('2d');
+  ctx.save();
+  ctx.fillStyle = 'rgba(15,15,15,0.5)';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.fillStyle = '#e0a030';
+  ctx.fillRect(0, c.height - 26, c.width, 26);
+  ctx.fillStyle = '#1a1200';
+  ctx.font = 'bold 14px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText("YOU DON'T HAVE THIS ROM", c.width / 2, c.height - 13);
+  ctx.textBaseline = 'alphabetic';
+  ctx.restore();
+}
+
 function loadBoxart(url) {
   return new Promise((resolve, reject) => {
     const img = new Image();

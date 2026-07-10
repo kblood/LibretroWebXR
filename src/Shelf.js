@@ -6,10 +6,16 @@
 import * as THREE from 'three';
 import { CARTRIDGE_DIMS } from './Cartridge.js';
 
-const SHELF_DEPTH = 0.18;
-const SHELF_THICK = 0.025;
+export const SHELF_DEPTH = 0.18;
+export const SHELF_THICK = 0.025;
 const SLOT_SPACING = CARTRIDGE_DIMS.W + 0.04;
 const PLANK_PADDING = 0.06; // padding at each end of the plank
+
+/** Plank width for N cartridges — shared by createShelf, addCartridgeToShelf,
+ * and RoomBuilder (sizing the cover-plaque sign to match). */
+export function plankWidthFor(count) {
+  return Math.max(SLOT_SPACING * count + PLANK_PADDING * 2, 0.6);
+}
 
 export function createShelf(cartridges, { position = new THREE.Vector3(0, 1.2, -2.4), rotationY = 0 } = {}) {
   const group = new THREE.Group();
@@ -17,7 +23,7 @@ export function createShelf(cartridges, { position = new THREE.Vector3(0, 1.2, -
   group.position.copy(position);
   group.rotation.y = rotationY;
 
-  const plankW = Math.max(SLOT_SPACING * cartridges.length + PLANK_PADDING * 2, 0.6);
+  const plankW = plankWidthFor(cartridges.length);
 
   // Plank — warm wood look. Slight bevel via secondary darker box below.
   const plank = new THREE.Mesh(
@@ -82,7 +88,7 @@ export function addCartridgeToShelf(shelf, cart) {
 
   // Widen the plank and bracket to fit the new count (mirrors createShelf).
   // createShelf adds plank first, then bracket — both are non-cartridge Mesh children.
-  const plankW = Math.max(SLOT_SPACING * all.length + PLANK_PADDING * 2, 0.6);
+  const plankW = plankWidthFor(all.length);
   const nonCartMeshes = shelf.children.filter((c) => c.isMesh && !c.userData?.kind);
   const [plank, bracket] = nonCartMeshes; // plank at index 0, bracket at index 1
   if (plank) {

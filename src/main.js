@@ -82,6 +82,7 @@ import {
 import { buildRoom, buildProp, buildPortal, applyPosterTexture, FIT_MODES, DEFAULT_FIT_MODE, lockBookcaseHomes } from './RoomBuilder.js';
 import { createShelf, addCartridgeToShelf } from './Shelf.js';
 import { createMedia } from './Media.js';
+import { createCoverPlaque } from './CoverPlaque.js';
 import { RoomEditor } from './RoomEditor.js';
 import { cycleSurface, cycleTimeOfDay, cyclePosterTexture, cycleShelfCollection, cycleFitMode, stepScale } from './EnvEditor.js';
 import {
@@ -3641,11 +3642,20 @@ function rebuildBookcase(rec) {
   // Call the helper through RoomBuilder via buildProp to get a temp new object,
   // then steal its cart children. Actually, we import lockBookcaseHomes above;
   // replicate the logic here directly (same as buildBookcaseCarts but inline):
-  const games = (() => {
-    const col = (prop.collection && currentCollections.byKey.get(prop.collection)) || currentCollections.list[0];
-    return col ? col.games.slice() : [];
-  })();
+  const col = (prop.collection && currentCollections.byKey.get(prop.collection)) || currentCollections.list[0];
+  const games = col ? col.games.slice() : [];
   if (!games.length) return false;
+
+  // Refresh the cover plaque to name the new collection (mirrors RoomBuilder's
+  // initial-build plaque; find-and-replace since the group itself persists).
+  const BOOKCASE_H_CONST = 1.8;
+  const oldPlaque = bookcaseGroup.children.find((c) => c.userData?.kind === 'coverPlaque');
+  if (oldPlaque) bookcaseGroup.remove(oldPlaque);
+  if (col) {
+    const plaque = createCoverPlaque(col.title, { width: 0.9 * 0.85 });
+    plaque.position.set(0, BOOKCASE_H_CONST + 0.02, 0);
+    bookcaseGroup.add(plaque);
+  }
 
   // Reuse the exported function from RoomBuilder — but it's not exported as a
   // standalone. Rebuild via a throw-away buildProp call: build a temp descriptor

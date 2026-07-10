@@ -12,6 +12,7 @@ import {
   resolutionPlan,
   resolve,
   isLocalRomMeta,
+  isUnresolvableHere,
   verifyRomIntegrity,
   sha1Hex,
 } from '../src/RomResolver.js';
@@ -346,6 +347,39 @@ console.log('--- resolve() enforces declared sha1 ---');
       ok('resolve mismatch message mentions sha1', e.message.includes('sha1 mismatch'));
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// isUnresolvableHere — pre-flight "you don't have this ROM" classification.
+// Node has no OPFS (navigator.storage is undefined), so every local-only
+// entry here behaves like a browser that's never cached the bytes — exactly
+// the cross-peer scenario this predicate exists to catch. The one case it
+// canNOT exercise in Node is "local-only AND actually OPFS-cached" (needs a
+// real browser); that path is headless-browser-verified separately via the
+// existing --rom= pick-and-cache flow (see the debug harness notes).
+// ---------------------------------------------------------------------------
+
+console.log('--- isUnresolvableHere ---');
+{
+  // Shipping CC0 game: no `rom` block at all → always resolvable (url source).
+  ok('shipping game (no rom block) is resolvable',
+    !(await isUnresolvableHere({ file: 'freeware/lwx-snes-demo.sfc', title: 'LWX Demo' })));
+
+  // Explicit url source → resolvable, regardless of sha1.
+  ok('explicit url source is resolvable',
+    !(await isUnresolvableHere({ file: 'game.sfc', rom: { source: 'url', sha1: 'deadbeef' } })));
+
+  // Local-only (opfs+pick), sha1 declared, but Node has no OPFS → unresolvable here.
+  ok('local-only with sha1, no OPFS in this env → unresolvable',
+    await isUnresolvableHere({ file: 'game.sfc', rom: { sha1: 'a1b2c3', sources: ['opfs', 'pick'] } }));
+
+  // Local-only, NO declared sha1 → can never be OPFS-verified → unresolvable.
+  ok('local-only with no sha1 → unresolvable',
+    await isUnresolvableHere({ file: 'game.sfc', rom: { source: 'pick' } }));
+
+  // Sanity: doesn't throw on a bare/null-ish meta.
+  ok('null meta does not throw', !(await isUnresolvableHere(null)));
+  ok('empty meta does not throw', !(await isUnresolvableHere({})));
 }
 
 // ---------------------------------------------------------------------------

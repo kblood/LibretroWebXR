@@ -283,6 +283,27 @@ export async function verifyRomIntegrity(buf, meta) {
   }
 }
 
+/**
+ * True when this specific browser can't resolve `meta` without the user
+ * picking the file again — i.e. it's local-only (see `isLocalRomMeta`) AND
+ * not sitting in this browser's OPFS cache. The main use case: a multiplayer
+ * peer sees a cartridge another peer loaded from THEIR local folder/pick —
+ * the room descriptor round-trips fine, but this peer's browser never cached
+ * those bytes, so a load attempt would 404/fail. Never prompts or touches the
+ * network — safe to call speculatively for every cartridge at build time to
+ * drive a pre-flight "you don't have this" affordance instead of only
+ * discovering it on a failed load. Non-local (url-sourced) entries are always
+ * considered resolvable here (their reachability isn't pre-checked — a 404
+ * still surfaces at load time, same as today).
+ */
+export async function isUnresolvableHere(meta) {
+  if (!isLocalRomMeta(meta)) return false;
+  const key = cacheKey(meta);
+  if (!key) return true; // local-only with no declared sha1 → can never be OPFS-verified
+  const cached = await opfsGet(key);
+  return !cached;
+}
+
 // --- Per-source fetchers ----------------------------------------------------
 
 async function fromUrl(meta, { fetchImpl } = {}) {

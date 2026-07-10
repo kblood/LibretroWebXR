@@ -1,4 +1,5 @@
 {
+  "title": "LWX Test Games",
   "_comment": "Default collection. Every cartridge here is a CC0 game we BUILD and SHIP (see games/ + scripts/make-*.mjs), so all of them boot out of the box with no downloads. Homebrew/PD pointers that need a manual download were moved to roms/homebrew.collection.json (load with ?collection=roms/homebrew.collection.json) so the default room never shows a cartridge that 404s. No commercial ROMs or BIOS here. See README.md.",
   "cartridges": [
     { "file": "freeware/lwx-demo.prg", "system": "c64", "core": "vice_x64", "title": "LibretroWebXR C64 Demo", "color": "#5a8a5a",

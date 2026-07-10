@@ -12,7 +12,9 @@
 
 import * as THREE from 'three';
 import { createMedia } from './Media.js';
-import { createShelf, lockShelfHomes } from './Shelf.js';
+import { createShelf, lockShelfHomes, plankWidthFor, SHELF_THICK, SHELF_DEPTH } from './Shelf.js';
+import { createCoverPlaque } from './CoverPlaque.js';
+import { CARTRIDGE_DIMS } from './Cartridge.js';
 import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
 import { createKeyboardDevice } from './Keyboard.js';
@@ -20,7 +22,7 @@ import { createLightGun } from './LightGun.js';
 import { createMouse } from './Mouse.js';
 import {
   createBookcase, createCupboard, createTable,
-  bookcaseShelfSurfaceYs, BOOKCASE_W, BOOKCASE_T,
+  bookcaseShelfSurfaceYs, BOOKCASE_W, BOOKCASE_H, BOOKCASE_T,
 } from './Furniture.js';
 import { fitModeUV as _fitModeUV, FIT_MODES as _FIT_MODES, DEFAULT_FIT_MODE as _DEFAULT_FIT_MODE } from './PosterFit.js';
 
@@ -54,6 +56,28 @@ const BUILTIN_COLORS = {
   'neon-purple':  '#4a1a6a',
   'warm-amber':   '#5a3a10',
 };
+
+/**
+ * Resolve which collection object backs a shelf/bookcase prop (same lookup
+ * `gamesForShelf` uses internally) — needed separately so callers can read
+ * `.title` for the cover-plaque sign without re-deriving the games list.
+ */
+function resolveShelfCollection(prop, collections) {
+  return (prop.collection && collections.byKey.get(prop.collection)) || collections.list[0] || null;
+}
+
+/**
+ * Attach a small header-plaque sign (see [[src/CoverPlaque.js]]) naming the
+ * collection a shelf/bookcase is showing. No-op if there's nothing to name.
+ * `group` is the shelf/bookcase's THREE.Group; the plaque is added as a child
+ * at the given local position, facing +Z (this project's furniture "front").
+ */
+function attachCoverPlaque(group, col, { width, y, z }) {
+  if (!col) return;
+  const plaque = createCoverPlaque(col.title, { width });
+  plaque.position.set(0, y, z);
+  group.add(plaque);
+}
 
 /**
  * Resolve which games land on a shelf:
@@ -303,6 +327,13 @@ export function buildProp(prop, { scene, collections }) {
       if (!carts.length) return null; // skip empty halves / empty collections
       const shelf = createShelf(carts, { position: v3(prop.pos), rotationY: prop.rot[1] * DEG });
       shelf.userData.kind = 'shelf'; // createShelf sets none; editor identifies by this
+      // Cover plaque: a small sign above the cartridges, mounted against the
+      // back (wall) side so it never obstructs grabbing a cart.
+      attachCoverPlaque(shelf, resolveShelfCollection(prop, collections), {
+        width: plankWidthFor(carts.length),
+        y: SHELF_THICK / 2 + CARTRIDGE_DIMS.H + 0.06,
+        z: -SHELF_DEPTH / 2,
+      });
       scene.addObject(shelf);
       lockShelfHomes(shelf);
       return { object: shelf, kind: 'shelf', cartridges: carts };
@@ -335,6 +366,14 @@ export function buildProp(prop, { scene, collections }) {
         const games = gamesForShelf(prop, collections);
         if (games.length > 0) {
           carts = buildBookcaseCarts(obj, games);
+          // Cover plaque: a small sign standing on top, front edge (mirrors
+          // the shelf's; kept off `rebuildBookcase`'s cart-only fast path
+          // separately below since bookcase geometry itself never rebuilds).
+          attachCoverPlaque(obj, resolveShelfCollection(prop, collections), {
+            width: BOOKCASE_W * 0.85,
+            y: BOOKCASE_H + 0.02,
+            z: 0,
+          });
         }
       }
       scene.addObject(obj);
