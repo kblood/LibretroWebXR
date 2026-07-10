@@ -104,6 +104,22 @@ export function cycleShelfCollection(prop, collectionKeys) {
   return next;
 }
 
+/**
+ * Advance a portal prop's `target` to the next entry in an ordered list of
+ * known room URLs/ids (main.js's KNOWN_ROOMS). Mutates `prop.target` and
+ * returns the new value so the imperative caller can update the live
+ * proximity-nav record. Pure: no THREE/DOM, unit-tested in Node. A
+ * single-entry (or empty) list is a no-op — mirrors cycleShelfCollection.
+ */
+export function cyclePortalTarget(prop, roomOptions) {
+  if (!prop || typeof prop !== 'object') return undefined;
+  const opts = Array.isArray(roomOptions) ? roomOptions.filter(Boolean) : [];
+  if (opts.length === 0) return prop.target;
+  const next = nextInCycle(prop.target, opts);
+  prop.target = next;
+  return next;
+}
+
 // Fit-mode palette (matches FIT_MODES in RoomBuilder.js — kept in sync here
 // so EnvEditor stays free of THREE/browser imports and remains unit-testable).
 export const FIT_MODE_OPTIONS = ['contain', 'cover', 'stretch'];

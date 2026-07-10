@@ -10,7 +10,7 @@ import { parseRoom, defaultRoom, normalizeProp, normalizePortal, roomCollectionR
 import { serializeRoom, round } from '../src/RoomSerializer.js';
 import {
   nextInCycle, ensureEnvironment, cycleSurface, cycleTimeOfDay, cyclePosterTexture,
-  cycleShelfCollection, SURFACE_OPTIONS, POSTER_OPTIONS, TIME_OF_DAY_OPTIONS,
+  cycleShelfCollection, cyclePortalTarget, SURFACE_OPTIONS, POSTER_OPTIONS, TIME_OF_DAY_OPTIONS,
 } from '../src/EnvEditor.js';
 import {
   uniqueId, existingIds, createProp, createPortal, addProp, addPortal,
@@ -294,6 +294,22 @@ eq('nextInCycle unknown → first', nextInCycle('nope', SURFACE_OPTIONS), SURFAC
   ok('cycleShelfCollection empty list leaves value',
      cycleShelfCollection({ collection: 'x' }, []) === 'x');
   ok('cycleShelfCollection tolerates bad prop', cycleShelfCollection(null, keys) === undefined);
+}
+{
+  // cyclePortalTarget: same generic advance-through-a-key-list shape as
+  // cycleShelfCollection, applied to a portal's `target` field (Task #4).
+  const rooms = ['roms/bedroom.room.json', 'roms/arcade.room.json'];
+  const portal = { type: 'portal', id: 'p1', target: 'roms/bedroom.room.json' };
+  eq('cyclePortalTarget advances', cyclePortalTarget(portal, rooms), 'roms/arcade.room.json');
+  eq('cyclePortalTarget writes back', portal.target, 'roms/arcade.room.json');
+  eq('cyclePortalTarget wraps', cyclePortalTarget(portal, rooms), 'roms/bedroom.room.json');
+  eq('cyclePortalTarget unknown current starts at first',
+     cyclePortalTarget({ target: 'nope' }, rooms), 'roms/bedroom.room.json');
+  eq('cyclePortalTarget single-entry is a no-op',
+     cyclePortalTarget({ target: 'only.room.json' }, ['only.room.json']), 'only.room.json');
+  ok('cyclePortalTarget empty list leaves value',
+     cyclePortalTarget({ target: 'x' }, []) === 'x');
+  ok('cyclePortalTarget tolerates bad prop', cyclePortalTarget(null, rooms) === undefined);
 }
 {
   // End-to-end: edit the descriptor, then export must reflect the edits.

@@ -84,7 +84,7 @@ import { createShelf, addCartridgeToShelf } from './Shelf.js';
 import { createMedia } from './Media.js';
 import { createCoverPlaque } from './CoverPlaque.js';
 import { RoomEditor } from './RoomEditor.js';
-import { cycleSurface, cycleTimeOfDay, cyclePosterTexture, cycleShelfCollection, cycleFitMode, stepScale } from './EnvEditor.js';
+import { cycleSurface, cycleTimeOfDay, cyclePosterTexture, cycleShelfCollection, cyclePortalTarget, cycleFitMode, stepScale } from './EnvEditor.js';
 import {
   createProp, createPortal,
   addProp as appendProp, addPortal as appendPortal,
@@ -3765,6 +3765,18 @@ function cycleSelected() {
     const v = cycleShelfCollection(prop, keys);
     if (!rebuildBookcase(rec)) { prop.collection = prev; setStatus(`"${v}" has no games`); return; }
     setStatus(`Bookcase collection: ${v}`);
+  } else if (object.userData.kind === 'portal') {
+    // Portal descriptors live in room.portals[] (not room.props[]) and never
+    // get a `.type` field (see normalizePortal in RoomLoader.js) — the object's
+    // userData.kind (set by buildPortal) is the only reliable signal here.
+    if (KNOWN_ROOMS.length < 2) { setStatus('only one known room'); return; }
+    const v = cyclePortalTarget(prop, KNOWN_ROOMS);
+    object.userData.target = v;
+    // activePortals holds a denormalized snapshot the proximity-nav tick reads
+    // (see the addPortal() push below) — keep it in sync with prop.target.
+    const live = activePortals.find((p) => p.prop === prop);
+    if (live) live.target = v;
+    setStatus(`Portal target: ${v}`);
   } else {
     setStatus(`nothing to change for ${prop.type}`);
   }
