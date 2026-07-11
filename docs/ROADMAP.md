@@ -617,6 +617,14 @@ trigger — for every system that had one historically. Full design + status:
   core reboots the primary console in place, no page reload (`0c973d8`).
 - **Remaining:** real-headset validation (aim feel, two-gun co-op timing) —
   everything else is headless- and real-core-verified.
+- **Known bug, not yet fixed (2026-07-11):** the arming flag
+  (`window.__lightgunArmed`) is deliberately sticky for the session but
+  `isLightgunCapable` is system-level, not per-ROM — once armed, any later
+  boot of a gun-capable-system ROM gets a gun wired regardless of whether
+  that specific title uses one. Confirmed real (a session log + code
+  reading), confirmed *not* the cause of a black-screen report it looked
+  linked to (direct reproduction rendered fine). Detail: `docs/LIGHTGUN_
+  SUPPORT.md` "Known bug".
 
 ## Mouse peripheral + new systems (Amiga, SG-1000, Sega 32X)  ✅ shipped
 A grabbable **mouse peripheral** (`src/Mouse.js`/`src/MouseMgr.js`), built to
@@ -637,6 +645,13 @@ light-gun architecture (cord/plug into a console port, net-synced binding via
 - **SG-1000** and **Sega 32X** also joined the system list (via `gearsystem`
   and `picodrive` respectively) as part of the same content-aware core-loading
   pass that added Amiga.
+- **Desktop pointer-lock bug fixed (2026-07-11, `a778b44`, pushed not
+  deployed).** `MouseMgr.attachDesktop()`'s click listener called
+  `requestPointerLock()` on any canvas click regardless of system/wiring —
+  fixed with a `getWired()` gate + `releaseDesktopLock()` on a non-mouse boot.
+  Same-shaped arming-leak bug as the light gun's (`window.__mouseArmed` sticky
+  + `isMouseCapable` system-level, not per-ROM) is confirmed real and **still
+  open** — see `docs/MOUSE_SUPPORT.md` follow-up #5.
 
 ## DOS / VirtualXT  ⚠ registered, blocked
 A `virtualxt` core entry + `dos` system exist in `systems.js` (MPL-2.0,

@@ -411,6 +411,22 @@ to keep an immersive XR session alive — blocked on de-singletonizing the prima
 canvas); 2-gun co-op needs per-port pointer state in `rwebinput`; headset validation
 pending (checklist ready).
 
+**Known bug, not yet fixed (found 2026-07-11):** `window.__lightgunArmed` is
+deliberately sticky for the rest of the session (so switching between multiple gun
+games doesn't require re-grabbing each time), but `isLightgunCapable(systemId)` is a
+**system**-level flag (true for every SNES game, since Super Scope exists on the
+platform), not a per-ROM one. Combined, `(meta.lightgun || window.__lightgunArmed)` in
+`main.js` (both the `loadCartridge` and `__pickLocalRom` boot paths) means once armed,
+**any** later boot of a gun-capable-system ROM gets a gun wired onto a controller
+port — including a plain non-gun game on that system. Confirmed via a real session log
+(a gun boot fired right before an SNES RPG that has no gun support) and via code
+reading; **ruled out as the cause of a specific black-screen report** by forcing the
+exact same mis-wiring onto a known-good SNES ROM through the real boot path — it
+rendered fine (`tmp/verify-beholder-repro.mjs`), so a wrong controller/gun device
+alone does not blank the video output. Still a real bug worth fixing: track "did THIS
+boot's ROM ask for a gun" per-load rather than leaking the armed flag across
+unrelated titles.
+
 `EmulatorClient` retains the de-risk debug hooks (`__forceInputDevices`,
 `__forceCoreOptions`, `__forceRemapName`, `__forceCfgExtra`, `__forceExtraFiles`); the
 gun integration adds `__lightGun`, `__lightGunMgr`, `__gunTargets`, `__gunFire`,

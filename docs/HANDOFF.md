@@ -1,11 +1,50 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated
-2026-07-10 (code @ `b25abdc`, branch `main`).
+2026-07-11 (code @ `a778b44`, branch `main`).
 
 **Current focus: everything below is now live — real-headset validation is
-what's left.** Deployed 2026-07-10 (see "Live build" below). Highlights,
+what's left.** Deployed 2026-07-10 (see "Live build" below); `a778b44`
+(2026-07-11, the desktop pointer-lock fix below) is **committed + pushed but
+NOT yet deployed** — run `npm run deploy` before expecting it live. Highlights,
 newest first:
+- **Desktop mouse pointer-lock gated on real wiring + Eye of the Beholder
+  black-screen root-caused (2026-07-11, `a778b44`, pushed not deployed).** Two
+  separate findings from one user report chain:
+  1. A user's Quest report ("Eye of the Beholder SNES loads to a black
+     screen") led first to a real-but-irrelevant bug (light-gun arming leaks
+     across unrelated ROMs — see `docs/LIGHTGUN_SUPPORT.md` "Known bug",
+     still open) and eventually to the actual cause: **the user's ROM file was
+     truncated/corrupt.** Its size (575,166 bytes) isn't even a multiple of
+     512, let alone a valid SNES bank-aligned size (the game is normally
+     ~1.5 MB); a truncated ROM boots "successfully" at the JS/core-start layer
+     (no exception, nothing to catch) and then renders nothing because
+     critical banks are missing. **Lesson for future "black screen on
+     headset" reports:** check the `boot-attempt`/`rom-picked` telemetry's
+     `bytes` field against a known-good size for that ROM *before* assuming a
+     code bug — this is now a fast, cheap first check. The production log
+     server's `boot-attempt` event (logged in both `loadCartridge` and
+     `loadCartridgeIntoConsole`) carries `{file, system, core, plan:{sha1,
+     cacheKey, order, url}, opfs}` and is the right first stop:
+     `curl https://dionysus.dk/logs.json?tail=0` (careful — no `session` filter
+     returns EVERY session; `tail=0` disables the 200-entry default cap too).
+  2. While chasing a related desktop-only report ("mouse movement becomes
+     very different" after loading an external ROM), found and fixed a real,
+     separate bug: `MouseMgr.attachDesktop()`'s click listener called
+     `requestPointerLock()` on **any** canvas click, regardless of system or
+     whether a mouse device was actually wired to the seated console —
+     clicking near/on the canvas while loading an unrelated (non-mouse) ROM
+     silently captured the OS cursor into relative/hidden-cursor motion (no
+     error thrown, just a broken-feeling mouse — reads as a crash). Fixed with
+     a `getWired()` gate + a `releaseDesktopLock()` call on any boot that
+     doesn't want the mouse device. Full detail + the identical-shaped
+     still-open bug in the gun/mouse arming flags: `docs/MOUSE_SUPPORT.md`
+     "Follow-ups", `docs/LIGHTGUN_SUPPORT.md` "Known bug".
+  3. Added integration tests proving a controller's cable can move between
+     ports/consoles mid-session (moves, swaps, unplugs) with routing always
+     following the live seat: `scripts/test-controller-portswitch.mjs` (new),
+     `scripts/test-mousemgr-pointerlock.mjs` (new), extended
+     `scripts/test-patchbay.mjs`. `npm test` green (0 failures).
 - **"Fix everything" pass (2026-07-10, `76325d3`..`b25abdc`, deployed).**
   Four code-only gaps closed in one sweep: shelf/bookcase cover plaques
   (derive the label from the collection's own `title`); a pre-flight "you
@@ -759,11 +798,25 @@ inline. If you're picking up stale-looking doc claims again, check `git log
   `saved = []` so a stalled headless-Chrome IndexedDB open can no longer wedge
   init.
 
-## Immediate next actions (as of 2026-07-10, code @ `b25abdc`)
+## Immediate next actions (as of 2026-07-11, code @ `a778b44`)
 
-The code is **committed, pushed, and deployed** (see "Live build" above —
-live is `b25abdc`). Sensible next steps, in rough priority:
+`a778b44` (desktop pointer-lock fix + controller port-switch tests, above) is
+**committed + pushed but NOT deployed yet** — `npm run deploy` first if you
+want it live (live is still `b25abdc`, 2026-07-10). Sensible next steps, in
+rough priority:
 
+0. **Deploy `a778b44`.** Cheap, verified, no known regressions (`npm test`
+   green). Do this before anything else below so the pointer-lock fix is
+   actually live for the next desktop session.
+0.5. **Fix the gun/mouse arming cross-wiring bug** (`docs/LIGHTGUN_SUPPORT.md`
+   "Known bug", `docs/MOUSE_SUPPORT.md` follow-up #5) — confirmed real via
+   code + a live session log, not yet fixed. `window.__lightgunArmed`/
+   `window.__mouseArmed` are deliberately sticky for the session, but
+   `isLightgunCapable`/`isMouseCapable` are system-level, not per-ROM, so an
+   armed peripheral leaks onto any later gun/mouse-*capable-system* ROM
+   regardless of whether that specific title uses one. Fix shape: track
+   "did THIS boot's meta actually ask for the device" instead of gating on
+   the sticky armed flag alone once a game is already running one.
 1. **Diagnose + fix the controls bug on a real Quest.** Unchanged from the prior
    handoff — still open, still just instrumented, not reproduced or fixed since.
    The input pipeline emits Logger 'input'/'input-state' events; reproduce on a
@@ -864,6 +917,45 @@ console only seems to pause it." Both fixed:
   the off→on edge, not on redundant on→on.
 - Not yet deployed as of writing this entry — `npm test` (all green, no
   regressions) and both headless verifications pass; deploy is the next step.
+
+**2026-07-11 session — "Eye of the Beholder won't load" investigation.** A
+user reported an SNES ROM black-screening on Quest. Walked through several
+theories before landing on the real one, worth recording for how the
+diagnosis actually went (not just the fix):
+1. First theory — the light-gun arming flag (`window.__lightgunArmed`) had
+   fired on this exact boot (confirmed in the session log), so it looked like
+   the culprit. **The user pushed back twice** ("controllers are unlikely to
+   have anything to do with the game not loading — are you sure?", then after
+   more detail, pointed out external ROMs had never worked even before the
+   light-gun feature existed). Both pushbacks were right to make: a
+   reproduction test (`tmp/verify-beholder-repro.mjs`, forcing the identical
+   mis-wiring onto a known-good SNES ROM via the real boot path) rendered
+   fine — proving wrong controller/gun wiring alone does not blank the video
+   output. The bug is real (see `docs/LIGHTGUN_SUPPORT.md` "Known bug") but
+   was not the cause of this report.
+2. A related but separate desktop-only report ("mouse movement becomes very
+   different" after loading an external ROM) led to the actual
+   `MouseMgr.attachDesktop()` pointer-lock bug — fixed, see the top summary
+   and `docs/MOUSE_SUPPORT.md`.
+3. Back on the Quest, a second attempt with richer `boot-attempt`/`rom-picked`
+   telemetry (now carrying `{bytes, plan:{sha1,cacheKey,order,url}, opfs}`)
+   showed the SAME 575,166-byte file failing identically on **two different
+   consoles** via **two different boot code paths** (`loadCartridge`'s raw
+   pick and `loadCartridgeIntoConsole`'s full resolver), with **zero JS errors
+   logged** in either case. That combination — silent "success" at the JS
+   layer, reproducible across independent code paths — pointed away from the
+   app and toward the file. 575,166 isn't divisible by 512 (real SNES dumps
+   always are, being built from fixed-size banks) and is roughly a third of
+   the ~1.5 MB the real cart is. **Root cause: a truncated/corrupt ROM file on
+   the user's headset**, not an app bug. Confirmed by the user after
+   re-acquiring a working dump.
+4. **Takeaway for next time:** when a headset "black screen" report comes in,
+   pull `boot-attempt`'s `bytes` field and sanity-check it against a known
+   ROM size *before* chasing wiring/code theories — it's a 30-second check
+   that would have shortened this investigation considerably. Fetching logs:
+   `curl https://dionysus.dk/logs.json?tail=0 -o out.json` (all sessions, no
+   truncation — large; add `?session=<id>` once you know which one), then
+   filter `entries` by `sessionId` and sort by `ts`.
 
 ## Gotchas already hit (so you don't re-hit them)
 

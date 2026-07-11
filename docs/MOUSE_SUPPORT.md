@@ -119,3 +119,23 @@ controllers, two mice) and, even then, needs the multiport core patch above.
    `kick40068.A1200` provisioned into the core's system dir before boot; commit
    `6089ebe`), so Settlers boots the real game, not just the AROS cracktro.
 3. **Headset validation** of the in-VR grab + positional-motion feel + gain tuning.
+4. ✅ **done (2026-07-11, `a778b44`)** — desktop pointer-lock was ungated:
+   `MouseMgr.attachDesktop()`'s click listener called `requestPointerLock()` on
+   **any** click of the app canvas, regardless of system or whether a mouse
+   device was actually wired to the seated console. A click while loading or
+   playing an unrelated (non-mouse) ROM silently captured the OS cursor into
+   relative/hidden-cursor motion — no error, just a broken-feeling mouse, which
+   reads as the page having crashed. Fixed: `attachDesktop()` now takes a
+   `getWired()` gate (true only when the current boot wired a real mouse
+   device on that port); `loadCartridge`/`rebootPrimaryConsole` call the new
+   `releaseDesktopLock()` to force-drop a stale lock left over from a prior
+   mouse-capable boot. Tests: `scripts/test-mousemgr-pointerlock.mjs`.
+5. **Known bug, not yet fixed** — same shape as the light-gun arming leak (see
+   `docs/LIGHTGUN_SUPPORT.md` "Known bug"): `window.__mouseArmed` is
+   deliberately sticky for the session, but `isMouseCapable(systemId)` is
+   system-level, not per-ROM. `wantMouse` in `main.js`
+   (`!gun && isMouseCapable(meta.system) && (meta.mouse || window.__mouseArmed)`)
+   means once a mouse has been armed, any later boot of a mouse-capable-system
+   ROM gets the libretro MOUSE device wired regardless of whether that
+   specific ROM uses one. Found 2026-07-11 alongside the gun version of the
+   same bug; not yet fixed.
