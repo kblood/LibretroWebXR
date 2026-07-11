@@ -2300,11 +2300,16 @@ async function buildCartridgeWorld() {
   // __gunArmedState reports whether the gun device is connected this boot.
   window.__armGun = () => armLightGunAndReload();
   window.__gunArmedState = () => ({ armed: !!window.__lightgunArmed, consoleArmed: _lightgunArmedConsole, system: currentMeta?.system || null, core: currentMeta?.core || null });
+  // __disarmGun: clears the sticky arm flag so a LATER unrelated game on the
+  // same gun-capable system stops silently inheriting the gun (see
+  // [[gun-mouse-arming-leak-bug]] in project memory / docs/LIGHTGUN_SUPPORT.md).
+  window.__disarmGun = () => disarmLightGunAndReload();
   // --- Mouse debug hooks (mirror the gun hooks) ---
   window.__mouse = () => mouseObj;
   window.__mouseMgr = () => mouseMgr;
   window.__armMouse = () => armMouseAndReload();
   window.__mouseArmedState = () => ({ armed: !!window.__mouseArmed, consoleArmed: _mouseArmedConsole, twoMousePorts: _twoMousePorts.slice(), system: currentMeta?.system || null });
+  window.__disarmMouse = () => disarmMouseAndReload();
   // Resolve the libretro mouse PORT a cabled mouse currently drives (the value
   // MouseMgr.portForMouse feeds to sendMouse). Returns null for single-mouse.
   window.__mouseLibretroPort = (cableId) => {
@@ -3809,6 +3814,11 @@ function cycleSelected() {
 // --- In-VR menu + controls panel -----------------------------------------
 
 let controlsPanel = null;
+// Main-menu "Disarm Gun"/"Disarm Mouse" buttons — an explicit affordance for
+// the sticky window.__lightgunArmed/__mouseArmed flags (see
+// [[gun-mouse-arming-leak-bug]]). Module-level so loadCartridge/
+// rebootPrimaryConsole (outside buildMenuAndControlsPanel) can refresh labels.
+let gunArmBtn = null, mouseArmBtn = null;
 function buildMenuAndControlsPanel() {
   controlsPanel = createControlsPanel();
   scene.addObject(controlsPanel);
@@ -3847,6 +3857,14 @@ function buildMenuAndControlsPanel() {
       // M0 hardening: in-VR voice toggle (the 🎤 header button is desktop-only).
       // Appended after the rack toggles and only in a networked session (idx 12).
       ...(net ? [{ label: 'Voice: Off', onActivate: () => {} }] : []),
+      // Explicit disarm affordance for the sticky gun/mouse "armed" flags (see
+      // [[gun-mouse-arming-leak-bug]]): grabbing the gun/mouse prop arms it for
+      // the rest of the session across EVERY gun/mouse-capable-system ROM, not
+      // just ones that use the device. These clear that sticky flag so a later
+      // unrelated game stops silently inheriting it; the currently running game
+      // keeps its device if its own meta legitimately declares it.
+      { label: 'Gun: Off',   onActivate: () => {} },
+      { label: 'Mouse: Off', onActivate: () => {} },
       // In-VR equivalents of the desktop header's folder-grant buttons. This
       // codebase avoids free-text URL/prompt() entry in VR (see "Set Poster
       // Image…" below, which explicitly punts to Cycle Selected in VR instead),
@@ -3867,10 +3885,12 @@ function buildMenuAndControlsPanel() {
   const rackPauseBtn = menu.userData.buttons[10];
   const wallsBtn = menu.userData.buttons[11];
   const vrVoiceBtn = net ? menu.userData.buttons[12] : null;
-  // Always the last three buttons regardless of whether Voice is present.
+  // Always the last five buttons regardless of whether Voice is present.
   const vrMpBtn = menu.userData.buttons.at(-1);
   const vrImagesFolderBtn = menu.userData.buttons.at(-2);
   const vrRomFolderBtn = menu.userData.buttons.at(-3);
+  mouseArmBtn = menu.userData.buttons.at(-4);
+  gunArmBtn = menu.userData.buttons.at(-5);
 
   // Build a per-mode action sub-panel (hidden until its mode is active). All its
   // buttons are registered with menuMgr up front; MenuMgr's effVisible check
@@ -4351,6 +4371,14 @@ function buildMenuAndControlsPanel() {
       }
     };
   }
+
+  // Disarm buttons: no-op (with a status hint) when nothing is armed; otherwise
+  // clear the sticky flag, live-rebooting the current game off the device only
+  // if that game doesn't itself declare it. syncPeripheralArmButtons() keeps
+  // the labels in sync at every boot (see loadCartridge/rebootPrimaryConsole).
+  gunArmBtn.onActivate = () => disarmLightGunAndReload();
+  mouseArmBtn.onActivate = () => disarmMouseAndReload();
+  syncPeripheralArmButtons();
 
   // In-VR folder grants: same File System Access flow as the desktop header
   // buttons (romFolderBtn/imagesFolderBtn below), fired from a raycast trigger
@@ -4843,6 +4871,80 @@ async function armMouseAndReload() {
   }
 }
 
+// Keep the main-menu "Gun"/"Mouse" buttons' labels reflecting the sticky arm
+// flags. Called at every primary boot (loadCartridge / rebootPrimaryConsole)
+// and right after the disarm buttons are wired up.
+function syncPeripheralArmButtons() {
+  gunArmBtn?.setLabel(window.__lightgunArmed ? 'Disarm Gun' : 'Gun: Off');
+  mouseArmBtn?.setLabel(window.__mouseArmed ? 'Disarm Mouse' : 'Mouse: Off');
+}
+
+// Disarm: the explicit counterpart to armLightGunAndReload. Clears the sticky
+// session flag (so a LATER unrelated game on the same gun-capable SYSTEM stops
+// silently inheriting the gun — see [[gun-mouse-arming-leak-bug]]). If the
+// CURRENTLY running game only has the gun because of that flag (its own meta
+// doesn't declare lightgun:true), live-reboot it without the device; a curated
+// gun title keeps its gun regardless, since disarming here only affects what
+// happens NEXT.
+async function disarmLightGunAndReload() {
+  if (!window.__lightgunArmed && !_lightgunArmedConsole) { setStatus('no light gun connected'); return; }
+  try { sessionStorage.removeItem(LIGHTGUN_ARM_KEY); } catch (_) {}
+  window.__lightgunArmed = false;
+  logger?.event?.('lightgun-disarm', { system: currentMeta?.system || null, consoleId: CONSOLE_ID, hadDevice: _lightgunArmedConsole });
+  const declaredByGame = !!_lastLoadedMeta?.lightgun;
+  if (!_lightgunArmedConsole || declaredByGame) {
+    syncPeripheralArmButtons();
+    setStatus(declaredByGame ? 'gun stays connected for this game' : 'gun disarmed');
+    return;
+  }
+  const m = _lastLoadedMeta;
+  setStatus('disconnecting light gun…');
+  try {
+    await rebootPrimaryConsole(m, null, null);
+    const cart = cartridges.find((c) => c.userData.file === m.file);
+    if (cart && grabMgr) grabMgr.setInsertedCart(cart);
+    setStatus('light gun disconnected');
+  } catch (e) {
+    console.warn('[lightgun] disarm reboot failed:', e);
+    logger?.event?.('lightgun-disarm-fail', { error: String(e?.message || e) });
+    setStatus('could not disconnect the light gun');
+  }
+  syncPeripheralArmButtons();
+}
+
+// Mirrors disarmLightGunAndReload for the mouse. Also unplugs the mouse's
+// in-world cable jack (armMouseAndReload plugs it in) so the cord's visual
+// state matches "not connected" when we actually drop the device.
+async function disarmMouseAndReload() {
+  if (!window.__mouseArmed && !_mouseArmedConsole) { setStatus('no mouse connected'); return; }
+  try { sessionStorage.removeItem(MOUSE_ARM_KEY); } catch (_) {}
+  window.__mouseArmed = false;
+  logger?.event?.('mouse-disarm', { system: currentMeta?.system || null, consoleId: CONSOLE_ID, hadDevice: _mouseArmedConsole });
+  const declaredByGame = !!_lastLoadedMeta?.mouse;
+  if (!_mouseArmedConsole || declaredByGame) {
+    syncPeripheralArmButtons();
+    setStatus(declaredByGame ? 'mouse stays connected for this game' : 'mouse disarmed');
+    return;
+  }
+  const m = _lastLoadedMeta;
+  setStatus('disconnecting mouse…');
+  try {
+    await rebootPrimaryConsole(m, null, null);
+    const cart = cartridges.find((c) => c.userData.file === m.file);
+    if (cart && grabMgr) grabMgr.setInsertedCart(cart);
+    try {
+      cable.unplugController(mouseObj.userData.cableId);
+      _broadcastCablePort(mouseObj.userData.cableId);
+    } catch (_) {}
+    setStatus('mouse disconnected');
+  } catch (e) {
+    console.warn('[mouse] disarm reboot failed:', e);
+    logger?.event?.('mouse-disarm-fail', { error: String(e?.message || e) });
+    setStatus('could not disconnect the mouse');
+  }
+  syncPeripheralArmButtons();
+}
+
 async function loadCartridge(meta, { echo = true } = {}) {
   setStatus(`loading ${meta.title}…`);
   // Boot telemetry (diagnoses headset boot failures): how the ROM resolves +
@@ -4912,6 +5014,7 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // this new ROM (no mouse device) can't consume it — release it so the OS
     // cursor comes back instead of staying captured for a game that ignores it.
     if (!mouse) mouseMgr?.releaseDesktopLock();
+    syncPeripheralArmButtons();
     gameInput?.setSystem(meta.system);
     // Loading implies the primary console is on — sync power state + switch tint.
     setConsolePower(CONSOLE_ID, true, consoleObjs.get(CONSOLE_ID)?.userData?.powerBtn);
@@ -5175,6 +5278,7 @@ async function rebootPrimaryConsole(meta, gun, mouse = null) {
   _mouseArmedConsole = !!mouse;
   _twoMousePorts = (mouse && mouse.mice?.length > 1) ? mouse.mice.map((x) => x.port) : [];
   if (!mouse) mouseMgr?.releaseDesktopLock();
+  syncPeripheralArmButtons();
   gameInput?.setSystem(meta.system);
   consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
   setSystemLabel(coreName);

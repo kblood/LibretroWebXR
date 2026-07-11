@@ -617,14 +617,17 @@ trigger — for every system that had one historically. Full design + status:
   core reboots the primary console in place, no page reload (`0c973d8`).
 - **Remaining:** real-headset validation (aim feel, two-gun co-op timing) —
   everything else is headless- and real-core-verified.
-- **Known bug, not yet fixed (2026-07-11):** the arming flag
-  (`window.__lightgunArmed`) is deliberately sticky for the session but
-  `isLightgunCapable` is system-level, not per-ROM — once armed, any later
-  boot of a gun-capable-system ROM gets a gun wired regardless of whether
-  that specific title uses one. Confirmed real (a session log + code
+- **Arming-leak bug fixed (found + fixed 2026-07-11, disarm option):** the
+  arming flag (`window.__lightgunArmed`) is deliberately sticky for the
+  session but `isLightgunCapable` is system-level, not per-ROM — once armed,
+  any later boot of a gun-capable-system ROM got a gun wired regardless of
+  whether that specific title uses one. Confirmed real (a session log + code
   reading), confirmed *not* the cause of a black-screen report it looked
-  linked to (direct reproduction rendered fine). Detail: `docs/LIGHTGUN_
-  SUPPORT.md` "Known bug".
+  linked to (direct reproduction rendered fine). Fixed with an explicit
+  `disarmLightGunAndReload()` / `window.__disarmGun()` / "Disarm Gun" menu
+  button that clears the sticky flag and drops the device from the current
+  game only if that game didn't declare its own `lightgun` meta. Detail:
+  `docs/LIGHTGUN_SUPPORT.md`.
 
 ## Mouse peripheral + new systems (Amiga, SG-1000, Sega 32X)  ✅ shipped
 A grabbable **mouse peripheral** (`src/Mouse.js`/`src/MouseMgr.js`), built to
@@ -650,8 +653,9 @@ light-gun architecture (cord/plug into a console port, net-synced binding via
   `requestPointerLock()` on any canvas click regardless of system/wiring —
   fixed with a `getWired()` gate + `releaseDesktopLock()` on a non-mouse boot.
   Same-shaped arming-leak bug as the light gun's (`window.__mouseArmed` sticky
-  + `isMouseCapable` system-level, not per-ROM) is confirmed real and **still
-  open** — see `docs/MOUSE_SUPPORT.md` follow-up #5.
+  + `isMouseCapable` system-level, not per-ROM) is confirmed real and **fixed**
+  the same way (`disarmMouseAndReload()` / `window.__disarmMouse()` / "Disarm
+  Mouse" menu button) — see `docs/MOUSE_SUPPORT.md` follow-up #5.
 
 ## DOS / VirtualXT  ⚠ registered, blocked
 A `virtualxt` core entry + `dos` system exist in `systems.js` (MPL-2.0,

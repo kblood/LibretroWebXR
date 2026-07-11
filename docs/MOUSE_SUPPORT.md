@@ -130,12 +130,22 @@ controllers, two mice) and, even then, needs the multiport core patch above.
    device on that port); `loadCartridge`/`rebootPrimaryConsole` call the new
    `releaseDesktopLock()` to force-drop a stale lock left over from a prior
    mouse-capable boot. Tests: `scripts/test-mousemgr-pointerlock.mjs`.
-5. **Known bug, not yet fixed** — same shape as the light-gun arming leak (see
-   `docs/LIGHTGUN_SUPPORT.md` "Known bug"): `window.__mouseArmed` is
-   deliberately sticky for the session, but `isMouseCapable(systemId)` is
-   system-level, not per-ROM. `wantMouse` in `main.js`
+5. ✅ **fixed (2026-07-11, disarm option)** — same shape as the light-gun arming
+   leak (see `docs/LIGHTGUN_SUPPORT.md`): `window.__mouseArmed` is deliberately
+   sticky for the session, but `isMouseCapable(systemId)` is system-level, not
+   per-ROM. `wantMouse` in `main.js`
    (`!gun && isMouseCapable(meta.system) && (meta.mouse || window.__mouseArmed)`)
-   means once a mouse has been armed, any later boot of a mouse-capable-system
-   ROM gets the libretro MOUSE device wired regardless of whether that
-   specific ROM uses one. Found 2026-07-11 alongside the gun version of the
-   same bug; not yet fixed.
+   meant once a mouse had been armed, any later boot of a mouse-capable-system
+   ROM got the libretro MOUSE device wired regardless of whether that specific
+   ROM uses one. Found 2026-07-11 alongside the gun version of the same bug.
+   Fixed the same way: `disarmMouseAndReload()` clears `window.__mouseArmed` +
+   its `sessionStorage` key, live-rebooting the CURRENT game without the mouse
+   only if its own meta doesn't declare `mouse: true` (a legitimately-declared
+   mouse game keeps its device; disarming there only stops the leak onto the
+   *next* load). Also unplugs the mouse's in-world cable jack when the device is
+   actually dropped. Exposed as `window.__disarmMouse()` and a "Disarm Mouse" /
+   "Mouse: Off" menu button (same panel as the gun's). Verified end-to-end in
+   `tmp/verify-disarm-mouse.mjs` (9/9 assertions: leak reproduced, fixed for
+   undeclared games; the "declared" preservation branch shares the gun's tested
+   code shape but has no second mouse-capable manifest title to reproduce
+   against directly).

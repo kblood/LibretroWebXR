@@ -411,23 +411,35 @@ to keep an immersive XR session alive — blocked on de-singletonizing the prima
 canvas); 2-gun co-op needs per-port pointer state in `rwebinput`; headset validation
 pending (checklist ready).
 
-**Known bug, not yet fixed (found 2026-07-11):** `window.__lightgunArmed` is
-deliberately sticky for the rest of the session (so switching between multiple gun
-games doesn't require re-grabbing each time), but `isLightgunCapable(systemId)` is a
-**system**-level flag (true for every SNES game, since Super Scope exists on the
-platform), not a per-ROM one. Combined, `(meta.lightgun || window.__lightgunArmed)` in
-`main.js` (both the `loadCartridge` and `__pickLocalRom` boot paths) means once armed,
-**any** later boot of a gun-capable-system ROM gets a gun wired onto a controller
-port — including a plain non-gun game on that system. Confirmed via a real session log
-(a gun boot fired right before an SNES RPG that has no gun support) and via code
-reading; **ruled out as the cause of a specific black-screen report** by forcing the
-exact same mis-wiring onto a known-good SNES ROM through the real boot path — it
-rendered fine (`tmp/verify-beholder-repro.mjs`), so a wrong controller/gun device
-alone does not blank the video output. Still a real bug worth fixing: track "did THIS
-boot's ROM ask for a gun" per-load rather than leaking the armed flag across
-unrelated titles.
+**Arming-leak bug, found 2026-07-11, fixed 2026-07-11 (disarm option):**
+`window.__lightgunArmed` is deliberately sticky for the rest of the session (so
+switching between multiple gun games doesn't require re-grabbing each time), but
+`isLightgunCapable(systemId)` is a **system**-level flag (true for every SNES game,
+since Super Scope exists on the platform), not a per-ROM one. Combined,
+`(meta.lightgun || window.__lightgunArmed)` in `main.js` (both the `loadCartridge` and
+`__pickLocalRom` boot paths) means once armed, **any** later boot of a gun-capable-
+system ROM gets a gun wired onto a controller port — including a plain non-gun game on
+that system. Confirmed via a real session log (a gun boot fired right before an SNES
+RPG that has no gun support) and via code reading; **ruled out as the cause of a
+specific black-screen report** by forcing the exact same mis-wiring onto a known-good
+SNES ROM through the real boot path — it rendered fine (`tmp/verify-beholder-repro.mjs`),
+so a wrong controller/gun device alone does not blank the video output.
+
+Fixed with an explicit **disarm** affordance rather than dropping the sticky flag
+entirely (a strict per-ROM-meta-only gate would break the legitimate externally-picked-
+ROM case, which has no metadata to declare `lightgun: true` in the first place):
+`disarmLightGunAndReload()` (`src/main.js`) clears `window.__lightgunArmed` + its
+`sessionStorage` key and, only if the **currently running** game doesn't itself declare
+`meta.lightgun` (i.e. it only has the gun because of the sticky flag), live-reboots it
+without the device. A game that legitimately declares its own gun keeps it connected
+regardless — disarming there only stops the flag from leaking onto the *next* unrelated
+load. Exposed as `window.__disarmGun()` and as a "Disarm Gun" / "Gun: Off" button on the
+main in-VR/desktop menu panel (mirrors the "Voice" toggle button pattern). Verified
+end-to-end against the real boot path in `tmp/verify-disarm.mjs` (15/15 assertions: leak
+reproduced, fixed for undeclared games, preserved for curated gun titles, flag stays
+cleared for later loads even when disarmed mid-curated-game).
 
 `EmulatorClient` retains the de-risk debug hooks (`__forceInputDevices`,
 `__forceCoreOptions`, `__forceRemapName`, `__forceCfgExtra`, `__forceExtraFiles`); the
 gun integration adds `__lightGun`, `__lightGunMgr`, `__gunTargets`, `__gunFire`,
-`__armGun`, `__gunArmedState` for headless verification.
+`__armGun`, `__disarmGun`, `__gunArmedState` for headless verification.

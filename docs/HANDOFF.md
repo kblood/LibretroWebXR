@@ -1,21 +1,37 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated
-2026-07-11 (code @ `a778b44`, branch `main`).
+2026-07-11, branch `main` (code @ `a778b44` + one more pending commit for the
+gun/mouse disarm option below — check `git log` for the actual HEAD).
 
 **Current focus: everything below is now live — real-headset validation is
-what's left.** Deployed 2026-07-10 (see "Live build" below); `a778b44`
-(2026-07-11, the desktop pointer-lock fix below) is **committed + pushed but
-NOT yet deployed** — run `npm run deploy` before expecting it live. Highlights,
-newest first:
+what's left.** Deployed 2026-07-10 (see "Live build" below); `a778b44` (the
+desktop pointer-lock fix) and the gun/mouse disarm option (both 2026-07-11) are
+**committed + pushed but NOT yet deployed** — run `npm run deploy` before
+expecting them live. Highlights, newest first:
+- **Gun/mouse arming-leak bug fixed with an explicit disarm option
+  (2026-07-11, pushed not deployed).** Follow-up to the entry below:
+  `window.__lightgunArmed`/`window.__mouseArmed` are deliberately sticky for
+  the session, but capability checks are system- not per-ROM-level, so an
+  armed peripheral used to leak onto any later unrelated ROM on a
+  gun/mouse-capable system. Rather than a stricter meta-only gate (which would
+  break externally-picked ROMs — no per-title metadata to declare
+  `lightgun`/`mouse` in the first place), added `disarmLightGunAndReload()`/
+  `disarmMouseAndReload()`, `window.__disarmGun()`/`window.__disarmMouse()`,
+  and "Disarm Gun"/"Disarm Mouse" main-menu buttons: clears the sticky flag and
+  drops the device from the CURRENT game only if that game doesn't itself
+  declare it. Verified end-to-end against the real boot path:
+  `tmp/verify-disarm.mjs` (gun, 15/15) and `tmp/verify-disarm-mouse.mjs`
+  (mouse, 9/9). Details: `docs/LIGHTGUN_SUPPORT.md`, `docs/MOUSE_SUPPORT.md`,
+  session narrative below (item 5 under "Eye of the Beholder won't load").
 - **Desktop mouse pointer-lock gated on real wiring + Eye of the Beholder
   black-screen root-caused (2026-07-11, `a778b44`, pushed not deployed).** Two
   separate findings from one user report chain:
   1. A user's Quest report ("Eye of the Beholder SNES loads to a black
      screen") led first to a real-but-irrelevant bug (light-gun arming leaks
-     across unrelated ROMs — see `docs/LIGHTGUN_SUPPORT.md` "Known bug",
-     still open) and eventually to the actual cause: **the user's ROM file was
-     truncated/corrupt.** Its size (575,166 bytes) isn't even a multiple of
+     across unrelated ROMs — see `docs/LIGHTGUN_SUPPORT.md`, since fixed,
+     bullet above) and eventually to the actual cause: **the user's ROM file
+     was truncated/corrupt.** Its size (575,166 bytes) isn't even a multiple of
      512, let alone a valid SNES bank-aligned size (the game is normally
      ~1.5 MB); a truncated ROM boots "successfully" at the JS/core-start layer
      (no exception, nothing to catch) and then renders nothing because
@@ -798,25 +814,32 @@ inline. If you're picking up stale-looking doc claims again, check `git log
   `saved = []` so a stalled headless-Chrome IndexedDB open can no longer wedge
   init.
 
-## Immediate next actions (as of 2026-07-11, code @ `a778b44`)
+## Immediate next actions (as of 2026-07-11)
 
-`a778b44` (desktop pointer-lock fix + controller port-switch tests, above) is
-**committed + pushed but NOT deployed yet** — `npm run deploy` first if you
-want it live (live is still `b25abdc`, 2026-07-10). Sensible next steps, in
-rough priority:
+`a778b44` (desktop pointer-lock fix + controller port-switch tests) and the
+gun/mouse **disarm option** (this session, see below) are **committed + pushed
+but NOT deployed yet** — `npm run deploy` first if you want them live (live is
+still `b25abdc`, 2026-07-10). Sensible next steps, in rough priority:
 
-0. **Deploy `a778b44`.** Cheap, verified, no known regressions (`npm test`
-   green). Do this before anything else below so the pointer-lock fix is
-   actually live for the next desktop session.
-0.5. **Fix the gun/mouse arming cross-wiring bug** (`docs/LIGHTGUN_SUPPORT.md`
-   "Known bug", `docs/MOUSE_SUPPORT.md` follow-up #5) — confirmed real via
-   code + a live session log, not yet fixed. `window.__lightgunArmed`/
-   `window.__mouseArmed` are deliberately sticky for the session, but
-   `isLightgunCapable`/`isMouseCapable` are system-level, not per-ROM, so an
-   armed peripheral leaks onto any later gun/mouse-*capable-system* ROM
-   regardless of whether that specific title uses one. Fix shape: track
-   "did THIS boot's meta actually ask for the device" instead of gating on
-   the sticky armed flag alone once a game is already running one.
+0. **Deploy the pending commits.** Cheap, verified, no known regressions
+   (`npm test` green; disarm feature end-to-end verified against a real dev
+   server in `tmp/verify-disarm.mjs` + `tmp/verify-disarm-mouse.mjs`, 24/24
+   assertions). Do this before anything else below so both fixes are actually
+   live for the next session.
+0.5. ✅ **done — gun/mouse arming cross-wiring "leak"** (`docs/LIGHTGUN_
+   SUPPORT.md`, `docs/MOUSE_SUPPORT.md` follow-up #5): `window.__lightgunArmed`/
+   `window.__mouseArmed` are deliberately sticky for the session while
+   `isLightgunCapable`/`isMouseCapable` are system- not per-ROM-level, so an
+   armed peripheral used to leak onto any later gun/mouse-*capable-system* ROM
+   regardless of whether that title used one. Rather than dropping the sticky
+   flag (which would break externally-picked ROMs that have no per-title
+   metadata to declare `lightgun`/`mouse` at all), added an explicit **disarm**
+   affordance: `disarmLightGunAndReload()`/`disarmMouseAndReload()`
+   (`src/main.js`), `window.__disarmGun()`/`window.__disarmMouse()`, and a
+   "Disarm Gun"/"Disarm Mouse" button on the main menu panel. Clears the sticky
+   flag and, only if the CURRENT game doesn't itself declare the device, live-
+   reboots without it — a curated gun/mouse title keeps its device regardless.
+   HEADSET-UNVERIFIED (the new menu buttons render/click headless only so far).
 1. **Diagnose + fix the controls bug on a real Quest.** Unchanged from the prior
    handoff — still open, still just instrumented, not reproduced or fixed since.
    The input pipeline emits Logger 'input'/'input-state' events; reproduce on a
@@ -931,8 +954,8 @@ diagnosis actually went (not just the fix):
    reproduction test (`tmp/verify-beholder-repro.mjs`, forcing the identical
    mis-wiring onto a known-good SNES ROM via the real boot path) rendered
    fine — proving wrong controller/gun wiring alone does not blank the video
-   output. The bug is real (see `docs/LIGHTGUN_SUPPORT.md` "Known bug") but
-   was not the cause of this report.
+   output. The bug is real (see `docs/LIGHTGUN_SUPPORT.md`, since fixed — item
+   5 below) but was not the cause of this report.
 2. A related but separate desktop-only report ("mouse movement becomes very
    different" after loading an external ROM) led to the actual
    `MouseMgr.attachDesktop()` pointer-lock bug — fixed, see the top summary
@@ -956,6 +979,22 @@ diagnosis actually went (not just the fix):
    `curl https://dionysus.dk/logs.json?tail=0 -o out.json` (all sessions, no
    truncation — large; add `?session=<id>` once you know which one), then
    filter `entries` by `sessionId` and sort by `ts`.
+5. **Follow-up: fixed the real-but-irrelevant arming-leak bug from step 1.**
+   The user opted for a "disarm" option over leaving it or a stricter
+   meta-only gate (which would have broken externally-picked ROMs — they have
+   no per-title metadata to declare `lightgun`/`mouse` in the first place).
+   Added `disarmLightGunAndReload()`/`disarmMouseAndReload()`,
+   `window.__disarmGun()`/`window.__disarmMouse()`, and "Disarm Gun"/"Disarm
+   Mouse" main-menu buttons (`src/main.js`) — clears the sticky armed flag and
+   drops the device from the *currently running* game only if that game's own
+   meta doesn't declare it; a curated gun/mouse title keeps its device
+   regardless, since disarming only changes what the *next* load inherits.
+   Verified against the real boot path (`window.__loadCartridge`, not just
+   `__pickLocalRom`) with a dedicated `npx vite` dev server on a scratch port
+   (port 5173 turned out to be serving an unrelated project — check before
+   assuming a "running dev server" is this repo): `tmp/verify-disarm.mjs`
+   (gun, 15/15 assertions incl. reproducing the leak, the fix, and the
+   curated-title preservation) and `tmp/verify-disarm-mouse.mjs` (mouse, 9/9).
 
 ## Gotchas already hit (so you don't re-hit them)
 
@@ -981,6 +1020,12 @@ diagnosis actually went (not just the fix):
   checks miss it. `npm run debug -- --rom=<path> --core=<name> --screenshot=...`
   then Read the PNG and look at the CRT pixels (the header says "running" even when
   black).
+- **Don't assume a dev server on a "standard" port is THIS repo.** Other
+  projects' `vite` instances can be sitting on 5173/5183/etc. on the same
+  machine (found 2026-07-11: port 5173 was serving an unrelated "Greybox"
+  project). Check the page `<title>` (or just `curl` the HTML) before trusting
+  a Puppeteer script's target port; when in doubt, start your own
+  `npx vite --port <scratch-port> --strictPort` and point scripts at that.
 - `gh` CLI wasn't logged in but git push worked (Windows credential store).
   `gh` was bridged via `git credential fill → gh auth login --with-token`.
 - Don't batch a failing shell command with dependent tool calls — a non-zero
