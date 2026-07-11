@@ -46,6 +46,41 @@ console.log('--- one port per controller (re-plug moves) ---');
     [{ controllerId: 'g1', port: 2, player: 3 }]);
 }
 
+console.log('--- controller switches to a DIFFERENT console (not just a different port) ---');
+{
+  const pb = new Patchbay();
+  pb.addConsole('nesA', { ports: 4 });
+  pb.addConsole('snesB', { ports: 4 });
+  pb.plugController('g1', 'nesA', 1);
+  eq('starts on nesA port 1', pb.portOf('g1'), { consoleId: 'nesA', port: 1 });
+  pb.plugController('g1', 'snesB', 2);   // move to a different console entirely
+  eq('now on snesB port 2', pb.portOf('g1'), { consoleId: 'snesB', port: 2 });
+  eq('playerOf follows to snesB', pb.playerOf('g1'), { consoleId: 'snesB', player: 3 });
+  ok('old console (nesA) no longer lists it', !pb.controllersOf('nesA').some(c => c.controllerId === 'g1'));
+  ok('nesA port 1 freed', pb.isPortFree('nesA', 1));
+  eq('snesB now lists it', pb.controllersOf('snesB'), [{ controllerId: 'g1', port: 2, player: 3 }]);
+}
+
+console.log('--- two controllers SWAP ports on the same console (no cross-contamination) ---');
+{
+  const pb = new Patchbay();
+  pb.addConsole('md', { ports: 4 });
+  pb.plugController('g1', 'md', 0);
+  pb.plugController('g2', 'md', 1);
+  // Swap: g1 takes g2's port and vice versa. Order matters — plugging g1 into
+  // port 1 first evicts g2 (still-current occupant), so g2 must be re-plugged
+  // into port 0 afterward; this exercises the exact evict-then-replug sequence
+  // the 3D grab/drop flow drives when two players trade controllers.
+  pb.plugController('g1', 'md', 1);
+  pb.plugController('g2', 'md', 0);
+  eq('g1 now on port 1', pb.portOf('g1'), { consoleId: 'md', port: 1 });
+  eq('g2 now on port 0', pb.portOf('g2'), { consoleId: 'md', port: 0 });
+  eq('g1 drives player 2', pb.playerOf('g1'), { consoleId: 'md', player: 2 });
+  eq('g2 drives player 1', pb.playerOf('g2'), { consoleId: 'md', player: 1 });
+  eq('occupantOf port 0 is g2', pb.occupantOf('md', 0), 'g2');
+  eq('occupantOf port 1 is g1', pb.occupantOf('md', 1), 'g1');
+}
+
 console.log('--- one controller per port (re-plug evicts) ---');
 {
   const pb = new Patchbay();

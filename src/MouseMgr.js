@@ -133,13 +133,19 @@ export class MouseMgr {
    * @param {Function} o.getEl      () => HTMLElement   the element to lock to (the app canvas)
    * @param {Function} o.getClient  () => EmulatorClient|null  the console to drive
    * @param {Function} [o.getPort]  () => number|null  libretro mouse port (usually null/0)
+   * @param {Function} [o.getWired] () => boolean  true only when the seated console's
+   *   CURRENT boot actually has a libretro MOUSE device wired on this mouse's port.
+   *   Gates auto-lock so an ordinary click on the scene (e.g. while loading an
+   *   unrelated ROM) doesn't silently capture the OS cursor for a game that has no
+   *   use for it. Default () => true (back-compat for callers/tests that don't pass it).
    * @param {boolean}  [o.autoLock] request lock on click (default true)
    */
-  attachDesktop({ getEl, getClient, getPort = () => null, autoLock = true } = {}) {
+  attachDesktop({ getEl, getClient, getPort = () => null, getWired = () => true, autoLock = true } = {}) {
     if (this._desktopBound || typeof document === 'undefined') return;
     this._desktopBound = true;
     const el = getEl?.();
     if (!el) return;
+    this._getWired = typeof getWired === 'function' ? getWired : () => true;
     let buttons = 0;
     const send = (dx, dy) => {
       if (document.pointerLockElement == null) return; // only while locked
@@ -149,6 +155,7 @@ export class MouseMgr {
     };
     if (autoLock) {
       el.addEventListener('click', () => {
+        if (!this._getWired()) return; // no mouse device on this boot — leave the cursor alone
         try { el.requestPointerLock?.(); } catch (_) {}
       });
     }
@@ -168,5 +175,19 @@ export class MouseMgr {
     });
     // Suppress the context menu so a right-click reaches the core, not the browser.
     el.addEventListener('contextmenu', (e) => { if (document.pointerLockElement != null) e.preventDefault(); });
+  }
+
+  /**
+   * Force-exit desktop pointer lock. No-op if not currently locked. Call this
+   * when a newly loaded ROM no longer wants the mouse device (e.g. switching
+   * from an Amiga game to an unrelated SNES game while still locked from the
+   * prior boot) — otherwise the OS cursor stays captured for a game that can't
+   * use it, which reads as the page having crashed.
+   */
+  releaseDesktopLock() {
+    if (typeof document === 'undefined') return;
+    if (document.pointerLockElement != null) {
+      try { document.exitPointerLock?.(); } catch (_) {}
+    }
   }
 }

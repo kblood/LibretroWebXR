@@ -2224,6 +2224,14 @@ async function buildCartridgeWorld() {
       if (!seat) return null;
       return libretroMousePortFor(_mouseSlotIndex(mouseObj, seat.consoleId), _twoMousePortsForConsole(seat.consoleId));
     },
+    // Only auto-lock when the console this mouse is cabled to is CURRENTLY
+    // booted with a real libretro MOUSE device on that port — not just because
+    // a mouse prop happens to be plugged in somewhere. Secondary (rack) consoles
+    // never wire a mouse device today, so only the primary can ever be wired.
+    getWired: () => {
+      const seat = cable.portOf(mouseObj?.userData?.cableId);
+      return !!seat && seat.consoleId === CONSOLE_ID && _mouseArmedConsole;
+    },
   });
 
   // Phase 4: the primary console's physical object + its grabbable video-out
@@ -4900,6 +4908,10 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // (Amiga → [0,1]); MouseMgr.portForMouse derives each held mouse's port live
     // from its cable jack. Empty [] for single-mouse → shared DOM-mouse path.
     _twoMousePorts = (mouse && mouse.mice?.length > 1) ? mouse.mice.map((x) => x.port) : [];
+    // If desktop pointer lock was still engaged from a PRIOR mouse-capable boot,
+    // this new ROM (no mouse device) can't consume it — release it so the OS
+    // cursor comes back instead of staying captured for a game that ignores it.
+    if (!mouse) mouseMgr?.releaseDesktopLock();
     gameInput?.setSystem(meta.system);
     // Loading implies the primary console is on — sync power state + switch tint.
     setConsolePower(CONSOLE_ID, true, consoleObjs.get(CONSOLE_ID)?.userData?.powerBtn);
@@ -5162,6 +5174,7 @@ async function rebootPrimaryConsole(meta, gun, mouse = null) {
   _twoGunPorts = (gun && gun.guns?.length > 1) ? gun.guns.map((x) => x.port) : [];
   _mouseArmedConsole = !!mouse;
   _twoMousePorts = (mouse && mouse.mice?.length > 1) ? mouse.mice.map((x) => x.port) : [];
+  if (!mouse) mouseMgr?.releaseDesktopLock();
   gameInput?.setSystem(meta.system);
   consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
   setSystemLabel(coreName);
