@@ -27,6 +27,7 @@ const DROP_RADIUS = 0.22; // metres — console slot acceptance radius
 
 const LASER_IDLE = 0x88aaff;
 const LASER_HOVER = 0xffd060;
+const HOVER_BOX_PAD = 1.08; // fraction over the target's bounds so the outline clears its surface
 
 export class GrabMgr {
   constructor({ scene, controllers, console: consoleObj, getConsoles, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, onPlugReleased, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, onGamepadGrabbed, onGamepadReleased, onObjectGrabbed, isRemotelyHeld, getRoomBounds, isPreviewEnabled }) {
@@ -89,6 +90,17 @@ export class GrabMgr {
     this._origin = new THREE.Vector3();
     this._dir = new THREE.Vector3();
     this._quat = new THREE.Quaternion();
+
+    // Distance-grab highlight: a reusable wireframe box per controller, fit to
+    // whatever it's currently aiming at, so it's obvious what a grab will pick
+    // up before the grip is even squeezed. World-axis-aligned bounds (not
+    // oriented to the target's own rotation) — a deliberate simplification
+    // that keeps this correct for every grabbable kind (cartridges, gamepads,
+    // guns, mice, plugs, editable props) with no per-prop registration needed.
+    this._hoverBoxes = new Map();       // controller -> LineSegments outline
+    this._hbBox3 = new THREE.Box3();
+    this._hbSize = new THREE.Vector3();
+    this._hbCenter = new THREE.Vector3();
 
     // Ghost preview: a single wireframe box reused across all held editable props.
     // Shown only when isPreviewEnabled() is true and exactly one editable prop is held.
@@ -193,10 +205,12 @@ export class GrabMgr {
       // would intersect the ray itself).
       if (this.held.has(ctrl)) {
         this._setHover(ctrl, null);
+        this._refreshHoverBox(ctrl, null);
         continue;
       }
       const target = this._aimTarget(ctrl);
       this._setHover(ctrl, target);
+      this._refreshHoverBox(ctrl, target);
     }
     this._updateGhost();
   }
@@ -279,6 +293,44 @@ export class GrabMgr {
     this._hover.set(ctrl, target);
     const mat = ctrl.userData.laserMat;
     if (mat) mat.color.setHex(target ? LASER_HOVER : LASER_IDLE);
+  }
+
+  // Lazily create the per-controller highlight outline (a unit wireframe box,
+  // resized/repositioned to fit whatever it's hovering).
+  _ensureHoverBox(ctrl) {
+    let box = this._hoverBoxes.get(ctrl);
+    if (box) return box;
+    const geom = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
+    const mat = new THREE.LineBasicMaterial({
+      color: LASER_HOVER, transparent: true, opacity: 0.9, depthTest: false,
+    });
+    box = new THREE.LineSegments(geom, mat);
+    box.name = 'grab-hover-highlight';
+    box.visible = false;
+    box.renderOrder = 999; // read clearly over the target even when just behind its surface
+    this.scene.add(box);
+    this._hoverBoxes.set(ctrl, box);
+    return box;
+  }
+
+  // Fit `ctrl`'s highlight box to `target`'s current world bounds, or hide it
+  // when there's nothing hovered. Recomputed every frame (not just on hover
+  // change) so it tracks a target that moves while aimed at.
+  _refreshHoverBox(ctrl, target) {
+    const box = this._ensureHoverBox(ctrl);
+    if (!target) { box.visible = false; return; }
+    target.updateMatrixWorld(true);
+    this._hbBox3.setFromObject(target);
+    if (this._hbBox3.isEmpty()) { box.visible = false; return; }
+    this._hbBox3.getSize(this._hbSize);
+    this._hbBox3.getCenter(this._hbCenter);
+    box.position.copy(this._hbCenter);
+    box.scale.set(
+      Math.max(this._hbSize.x, 0.01) * HOVER_BOX_PAD,
+      Math.max(this._hbSize.y, 0.01) * HOVER_BOX_PAD,
+      Math.max(this._hbSize.z, 0.01) * HOVER_BOX_PAD,
+    );
+    box.visible = true;
   }
 
   _aimTarget(ctrl) {

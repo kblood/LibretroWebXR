@@ -22,6 +22,15 @@ This is **not** a greenfield plan; a working app was carried over (see
   carts), a **console**, a **gamepad**, a **memory card**, with grab + locomotion
   (`Cartridge`, `Shelf`, `Console`, `Gamepad`, `MemoryCard`, `Furniture`,
   `GrabMgr`, `LocomotionMgr`).
+- **Distance-grab highlight (2026-07-12):** `GrabMgr` now outlines whatever a
+  controller (or the desktop mouse-look ray) is aiming at with a yellow
+  wireframe box, before the grip is even squeezed — the existing aim-ray
+  hover detection (which already recoloured the laser) now also fits a
+  reusable per-controller box to the hovered object's live world bounds each
+  frame, and hides it on grab/aim-away. Works for every grabbable kind
+  (cartridges, gamepad, light gun, mouse, patch-cord plugs, editable props)
+  with no per-prop registration. Headless-verified end-to-end against the
+  real aim/grab/release code path: `tmp/verify-grab-highlight.mjs` (13/13).
 - Input across keyboard / gamepad / WebXR controllers with per-core, two-hand
   RetroPad mapping (`InputMgr`, `GameInputMgr`, `ControllerMaps`,
   `ControlsPanel`).
