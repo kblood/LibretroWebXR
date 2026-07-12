@@ -1,14 +1,34 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated
-2026-07-11, branch `main` (code @ `a778b44` + one more pending commit for the
-gun/mouse disarm option below — check `git log` for the actual HEAD).
+2026-07-12, branch `main` (code @ `a778b44` + the gun/mouse disarm option +
+one more pending commit for SNES/C64 mouse support below — check `git log`
+for the actual HEAD).
 
 **Current focus: everything below is now live — real-headset validation is
 what's left.** Deployed 2026-07-10 (see "Live build" below); `a778b44` (the
-desktop pointer-lock fix) and the gun/mouse disarm option (both 2026-07-11) are
-**committed + pushed but NOT yet deployed** — run `npm run deploy` before
-expecting them live. Highlights, newest first:
+desktop pointer-lock fix), the gun/mouse disarm option, and SNES/C64 mouse
+support (all 2026-07-11/12) are **committed + pushed but NOT yet deployed** —
+run `npm run deploy` before expecting them live. Highlights, newest first:
+- **SNES Mouse + C64 (1351) Mouse support added (2026-07-12).** User asked if
+  the mouse peripheral could cover systems that had real mouse hardware
+  historically (named SNES, NES, C64). Checked actual libretro core support
+  rather than assuming from hardware history: **SNES** (`snes9x`, real port for
+  Mario Paint) and **C64** (`vice_x64`, the 1351/GEOS mouse) both shipped and
+  headless-verified against real content (`tmp/verify-snes-mouse.mjs` 6/6,
+  `tmp/verify-c64-mouse.mjs` 5/5, no regressions in the disarm suites or
+  `npm test`). C64 required generalizing `mouseLoadConfig()` to merge
+  per-descriptor `coreOptions`, since VICE selects its mouse entirely via
+  `vice_joyport`/`vice_joyport_type` core options rather than a port-device
+  assignment. Caught and corrected my own wrong guess mid-investigation (see
+  `docs/MOUSE_SUPPORT.md`) by fetching the real vice-libretro source instead
+  of trusting a `strings`-on-wasm guess or a WebSearch summary. **NES/Famicom
+  Mouse is NOT feasible** — neither NES core we ship implements the real
+  Famicom Mouse (HVC-031); their mouse-shaped devices are unrelated (Subor
+  keyboard/mouse combo, Bandai Oeka Kids tablet). Sega Mega Mouse (Genesis)
+  looks real/supportable but is unverified and out of scope — flagged as a
+  follow-up only. Full detail: `docs/MOUSE_SUPPORT.md`, `docs/ROADMAP.md`
+  "Mouse peripheral + new systems".
 - **Gun/mouse arming-leak bug fixed with an explicit disarm option
   (2026-07-11, pushed not deployed).** Follow-up to the entry below:
   `window.__lightgunArmed`/`window.__mouseArmed` are deliberately sticky for

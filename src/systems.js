@@ -121,7 +121,17 @@ export const SYSTEMS = {
     // drives an independent libretro port. The patched multiport rwebinput feeds
     // each port its OWN aim point (webgun_set per port) — see LIGHTGUN_SUPPORT.md
     // "Co-op caveat". Requested via lightgunLoadConfig(systemId, { twoGun:true }).
-    lightgun2: { label: 'Justifier (2-gun)', core: 'snes9x', devices: [516, 772], ports: [1, 2], coreOptions: { snes9x_justifier1_crosshair: 'enabled', snes9x_justifier2_crosshair: 'enabled' } } },
+    lightgun2: { label: 'Justifier (2-gun)', core: 'snes9x', devices: [516, 772], ports: [1, 2], coreOptions: { snes9x_justifier1_crosshair: 'enabled', snes9x_justifier2_crosshair: 'enabled' } },
+    // SNES Mouse (snes9x). Real hardware peripheral (Mario Paint); the strings
+    // embedded in the fetched core binary confirm native support ("Cannot select
+    // SNES Mouse: MouseMaster disabled", remap descriptors "Mouse1"/"Mouse2" per
+    // port) with no dedicated core-option toggle found — same zero-coreOptions
+    // shape as the Amiga mouse (CORES.puae note): just assign RETRO_DEVICE_MOUSE
+    // (device 2, the base id — SNES has only one mouse type, unlike the gun's
+    // per-peripheral SUBCLASS ids) to a port. Mario Paint requires the mouse on
+    // Port 2 (port index 1), matching this system's existing Super Scope port
+    // convention above. See docs/MOUSE_SUPPORT.md for the headless verification.
+    mouse: { label: 'SNES Mouse', core: 'snes9x', device: 2, port: 1 } },
   nes:       { label: 'Nintendo (NES)',     defaultCore: 'nestopia',         cores: ['nestopia','fceumm'],            exts: ['nes','fds','unf','unif'],     aliases: ['nes','nintendo','famicom','nintendo entertainment system'], thumbnailRepo: 'Nintendo_-_Nintendo_Entertainment_System',       medium: 'cartridge',
     // NES Zapper (nestopia). Device 262 = SUBCLASS(POINTER,0); nestopia hardcodes
     // reading the gun from port index 1 (player 2), and needs the zapper_device
@@ -156,7 +166,20 @@ export const SYSTEMS = {
   sega32x:   { label: 'Sega 32X',           defaultCore: 'picodrive',        cores: ['picodrive'],                    exts: ['32x'],                        aliases: ['sega32x','sega 32x','32x','mega 32x','super 32x'],        thumbnailRepo: 'Sega_-_32X',                                     medium: 'cartridge' },
   atari2600: { label: 'Atari 2600',         defaultCore: 'stella2014',       cores: ['stella2014'],                   exts: ['a26','bin'],                  aliases: ['atari2600','atari 2600','2600','vcs'],                   thumbnailRepo: 'Atari_-_2600',                                   medium: 'cartridge' },
   pce:       { label: 'PC Engine / TG-16',  defaultCore: 'mednafen_pce_fast',cores: ['mednafen_pce_fast'],            exts: ['pce'],                        aliases: ['pce','pc engine','turbografx','turbografx-16','tg16'],   thumbnailRepo: 'NEC_-_PC_Engine_-_TurboGrafx_16',                medium: 'cartridge' },
-  c64:       { label: 'Commodore 64',       defaultCore: 'vice_x64',         cores: ['vice_x64'],                     exts: ['d64','d71','d80','d81','d82','g64','x64','t64','tap','prg','p00','crt'], aliases: ['c64','commodore 64','commodore64'], thumbnailRepo: 'Commodore_-_64',  medium: 'floppy', keyboard: true },
+  c64:       { label: 'Commodore 64',       defaultCore: 'vice_x64',         cores: ['vice_x64'],                     exts: ['d64','d71','d80','d81','d82','g64','x64','t64','tap','prg','p00','crt'], aliases: ['c64','commodore 64','commodore64'], thumbnailRepo: 'Commodore_-_64',  medium: 'floppy', keyboard: true,
+    // Commodore 1351 mouse (vice_x64). Real hardware peripheral (GEOS). UNLIKE
+    // Amiga/SNES, vice-libretro does NOT read a per-port retro_set_controller_
+    // port_device assignment for this — it's entirely coreOptions-driven: ONE
+    // joyport is picked (vice_joyport: "1"|"2", default "2" — "most games use
+    // port 2") and that port's device TYPE is picked separately (vice_joyport_type,
+    // "3" = "Mouse (1351)"; "1" = Joystick is the default). Confirmed against the
+    // actual upstream source (github.com/libretro/vice-libretro, libretro/
+    // libretro-core.c, the RETRO_VARIABLE definitions) — an earlier guess based on
+    // strings embedded in the fetched .wasm ("1351mouse") was WRONG; the real
+    // value is the numeric string "3". device/port below are inert for VICE (kept
+    // only so this descriptor's shape matches every other system's).
+    mouse: { label: 'C64 Mouse (1351)', core: 'vice_x64', device: 2, port: 1,
+      coreOptions: { vice_joyport: '2', vice_joyport_type: '3' } } },
   vic20:     { label: 'Commodore VIC-20',   defaultCore: 'vice_xvic',        cores: ['vice_xvic'],                    exts: ['20','40','60','a0','b0','rom'], aliases: ['vic20','vic-20','commodore vic-20'],                    thumbnailRepo: 'Commodore_-_VIC-20',                             medium: 'floppy', keyboard: true },
   amiga:     { label: 'Commodore Amiga',    defaultCore: 'puae',             cores: ['puae'],                         exts: ['adf','adz','dms','fdi','ipf','hdf','hdz','lha','uae'], aliases: ['amiga','commodore amiga','a500','a1200','amiga 500','amiga 1200'], thumbnailRepo: 'Commodore_-_Amiga', medium: 'floppy', keyboard: true,
     // Amiga mouse. The DB9 ports take a mouse just like a joystick; PUAE reads it
@@ -416,7 +439,7 @@ export function mouseLoadConfig(systemId, opts = {}) {
       inputDevices[port + 1] = device;
       mice.push({ device, port });
     });
-    return { core: tm.core, inputDevices, coreOptions: {}, remapName, mice };
+    return { core: tm.core, inputDevices, coreOptions: tm.coreOptions || {}, remapName, mice };
   }
   const m = SYSTEMS[systemId]?.mouse;
   if (!m) return null;
@@ -424,7 +447,13 @@ export function mouseLoadConfig(systemId, opts = {}) {
   return {
     core: m.core,
     inputDevices: { [m.port + 1]: m.device },
-    coreOptions: {},
+    // Per-descriptor coreOptions (mirrors lightgunLoadConfig): most systems need
+    // none (Amiga/SNES just read whatever device retro_set_controller_port_device
+    // assigns), but VICE's C64/VIC-20 mouse is entirely coreOptions-driven
+    // (vice_joyport/vice_joyport_type pick ONE joyport + device type; the
+    // inputDevices assignment above is inert for VICE, kept only so this
+    // descriptor's shape matches every other system's).
+    coreOptions: m.coreOptions || {},
     remapName,
     mice: [{ device: m.device, port: m.port }],
   };

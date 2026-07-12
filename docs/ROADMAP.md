@@ -629,7 +629,7 @@ trigger — for every system that had one historically. Full design + status:
   game only if that game didn't declare its own `lightgun` meta. Detail:
   `docs/LIGHTGUN_SUPPORT.md`.
 
-## Mouse peripheral + new systems (Amiga, SG-1000, Sega 32X)  ✅ shipped
+## Mouse peripheral + new systems (Amiga, SNES, C64, SG-1000, Sega 32X)  ✅ shipped
 A grabbable **mouse peripheral** (`src/Mouse.js`/`src/MouseMgr.js`), built to
 unlock Amiga point-and-click games and reusable later by DOS. Mirrors the
 light-gun architecture (cord/plug into a console port, net-synced binding via
@@ -656,6 +656,26 @@ light-gun architecture (cord/plug into a console port, net-synced binding via
   + `isMouseCapable` system-level, not per-ROM) is confirmed real and **fixed**
   the same way (`disarmMouseAndReload()` / `window.__disarmMouse()` / "Disarm
   Mouse" menu button) — see `docs/MOUSE_SUPPORT.md` follow-up #5.
+- **SNES Mouse + C64 (1351) Mouse added (2026-07-11).** User asked whether
+  other systems with real mouse hardware could be supported (named SNES, NES,
+  C64). Checked each system's actual libretro core, not just hardware history:
+  **SNES** (`snes9x`, Mario Paint's real peripheral) and **C64** (`vice_x64`,
+  the 1351/GEOS mouse) both shipped, headless-verified against real content
+  (`tmp/verify-snes-mouse.mjs` 6/6, `tmp/verify-c64-mouse.mjs` 5/5). C64 needed
+  `mouseLoadConfig()` generalized to merge per-descriptor `coreOptions` (VICE
+  picks its mouse device entirely via `vice_joyport`/`vice_joyport_type`
+  core options, not a port-device assignment like every other system here —
+  see `docs/MOUSE_SUPPORT.md` for the full architecture note and the wrong-
+  guess-then-corrected-via-real-source story). **NES/Famicom Mouse turned out
+  not feasible** — neither NES core we ship (`nestopia`, `fceumm`) implements
+  the real Famicom Mouse (HVC-031); they only have unrelated same-port
+  peripherals (Subor keyboard/mouse combo, Bandai Oeka Kids tablet). Sega Mega
+  Mouse (Genesis) looks real and supportable (`genesis_plus_gx` has a mouse-
+  invert option) but wasn't part of the ask and hasn't been verified — flagged
+  as a follow-up, not shipped. Neither SNES nor C64 mouse has been proven with
+  content that actually *reads* the mouse yet (no such CC0 ROM in the
+  collection) — verified structurally only, same caveat as Amiga before its
+  own follow-up authoring work.
 
 ## DOS / VirtualXT  ⚠ registered, blocked
 A `virtualxt` core entry + `dos` system exist in `systems.js` (MPL-2.0,

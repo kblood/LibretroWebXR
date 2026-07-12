@@ -94,6 +94,70 @@ When not in VR, the computer mouse drives the primary in-world mouse via Pointer
 path binds a single mouse. Two-player split-pointer is a VR-only affordance (two
 controllers, two mice) and, even then, needs the multiport core patch above.
 
+## Other mouse-capable systems (2026-07-11)
+
+The mouse config is fully data-driven (`SYSTEMS[id].mouse` in `src/systems.js`
++ `mouseLoadConfig()`), so extending it beyond Amiga is normally just a new
+descriptor — but each system needed its actual core support checked (real
+hardware history isn't enough; the libretro core has to actually implement the
+device), the same "de-risk before shipping" discipline as the Amiga mouse
+above. Checked by `strings`-scanning the fetched core `.wasm` binaries for
+core-option evidence, then confirming exact values against the real upstream
+source (never guess a core-option value string — see the C64 entry below for
+why that matters) and a headless boot+arm test (`tmp/verify-snes-mouse.mjs`,
+`tmp/verify-c64-mouse.mjs`):
+
+- ✅ **SNES Mouse — shipped.** Real hardware peripheral (Mario Paint). The
+  fetched `snes9x_libretro.wasm` embeds native support directly (`"Cannot
+  select SNES Mouse: MouseMaster disabled"`, per-port `Mouse1`/`Mouse2` remap
+  descriptors) with no dedicated core-option toggle — same zero-coreOptions
+  shape as Amiga: `snes.mouse = { core: 'snes9x', device: 2, port: 1 }` (port
+  index 1 = Port 2, matching Mario Paint's real hardware requirement, and this
+  system's existing Super Scope port convention). Verified: boots, still
+  renders after the arm-reboot, `sendMouse()` doesn't throw, and the core
+  never logs the MouseMaster-disabled rejection.
+- ✅ **C64 Mouse (1351) — shipped, but a DIFFERENT wiring shape.** VICE
+  (`vice_x64`) genuinely emulates the 1351, NEOS, Amiga, Atari ST, SmartMouse,
+  and Micromys mice, plus light pens — but **not** via
+  `retro_set_controller_port_device` like every other peripheral in this app.
+  It's entirely coreOptions-driven: `vice_joyport` picks ONE joystick port
+  ("1"|"2", default "2" — "most games use port 2"), and `vice_joyport_type`
+  picks that port's device type ("1"=Joystick default, "3"=Mouse(1351), "4"
+  =NEOS, "5"=Amiga, "7"=Atari ST, "8"=SmartMouse, "9"=Micromys, "11"-"16"
+  =various light pens/guns). **An initial guess based on `strings` on the
+  fetched .wasm — the literal token `"1351mouse"` — was wrong**; it's a name
+  fragment from elsewhere in the binary, not the actual option value. Ground
+  truth came from the real upstream source
+  (`github.com/libretro/vice-libretro/blob/master/libretro/libretro-core.c`,
+  the `RETRO_VARIABLE`/`vice_joyport_type` definition table). Shipped as
+  `c64.mouse = { core: 'vice_x64', device: 2, port: 1, coreOptions:
+  { vice_joyport: '2', vice_joyport_type: '3' } }` — `mouseLoadConfig()` now
+  merges a per-descriptor `coreOptions` (mirrors `lightgunLoadConfig`, which
+  already did this); the `device`/`port` fields are inert for VICE, kept only
+  so the descriptor's shape matches every other system's. **Not yet proven
+  with real mouse-reading content** (GEOS or similar) — verified only that the
+  core accepts the config and keeps rendering after the arm-reboot.
+- ❌ **NES/Famicom Mouse — not feasible with the cores we ship.** The real
+  hardware (the Famicom Mouse, HVC-031) existed but was Japan-only and
+  extremely rare. Neither `nestopia_libretro.wasm` nor `fceumm_libretro.wasm`
+  expose it: nestopia's mouse-shaped device is the unrelated "Subor" Famiclone
+  keyboard/mouse combo (its internal cartridge database lists
+  `<device type="subormouse">` for specific Chinese edutainment software),
+  and fceumm's is the Bandai **Oeka Kids Tablet** (a drawing-tablet
+  peripheral, `fceumm_mouse_sensitivity` + `"Famicom Expansion: Oeka Kids
+  Tablet"` string). Neither is the official Famicom Mouse, and there's no
+  realistic test content for either. Not implemented; revisit only if a core
+  adds real Famicom Mouse support upstream.
+- 🔲 **Sega Mega Mouse (Genesis/MD) — real, unverified, not implemented.**
+  `genesis_plus_gx_libretro.wasm` has a dedicated `genesis_plus_gx_
+  invert_mouse` option, strongly suggesting real Mega Mouse support — but the
+  exact device ID (likely a `RETRO_DEVICE_SUBCLASS(MOUSE, …)`, mirroring how
+  its lightgun devices are subclassed, e.g. Menacer=516) hasn't been confirmed
+  against the real source the way SNES/C64 were. Wasn't part of the original
+  ask; worth a follow-up if there's a real use case (bonus content: the
+  peripheral is genuine but its official software is even more obscure than
+  Mario Paint).
+
 ## Test content (gitignored — never committed)
 
 `public/roms/local/amiga/` (fully gitignored) carries the user's own:
