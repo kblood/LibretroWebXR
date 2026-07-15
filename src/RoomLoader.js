@@ -11,7 +11,7 @@ export const ROOM_SCHEMA = 'libretrowebxr/room@1';
 // Prop kinds the builder knows how to instantiate. Unknown kinds are dropped
 // (with a warning at build time), not fatal — forward-compatibility for rooms
 // authored against a newer builder.
-export const PROP_TYPES = ['shelf', 'console', 'gamepad', 'tv', 'poster', 'model', 'bookcase', 'cupboard', 'table', 'keyboard', 'lightgun', 'tvset'];
+export const PROP_TYPES = ['shelf', 'console', 'gamepad', 'tv', 'poster', 'model', 'bookcase', 'cupboard', 'table', 'keyboard', 'lightgun', 'mouse', 'tvset'];
 const PROP_SET = new Set(PROP_TYPES);
 
 function num(v, d = 0) { const n = Number(v); return Number.isFinite(n) ? n : d; }

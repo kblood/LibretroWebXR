@@ -833,6 +833,39 @@ inline. If you're picking up stale-looking doc claims again, check `git log
   (`MEMORY_CARD_TIMEOUT_MS`, "FIX 2") inside a try/catch, falling back to
   `saved = []` so a stalled headless-Chrome IndexedDB open can no longer wedge
   init.
+- ~~Client↔host full-sync review gaps~~ **✅ fixed (2026-07-15).** A review of
+  "does a client become fully synced with the room/displays/controllers/held
+  objects, both ways" found 7 gaps; the code-level ones are now fixed:
+  gun/mouse/keyboard input now forwards to the host over new `'gun'`/`'mouse'`/
+  `'kbd'` WIRE channels (mirrors the existing gamepad `forwardGameInput` path —
+  `_gunClientFor`/`_mouseClientFor`/`_kbdSendInputFor` in `main.js`, applied
+  host-side by `_hostApplyGunWire`/`_hostApplyMouseWire`/`_hostApplyKbdWire`);
+  the mouse now has full hold/grab network sync (`src/GhostMouseMgr.js`,
+  mirrors `GhostLightGunMgr`); the default (boot-time) console/TVs/gun/mouse/
+  keyboard now get `userData.roomProp` + `_staticPropIds` seeding so Move-mode
+  repositioning of them actually broadcasts (previously only the *receive*
+  side worked — `_broadcastPropMove` silently no-op'd on send for all of
+  these, TVs included); gun/mouse are now dual-mode grabbable (play + edit,
+  like the gamepad) so Move mode can reach them at all; `RoomLoader.PROP_TYPES`
+  now includes `'mouse'` (was silently dropped on room-JSON parse); a peer-
+  spawned mouse's `cableId` now survives `serializePropState` (was silently
+  dropped, unlike the gun's). Two findings remain **accepted, not bugs**:
+  cartridge exclusive-grab-lock has no pre-authority race guard (documented
+  limitation, low stakes — worst case is a brief double-grab visual glitch);
+  `gun:`/`mouse:`/`prop:` STATE persisting after the setter disconnects (unlike
+  `gamepad:`, which auto-clears) is *consistent* with `PropSync.js`'s
+  documented "room layout is persistent shared state" policy, not an
+  inconsistency — arguably gamepad's vanish-on-disconnect is the outlier, not
+  gun/mouse. One residual race is mitigated but not eliminated: two peers
+  joining an empty room within the same `_awaitHostRoom` grace window can both
+  conclude "I'm the host" and both try to publish a `'room'` STATE key; the
+  publish call now re-checks immediately beforehand and skips if another peer
+  already published (`mp-room-publish-raced` telemetry event), so the loser
+  no longer clobbers the winner for future late joiners — but the loser peer
+  itself keeps running on its own already-built (possibly divergent) local
+  room until a manual reconnect. A full fix needs server-side compare-and-swap
+  (`Hub.js`'s `setState` has none); out of scope unless this proves to matter
+  in practice.
 
 ## Immediate next actions (as of 2026-07-11)
 

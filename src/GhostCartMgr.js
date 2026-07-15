@@ -37,6 +37,15 @@ export class GhostCartMgr {
       const h = want.get(objId);
       if (!h || h.holder !== g.holder) this._removeGhost(objId);
     }
+    // Unhide anything still hidden whose hold has fully ended — checked
+    // independently of the ghost lifecycle above. A hold can start and end
+    // before the holder's avatar hand is ever available to attach a ghost to
+    // (see the `if (!attach) continue` below), in which case no ghost is ever
+    // created and the removal loop above never runs for it; without this
+    // sweep the local cart would stay hidden forever.
+    for (const objId of [...this._hidden.keys()]) {
+      if (!want.has(objId)) this._unhideCart(objId);
+    }
 
     for (const h of holds) {
       // Hide our local copy of the held cart the moment the hold is known, even

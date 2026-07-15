@@ -17,6 +17,8 @@
 //   where pos is [x,y,z] in metres and rot is [x,y,z] in DEGREES (Euler XYZ).
 //   Type-specific fields:
 //     poster  → texture, size?, fit?, scale?
+//     lightgun/mouse → cableId (so a remote peer's mesh lands under the same
+//                       id its gun:/mouse: port-binding channel is keyed by)
 //     console → (none beyond pos/rot for physical placement)
 //     tv      → (pos/rot only — TV mesh exists on every peer from the room)
 //     others  → (pos/rot only — just physical placement)
@@ -111,6 +113,11 @@ export function serializePropState(prop, object, { roundTo = 3 } = {}) {
   // the SAME id its port binding (gun:<cableId> STATE) is keyed by — that linkage
   // is what lets the synced mesh draw its cord to the jack named by the gun: state.
   if (prop.type === 'lightgun') {
+    if (prop.cableId !== undefined) payload.cableId = prop.cableId;
+  }
+  // mouse: same reasoning as lightgun — carry the stable cableId so a remote
+  // peer's mesh lands under the id its mouse:<cableId> port binding is keyed by.
+  if (prop.type === 'mouse') {
     if (prop.cableId !== undefined) payload.cableId = prop.cableId;
   }
   // console: no extra fields needed (physical mesh only, game does not sync here)

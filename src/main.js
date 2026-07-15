@@ -46,6 +46,8 @@ import { buildIceServers } from './net/NetProtocol.js';
 import { sanitiseRoom, randomRoomSuffix } from './net/SessionUtils.js';
 import { GhostCartMgr } from './GhostCartMgr.js';
 import { GhostGamepadMgr, makeGamepadHoldKey, isGamepadHoldKey, cableIdFromHoldKey } from './GhostGamepadMgr.js';
+import { GhostLightGunMgr, makeGunHoldKey, isGunHoldKey, cableIdFromGunHoldKey } from './GhostLightGunMgr.js';
+import { GhostMouseMgr, makeMouseHoldKey, isMouseHoldKey, cableIdFromMouseHoldKey } from './GhostMouseMgr.js';
 import { makeHoldKey, parseHolds } from './net/HoldState.js';
 import {
   makeGamepadStateKey, isGamepadStateKey, cableIdFromStateKey,
@@ -204,6 +206,10 @@ window.__client = client;
 let net = null;
 // Shared-gamepad ghost renderer (non-null only while in a session).
 let ghostGpMgr = null;
+// Shared-light-gun ghost renderer (non-null only while in a session).
+let ghostGunMgr = null;
+// Shared-mouse ghost renderer (non-null only while in a session).
+let ghostMouseMgr = null;
 // Gamepad existence reconciler: replaced by the real function once
 // buildCartridgeWorld runs and the gamepad-building pieces are ready.
 // Called whenever a `gamepad:*` STATE key arrives (including late-join snapshot).
@@ -247,11 +253,12 @@ let _reconcilePropState = () => {};
 // buildCartridgeWorld wires it to the prop registry.
 let _applyLiveDrag = () => {};
 // Headless test tap: the last few WIRE messages received per channel (gp/drag/
-// reset), mirroring NetMgr.recvInputs() for the INPUT channel. Lets the
-// smoke harness confirm transient relay actually reaches the other peer (the
-// real effects — ghost-pad animation, live drag, console reset — are internal).
+// reset/gun/mouse/kbd), mirroring NetMgr.recvInputs() for the INPUT channel.
+// Lets the smoke harness confirm transient relay actually reaches the other
+// peer (the real effects — ghost-pad animation, live drag, console reset,
+// M1.3 peripheral forwarding — are internal).
 // Exposed as window.__wireRx in buildCartridgeWorld. Capped so it can't grow.
-const _wireRxLog = { gp: [], drag: [], reset: [] };
+const _wireRxLog = { gp: [], drag: [], reset: [], gun: [], mouse: [], kbd: [] };
 function _recordWireRx(ch, data) {
   const buf = _wireRxLog[ch];
   if (!buf) return;
@@ -346,12 +353,19 @@ function connectToRoom(room, nick, color) {
     onGameInput: (ev) => { if (net?.isHost()) gameInput?.setRemoteButton(ev); },
     // M2 transient relay: a peer's per-frame ephemera. 'gp' = a held pad's live
     // button state → animate that pad's ghost in the holder's hand. 'drag' = a
-    // prop's live transform while held → move our copy in real time.
+    // prop's live transform while held → move our copy in real time. 'gun'/
+    // 'mouse'/'kbd' (M1.3) = a non-host peer's peripheral input, applied to OUR
+    // core only when we're the host (mirrors onGameInput's isHost() gate) — a
+    // non-host receiving another non-host's forward is a harmless no-op, same
+    // "broadcast to everyone" tradeoff 'gp'/'drag' already make.
     onWire: (ch, data) => {
       _recordWireRx(ch, data);
       if (ch === 'gp' && data?.cableId) ghostGpMgr?.applyInput(data.cableId, data);
       else if (ch === 'drag' && data?.id) _applyLiveDrag(data);
       else if (ch === 'reset' && data?.consoleId) resetConsole(data.consoleId);
+      else if (ch === 'gun') _hostApplyGunWire(data);
+      else if (ch === 'mouse') _hostApplyMouseWire(data);
+      else if (ch === 'kbd') _hostApplyKbdWire(data);
     },
     // M1.2 host video: paint the host's frames on the TV; pause our core while
     // watching (it isn't authoritative). Resume + revert when the stream ends.
@@ -1408,6 +1422,54 @@ function _cabledObjFor(cableId) {
   return _gamepadObjs.get(cableId) || _lightGunObjsById.get(cableId) || _mouseObjsById.get(cableId) || null;
 }
 
+// M1.3: wrap a gun/mouse's local EmulatorClient so a non-host peer's aim/motion
+// ALSO reaches the host's authoritative core over the 'gun'/'mouse' WIRE
+// channels, while still dispatching locally too (same "keep seeing your own
+// game until host video lands" rationale as onLogicalInput's gamepad
+// forwarding — see also _kbdSendInputFor for the keyboard equivalent). Host
+// peers (and solo) get the real client straight back — no shim, no forwarding.
+function _gunClientFor(cableId, localClient) {
+  if (!net || net.isHost()) return localClient;
+  return {
+    sendLightgun: (u, v, trigger, port) => {
+      net.sendWire('gun', { cableId, u, v, trigger, port });
+      localClient?.sendLightgun?.(u, v, trigger, port);
+    },
+  };
+}
+
+function _mouseClientFor(cableId, localClient) {
+  if (!net || net.isHost()) return localClient;
+  return {
+    sendMouse: (dx, dy, buttons, port) => {
+      net.sendWire('mouse', { cableId, dx, dy, buttons, port });
+      localClient?.sendMouse?.(dx, dy, buttons, port);
+    },
+  };
+}
+
+// M1.3 receive side (host only — see onWire's isHost() gate below): apply a
+// non-host peer's gun/mouse/keyboard action to the primary console's core.
+// Trusts the sender's already-resolved port (mirrors how the sender's resolved
+// `player` is trusted for gamepad forwarding, see NetMgr.forwardGameInput) —
+// the whole M1 game-sync model is scoped to the one shared/authoritative game,
+// same as gamepad input, so these always target CONSOLE_ID, not a secondary
+// rack console.
+function _hostApplyGunWire(data) {
+  if (!net?.isHost() || !data) return;
+  rackMgr.get(CONSOLE_ID)?.client?.sendLightgun(data.u, data.v, !!data.trigger, data.port ?? null);
+}
+
+function _hostApplyMouseWire(data) {
+  if (!net?.isHost() || !data) return;
+  rackMgr.get(CONSOLE_ID)?.client?.sendMouse(data.dx ?? 0, data.dy ?? 0, data.buttons ?? 0, data.port ?? null);
+}
+
+function _hostApplyKbdWire(data) {
+  if (!net?.isHost() || !data?.type) return;
+  rackMgr.get(_kbdTargetConsoleId)?.sendInput(data.type, data.code, data.key, data.keyCode, data.location);
+}
+
 // Which gun-in-jack-order this gun is among the GUNS plugged into a console (0,1,…),
 // or -1 if it isn't plugged there. cable.controllersOf returns occupants sorted by
 // port, so filtering to guns gives a stable jack-order index → libretroGunPortFor
@@ -1658,6 +1720,21 @@ function syncKeyboardCord() {
 // `currentConsoleSystems` tracks what each console is running (set by loadCartridge).
 const _consoleSystems = new Map(); // consoleId -> system string (set on each boot)
 
+// M1.3: build the primary keyboard's sendInput callback for `consoleId`. Always
+// dispatches locally (unchanged); when we're a non-host peer in a session, ALSO
+// forwards over the 'kbd' WIRE channel so the keystroke reaches the host's
+// authoritative core (mirrors clientForGun/clientForMouse's WIRE shim, and the
+// "still dispatch locally too" rationale of onLogicalInput's gamepad forwarding
+// — this peer keeps seeing its own game until host video replaces the canvas).
+// The host applies a received 'kbd' message to ITS OWN _kbdTargetConsoleId, not
+// the sender's, so no consoleId needs to ride along (see onWire in connectToRoom).
+function _kbdSendInputFor(consoleId) {
+  return (type, code, key, keyCode, location) => {
+    rackMgr.get(consoleId)?.sendInput(type, code, key, keyCode, location);
+    if (net && !net.isHost()) net.sendWire('kbd', { type, code, key, keyCode, location });
+  };
+}
+
 function connectKeyboardTo(consoleId) {
   if (!c64kbd) return;
   // Flush any held keys on the old target before switching.
@@ -1665,8 +1742,7 @@ function connectKeyboardTo(consoleId) {
   _kbdTargetConsoleId = consoleId || CONSOLE_ID;
   cable.plugKeyboard(KBD_ID, _kbdTargetConsoleId);
   // Re-wire sendInput to target the new console.
-  c64kbd.setSendInput((type, code, key, keyCode, location) =>
-    rackMgr.get(_kbdTargetConsoleId)?.sendInput(type, code, key, keyCode, location));
+  c64kbd.setSendInput(_kbdSendInputFor(_kbdTargetConsoleId));
   // Switch layout: c64 layout for keyboard-capable Commodore systems, standard otherwise.
   const sys = _consoleSystems.get(_kbdTargetConsoleId);
   c64kbd.setLayout(isKeyboardCapable(sys) ? 'c64' : 'standard');
@@ -1982,8 +2058,22 @@ async function buildCartridgeWorld() {
   // serializeRoom(currentRoom) with no live-transform map is an identity
   // round-trip of the descriptor → the room@1 wire shape parseRoom() expects.
   if (_publishHostRoom && net) {
-    net.setObjectState(ROOM_STATE_KEY, serializeRoom(currentRoom));
-    logger?.event?.('mp-room-publish', { props: currentRoom?.props?.length ?? 0 });
+    // Final check right before publishing: another peer may have published a
+    // 'room' state in the brief window since _awaitHostRoom's last poll (up to
+    // its 40ms granularity plus network latency) — a narrow but real race when
+    // two peers join the same empty room near-simultaneously. Don't overwrite
+    // one that's already there: whichever peer's write reaches the server
+    // FIRST should stay authoritative for future late joiners, not whichever
+    // write happens to land last. This peer still keeps using the room it
+    // already built locally (adopting the winner's layout live would need a
+    // rebuild, out of scope for this narrow mitigation) — a residual,
+    // low-probability limitation; see docs/HANDOFF.md.
+    if (!net.getObjectState(ROOM_STATE_KEY)) {
+      net.setObjectState(ROOM_STATE_KEY, serializeRoom(currentRoom));
+      logger?.event?.('mp-room-publish', { props: currentRoom?.props?.length ?? 0 });
+    } else {
+      logger?.event?.('mp-room-publish-raced', { props: currentRoom?.props?.length ?? 0 });
+    }
   }
 
   // A room may omit a console/gamepad; the load + input wiring below needs
@@ -2047,8 +2137,7 @@ async function buildCartridgeWorld() {
     rotationY: 0,
     layout: 'standard',
   });
-  c64kbd.setSendInput((type, code, key, keyCode, location) =>
-    rackMgr.get(_kbdTargetConsoleId)?.sendInput(type, code, key, keyCode, location));
+  c64kbd.setSendInput(_kbdSendInputFor(_kbdTargetConsoleId));
   c64kbd.object3d.visible = false;
   scene.addObject(c64kbd.object3d);
   window.__c64kbd = c64kbd; // legacy debug hook
@@ -2124,15 +2213,38 @@ async function buildCartridgeWorld() {
       if (obj?.userData?.kind === 'lightgun') {
         logger?.event?.('lightgun-grab', { hand, system: currentMeta?.system || null, consoleId: CONSOLE_ID, alreadyArmed: _lightgunArmedConsole });
         armLightGunAndReload();
+        // Shared-gun sync: announce which gun we're holding so remote peers see
+        // it locked and show a correctly-aimed ghost in our avatar's hand
+        // (mirrors onGamepadGrabbed).
+        const id = net?.presence?.selfId;
+        const cableId = obj.userData?.cableId;
+        if (net && id && cableId) net.setObjectState(makeGunHoldKey(cableId), { holder: id, hand });
       } else if (obj?.userData?.kind === 'mouse') {
         logger?.event?.('mouse-grab', { hand, system: currentMeta?.system || null, consoleId: CONSOLE_ID, alreadyArmed: _mouseArmedConsole });
         armMouseAndReload();
+        // Shared-mouse sync: announce which mouse we're holding so remote peers
+        // see it locked and show a ghost in our avatar's hand (mirrors the gun).
+        const id = net?.presence?.selfId;
+        const cableId = obj.userData?.cableId;
+        if (net && id && cableId) net.setObjectState(makeMouseHoldKey(cableId), { holder: id, hand });
       }
     },
-    // Remote-hold lock: refuse grab of a gamepad currently held by a remote peer.
-    // ghostGpMgr is set up just after GrabMgr in this function, so the reference
-    // is captured as a closure — at grab-time it is non-null whenever net is active.
-    isRemotelyHeld: (cableId) => ghostGpMgr?.isRemotelyHeld(cableId) || false,
+    // Symmetric counterpart to onObjectGrabbed — clears the gun's/mouse's network
+    // hold state on release so remote peers drop the ghost and it's grabbable again.
+    onObjectReleased: (obj) => {
+      if (obj?.userData?.kind === 'lightgun') {
+        const cableId = obj.userData?.cableId;
+        if (net && cableId) net.setObjectState(makeGunHoldKey(cableId), null);
+      } else if (obj?.userData?.kind === 'mouse') {
+        const cableId = obj.userData?.cableId;
+        if (net && cableId) net.setObjectState(makeMouseHoldKey(cableId), null);
+      }
+    },
+    // Remote-hold lock: refuse grab of a gamepad, light gun, or mouse currently
+    // held by a remote peer. ghostGpMgr/ghostGunMgr/ghostMouseMgr are set up just
+    // after GrabMgr in this function, so the reference is captured as a closure —
+    // at grab-time all three are non-null whenever net is active.
+    isRemotelyHeld: (cableId) => ghostGpMgr?.isRemotelyHeld(cableId) || ghostGunMgr?.isRemotelyHeld(cableId) || ghostMouseMgr?.isRemotelyHeld(cableId) || false,
     // Placement preview: supply live room bounds so the ghost can compute the
     // snapped drop location each frame. isPreviewEnabled() reads the editor's
     // surfaceSnap flag — the ghost is only shown when surface-snap is ON.
@@ -2159,7 +2271,7 @@ async function buildCartridgeWorld() {
     consoleIdForGun: (gun) => cable.portOf(gun?.userData?.cableId)?.consoleId ?? null,
     clientForGun: (gun) => {
       const cid = cable.portOf(gun?.userData?.cableId)?.consoleId;
-      return cid ? (rackMgr.get(cid)?.client || null) : null;
+      return cid ? _gunClientFor(gun.userData.cableId, rackMgr.get(cid)?.client || null) : null;
     },
     // Libretro gun PORT this gun drives, for TWO-GUN co-op only. Derived live from
     // the cable: the Kth gun (in cable-port / jack order) on the console drives the
@@ -2196,7 +2308,7 @@ async function buildCartridgeWorld() {
       .map((ctrl) => ({ mouse: grabMgr.heldObject(ctrl), controller: ctrl })),
     clientForMouse: (mouse) => {
       const cid = cable.portOf(mouse?.userData?.cableId)?.consoleId;
-      return cid ? (rackMgr.get(cid)?.client || null) : null;
+      return cid ? _mouseClientFor(mouse.userData.cableId, rackMgr.get(cid)?.client || null) : null;
     },
     // Libretro mouse PORT for split-pointer 2-player: the Kth mouse (cable-jack
     // order) on its seated console drives the Kth of that console's two-mouse ports.
@@ -2217,7 +2329,7 @@ async function buildCartridgeWorld() {
     getClient: () => {
       const seat = cable.portOf(mouseObj?.userData?.cableId);
       const cid = seat?.consoleId ?? CONSOLE_ID;
-      return rackMgr.get(cid)?.client || null;
+      return _mouseClientFor(mouseObj?.userData?.cableId, rackMgr.get(cid)?.client || null);
     },
     getPort: () => {
       const seat = cable.portOf(mouseObj?.userData?.cableId);
@@ -2262,6 +2374,13 @@ async function buildCartridgeWorld() {
   // Item 6 — the primary console + every TV become repositionable in Move mode.
   registerMovableProp(consoleObj, 'console');
   for (const tv of scene._tvs) registerMovableProp(tv.group, 'tv');
+  // The default gun/mouse/keyboard are repositionable too. They stay play-mode
+  // grabbable (GrabMgr._isCandidate special-cases their kind, mirroring the
+  // gamepad/keyboard dual-mode rule) — registerMovableProp only adds the edit-
+  // mode half (userData.editable) on top of that.
+  registerMovableProp(lightGunObj, 'lightgun');
+  registerMovableProp(mouseObj, 'mouse');
+  if (c64kbd) registerMovableProp(c64kbd.object3d, 'keyboard');
 
   // Phase 5 persistence: re-create any consoles the user spawned in a previous
   // session (survives the cross-core reload too). Best-effort, fire-and-forget.
@@ -2654,6 +2773,50 @@ async function buildCartridgeWorld() {
       heldBy: (cableId) => ghostGpMgr.heldBy(cableId),
       isRemotelyHeld: (cableId) => ghostGpMgr.isRemotelyHeld(cableId),
     };
+
+    // Shared-light-gun sync: show a ghost gun (correctly aimed — see
+    // GrabMgr's alignToController) in the remote holder's hand, and lock the
+    // local gun from being grabbed while it's held remotely. Uses the
+    // `hold:gun:<cableId>` STATE namespace (same Hub auto-clear as cart/gamepad
+    // holds). Mirrors the gamepad wiring immediately above.
+    ghostGunMgr = new GhostLightGunMgr({ avatars: net.avatars, lightGunObjs: _lightGunObjsById });
+    scene.addTickCallback(() => {
+      const presentIds = new Set(net.presence.peers().map((p) => p.id));
+      const gunEntries = net.objects.entries().filter(([k]) => isGunHoldKey(k));
+      // Remap objId from 'gun:<cableId>' to just '<cableId>' for GhostLightGunMgr.
+      const gunHolds = parseHolds(gunEntries, { selfId: net.presence.selfId, presentIds })
+        .map((h) => ({ ...h, objId: cableIdFromGunHoldKey(`hold:${h.objId}`) || h.objId }));
+      ghostGunMgr.sync(gunHolds);
+    });
+    window.__ghostGun = {
+      count: () => ghostGunMgr.ghostCount,
+      hidden: () => ghostGunMgr.hiddenCount,
+      has: (cableId) => ghostGunMgr.hasGhost(cableId),
+      isHidden: (cableId) => ghostGunMgr.isHidden(cableId),
+      heldBy: (cableId) => ghostGunMgr.heldBy(cableId),
+      isRemotelyHeld: (cableId) => ghostGunMgr.isRemotelyHeld(cableId),
+    };
+
+    // Shared-mouse sync: mirrors the light-gun wiring immediately above. Uses
+    // the `hold:mouse:<cableId>` STATE namespace (same Hub auto-clear as
+    // cart/gamepad/gun holds).
+    ghostMouseMgr = new GhostMouseMgr({ avatars: net.avatars, mouseObjs: _mouseObjsById });
+    scene.addTickCallback(() => {
+      const presentIds = new Set(net.presence.peers().map((p) => p.id));
+      const mouseEntries = net.objects.entries().filter(([k]) => isMouseHoldKey(k));
+      // Remap objId from 'mouse:<cableId>' to just '<cableId>' for GhostMouseMgr.
+      const mouseHolds = parseHolds(mouseEntries, { selfId: net.presence.selfId, presentIds })
+        .map((h) => ({ ...h, objId: cableIdFromMouseHoldKey(`hold:${h.objId}`) || h.objId }));
+      ghostMouseMgr.sync(mouseHolds);
+    });
+    window.__ghostMouse = {
+      count: () => ghostMouseMgr.ghostCount,
+      hidden: () => ghostMouseMgr.hiddenCount,
+      has: (cableId) => ghostMouseMgr.hasGhost(cableId),
+      isHidden: (cableId) => ghostMouseMgr.isHidden(cableId),
+      heldBy: (cableId) => ghostMouseMgr.heldBy(cableId),
+      isRemotelyHeld: (cableId) => ghostMouseMgr.isRemotelyHeld(cableId),
+    };
     // Headless test tap for the transient WIRE channel: returns a copy of the
     // last received messages on a channel (gp/drag/reset). See _wireRxLog.
     window.__wireRx = (ch) => (_wireRxLog[ch] ? _wireRxLog[ch].slice() : []);
@@ -2813,7 +2976,40 @@ async function buildCartridgeWorld() {
       // Create a minimal "prop descriptor" for the TV so serializePropState can
       // work with it. The id comes from SceneMgr's tv.id (e.g. 'tv0').
       const tvDesc = { type: 'tv', id: tv.id };
+      // userData.roomProp is what _broadcastPropMove reads to find the prop id —
+      // without it, a local TV move in the editor silently never broadcasts
+      // (receive-side reconciliation already worked via _staticPropIds below).
+      tv.group.userData.roomProp = tvDesc;
       _syncedProps.set(tv.id, { prop: tvDesc, object: tv.group });
+    }
+
+    // Seed the primary console + default gun/mouse/keyboard the same way as the
+    // TVs above. Unlike Add-menu props (console/lightgun/mouse are also
+    // CREATABLE_PROP_TYPES), these are hardcoded rack/peripheral objects built
+    // unconditionally at boot on every peer — they never go through addProp's
+    // editor.registerPlaced/_syncedProps seeding, so without this block their
+    // Move-mode repositioning (now possible via registerMovableProp above) would
+    // never reach other peers either.
+    const consoleDesc = { type: 'console', id: CONSOLE_ID };
+    consoleObj.userData.roomProp = consoleDesc;
+    _syncedProps.set(CONSOLE_ID, { prop: consoleDesc, object: consoleObj });
+    _staticPropIds.add(CONSOLE_ID);
+
+    const gunDesc = { type: 'lightgun', id: lightGunObj.userData.cableId, cableId: lightGunObj.userData.cableId };
+    lightGunObj.userData.roomProp = gunDesc;
+    _syncedProps.set(gunDesc.id, { prop: gunDesc, object: lightGunObj });
+    _staticPropIds.add(gunDesc.id);
+
+    const mouseDesc = { type: 'mouse', id: mouseObj.userData.cableId, cableId: mouseObj.userData.cableId };
+    mouseObj.userData.roomProp = mouseDesc;
+    _syncedProps.set(mouseDesc.id, { prop: mouseDesc, object: mouseObj });
+    _staticPropIds.add(mouseDesc.id);
+
+    if (c64kbd) {
+      const kbdDesc = { type: 'keyboard', id: KBD_ID };
+      c64kbd.object3d.userData.roomProp = kbdDesc;
+      _syncedProps.set(KBD_ID, { prop: kbdDesc, object: c64kbd.object3d });
+      _staticPropIds.add(KBD_ID);
     }
 
     // Apply a remote prop payload to a live object (move-only, no snap — the
