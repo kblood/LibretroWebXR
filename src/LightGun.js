@@ -91,6 +91,12 @@ export function createLightGun({ position = new THREE.Vector3(-0.6, 0.78, -2.2) 
     kind: 'lightgun',
     cordAnchor,
     barrelTip,
+    // Snap-to-controller pose applied by GrabMgr on grab (see its _tryGrab):
+    // identity rotation puts the gun's local -Z (barrel forward) exactly on
+    // the controller's own -Z, the same axis its aiming laser is drawn along
+    // (SceneMgr._initControllers), so the barrel points wherever the
+    // controller points instead of keeping its pre-grab world rotation.
+    alignToController: true,
     /**
      * Fill `outRay` (THREE.Ray) with the world-space barrel ray: origin at the
      * muzzle, direction along the gun's local -Z. Returns outRay.

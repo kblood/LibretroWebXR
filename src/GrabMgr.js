@@ -29,8 +29,13 @@ const LASER_IDLE = 0x88aaff;
 const LASER_HOVER = 0xffd060;
 const HOVER_BOX_PAD = 1.08; // fraction over the target's bounds so the outline clears its surface
 
+// Prop kinds that can be exclusively locked by a remote peer's hold (see
+// _isRemotelyHeld / GhostGamepadMgr / GhostLightGunMgr / GhostMouseMgr) — only
+// cabled peripherals shared across the network need this; cartridges etc. don't.
+const NETWORK_LOCKABLE_KINDS = new Set(['gamepad', 'lightgun', 'mouse']);
+
 export class GrabMgr {
-  constructor({ scene, controllers, console: consoleObj, getConsoles, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, onPlugReleased, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, onGamepadGrabbed, onGamepadReleased, onObjectGrabbed, isRemotelyHeld, getRoomBounds, isPreviewEnabled }) {
+  constructor({ scene, controllers, console: consoleObj, getConsoles, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, onPlugReleased, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, onGamepadGrabbed, onGamepadReleased, onObjectGrabbed, onObjectReleased, isRemotelyHeld, getRoomBounds, isPreviewEnabled }) {
     this.scene = scene;
     this.controllers = controllers;
     this.console = consoleObj;
@@ -75,9 +80,15 @@ export class GrabMgr {
     // Generic grab notification: fired for ANY grabbed object after it attaches,
     // with (object, hand). Used by main.js to arm the light gun on pick-up.
     this.onObjectGrabbed = onObjectGrabbed || (() => {});
-    // isRemotelyHeld(obj): returns true when a gamepad is held by a remote peer
-    // (supplied by main.js from GhostGamepadMgr). When true the gamepad is NOT
-    // grabbable locally. No-op when null (single-player or pre-net).
+    // Generic release notification: fired for ANY released object, with
+    // (object, hand). Symmetric counterpart to onObjectGrabbed — e.g. main.js
+    // uses it to clear a light gun's network hold state so remote peers drop
+    // its ghost.
+    this.onObjectReleased = onObjectReleased || (() => {});
+    // isRemotelyHeld(obj): returns true when a gamepad or light gun is held by a
+    // remote peer (supplied by main.js from GhostGamepadMgr / GhostLightGunMgr).
+    // When true the object is NOT grabbable locally. No-op when null
+    // (single-player or pre-net).
     this._isRemotelyHeld = isRemotelyHeld || (() => false);
     // Placement preview: getRoomBounds() supplies the room extents (from SceneMgr);
     // isPreviewEnabled() gates whether the ghost box is shown while dragging.
@@ -143,6 +154,14 @@ export class GrabMgr {
     // can't catch it. Grabbing is on grip (squeeze); typing is on trigger (select),
     // so the two never collide.
     if (obj.userData?.kind === 'keyboard') return obj.visible !== false;
+    // Light gun / mouse are dual-purpose too: grabbable in play mode (to aim/use)
+    // AND in edit mode (to reposition), like the gamepad. userData.editable is
+    // still set on them (registerMovableProp) so onEditRelease/onSelectProp/the
+    // placement ghost treat them as normal editable props once in edit mode —
+    // only the play-mode candidacy needs this override, since the generic rule
+    // below would otherwise make an editable prop invisible to play-mode grabs.
+    // Hidden (remotely held, see GhostLightGunMgr/GhostMouseMgr) → inert.
+    if (obj.userData?.kind === 'lightgun' || obj.userData?.kind === 'mouse') return obj.visible !== false;
     // Patch-cord plugs are grabbable while playing (repatch cords any time) and
     // visible, but inert in edit mode so they don't compete with prop arranging.
     if (obj.userData?.kind === 'plug') return obj.visible !== false && !this.isEditMode();
@@ -350,8 +369,8 @@ export class GrabMgr {
     if (!n) return null;
     // Skip if another controller is already holding it locally.
     for (const o of this.held.values()) if (o === n) return null;
-    // Skip if a remote peer is holding this gamepad (exclusive network lock).
-    if (n.userData?.kind === 'gamepad' && this._isRemotelyHeld(n.userData?.cableId)) return null;
+    // Skip if a remote peer is holding this peripheral (exclusive network lock).
+    if (NETWORK_LOCKABLE_KINDS.has(n.userData?.kind) && this._isRemotelyHeld(n.userData?.cableId)) return null;
     return n;
   }
 
@@ -364,8 +383,8 @@ export class GrabMgr {
       let busy = false;
       for (const o of this.held.values()) if (o === obj) { busy = true; break; }
       if (busy) continue;
-      // Skip if a remote peer holds this gamepad (exclusive network lock).
-      if (obj.userData?.kind === 'gamepad' && this._isRemotelyHeld(obj.userData?.cableId)) continue;
+      // Skip if a remote peer holds this peripheral (exclusive network lock).
+      if (NETWORK_LOCKABLE_KINDS.has(obj.userData?.kind) && this._isRemotelyHeld(obj.userData?.cableId)) continue;
       const p = new THREE.Vector3();
       obj.getWorldPosition(p);
       const d = p.distanceTo(this._origin);
@@ -378,6 +397,13 @@ export class GrabMgr {
     if (this.held.has(ctrl)) return;
     const target = this._hover.get(ctrl) || this._aimTarget(ctrl) || this._nearestInArmRange(ctrl);
     if (!target) return;
+    // tick() computes each controller's hover independently, so both hands can
+    // end up hovering the same free-standing object in the same frame; without
+    // this check the second grip would re-parent it out from under the first
+    // hand and leave `held` with two entries for one object.
+    for (const heldObj of this.held.values()) {
+      if (heldObj === target) return;
+    }
 
     // Change mode: grip SELECTS an editable prop (not the gamepad, which stays
     // playable) without attaching/moving it. The menu cycles its options.
@@ -393,6 +419,23 @@ export class GrabMgr {
     }
 
     ctrl.attach(target);
+    // attach() preserves world transform, so by default a grabbed object keeps
+    // whatever rotation it had at rest (e.g. sitting on a shelf) and stays
+    // rigidly offset from the controller from then on. That's fine for props
+    // held for their own sake (cartridges, gamepad), but an aimable prop like
+    // the light gun needs its barrel to align with the controller's own -Z
+    // (the same axis the aiming laser is drawn along — see SceneMgr._initControllers)
+    // so it points wherever the controller points. Aimable props opt in via
+    // userData.alignToController.
+    //
+    // Skipped in edit mode: there the grab means "pick up to reposition", not
+    // "aim" — snapping rotation there would fight the room editor (which only
+    // re-uprights wall props on release, not floor props like the gun) and
+    // reorient the prop every time it's nudged.
+    if (target.userData?.alignToController && !this.isEditMode()) {
+      target.position.set(0, 0, 0);
+      target.quaternion.identity();
+    }
     this.held.set(ctrl, target);
     this._setHover(ctrl, null);
 
@@ -478,6 +521,9 @@ export class GrabMgr {
 
     // Non-gamepad props (light gun, etc.) clear their held highlight on release.
     if (kind !== 'gamepad') obj.userData?.setHeld?.(false);
+
+    // Generic release notification for any object (light-gun hold-state clear, etc.).
+    this.onObjectReleased(obj, this._handFor(ctrl));
   }
 
   _handleCartridgeRelease(cart) {
