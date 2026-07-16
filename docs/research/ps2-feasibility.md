@@ -1,12 +1,14 @@
 # PlayStation 2 via libretro — feasibility
 
 **TL;DR.** **Not worth pursuing right now.** A real PS2 core exists
-(`LRPS2`, plus a lighter `Play!` core), but two independent things rule it out
-for this project: **it has no light gun support at all** — the entire reason
-you'd want PS2 here (Time Crisis, Vampire Night, Point Blank-style titles) —
-and it's a **desktop-only, GPU-heavy emulator with no evidence of an
-Emscripten/wasm build**, one tier harder than the N64 core this project
-already rejected as "not viable" in [[psx-n64-feasibility]].
+(`LRPS2`, plus a lighter `Play!` core, which also has its own light-gun
+support and a browser/wasm build — see the
+[2026-07-17 update](#update-2026-07-17--two-corrections-verdict-unchanged) for
+corrections to this section). The blocker isn't missing features anymore, it's
+architectural: neither has a libretro core, so nothing here plugs into this
+project's core-loading pipeline without a from-scratch integration, and the
+one confirmed browser build runs interpreter-only and is reported slow/buggy
+in practice.
 
 ## What exists today
 
@@ -127,3 +129,74 @@ Emscripten port before any of this is testable.
 
 _Research pass: 2026-07-16. Libretro core status changes fast — re-verify
 buildbot/docs pages before acting on this if it's been more than a few months._
+
+## Update (2026-07-17) — two corrections, verdict unchanged
+
+A follow-up pass (prompted by "has newer wasm made this viable?") found the
+2026-07-16 pass above was **wrong on two factual points**, but the skip
+verdict still holds for different, better-evidenced reasons.
+
+**Correction 1 — a PS2-in-browser build does exist.** `Play!.js`
+(https://playjs.purei.org/, part of the mainline `jpd002/Play-` repo) is a
+real Emscripten/wasm build of the `Play!` PS2 emulator running today in
+Chrome/Firefox, no BIOS file required. The "no evidence of an Emscripten/wasm
+build" claim above was a research miss, not a project fact — it exists, I
+just hadn't found it.
+
+**Correction 2 — light gun / GunCon input does exist**, in `Play!` itself
+(not in LRPS2, so the EmuVR-sourced Blocker 1 quote was accurate for LRPS2
+specifically but overgeneralized to "PS2 cores" as a whole). `Play!` maps
+GunCon trigger/pedal to CIRCLE/TRIANGLE and uses cursor position for aim,
+with Time Crisis 3 named explicitly as a supported/calibratable title.
+
+**Why the verdict doesn't change despite both corrections flipping:**
+
+- **It's not a libretro core.** `Play!.js` is `Play!`'s own standalone
+  SDL-style frontend recompiled with Emscripten — its own window, canvas,
+  event loop, and mouse-based GunCon input, entirely outside the libretro
+  ABI. This project's whole pipeline (`src/systems.js` core loading,
+  `RackBudget`, the `RETRO_DEVICE_LIGHTGUN` wiring documented above, and the
+  netplay host/late-joiner state sync, which is built on
+  `retro_serialize`/`retro_unserialize`) assumes a libretro core. None of
+  that applies to a monolithic non-libretro app. Adding PS2 would mean
+  building a second, parallel emulator-integration stack from scratch — not
+  "register a new core" the way every other system in this project works —
+  with no guarantee `Play!.js`'s wasm build even exposes a serialize hook to
+  hang netplay sync off of.
+- **The web build is confirmed slow in practice, not just in theory.**
+  Per the project's own docs, the wasm build runs as a plain interpreter
+  (no JIT — "write protection on memory pages is not supported, thus...JIT
+  cache can't be invalidated," which can also break games that
+  self-modify EE code at runtime). Outside reviews report it as "choppy,
+  slow, and fidgety" with "poor framerates and bugs galore," and the authors
+  themselves call it "only an experiment, not meant to play all games."
+  ~400 titles playable, ~1,200 more in partial/broken states. That's
+  real-world confirmation of Blocker 2's theoretical no-JIT concern, not
+  just a prediction anymore.
+- **The "wasm gets its own JIT" hope doesn't rescue this.** There's a
+  `jit-interface` proposal (`func.new`, safe runtime code generation) that
+  would let wasm modules do what PCSX2's JIT does today. It's real, but it's
+  **Phase 1 of 5** — earliest community-group stage, unimplemented in any
+  browser, no shipping timeline, championed by one person. (For scale: wasm
+  threads, which shipped in 2025, took years to go from Phase 1 to
+  universal browser support.) Not something to plan a port around.
+
+**Verdict stands: skip.** Better information now, same conclusion — and if
+anything the "no libretro core → no fit with this project's architecture"
+point is a harder blocker than either point in the original pass, since it's
+not fixable by anyone upstream shipping a feature; it's a structural mismatch
+with how this whole frontend is built.
+
+**Revisit only if:** `Play!` (or a fork) ships as an actual libretro core —
+at which point the `RETRO_DEVICE_LIGHTGUN` wiring and per-core registration
+pattern this project already has would apply directly and most of this
+integration cost disappears.
+
+### Additional sources (2026-07-17 pass)
+
+- [Play!.js](https://playjs.purei.org/)
+- [jpd002/Play- GitHub — Emscripten build docs](https://github.com/jpd002/Play-)
+- [Play!.js coverage — chromeunboxed.com](https://chromeunboxed.com/web-based-playstation-2-game-emulator)
+- [Play!.js coverage — megavisions.net](https://www.megavisions.net/this-emulator-plays-playstation-2-games-in-your-web-browser/)
+- [WebAssembly jit-interface proposal](https://github.com/WebAssembly/jit-interface)
+- [WebAssembly/proposals — phase tracking](https://github.com/WebAssembly/proposals)
