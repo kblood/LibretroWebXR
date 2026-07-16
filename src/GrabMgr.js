@@ -20,13 +20,25 @@ import * as THREE from 'three';
 import {
   clampToRoom, snapToSurface, footprintForKind, SURFACE_KIND,
 } from './Placement.js';
+import { nearestAnchorAlongRay } from './Snap.js';
 
 const ARM_RANGE  = 0.45;  // metres — fallback close-range grab when nothing aimed
 const RAY_RANGE  = 5.0;   // metres — how far the aim ray reaches
 const DROP_RADIUS = 0.22; // metres — console slot acceptance radius
 
+// Distance-hold (right-stick pull/push, see _tickDistanceHold): a ray-grab
+// hovers at arm's length instead of teleporting to hand, reelable in/out,
+// and snaps into a normal grab once within MAGNETIZE_RADIUS.
+const MAGNETIZE_RADIUS = 0.15;   // metres — distance-held prop becomes a real grab
+const PULL_SPEED = 2.0;          // m/s of hold-distance change at full stick deflection
+const PULL_DEAD_ZONE = 0.15;
+// Point-and-place (Mechanism B, see _handle*Release / _updateSocketLaser):
+// perpendicular tolerance for "is the release ray aimed at this socket".
+const SOCKET_RAY_MAX_PERP = 0.25;
+
 const LASER_IDLE = 0x88aaff;
 const LASER_HOVER = 0xffd060;
+const LASER_SOCKET = 0x55ff88;
 const HOVER_BOX_PAD = 1.08; // fraction over the target's bounds so the outline clears its surface
 
 // Prop kinds that can be exclusively locked by a remote peer's hold (see
@@ -96,6 +108,9 @@ export class GrabMgr {
     this._isPreviewEnabled = isPreviewEnabled || (() => false);
     this.grabbables = [];
     this.held = new Map();              // controller -> Object3D
+    // Right-controller ray-grabs that haven't magnetized into a real grab yet
+    // (see _tickDistanceHold): controller -> { distance, rotOffset }.
+    this._holdDistance = new Map();
     this._hover = new Map();            // controller -> Object3D (or null)
     this._ray = new THREE.Raycaster();
     this._origin = new THREE.Vector3();
@@ -216,15 +231,19 @@ export class GrabMgr {
     this.console.userData.setInserted(true);
   }
 
-  // Per-frame: update hover targets, laser colours, and placement ghost.
-  // Wired up by main.js through SceneMgr.addTickCallback.
-  tick() {
+  // Per-frame: update hover targets, laser colours, placement ghost, and any
+  // active distance-hold pull/push. Wired up by main.js through
+  // SceneMgr.addTickCallback (receives dtMs, matching LocomotionMgr's tick).
+  tick(dtMs = 16) {
+    const dt = Math.min(dtMs, 50) / 1000; // clamp for hitch protection
     for (const ctrl of this.controllers) {
       // While holding, we don't ray-cast for a new target (the held thing
       // would intersect the ray itself).
       if (this.held.has(ctrl)) {
         this._setHover(ctrl, null);
         this._refreshHoverBox(ctrl, null);
+        if (this._holdDistance.has(ctrl)) this._tickDistanceHold(ctrl, dt);
+        this._updateSocketLaser(ctrl);
         continue;
       }
       const target = this._aimTarget(ctrl);
@@ -232,6 +251,128 @@ export class GrabMgr {
       this._refreshHoverBox(ctrl, target);
     }
     this._updateGhost();
+  }
+
+  // Reel a distance-held object in/out along the controller's aim ray using
+  // the right thumbstick, and magnetize it into a normal grab once close
+  // enough. See _tryGrab for how a hold enters this state.
+  _tickDistanceHold(ctrl, dt) {
+    const state = this._holdDistance.get(ctrl);
+    const target = this.held.get(ctrl);
+    if (!state || !target) return;
+
+    const gp = ctrl.userData.inputSource?.gamepad;
+    if (gp?.axes?.length >= 4) {
+      const y = gp.axes[3] || 0;
+      if (Math.abs(y) > PULL_DEAD_ZONE) {
+        // xr-standard: pushing the stick forward gives axes[3] = -1. Forward
+        // sends the object further away; pulling back reels it in.
+        const push = -y;
+        state.distance += push * PULL_SPEED * dt;
+      }
+    }
+    state.distance = THREE.MathUtils.clamp(state.distance, MAGNETIZE_RADIUS, RAY_RANGE);
+
+    if (state.distance <= MAGNETIZE_RADIUS) {
+      this._magnetize(ctrl, target);
+      return;
+    }
+
+    const ray = this._controllerRay(ctrl);
+    const ctrlQuat = new THREE.Quaternion();
+    ctrl.getWorldQuaternion(ctrlQuat);
+
+    target.position.copy(ray.origin).addScaledVector(ray.dir, state.distance);
+    if (target.userData?.alignToController) {
+      // Aimable props (the light gun) track the controller's own facing the
+      // whole time in flight, so they always look correctly aimed — no pop
+      // when they finally magnetize.
+      target.quaternion.copy(ctrlQuat);
+    } else {
+      target.quaternion.copy(ctrlQuat).multiply(state.rotOffset);
+    }
+  }
+
+  // Finalize a distance-held object into a real hand-attach.
+  _magnetize(ctrl, target) {
+    this._holdDistance.delete(ctrl);
+    this._finalizeAttach(ctrl, target);
+  }
+
+  // World-space aim ray for a controller (release-time / distance-hold use;
+  // allocates, unlike _aimTarget's per-frame hover scratch fields — fine for
+  // these lower-frequency call sites).
+  _controllerRay(ctrl) {
+    ctrl.updateMatrixWorld();
+    const origin = new THREE.Vector3().setFromMatrixPosition(ctrl.matrixWorld);
+    const quat = new THREE.Quaternion();
+    ctrl.getWorldQuaternion(quat);
+    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(quat).normalize();
+    return { origin, dir };
+  }
+
+  // While holding something socket-eligible, tint the laser green when the
+  // aim ray currently matches a valid socket — same anchors/tolerance the
+  // release handlers use (Mechanism B), so the preview matches what release
+  // will actually do. No-op (idle colour) for kinds without a socket here.
+  _updateSocketLaser(ctrl) {
+    const mat = ctrl.userData.laserMat;
+    if (!mat) return;
+    const obj = this.held.get(ctrl);
+    const anchors = this._socketAnchorsFor(obj);
+    if (!anchors || !anchors.length) {
+      mat.color.setHex(LASER_IDLE);
+      return;
+    }
+    const ray = this._controllerRay(ctrl);
+    const hit = nearestAnchorAlongRay(ray.origin, ray.dir, anchors, {
+      maxDist: RAY_RANGE, maxPerp: SOCKET_RAY_MAX_PERP,
+    });
+    mat.color.setHex(hit ? LASER_SOCKET : LASER_IDLE);
+  }
+
+  _socketAnchorsFor(obj) {
+    const kind = obj?.userData?.kind;
+    if (kind === 'cartridge') return this._cartridgeAnchors();
+    if (kind === 'gamepad') return this._freePortAnchors();
+    if (kind === 'memory-card') return this._cardAnchor();
+    return null; // plugs preview via main.js's own jack sets (not visible here)
+  }
+
+  // Anchor lists shared between the release-time proximity/ray match and the
+  // socket-laser preview, so both always agree on what counts as "in range".
+  _cartridgeAnchors() {
+    const list = [];
+    const p = new THREE.Vector3();
+    for (const [consoleId, consoleObj] of this.getConsoles()) {
+      const slotAnchor = consoleObj?.userData?.slotAnchor;
+      if (!slotAnchor) continue;
+      slotAnchor.getWorldPosition(p);
+      list.push({ id: consoleId, x: p.x, y: p.y, z: p.z, consoleObj });
+    }
+    return list;
+  }
+
+  _freePortAnchors() {
+    const cu = this.console?.userData;
+    const list = [];
+    if (!this.cable || !cu?.portAnchors) return list;
+    const p = new THREE.Vector3();
+    for (let i = 0; i < cu.portAnchors.length; i++) {
+      if (i >= cu.activePorts) continue;
+      if (!this.cable.isPortFree(i)) continue;
+      cu.portAnchors[i].getWorldPosition(p);
+      list.push({ id: i, x: p.x, y: p.y, z: p.z });
+    }
+    return list;
+  }
+
+  _cardAnchor() {
+    const anchor = this.console?.userData?.cardSlotAnchor;
+    if (!anchor) return [];
+    const p = new THREE.Vector3();
+    anchor.getWorldPosition(p);
+    return [{ id: 'card', x: p.x, y: p.y, z: p.z }];
   }
 
   // --- Placement ghost (preview) -------------------------------------------
@@ -395,7 +536,8 @@ export class GrabMgr {
 
   _tryGrab(ctrl) {
     if (this.held.has(ctrl)) return;
-    const target = this._hover.get(ctrl) || this._aimTarget(ctrl) || this._nearestInArmRange(ctrl);
+    const rayTarget = this._hover.get(ctrl) || this._aimTarget(ctrl);
+    const target = rayTarget || this._nearestInArmRange(ctrl);
     if (!target) return;
     // tick() computes each controller's hover independently, so both hands can
     // end up hovering the same free-standing object in the same frame; without
@@ -418,23 +560,37 @@ export class GrabMgr {
       this.console.userData.setInserted(false);
     }
 
-    ctrl.attach(target);
-    // attach() preserves world transform, so by default a grabbed object keeps
-    // whatever rotation it had at rest (e.g. sitting on a shelf) and stays
-    // rigidly offset from the controller from then on. That's fine for props
-    // held for their own sake (cartridges, gamepad), but an aimable prop like
-    // the light gun needs its barrel to align with the controller's own -Z
-    // (the same axis the aiming laser is drawn along — see SceneMgr._initControllers)
-    // so it points wherever the controller points. Aimable props opt in via
-    // userData.alignToController.
-    //
-    // Skipped in edit mode: there the grab means "pick up to reposition", not
-    // "aim" — snapping rotation there would fight the room editor (which only
-    // re-uprights wall props on release, not floor props like the gun) and
-    // reorient the prop every time it's nudged.
-    if (target.userData?.alignToController && !this.isEditMode()) {
-      target.position.set(0, 0, 0);
-      target.quaternion.identity();
+    // Distance-hold: a ray-initiated grab by the RIGHT controller, in play
+    // mode, for a kind that doesn't claim the right thumbstick for game
+    // input (a held, played gamepad claims BOTH sticks for RetroPad d-pad
+    // input — see LocomotionMgr's header comment — so it always stays
+    // instant-attach), hovers at its current distance instead of snapping to
+    // hand; the right stick reels it in (_tickDistanceHold) until it
+    // magnetizes into a normal grab. The left controller's ray-grabs keep
+    // today's instant-attach unconditionally — there's no stick assigned to
+    // shrink a left-hand hold-distance, so it would otherwise float forever.
+    const eligibleForDistanceHold = !!rayTarget
+      && this._handFor(ctrl) === 'right'
+      && !this.isEditMode()
+      && target.userData?.kind !== 'gamepad';
+
+    if (eligibleForDistanceHold) {
+      this.scene.attach(target); // pull out of any shelf/holder group; preserves world transform
+      const ray = this._controllerRay(ctrl);
+      const targetPos = new THREE.Vector3();
+      target.getWorldPosition(targetPos);
+      const distance = ray.origin.distanceTo(targetPos);
+      const ctrlQuat = new THREE.Quaternion();
+      ctrl.getWorldQuaternion(ctrlQuat);
+      const targetQuat = new THREE.Quaternion();
+      target.getWorldQuaternion(targetQuat);
+      // Rotation offset so a non-aimable prop keeps rotating rigidly with the
+      // controller while still in flight, instead of freezing at its at-rest
+      // rotation (see _tickDistanceHold).
+      const rotOffset = ctrlQuat.clone().invert().multiply(targetQuat);
+      this._holdDistance.set(ctrl, { distance, rotOffset });
+    } else {
+      this._finalizeAttach(ctrl, target);
     }
     this.held.set(ctrl, target);
     this._setHover(ctrl, null);
@@ -465,10 +621,36 @@ export class GrabMgr {
     return i === 0 ? 'left' : i === 1 ? 'right' : null;
   }
 
+  // Rigidly re-parent `target` onto `ctrl` (used both for an ordinary instant
+  // grab and for a distance-held prop that just magnetized). attach()
+  // preserves world transform, so by default a grabbed object keeps whatever
+  // rotation it had at rest and stays rigidly offset from the controller
+  // from then on. That's fine for props held for their own sake (cartridges,
+  // gamepad), but an aimable prop like the light gun needs its barrel to
+  // align with the controller's own -Z (the same axis the aiming laser is
+  // drawn along — see SceneMgr._initControllers) so it points wherever the
+  // controller points. Aimable props opt in via userData.alignToController.
+  //
+  // Skipped in edit mode: there the grab means "pick up to reposition", not
+  // "aim" — snapping rotation there would fight the room editor (which only
+  // re-uprights wall props on release, not floor props like the gun) and
+  // reorient the prop every time it's nudged.
+  _finalizeAttach(ctrl, target) {
+    ctrl.attach(target);
+    if (target.userData?.alignToController && !this.isEditMode()) {
+      target.position.set(0, 0, 0);
+      target.quaternion.identity();
+    }
+  }
+
   _release(ctrl) {
     const obj = this.held.get(ctrl);
     if (!obj) return;
     this.held.delete(ctrl);
+    // In case grip was released before a distance-held prop ever magnetized
+    // (see _tickDistanceHold) — it's already parented to this.scene, so
+    // scene.attach() below is a harmless no-op re-affirm for it.
+    this._holdDistance.delete(ctrl);
     this.scene.attach(obj);
 
     const kind = obj.userData?.kind;
@@ -486,7 +668,7 @@ export class GrabMgr {
       // prop.  If it DID plug, edit-release is skipped (the snap-to-port
       // position already set the final resting place).
       const portBefore = this.cable?.portOf(obj.userData.cableId);
-      this._handleGamepadRelease(obj);
+      this._handleGamepadRelease(obj, ctrl);
       const plugged = this.cable && this.cable.portOf(obj.userData.cableId) !== portBefore
                       && this.cable.portOf(obj.userData.cableId) != null;
       if (!plugged && this.isEditMode() && obj.userData?.editable) {
@@ -499,11 +681,12 @@ export class GrabMgr {
     } else if (kind === 'plug') {
       // Patch-cord plug: main.js snaps it to the nearest compatible jack and
       // rewires the patch graph, or pulls the edge if dropped in mid-air.
-      this.onPlugReleased(obj);
+      // The aim ray lets main.js try a point-and-place match first.
+      this.onPlugReleased(obj, this._controllerRay(ctrl));
     } else if (kind === 'cartridge') {
-      this._handleCartridgeRelease(obj);
+      this._handleCartridgeRelease(obj, ctrl);
     } else if (kind === 'memory-card') {
-      this._handleCardRelease(obj);
+      this._handleCardRelease(obj, ctrl);
     }
 
     // The gamepad is grabbable in both modes, so always reconcile its held-state
@@ -526,24 +709,31 @@ export class GrabMgr {
     this.onObjectReleased(obj, this._handFor(ctrl));
   }
 
-  _handleCartridgeRelease(cart) {
+  _handleCartridgeRelease(cart, ctrl) {
     const cartWorld = new THREE.Vector3();
     cart.getWorldPosition(cartWorld);
+    const anchors = this._cartridgeAnchors();
 
     // Pick the nearest console slot across the WHOLE rack (each slotAnchor lives
     // in its console's group, so its world position tracks the console even after
     // it's been moved in Edit mode). Pre-fix this only ever checked the primary
     // console, so a cartridge could never be loaded into a second console.
     let best = null;                        // { consoleId, consoleObj, dist }
-    const _p = new THREE.Vector3();
-    for (const [consoleId, consoleObj] of this.getConsoles()) {
-      const slotAnchor = consoleObj?.userData?.slotAnchor;
-      if (!slotAnchor) continue;
-      slotAnchor.getWorldPosition(_p);
-      const dist = cartWorld.distanceTo(_p);
+    for (const a of anchors) {
+      const dist = cartWorld.distanceTo(new THREE.Vector3(a.x, a.y, a.z));
       if (dist < DROP_RADIUS && (!best || dist < best.dist)) {
-        best = { consoleId, consoleObj, dist };
+        best = { consoleId: a.id, consoleObj: a.consoleObj, dist };
       }
+    }
+
+    // Point-and-place: released while aiming at a slot places the cartridge
+    // there even if it's currently far away (Mechanism B).
+    if (!best && ctrl) {
+      const ray = this._controllerRay(ctrl);
+      const hit = nearestAnchorAlongRay(ray.origin, ray.dir, anchors, {
+        maxDist: RAY_RANGE, maxPerp: SOCKET_RAY_MAX_PERP,
+      });
+      if (hit) best = { consoleId: hit.id, consoleObj: hit.anchor.consoleObj, dist: hit.perp };
     }
 
     if (best) {
@@ -581,26 +771,35 @@ export class GrabMgr {
 
   // Snap a released gamepad onto the nearest free, enabled controller port and
   // plug it into the cable system. No console/cable → leaves it where dropped.
-  _handleGamepadRelease(gp) {
+  _handleGamepadRelease(gp, ctrl) {
     const cu = this.console?.userData;
     if (!this.cable || !cu?.portAnchors || gp.userData.cableId == null) return;
 
     const gpWorld = new THREE.Vector3();
     gp.getWorldPosition(gpWorld);
     const radius = cu.portRadius || 0.16;
+    const anchors = this._freePortAnchors();
 
     let bestPort = -1, bestDist = radius;
-    const aw = new THREE.Vector3();
-    for (let i = 0; i < cu.portAnchors.length; i++) {
-      if (i >= cu.activePorts) continue;        // port disabled for this system
-      if (!this.cable.isPortFree(i)) continue;  // already occupied
-      cu.portAnchors[i].getWorldPosition(aw);
-      const d = aw.distanceTo(gpWorld);
-      if (d < bestDist) { bestDist = d; bestPort = i; }
+    for (const a of anchors) {
+      const d = new THREE.Vector3(a.x, a.y, a.z).distanceTo(gpWorld);
+      if (d < bestDist) { bestDist = d; bestPort = a.id; }
     }
-    if (bestPort < 0) return;                    // not near a free port → stay put
+
+    // Point-and-place: released while aiming at a port plugs in there even
+    // if the gamepad is currently far from it (Mechanism B) — gamepads stay
+    // instant-attach on grab (see _tryGrab) but still benefit from this.
+    if (bestPort < 0 && ctrl) {
+      const ray = this._controllerRay(ctrl);
+      const hit = nearestAnchorAlongRay(ray.origin, ray.dir, anchors, {
+        maxDist: RAY_RANGE, maxPerp: SOCKET_RAY_MAX_PERP,
+      });
+      if (hit) bestPort = hit.id;
+    }
+    if (bestPort < 0) return;                    // not near/aimed at a free port → stay put
 
     const anchor = cu.portAnchors[bestPort];
+    const aw = new THREE.Vector3();
     const aq = new THREE.Quaternion();
     anchor.getWorldPosition(aw);
     anchor.getWorldQuaternion(aq);
@@ -610,14 +809,23 @@ export class GrabMgr {
     this.onGamepadPlugged(gp);
   }
 
-  _handleCardRelease(card) {
+  _handleCardRelease(card, ctrl) {
     const anchor = this.console.userData.cardSlotAnchor;
     const radius = this.console.userData.cardSlotRadius || 0.14;
     const aw = new THREE.Vector3();
     anchor.getWorldPosition(aw);
     const cw = new THREE.Vector3();
     card.getWorldPosition(cw);
-    if (cw.distanceTo(aw) < radius) {
+    // Point-and-place: aiming at the card slot inserts it even from far away
+    // (Mechanism B), falling back to today's proximity check.
+    let hit = cw.distanceTo(aw) < radius;
+    if (!hit && ctrl) {
+      const ray = this._controllerRay(ctrl);
+      hit = !!nearestAnchorAlongRay(ray.origin, ray.dir, this._cardAnchor(), {
+        maxDist: RAY_RANGE, maxPerp: SOCKET_RAY_MAX_PERP,
+      });
+    }
+    if (hit) {
       const aq = new THREE.Quaternion();
       anchor.getWorldQuaternion(aq);
       card.position.copy(aw);

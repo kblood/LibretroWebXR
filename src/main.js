@@ -22,7 +22,7 @@ import { createMouse } from './Mouse.js';
 import { MouseMgr } from './MouseMgr.js';
 import { Cord } from './Cord.js';
 import { Plug } from './Plug.js';
-import { nearestAnchor } from './Snap.js';
+import { nearestAnchor, nearestAnchorAlongRay } from './Snap.js';
 import { GrabMgr } from './GrabMgr.js';
 import { LocomotionMgr } from './LocomotionMgr.js';
 import { DesktopControls } from './DesktopControls.js';
@@ -873,6 +873,11 @@ function updateFocus() {
 // dropping it in mid-air clears the console's video edge (EmuVR repatch). The
 // pure snap decision is [[src/Snap.js]]; the graph is [[src/Patchbay.js]].
 const PLUG_SNAP_RADIUS = 0.26;                     // m — jack acceptance radius
+// Point-and-place (Mechanism B): released-while-aiming tolerance for plugs,
+// mirroring GrabMgr's own SOCKET_RAY_MAX_PERP/RAY_RANGE for the other socket
+// kinds (cart slot, controller port, memory card).
+const PLUG_RAY_MAX_PERP = 0.25;
+const PLUG_RAY_MAX_DIST = 5.0;
 const consoleObjs = new Map();                     // consoleId -> physical Console Object3D
 const videoPlugs = new Map();                      // consoleId -> { plug:Plug, cord:Cord }
 const _vp = new THREE.Vector3();
@@ -903,12 +908,14 @@ function addVideoPlug(consoleId, tvId) {
 }
 
 // GrabMgr release handler: snap the plug to the nearest TV jack and repatch, or
-// pull the console's video if dropped away from every jack.
+// pull the console's video if dropped away from every jack. `ray` (the
+// releasing controller's aim ray, from GrabMgr._controllerRay) lets a plug be
+// point-and-placed into a jack it's aimed at even when far from it.
 const _plugWorld = new THREE.Vector3();
-function handlePlugReleased(plugObj) {
+function handlePlugReleased(plugObj, ray) {
   const ud = plugObj.userData || {};
-  if (ud.plugKind === 'controller') { handleControllerPlugReleased(plugObj); return; }
-  if (ud.plugKind === 'keyboard')   { handleKeyboardPlugReleased(plugObj);   return; }
+  if (ud.plugKind === 'controller') { handleControllerPlugReleased(plugObj, ray); return; }
+  if (ud.plugKind === 'keyboard')   { handleKeyboardPlugReleased(plugObj, ray);   return; }
   if (ud.plugKind !== 'video') return;
   const consoleId = ud.sourceId;
   plugObj.getWorldPosition(_plugWorld);
@@ -917,7 +924,12 @@ function handlePlugReleased(plugObj) {
     tv.videoIn.getWorldPosition(p);
     return { id: tv.id, x: p.x, y: p.y, z: p.z };
   });
-  const hit = nearestAnchor({ x: _plugWorld.x, y: _plugWorld.y, z: _plugWorld.z }, anchors, PLUG_SNAP_RADIUS);
+  let hit = nearestAnchor({ x: _plugWorld.x, y: _plugWorld.y, z: _plugWorld.z }, anchors, PLUG_SNAP_RADIUS);
+  if (!hit && ray) {
+    hit = nearestAnchorAlongRay(ray.origin, ray.dir, anchors, {
+      maxDist: PLUG_RAY_MAX_DIST, maxPerp: PLUG_RAY_MAX_PERP,
+    });
+  }
   // One physical cable = one output: drop the console's prior TV edge(s) first.
   for (const tvId of cable.displaysOf(consoleId)) cable.disconnectVideo(tvId);
   if (hit) {
@@ -1577,7 +1589,7 @@ function _broadcastCablePort(cableId) {
 // GrabMgr release handler for a controller plug: snap to the nearest free port
 // jack across EVERY console and re-plug, or unplug if dropped in mid-air.
 const _ctrlPlugWorld = new THREE.Vector3();
-function handleControllerPlugReleased(plugObj) {
+function handleControllerPlugReleased(plugObj, ray) {
   const cableId = plugObj.userData?.sourceId;
   if (!cableId) return;
   plugObj.getWorldPosition(_ctrlPlugWorld);
@@ -1595,10 +1607,15 @@ function handleControllerPlugReleased(plugObj) {
       anchors.push({ id: `${consoleId}#${port}`, consoleId, port, x: _j.x, y: _j.y, z: _j.z });
     }
   }
-  const hit = nearestAnchor(
+  let hit = nearestAnchor(
     { x: _ctrlPlugWorld.x, y: _ctrlPlugWorld.y, z: _ctrlPlugWorld.z },
     anchors, PLUG_SNAP_RADIUS,
   );
+  if (!hit && ray) {
+    hit = nearestAnchorAlongRay(ray.origin, ray.dir, anchors, {
+      maxDist: PLUG_RAY_MAX_DIST, maxPerp: PLUG_RAY_MAX_PERP,
+    });
+  }
   if (hit) cable.plugController(cableId, hit.anchor.consoleId, hit.anchor.port);
   else cable.unplugController(cableId);
   seatControllerPlug(cableId);
@@ -1668,7 +1685,7 @@ function seatKeyboardPlug() {
 // GrabMgr release handler for a keyboard plug: snap to nearest keyboardJack
 // across all consoles (within keyboardJackRadius) and connect, else disconnect.
 const _kbdPlugWorld = new THREE.Vector3();
-function handleKeyboardPlugReleased(plugObj) {
+function handleKeyboardPlugReleased(plugObj, ray) {
   if (plugObj.userData?.sourceId !== KBD_ID) return;
   plugObj.getWorldPosition(_kbdPlugWorld);
   const anchors = [];
@@ -1687,6 +1704,14 @@ function handleKeyboardPlugReleased(plugObj) {
     const dx = _kbdPlugWorld.x - a.x, dy = _kbdPlugWorld.y - a.y, dz = _kbdPlugWorld.z - a.z;
     const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
     if (dist < a.radius && dist < hitDist) { hitDist = dist; hit = a; }
+  }
+  // Point-and-place: aiming at a console's keyboard jack connects it even
+  // from far away (Mechanism B).
+  if (!hit && ray) {
+    const rayHit = nearestAnchorAlongRay(ray.origin, ray.dir, anchors, {
+      maxDist: PLUG_RAY_MAX_DIST, maxPerp: PLUG_RAY_MAX_PERP,
+    });
+    if (rayHit) hit = rayHit.anchor;
   }
   if (hit) {
     connectKeyboardTo(hit.consoleId);
@@ -2164,7 +2189,7 @@ async function buildCartridgeWorld() {
     // its patch-cord plug so the cord follows the body-seated pad to its port.
     onGamepadPlugged: (gp) => { gameInput?.flushReleases(); seatControllerPlug(gp?.userData?.cableId); _broadcastCablePort(gp?.userData?.cableId); },
     // Patch-cord plug released → snap to nearest TV jack + repatch video.
-    onPlugReleased: (plug) => handlePlugReleased(plug),
+    onPlugReleased: (plug, ray) => handlePlugReleased(plug, ray),
     onMemoryCardInserted: handleMemoryCardInserted,
     // Phase E: deferred arrows — `editor` is assigned just below and these are
     // only called at tick/release time, never during GrabMgr construction.
@@ -2251,6 +2276,7 @@ async function buildCartridgeWorld() {
     getRoomBounds: () => scene.getRoomBounds(),
     isPreviewEnabled: () => !!(editor?.surfaceSnapEnabled() && editor?.isEditMode()),
   });
+  window.__grabMgr = grabMgr; // debug hook: headless verification of distance-hold/point-and-place
   cartridges.forEach((c) => grabMgr.addGrabbable(c));
   grabMgr.addGrabbable(gamepadObj);
   _registerLightGun(lightGunObj);

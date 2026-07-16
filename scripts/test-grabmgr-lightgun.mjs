@@ -158,5 +158,195 @@ console.log('--- a remotely-held light gun is excluded from arm-range grab candi
   ok(freeMgr._nearestInArmRange(ctrl) === gun, 'control: the same gun IS a candidate when not remotely held');
 }
 
+console.log('--- right-hand ray-grab beyond arm-range enters distance-hold instead of instant-attach');
+{
+  const scene = new THREE.Scene();
+  const gun = createLightGun({ position: new THREE.Vector3(0.2, 1.6, -2.0) });
+  scene.add(gun);
+  const ctrlLeft = makeCtrl([-0.2, 1.6, 0], [0, 0, 0]);
+  const ctrlRight = makeCtrl([0.2, 1.6, 0], [0, 0, 0]);
+  scene.add(ctrlLeft); scene.add(ctrlRight);
+  scene.updateMatrixWorld(true);
+
+  const mgr = new GrabMgr({ scene, controllers: [ctrlLeft, ctrlRight], console: makeConsole(), isEditMode: () => false });
+  mgr.addGrabbable(gun);
+  mgr._hover.set(ctrlRight, gun); // force a ray-hit target
+  mgr._tryGrab(ctrlRight);
+
+  ok(mgr.held.get(ctrlRight) === gun, 'right-hand ray-grab registers held');
+  ok(mgr._holdDistance.has(ctrlRight), 'enters distance-hold instead of an instant attach');
+  ok(gun.parent === scene, 'gun stays parented to the scene, not the controller, while distance-held');
+}
+
+console.log('--- left-hand ray-grabs keep today\'s instant-attach (no stick assigned to reel them in)');
+{
+  const scene = new THREE.Scene();
+  const gun = createLightGun({ position: new THREE.Vector3(-0.2, 1.6, -2.0) });
+  scene.add(gun);
+  const ctrlLeft = makeCtrl([-0.2, 1.6, 0], [0, 0, 0]);
+  const ctrlRight = makeCtrl([0.2, 1.6, 0], [0, 0, 0]);
+  scene.add(ctrlLeft); scene.add(ctrlRight);
+  scene.updateMatrixWorld(true);
+
+  const mgr = new GrabMgr({ scene, controllers: [ctrlLeft, ctrlRight], console: makeConsole(), isEditMode: () => false });
+  mgr.addGrabbable(gun);
+  mgr._hover.set(ctrlLeft, gun);
+  mgr._tryGrab(ctrlLeft);
+
+  ok(mgr.held.get(ctrlLeft) === gun, 'left-hand ray-grab registers held');
+  ok(!mgr._holdDistance.has(ctrlLeft), 'left hand never enters distance-hold');
+  ok(gun.parent === ctrlLeft, 'left-hand ray-grab instant-attaches exactly like today');
+}
+
+console.log('--- right-stick pulls a distance-held object in, magnetizing into a real grab');
+{
+  const scene = new THREE.Scene();
+  const gun = createLightGun({ position: new THREE.Vector3(0.2, 1.6, -0.6) }); // 0.6m from ctrlRight
+  scene.add(gun);
+  const ctrlLeft = makeCtrl([-0.2, 1.6, 0], [0, 0, 0]);
+  const ctrlRight = makeCtrl([0.2, 1.6, 0], [0, 0, 0]);
+  scene.add(ctrlLeft); scene.add(ctrlRight);
+  scene.updateMatrixWorld(true);
+
+  const mgr = new GrabMgr({ scene, controllers: [ctrlLeft, ctrlRight], console: makeConsole(), isEditMode: () => false });
+  mgr.addGrabbable(gun);
+  mgr._hover.set(ctrlRight, gun);
+  mgr._tryGrab(ctrlRight);
+  ok(mgr._holdDistance.has(ctrlRight), 'starts in distance-hold');
+  const initialDistance = mgr._holdDistance.get(ctrlRight).distance;
+
+  // Simulate the right stick pulled fully back (xr-standard axes[3] = +1 → reels in).
+  ctrlRight.userData.inputSource = { gamepad: { axes: [0, 0, 0, 1] } };
+  mgr.tick(50); // one 50ms tick
+  ok(mgr._holdDistance.has(ctrlRight), 'still distance-held after one small pull');
+  ok(mgr._holdDistance.get(ctrlRight).distance < initialDistance, 'pulling back shrinks the hold distance');
+
+  for (let i = 0; i < 10 && mgr._holdDistance.has(ctrlRight); i++) mgr.tick(50);
+
+  ok(!mgr._holdDistance.has(ctrlRight), 'pulling far enough magnetizes into a real grab');
+  ok(mgr.held.get(ctrlRight) === gun, 'still held after magnetizing');
+  ok(gun.parent === ctrlRight, 'gun is now rigidly attached to the controller');
+}
+
+console.log('--- gamepad ray-grabs skip distance-hold entirely (stick is claimed for RetroPad input)');
+{
+  const scene = new THREE.Scene();
+  const gp = new THREE.Object3D();
+  gp.userData.kind = 'gamepad';
+  gp.position.set(0.2, 1.6, -2.0);
+  scene.add(gp);
+  const ctrlLeft = makeCtrl([-0.2, 1.6, 0], [0, 0, 0]);
+  const ctrlRight = makeCtrl([0.2, 1.6, 0], [0, 0, 0]);
+  scene.add(ctrlLeft); scene.add(ctrlRight);
+  scene.updateMatrixWorld(true);
+
+  const mgr = new GrabMgr({ scene, controllers: [ctrlLeft, ctrlRight], console: makeConsole(), isEditMode: () => false });
+  mgr.addGrabbable(gp);
+  mgr._hover.set(ctrlRight, gp);
+  mgr._tryGrab(ctrlRight);
+
+  ok(mgr.held.get(ctrlRight) === gp, 'right-hand gamepad ray-grab registers held');
+  ok(!mgr._holdDistance.has(ctrlRight), 'gamepad grabs never enter distance-hold');
+  ok(gp.parent === ctrlRight, 'gamepad instant-attaches exactly like today');
+}
+
+console.log('--- edit-mode grabs skip distance-hold even for the right controller');
+{
+  const scene = new THREE.Scene();
+  const gun = createLightGun({ position: new THREE.Vector3(0.2, 1.6, -2.0) });
+  gun.userData.editable = true;
+  scene.add(gun);
+  const ctrlLeft = makeCtrl([-0.2, 1.6, 0], [0, 0, 0]);
+  const ctrlRight = makeCtrl([0.2, 1.6, 0], [0, 0, 0]);
+  scene.add(ctrlLeft); scene.add(ctrlRight);
+  scene.updateMatrixWorld(true);
+
+  const mgr = new GrabMgr({
+    scene, controllers: [ctrlLeft, ctrlRight], console: makeConsole(),
+    isEditMode: () => true, getMode: () => 'move',
+  });
+  mgr.addGrabbable(gun);
+  mgr._hover.set(ctrlRight, gun);
+  mgr._tryGrab(ctrlRight);
+
+  ok(mgr.held.get(ctrlRight) === gun, 'edit-mode right-hand grab still registers held');
+  ok(!mgr._holdDistance.has(ctrlRight), 'edit mode never enters distance-hold');
+  ok(gun.parent === ctrlRight, 'edit-mode grab instant-attaches exactly like today');
+}
+
+console.log('--- point-and-place: releasing a cartridge while aiming at a slot places it there despite being far away');
+{
+  const scene = new THREE.Scene();
+  const consoleObj = makeConsole();
+  consoleObj.position.set(0, 1.2, -2);
+  scene.add(consoleObj);
+
+  const ctrl = makeCtrl([0, 1.2, 0], [0, 0, 0]); // aims straight down -Z, through the slot
+  scene.add(ctrl);
+
+  const cart = new THREE.Object3D();
+  cart.userData.kind = 'cartridge';
+  cart.userData.homePosition = new THREE.Vector3(9, 9, 9);
+  cart.userData.homeQuaternion = new THREE.Quaternion();
+  cart.position.set(10, 10, 10);
+  scene.add(cart);
+  scene.updateMatrixWorld(true);
+
+  let inserted = null;
+  const mgr = new GrabMgr({
+    scene, controllers: [ctrl], console: consoleObj, isEditMode: () => false,
+    onCartridgeInserted: (info) => { inserted = info; },
+  });
+  mgr.addGrabbable(cart);
+  mgr.held.set(ctrl, cart); // simulate an already-held cartridge, far from the slot
+  mgr._release(ctrl);
+
+  ok(inserted !== null, 'onCartridgeInserted fires via ray-match even though the cart is far from the slot');
+  const slotWorld = new THREE.Vector3();
+  consoleObj.userData.slotAnchor.getWorldPosition(slotWorld);
+  const cartWorld = new THREE.Vector3();
+  cart.getWorldPosition(cartWorld);
+  ok(cartWorld.distanceTo(slotWorld) < 1e-6, 'cartridge snapped exactly to the slot anchor');
+}
+
+console.log('--- point-and-place: aiming a held gamepad at a port plugs it in despite being far away');
+{
+  const scene = new THREE.Scene();
+  const consoleObj = makeConsole();
+  const portAnchor = new THREE.Object3D();
+  consoleObj.add(portAnchor);
+  portAnchor.position.set(0, 0, -2); // 2m in front of the console's own origin
+  consoleObj.userData.portAnchors = [portAnchor];
+  consoleObj.userData.activePorts = 1;
+  scene.add(consoleObj);
+
+  const ctrl = makeCtrl([0, 0, 0], [0, 0, 0]); // aims straight down -Z, through the port anchor
+  scene.add(ctrl);
+
+  const gp = new THREE.Object3D();
+  gp.userData.kind = 'gamepad';
+  gp.userData.cableId = 'gp-1';
+  gp.position.set(10, 10, 10); // nowhere near the port
+  scene.add(gp);
+  scene.updateMatrixWorld(true);
+
+  const fakeCable = {
+    isPortFree: () => true,
+    portOf: () => (fakeCable._plugged ? fakeCable._plugged.port : null),
+    plug: (cableId, port) => { fakeCable._plugged = { cableId, port }; },
+  };
+  let plugged = null;
+  const mgr = new GrabMgr({
+    scene, controllers: [ctrl], console: consoleObj, cable: fakeCable, isEditMode: () => false,
+    onGamepadPlugged: (obj) => { plugged = obj; },
+  });
+  mgr.addGrabbable(gp);
+  mgr.held.set(ctrl, gp); // simulate an already-held gamepad, far from the port
+  mgr._release(ctrl);
+
+  ok(fakeCable._plugged && fakeCable._plugged.port === 0, 'ray-match plugs the gamepad into the aimed-at port');
+  ok(plugged === gp, 'onGamepadPlugged fires via the ray match');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
