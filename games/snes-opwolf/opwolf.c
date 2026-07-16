@@ -176,10 +176,29 @@ Gun gview[2];
 // --- Justifier backend (raw) --------------------------------------------------
 // We ping-pong: even frames latch+read gun 0, odd frames gun 1, matching the
 // hardware where each $4016 strobe toggles which gun latches to the PPU counters.
+//
+// IMPORTANT timing subtlety (this WAS a bug — cross-wired guns): a strobe's
+// trigger byte is read via immediate serial shift, so it reflects whichever
+// gun is selected AFTER this toggle. But the PPU H/V latch it also toggles
+// only lands "at the next frame's end" (see the file header) — so reading
+// OPHCT/OPVCT in the SAME poll actually returns the position latched by the
+// *previous* toggle, i.e. the OTHER gun. Storing it under `gun`'s index paired
+// gun A's fresh trigger with gun B's stale position every single frame, so a
+// hit registered by whichever gun's TRIGGER read happened to land, using the
+// WRONG gun's aimed position — in practice the two players' input streams
+// were cross-wired, not just each other's slightly-stale co-op partner.
+//
+// Fix: track which gun the LAST toggle actually selected (jf_latch_owner) and
+// read its now-ready position BEFORE issuing a new toggle, tagging it with
+// the correct (previous) gun index. Position then trails its own gun's
+// trigger by one poll (~1 frame) — expected and imperceptible, same as the
+// file header's documented "up to one frame stale" tolerance — but the two
+// data streams are no longer swapped between players.
 unsigned char jf_present;         // 1 once we have seen the 0xaa7000 signature
 unsigned short jf_x[2], jf_y[2];  // latched position per gun (screen px)
 unsigned char jf_trig[2];         // trigger bit per gun
 unsigned char jf_select;          // which gun we strobed last (0/1)
+unsigned char jf_latch_owner = 0xFF; // gun whose position is ready to read (0xFF = none yet)
 
 // Read the latched PPU beam position (OPHCT/OPVCT are read low-then-high; STAT78
 // read resets the high/low flip-flop). Returns position scaled to screen px.
@@ -224,9 +243,13 @@ void jf_strobe_and_read(void) {
 }
 
 void jf_poll(unsigned char gun) {
+    // Read the position owed from the PREVIOUS toggle first, tagged under the
+    // gun that toggle actually selected — BEFORE we issue a new toggle and
+    // change what's latched. See the jf_latch_owner comment above.
+    if (jf_latch_owner != 0xFF) jf_read_latch(jf_latch_owner);
     jf_select = gun;
     jf_strobe_and_read();         // toggles select inside the core, reads buttons
-    jf_read_latch(gun);           // capture this gun's latched aim
+    jf_latch_owner = gun;         // this toggle's position will be ready next poll
 }
 
 // --- the abstraction the game logic uses --------------------------------------
