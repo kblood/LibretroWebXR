@@ -23,9 +23,17 @@ already rejected as "not viable" in [[psx-n64-feasibility]].
   reach than LRPS2, but still no Emscripten/wasm target found in any build
   matrix or docs page during this research pass.
 
-Neither project's buildbot pages, docs, or announcement posts mention an
-Emscripten output. That's a strong negative signal, not proof of impossibility
-— nobody appears to have tried, likely because of the second point below.
+- **ARMSX2** — a newer (2025/2026) fork of PCSX2 targeting native ARM64
+  speed (desktop and mobile, including Android/iOS/Apple Silicon) via a
+  real-time x86→ARM64 machine-code translation layer over PCSX2's existing
+  JIT. Not a libretro core (no RetroArch integration found), and — like the
+  others — no Emscripten/wasm target. See Blocker 2 below for why its
+  approach doesn't change the wasm picture.
+
+Neither libretro-facing project's buildbot pages, docs, or announcement
+posts mention an Emscripten output. That's a strong negative signal, not
+proof of impossibility — nobody appears to have tried, likely because of the
+second point below.
 
 ## Blocker 1 — no light gun support
 
@@ -55,9 +63,31 @@ and PS2 is a bigger lift than either:
   path) — LRPS2's whole pitch is a **GPU-accelerated** LLE renderer
   (ParaLLEl-GS), which assumes a real graphics backend, not the constrained
   WebGL2-via-wasm environment this project runs in.
-- No JIT path exists in Emscripten-compiled wasm regardless of which of these
-  cores were ported, so none of this changes even with unlimited porting
-  effort — it's the same architectural wall, just a longer drop.
+- **Why "x86_64 only" isn't a packaging gap — it's the whole performance
+  story:** PCSX2/LRPS2's speed comes from a JIT recompiler that writes real
+  x86-64 machine code into memory at runtime and jumps to execute it
+  directly on the host CPU. Upstream PCSX2 *does* ship for ARM, but only as
+  a plain interpreter — dramatically slower, because the JIT (the actual
+  fast path) has no ARM equivalent there. A newer fork, **ARMSX2**, gets
+  PCSX2 running fast on ARM (Android, Apple Silicon) not by writing a native
+  ARM64 recompiler, but by translating the x86 machine code PCSX2's JIT
+  already emits into ARM64 machine code in real time — Rosetta-2-style. So
+  even PS2 emulation's "ARM support" story still fundamentally depends on
+  generating and executing real native machine code at runtime, just with
+  an extra translation hop.
+- **Why this matters for wasm specifically:** WebAssembly already solves
+  cross-CPU portability for free — the same `.wasm` file runs on an x86
+  Windows PC or an ARM Quest headset, because the browser's own engine turns
+  wasm into native code for whatever chip it's actually on. That was never
+  the blocker. The real problem is that none of these PS2 emulators' speed
+  comes from portable, recompilable C++ — their performance story is
+  "generate real machine code and jump to it," and a WebAssembly sandbox has
+  no ability to do that at all, on any host CPU. There is no "just
+  recompile it for wasm" path here; you'd be stuck with the same plain
+  interpreter ARM users are stuck with today, and PS2's interpreter-only
+  speed is understood to be far too slow to be usable — unlike PSX's
+  `pcsx_rearmed`, whose interpreter fallback was at least plausible enough
+  to call "marginal, worth a spike."
 
 ## Verdict
 
@@ -91,6 +121,9 @@ Emscripten port before any of this is testable.
 - [Sony - PlayStation 2 (PCSX2/LRPS2) - Libretro Docs](https://docs.libretro.com/library/lrps2/)
 - [buildbot.libretro.com PS2 nightly builds](https://buildbot.libretro.com/nightly/playstation/ps2/)
 - [Light Guns - EmuVR Wiki](https://www.emuvr.net/wiki/Light_Guns)
+- [PCSX2 Documentation/PCSX2 EE Recompiler - PCSX2 Wiki](https://wiki.pcsx2.net/index.php/PCSX2_Documentation/PCSX2_EE_Recompiler)
+- [ARMSX2 GitHub](https://github.com/ARMSX2/ARMSX2)
+- [Inside ARMSX2: Interviewing the Team Reviving PS2 Emulation on Android](https://gardinerbryant.com/inside-armsx2-interviewing-the-team-reviving-ps2-emulation-on-android/)
 
 _Research pass: 2026-07-16. Libretro core status changes fast — re-verify
 buildbot/docs pages before acting on this if it's been more than a few months._
