@@ -1,14 +1,17 @@
 # PlayStation 2 via libretro — feasibility
 
-**TL;DR.** **Not worth pursuing right now.** A real PS2 core exists
-(`LRPS2`, plus a lighter `Play!` core, which also has its own light-gun
-support and a browser/wasm build — see the
-[2026-07-17 update](#update-2026-07-17--two-corrections-verdict-unchanged) for
-corrections to this section). The blocker isn't missing features anymore, it's
-architectural: neither has a libretro core, so nothing here plugs into this
-project's core-loading pipeline without a from-scratch integration, and the
-one confirmed browser build runs interpreter-only and is reported slow/buggy
-in practice.
+**TL;DR — superseded, 2026-07-17.** This doc's verdict flipped from "skip"
+to "worth a real build plan" over the course of one research session — see
+the two updates below in order, and then
+**[docs/research/libretro-core-authoring/ps2-play-core-plan.md](libretro-core-authoring/ps2-play-core-plan.md)**
+for the current plan and next steps. Short version: `Play!` (one of the two
+PS2 emulators with a libretro-facing presence) already has a real
+WebAssembly-native JIT with SIMD (not an interpreter, despite what this doc
+claimed as recently as its own previous update) *and* an existing libretro
+core wrapper (`Source/ui_libretro/`, separate from its `Play!.js` browser
+frontend) — it's just never been built for Emscripten, and its libretro
+wrapper's input never got light-gun support wired in. Both are scoped,
+bounded engineering tasks now, not open research questions.
 
 ## What exists today
 
@@ -247,3 +250,18 @@ not LibretroWebXR work, and not gated on anything about *this* project.
 - [Play!.js coverage — megavisions.net](https://www.megavisions.net/this-emulator-plays-playstation-2-games-in-your-web-browser/)
 - [WebAssembly jit-interface proposal](https://github.com/WebAssembly/jit-interface)
 - [WebAssembly/proposals — phase tracking](https://github.com/WebAssembly/proposals)
+
+## Correction (2026-07-17, later same day) — the addendum above was itself wrong
+
+The "web build uses an interpreter approach" claim two sections up came from
+summarizing GitHub docs/wiki pages, not from reading the actual source. It's
+wrong: `Play!` has a real, mature WebAssembly-bytecode-emitting JIT
+(`Jitter_CodeGen_Wasm`, with a dedicated SIMD backend), and a separate
+existing libretro core wrapper neither prior pass had found
+(`Source/ui_libretro/`). Full findings and a build plan now live in
+**[docs/research/libretro-core-authoring/ps2-play-core-plan.md](libretro-core-authoring/ps2-play-core-plan.md)**
+— that doc supersedes this one's verdict. Kept here rather than deleted: the
+progression (wrong → less wrong → verified) is the useful part, and the next
+person to touch this shouldn't have to rediscover that secondhand
+review/doc summaries got the CPU-performance story backwards twice in a row
+before someone read the actual code.
