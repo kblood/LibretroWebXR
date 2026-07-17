@@ -262,6 +262,25 @@ Harness: `tmp/verify-ps2-integration.mjs` (real `EmulatorClient`/`systems.js`
 path, PS2SDK homebrew ELF) and `tmp/capture-ps2-log.mjs` (boot-log capture
 only, no post-boot evaluate/screenshot).
 
+**Correction (2026-07-17):** "boots" here only ever meant `retro_load_game`
++ `retro_run()` executing without crashing — it did **not** mean pixels
+reached the canvas for this path. See the caveat at the end of the
+GS/HW-render section above: the 292614/307200-non-black-pixel confirmation
+used a **standalone bypass harness** that called `play_libretro.js` directly
+(`Module.arguments = ['/content/graph.elf']`, no RetroArch `-c` config), not
+the real `EmulatorClient`/RetroArch content-loading pipeline. Driving content
+through the *real* pipeline (this section) never actually got a pixel-level
+render check — and when one was finally done (GunCon2 verification below),
+screenshots came back solid black for every homebrew ELF tried, including a
+trivial infinite-magenta-fill-loop with zero SIF/USB logic. Root cause:
+`CGSH_OpenGL::FlipImpl()` (`Source/gs/GSH_OpenGL/GSH_OpenGL.cpp`) gates the
+entire present/blit call behind `if(framebuffer)`, where `framebuffer` is
+resolved by matching the CRTC's configured display-layer buffer against a
+cache of framebuffers Play! has seen actually rendered to — for this content
+under the real pipeline, that match/creation never happens, so nothing is
+ever drawn to the canvas. Real, previously-undiagnosed, and separate from the
+GunCon2 driver work below — tracked in "Remaining work".
+
 ## Verified: main-thread no longer freezes
 
 Once real content was booting, the entire browser tab froze solid the moment
@@ -292,16 +311,94 @@ Re-verified with `tmp/verify-ps2-integration.mjs`: `page.screenshot()`
 the boot log is otherwise byte-identical in shape to the pre-fix run (same
 365-line tail) — confirming the fix didn't regress anything else.
 
+## Verified: GunCon2 input polling through the REAL USB driver stack
+
+Goes beyond Play!'s internal `CGunCon2UsbDevice::SetGunState()` shortcut —
+authored a homebrew PS2SDK test program that drives the emulated GunCon2 via
+the actual USB LDD driver protocol a real PS2 driver would use:
+`sceUsbdRegisterLdd` → DEVICE/CONFIGURATION/INTERFACE/ENDPOINT descriptor
+scan (`sceUsbdScanStaticDescriptor`) → `sceUsbdOpenPipe` → a continuous
+`sceUsbdTransferPipe` interrupt-transfer poll, parsing the real 6-byte
+GunCon2Out report (`u16 buttons` active-low, `s16 posX`, `s16 posY`). Source
+lives outside this repo (`~/ps2-guncon2-test/` in the WSL2 build tree — an
+IOP module `iop/guncon2_ldd/guncon2_ldd.c` + a SIF-RPC bridge + an EE program
+`ee/main.c`), following this project's "author own test content" pattern
+(same idea as `games/nes-gallery`, `games/snes-scope`).
+
+Verification reads state out of EE RAM directly
+(`retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM)`, exported to JS by adding
+`_retro_get_memory_data,_retro_get_memory_size` to `Makefile.emscripten`'s
+`ifeq ($(LIBRETRO), play)` `EXPORTED_FUNCTIONS` block) rather than via
+screenshots, since the `FlipImpl` bug above blanks the canvas for this
+content regardless of whether the driver test itself works.
+
+**Two real bugs found and fixed to get input actually reaching the driver:**
+
+1. **`rwebinput` had no light-gun support at all in this checkout.** The
+   existing multi-port patch (`docs/patches/rwebinput-lightgun-multiport.diff`,
+   written against an older RetroArch revision) no longer applied cleanly —
+   this tree's `rwebinput_input.c` has *zero* `RETRO_DEVICE_LIGHTGUN` handling
+   to patch against (not even the unpatched base case the diff's context
+   assumed). Hand-applied the equivalent changes: the per-port
+   `rwebinput_lightgun_state_t` array, the exported
+   `rwebinput_set_lightgun`/`rwebinput_clear_lightgun` setters, and a
+   `case RETRO_DEVICE_LIGHTGUN:` in `rwebinput_input_state()` that falls back
+   to the shared DOM mouse when no per-port state has been set — same shape
+   as the original patch, plus `_rwebinput_set_lightgun,_rwebinput_clear_lightgun`
+   in `Makefile.emscripten`'s base `EXPORTED_FUNCTIONS`. Rebuilt
+   `play_libretro.js`/`.wasm` with both this and the `retro_get_memory_data`
+   export.
+2. **`inputDevices` keys are 1-based player numbers, not 0-based libretro
+   ports.** `EmulatorClient.js`'s remap-file writer only treats
+   `Number(player) >= 1` as valid (matching `lightgunLoadConfig`'s
+   `{ [lg.port + 1]: lg.device }` convention in `systems.js`) and silently
+   drops anything else — logging `inputDevices set without remapName —
+   port device will not connect at boot`. `systems.js` declares the GunCon2 on
+   libretro **port 0** (`SYSTEMS.ps2.lightgun.port === 0`), so passing that
+   raw port value as the `inputDevices` key (as `tmp/verify-ps2-integration.mjs`
+   already did, uncaught since it never actually checked input) silently
+   dropped the device — it never connected at boot at all. Fix: key by
+   `port + 1`.
+
+With both fixed, `tmp/verify-ps2-guncon2-real.mjs` passes **8/8**: core boots,
+EE RAM probe readable, poll loop running, LDD `connected:1` (the real driver
+bound to the emulated device), idle trigger reads released, holding the
+trigger flips the real active-low bit (`buttons` drops from `65535` to
+`57343`), releasing restores it, and aim position propagates
+(`x/y` moved from `320,224` centre to `160,336`) — end-to-end through
+`sendLightgun()` → RetroArch's DOM mouse path → the patched `rwebinput` →
+`RETRO_DEVICE_LIGHTGUN` → `UpdateGunConInputState` →
+`CGunCon2UsbDevice::SetGunState` → the **real IOP driver's** `TransferPipe`
+poll → SIF RPC → the EE-side global, proven via the actual USB protocol, not
+Play!'s internal shortcut.
+
 ## Remaining work
 
 See [[research/libretro-core-authoring/ps2-play-core-plan.md]]'s
 risk-ordered list. Done: GS/HW-render spike, real-content boot via
 `EmulatorClient`, GunCon2 USB device + controller-port wiring (confirmed via
-`SET_CONTROLLER_INFO` registering `"PS2 GunCon2"`), main-thread-freeze fix.
+`SET_CONTROLLER_INFO` registering `"PS2 GunCon2"`), main-thread-freeze fix,
+GunCon2 real-driver input polling (see above, 8/8).
 Still open:
-- GunCon2 **input polling** during real gameplay is unverified — the only
-  content tested so far is a PS2SDK homebrew ELF with no controller/gun
-  input at all. Needs a real GunCon2-compatible ISO.
+- **`FlipImpl` never presents a frame for content driven through the real
+  `EmulatorClient`/RetroArch pipeline** (see the correction under "Verified:
+  real content boot" above) — every homebrew ELF tested this way screenshots
+  solid black, including trivial fill-loop content with no SIF/USB logic at
+  all. Root cause identified (`if(framebuffer)` gate in
+  `GSH_OpenGL::FlipImpl`, `Source/gs/GSH_OpenGL/GSH_OpenGL.cpp:169`) but not
+  yet fixed — real content will need this working to be visually playable at
+  all, even though EE-RAM-based verification (like the GunCon2 test above)
+  can route around it.
+- The GunCon2 test above still uses homebrew content with no video output a
+  player would see (paired with the `FlipImpl` bug, doubly true). A real
+  GunCon2-compatible ISO is still the only way to verify a *playable* gun
+  game, not just driver-level input plumbing.
+- The multiport `rwebinput` patch was hand-applied directly to the WSL2
+  `~/amiga-build/RetroArch` checkout, not re-saved as an updated `.diff` in
+  `docs/patches/` — the existing
+  `docs/patches/rwebinput-lightgun-multiport.diff` no longer matches current
+  RetroArch master and will need regenerating (`git diff`) from that checkout
+  if another core needs relinking from a fresh clone.
 - A handful of `WebGL: INVALID_OPERATION: texParameter: no texture bound to
   target` / `INVALID_ENUM` warnings appear every frame starting right at GS
   texture-cache init, before any content-specific rendering. Non-blocking
