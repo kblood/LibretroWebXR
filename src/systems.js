@@ -87,6 +87,17 @@ export const CORES = {
   // (it would require a heavy WSL2 emscripten build — see the dos system note).
   // weight 3 = heavy tier (full x86 + 18 MB wasm); cap to one live rack slot.
   virtualxt:         { url: 'cores/virtualxt_libretro.js',         exts: ['img','com','exe','ini'], label: 'DOS (VirtualXT)', style: 'module', license: 'MPL-2.0', weight: 3 },
+  // PlayStation 2, via a from-scratch Emscripten build of jpd002/Play- (no
+  // libretro buildbot PS2 core exists). Built + verified 2026-07-17 — see
+  // docs/PS2_CORE_BUILD.md for the recipe (3 real build/link bugs found and
+  // fixed) and the render-path verification (real WebGL draw calls + non-black
+  // pixel readback from a booted PS2SDK homebrew ELF). weight 3 = heavy tier
+  // (EE+VU MIPS-to-wasm JIT, same class as virtualxt's full-x86) — unmeasured
+  // on a real headset, may need bumping; see the plan doc's open items.
+  // remapName 'Play!' = this core's retro_get_system_info library_name; needed
+  // for the GunCon2 port-device override below to connect at boot (same
+  // mechanism as every other light gun here — see CORES doc comment above).
+  play:              { url: 'cores/play_libretro.js',              exts: ['elf','iso','cso','isz','cue','chd'], label: 'PlayStation 2 (Play!)', style: 'module', license: 'GPLv2', weight: 3, remapName: 'Play!' },
 };
 
 // Rack budget calibration (see RackBudget.js). Tuned to the Phase-0 Quest-3
@@ -207,6 +218,21 @@ export const SYSTEMS = {
   // shared EmulatorClient.sendMouse primitive owned by the parallel mouse agent —
   // see the "DOS mouse" follow-up comment below SYSTEM_PORTS.
   dos:       { label: 'DOS / IBM PC',       defaultCore: 'virtualxt',        cores: ['virtualxt'],                    exts: ['exe','com','bat','conf','img','dosz','zip','iso','cue'], aliases: ['dos','ms-dos','msdos','pc','ibm pc','dosbox','virtualxt'], thumbnailRepo: null, medium: 'floppy', keyboard: true },
+  // PlayStation 2 (Play!, see CORES.play). medium: 'floppy' is a placeholder —
+  // there's no disc-shaped prop yet (only cartridge/floppy exist); PS2 discs
+  // render as a floppy until one is built.
+  ps2:       { label: 'PlayStation 2',      defaultCore: 'play',              cores: ['play'],                         exts: ['elf','iso','cso','isz','cue','chd'], aliases: ['ps2','playstation 2','playstation2','sony playstation 2'], thumbnailRepo: 'Sony_-_PlayStation_2', medium: 'floppy',
+    // GunCon2 (Play!'s new CGunCon2UsbDevice — see docs/PS2_CORE_BUILD.md).
+    // Device 260 = SUBCLASS(LIGHTGUN,0), matching main_libretro.cpp's
+    // controllers[] registration; reads the standard RETRO_DEVICE_LIGHTGUN
+    // path (same libretro API every other gun here uses), so no core-specific
+    // read-mode coreOption is needed, unlike nestopia/genesis_plus_gx.
+    // UNVERIFIED end-to-end: no real GunCon2-compatible PS2 game ISO was
+    // available to confirm the LLD name string a real IOP-side driver
+    // registers with (see UsbGunCon2Device.h) — the device binds correctly to
+    // libretro's input path and the core builds/boots/renders with it present,
+    // but "does a real GunCon2 game's driver actually attach to it" is untested.
+    lightgun: { label: 'GunCon2', core: 'play', device: 260, port: 0, coreOptions: {} } },
 };
 
 // Controller ports per system — how many controllers the base hardware
@@ -224,6 +250,7 @@ const SYSTEM_PORTS = {
   sg1000: 2, sega32x: 2,
   amiga: 2,   // two DB9 joystick/mouse ports
   dos: 2,     // mouse (port 0) + keyboard / second device
+  ps2: 2,     // two native DualShock2 ports (no stock multitap)
 };
 // --- DOS mouse follow-up (do NOT implement here) -------------------------
 // DOS games are mouse-driven. The mouse transport is the SHARED

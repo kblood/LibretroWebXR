@@ -1,5 +1,40 @@
 # PS2 via a new `Play!`-based libretro core — build plan
 
+## Update (2026-07-17, later same day) — items 2 and 3 done; core boots real content
+
+Item 2 ("build `ui_libretro` for Emscripten") and item 3 ("wire
+`RETRO_DEVICE_LIGHTGUN`") are both done, not just planned. The core now boots
+real content end-to-end through the actual `EmulatorClient`/`systems.js`
+integration (not the item-1 bypass harness), and `SET_CONTROLLER_INFO`
+confirms `"PS2 GunCon2"` registers correctly as a controller option. Getting
+from the item-1 spike to a real boot took five more layered build/runtime
+bugs (thread-spawn crash under non-pthread Emscripten, pthread worker-script
+404, cross-realm Wasm-JIT import table, missing Emscripten exports, missing
+indirect-table growth, WebGL1-vs-WebGL2 context mismatch) plus a
+main-thread-freeze fix (`retro_run()` was blocking the browser's main thread
+indefinitely waiting on the GS mailbox). Full writeup, exact patches, and
+verification methodology for all of it: [[../../PS2_CORE_BUILD.md]].
+
+Still open, per that doc's "Remaining work": GunCon2 *input polling* during
+real gameplay (only tested against a no-input homebrew ELF so far, needs a
+real GunCon2-compatible ISO), a minor non-blocking WebGL texture-parameter
+warning, item 4 (`-msimd128`), and item 5 (rack weight — unchanged, still
+not rack-eligible).
+
+## Update (2026-07-17, same day) — the spike ran, and it worked
+
+Item 1 below ("GS/HW-render-under-Emscripten spike") is done, not just
+planned: `ui_libretro` now builds and links for Emscripten, boots a real
+open-source PS2 homebrew ELF with no BIOS needed, and the HW-render path
+issues real, continuous WebGL draw calls that produce actual non-black
+pixel output. Three real build/link issues were found and fixed along the
+way (a CMake include-order bug that silently disabled the JS platform
+detection and pulled in desktop-only GLEW; a zlib CMake target collision;
+missing `--bind`/`-fexceptions` link flags for Play!'s Embind-based Wasm-JIT
+and C++ exception use). Full recipe, exact patches, and the render-path
+verification methodology: [[../../PS2_CORE_BUILD.md]]. This doc's items
+2-5 (release rebuild, light gun wiring, SIMD, rack weight) are still open.
+
 Supersedes the "skip it" verdict in [[../ps2-feasibility.md]]. That doc's
 2026-07-16/17 passes were working from secondhand reviews and doc summaries.
 This pass reads the actual source of `jpd002/Play-` (the `Play!` PS2

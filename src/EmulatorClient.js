@@ -471,7 +471,7 @@ export class EmulatorClient extends EventTarget {
         if (typeof text === 'string' && text.includes('[INFO]')) console.debug('[core]', text);
         else console.warn('[core]', text);
       },
-      locateFile: (path) => path.endsWith('.wasm') ? coreBase + path : path,
+      locateFile: (path) => (path.endsWith('.wasm') || path.endsWith('.worker.js')) ? coreBase + path : path,
     };
 
     if (this.moduleStyle === 'module') {
