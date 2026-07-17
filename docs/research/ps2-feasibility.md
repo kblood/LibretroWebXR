@@ -192,6 +192,53 @@ at which point the `RETRO_DEVICE_LIGHTGUN` wiring and per-core registration
 pattern this project already has would apply directly and most of this
 integration cost disappears.
 
+### Addendum — checking whether newer WASM (SIMD/threads) could fix the speed
+
+Pushed on this further: does the current WASM feature set (SIMD128, threads,
+which have both shipped in all major browsers since ~2025) change the
+performance picture, either in general or specifically for `Play!.js`?
+
+- **General WASM state, confirmed:** WebAssembly 3.0 (GC, Memory64, threads,
+  SIMD, relaxed SIMD, exception handling) is real and shipped everywhere as
+  of late 2025. None of it adds the one thing that actually matters for a
+  PS2 emulator's stock performance story — a way to generate and execute
+  native machine code at runtime (see the `jit-interface`/Phase-1 discussion
+  above). SIMD and threads can still meaningfully speed up an
+  *interpreter's* hot loops even without a JIT, though — worth checking
+  case-by-case.
+- **`Play!.js` specifically, checked against its actual build config
+  (`Source/ui_js/CMakeLists.txt`, `Source/CMakeLists.txt`, and the
+  `Play--Framework` submodule's `SimdDefs.h`) rather than guessing:**
+  - `SimdDefs.h` explicitly maps `__EMSCRIPTEN__` → `FRAMEWORK_SIMD_USE_NEON`,
+    and vector-heavy code (`Source/ee/Vif.h`, the VIF/VU-feeding path) is
+    already written against that SIMD abstraction — so the maintainer's
+    intent was clearly for the browser build to get vector acceleration.
+  - But **no `-msimd128` (or `-mfpu=neon`) flag appears anywhere in the wasm
+    build's compile or link options**, in either `ui_js/CMakeLists.txt` or
+    the shared `Source/CMakeLists.txt`. Per Emscripten's own docs, NEON
+    intrinsics are emulated *on top of* wasm SIMD128 — meaning that flag is
+    what actually turns the emulation on. Without it, this code path is at
+    best compiling to Emscripten's scalar fallback for unsupported ops, not
+    real hardware SIMD, in the exact code (vector unit feed) that would
+    benefit most.
+  - PTHREAD_POOL_SIZE=2 is set, so some worker-thread pooling is already in
+    play; how much of the emulator's actual workload (EE/VU1/IOP split) uses
+    it wasn't checked.
+  - **Not independently verified by building it** — this is read from the
+    public build scripts, not confirmed against the actual generated
+    `Play.wasm`'s opcodes. Treat "no SIMD128 in the shipped build" as
+    strong-but-unconfirmed until someone actually builds it with the flag
+    added and diffs the output/benchmarks it.
+
+**So: is there a real, cheap performance lever here?** Plausibly yes, and
+it's a legitimate thing worth testing — but it's a lever on **`Play!.js` /
+`jpd002/Play-` upstream**, not on this project. Even a substantially faster
+`Play!.js` (from adding `-msimd128`, or from wasm eventually getting runtime
+codegen) still doesn't make it a libretro core, and the architecture-mismatch
+blocker above is the one this project can't route around. If this is worth
+pursuing, it's an upstream contribution to `jpd002/Play-` in its own right —
+not LibretroWebXR work, and not gated on anything about *this* project.
+
 ### Additional sources (2026-07-17 pass)
 
 - [Play!.js](https://playjs.purei.org/)
