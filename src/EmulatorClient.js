@@ -61,6 +61,33 @@ const SYSTEM_DIR = '/home/web_user/retroarch/system';
 // logical button so the controller works even if no cfg is honoured.
 const RA_CFG_PATH = '/home/web_user/retroarch/userdata/retroarch.cfg';
 
+// Play!'s Emscripten build routes EVERY optical-disc-image file open
+// (Source/Js_DiscImageDeviceStream.cpp, under __EMSCRIPTEN__) through this
+// JS-side bridge instead of the Emscripten filesystem — CreateImageStream()
+// unconditionally returns a CJsDiscImageDeviceStream that calls
+// Module.discImageDevice.{getFileSize,read,isDone}() via MAIN_THREAD_EM_ASM,
+// regardless of what (if anything) exists on FS at the content path. The C++
+// side has no per-instance path/identifier: it's one global device, which is
+// why this only cleanly supports single-file whole-disc images (.iso), not a
+// .cue naming two files (the cue-sheet parser opens two separate streams that
+// would both hit this same global object with no way to tell them apart).
+// Play!'s own (unrelated) ui_js browser frontend defines the same contract
+// backed by a File + async Blob.slice(); we back it with a plain
+// already-in-memory Uint8Array instead, so read() completes synchronously —
+// isDone() is true by the time the busy-poll loop in C++ checks it.
+class DiscImageDevice {
+  constructor(module, data) {
+    this._module = module;
+    this._data = data instanceof Uint8Array ? data : new Uint8Array(data);
+  }
+  getFileSize() { return this._data.length; }
+  read(dstPtr, offset, size) {
+    const src = this._data.subarray(offset, offset + size);
+    this._module.HEAPU8.set(src, dstPtr);
+  }
+  isDone() { return true; }
+}
+
 export class EmulatorClient extends EventTarget {
   constructor({
     coreUrl = 'cores/snes9x_libretro.js',
@@ -112,6 +139,12 @@ export class EmulatorClient extends EventTarget {
     // OS, not the AROS replacement). Fetched lazily in start(); a 404/failed fetch
     // is non-fatal (the core falls back to its built-in default). Null = none.
     this._systemFiles = null;
+    // Whole-disc image content (e.g. PS2 .iso bytes) streamed through Play!'s
+    // Module.discImageDevice JS bridge instead of being written into the
+    // Emscripten MEMFS (see DiscImageDevice above). Set from opts.discImage
+    // in start(); avoids ever duplicating a multi-hundred-MB disc image into
+    // the WASM heap's own filesystem layer. Null = normal MEMFS content.
+    this._discImage = false;
     // Synthetic mouse button state for sendMouse()'s DOM path — mirrors _gunDown.
     // A bitmask of currently-held DOM buttons (1=left, 2=right, 4=middle) so we
     // emit clean mousedown/mouseup edges (the core latches a button until release).
@@ -130,6 +163,7 @@ export class EmulatorClient extends EventTarget {
     // and before _writeRom — so extension-sensitive cores (e.g. PUAE) see e.g.
     // /rom/rom.adf instead of /rom/rom.bin.
     if (opts.contentExt) this._romPath = romVfsPath(opts.contentExt);
+    this._discImage = !!opts.discImage;
     if (opts.coreOptions && Object.keys(opts.coreOptions).length) this._coreOptions = opts.coreOptions;
     if (opts.inputDevices && Object.keys(opts.inputDevices).length) this._inputDevices = opts.inputDevices;
     if (opts.remapName) this._remapName = opts.remapName;
@@ -645,6 +679,19 @@ export class EmulatorClient extends EventTarget {
     const M = this._getModule();
     if (!M?.FS) throw new Error('Module.FS not available — core not initialized');
     try { M.FS.mkdirTree('/rom'); } catch (_) {}
+    if (this._discImage) {
+      // The real bytes never go through MEMFS — Play!'s CreateImageStream()
+      // ignores whatever (if anything) is on disk at this path under
+      // Emscripten and talks to M.discImageDevice instead (see DiscImageDevice
+      // above). Still write a small placeholder so any path-existence/size
+      // check RetroArch's own content loader does before retro_load_game
+      // (need_fullpath=true content is never actually read into memory by RA
+      // itself) finds a real, non-empty file.
+      M.discImageDevice = new DiscImageDevice(M, romBuffer);
+      const data = new Uint8Array(romBuffer);
+      M.FS.writeFile(this._romPath, data.subarray(0, Math.min(data.length, 32768)));
+      return;
+    }
     M.FS.writeFile(this._romPath, new Uint8Array(romBuffer));
   }
 

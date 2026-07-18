@@ -443,6 +443,92 @@ trigger flips the real active-low bit (`buttons` drops from `65535` to
 poll → SIF RPC → the EE-side global, proven via the actual USB protocol, not
 Play!'s internal shortcut.
 
+## Verified: real commercial game boot — Time Crisis II via a new discImageDevice shim
+
+Every prior verification above used `.elf` homebrew content, which loads
+through a completely different path (`BootableUtils::IsBootableExecutablePath`
+→ `BootType::ELF`) than a real disc image
+(`IsBootableDiscImagePath` → `BootType::CD` → `m_ee->m_os->BootFromCDROM()`).
+Getting an actual game (`Time Crisis II (Japan) (With GunCon2)`, sourced from
+the home Pi file server — see `CLAUDE.md`) booting surfaced one previously
+unknown architectural gap and one real rendering bug, neither exercised by
+any ELF test:
+
+**The gap — Play!'s Emscripten build has no filesystem path for disc
+images at all.** `Source/Js_DiscImageDeviceStream.cpp`'s
+`CreateImageStream()` unconditionally returns a `CJsDiscImageDeviceStream`
+under `__EMSCRIPTEN__`, for every optical-media file open — it never touches
+the Emscripten MEMFS, no matter what (if anything) exists at the requested
+path. Instead it calls out via `MAIN_THREAD_EM_ASM`/`MAIN_THREAD_EM_ASM_INT`
+to a JS-side singleton, `Module.discImageDevice`
+(`.getFileSize()` / `.read(dstPtr, offset, size)` / `.isDone()`), busy-polled
+with `usleep(100)` from native code. This bridge exists only in Play!'s
+separate, unrelated `ui_js` browser frontend (`js/play_browser/src/
+DiscImageDevice.ts`) — this project's RetroArch-based `EmulatorClient.js`
+had never implemented it, so no `.iso`/`.cue`/`.chd` content could load at
+all (silently — `retro_load_game` "succeeds" and the core just never
+produces a bootable disc filesystem).
+
+Also relevant: the reference `DiscImageDevice.ts` contract is a
+**single-global-file** design with no per-request path/identifier, which
+only cleanly supports a single whole-disc `.iso`-style image — a `.cue`
+sheet parses into *two* separate `CreateImageStream()` calls (one for the
+cue text, one for the referenced `.bin`) that would both hit the same
+global object with no way to tell them apart. Confirmed by reading
+`DiskUtils::CreateOpticalMediaFromPath()`: a bare `.iso` extension (no
+special-cased branch) falls through to exactly **one**
+`CreateImageStream()` call → `COpticalMedia::CreateAuto()`, which tries
+2048-byte ISO9660 blocks first and falls back to 2352-byte CD-ROM XA raw
+sectors — i.e. it auto-detects a raw `.bin`-style dump fine as long as it's
+presented as a single `.iso`-extension file, sidestepping the `.cue`
+multi-file problem entirely. So the fix loads the game's `.bin` directly
+with a `.iso` extension, skipping the `.cue` sidecar.
+
+**Fix — `DiscImageDevice` class + `opts.discImage` in `EmulatorClient.js`**:
+a small JS class backed by an already-in-memory `Uint8Array` (the fetched
+disc image), not a `File`/`Blob` — `read()` copies straight into
+`Module.HEAPU8` and returns synchronously, so by the time native code's
+busy-poll loop checks `isDone()` it's already `true` on the very first
+check (no async timing to get wrong, unlike the `File.slice().arrayBuffer()`
+reference implementation). `start(canvas, romBuffer, { discImage: true, ... })`
+installs `M.discImageDevice = new DiscImageDevice(M, romBuffer)` and writes
+only a small (32 KB) placeholder into MEMFS at the content path — confirmed
+via `ui_js`'s own `PlayModule.ts` (`FS.mkdir("/work")` then
+`discImageDevice = new DiscImageDevice(...)`, never `FS.writeFile` for the
+disc itself) that the real upstream design never puts disc bytes in the
+VFS either, so a multi-hundred-MB duplicate copy isn't needed. This avoids
+ever holding two full copies of a 700 MB+ disc image in the WASM heap.
+
+**The rendering bug — a vertical flip, invisible until now.** With the
+shim wired up, the game booted straight to a real, legible Japanese
+memory-card-select screen (`新規ファイルを作成するメモリーカード（PS2）の
+MEMORY CARD差込口を選択してください。`) — but upside-down. The `gl2.c`
+`glBlitFramebuffer` present fix (see "Verified: real rendered frames reach
+the canvas" above) replaced a shader/UV-mapped draw with a raw blit, and lost
+whatever V-flip the original texture coordinates applied to correct the
+FBO's bottom-up GL orientation for the top-down screen. Every earlier
+verification used solid-color or symmetric test content, which looks
+identical either way flipped — this bug existed the whole time and nothing
+so far could have caught it. Fixed by flipping the *source* Y range in the
+blit (`0, frame_height, frame_width, 0` instead of `0, 0, frame_width,
+frame_height`), the standard "flip during blit" idiom. Re-verified: the
+same memory-card screen now renders right-side-up.
+
+**Confirmed playable, not just a static screen**: synthesizing a few
+Start (`Enter`) and Cross (`h`, `input_player1_a`) presses through
+`sendInput()` — the same per-canvas `KeyboardEvent` path every other core
+uses for keyboard control — advanced past the memory-card prompt through a
+scene-load transition into the game's actual 3D intro cutscene (an oil rig
+at night, spotlights, water reflections), fully textured and lit,
+confirming the GS/HW-render pipeline handles real commercial 3D content
+correctly, not just the earlier synthetic solid-color self-test. Diagnostic
+scripts: `tmp/diag-ps2-realgame.mjs` (boot + first render),
+`tmp/diag-ps2-realgame-play.mjs` (boot + input navigation into gameplay).
+
+**Not yet done**: actually verifying the GunCon2 *in* real gameplay (only
+the menu/cutscene path was driven, via the standard pad keys, not the gun);
+re-diffing the `gl2.c` blit-present + Y-flip patch into `docs/patches/`.
+
 ## Remaining work
 
 See [[research/libretro-core-authoring/ps2-play-core-plan.md]]'s
@@ -451,26 +537,34 @@ risk-ordered list. Done: GS/HW-render spike, real-content boot via
 `SET_CONTROLLER_INFO` registering `"PS2 GunCon2"`), main-thread-freeze fix,
 GunCon2 real-driver input polling (see above, 8/8), real rendered frames
 reaching the canvas through the actual `EmulatorClient`/RetroArch pipeline
-(see "Verified: real rendered frames reach the canvas" above).
+(see "Verified: real rendered frames reach the canvas" above), a real
+commercial game (Time Crisis II) booting through a new `discImageDevice`
+shim and rendering correct, right-side-up, playable 3D content (see
+"Verified: real commercial game boot" above).
 Still open:
-- The GunCon2 test above still uses homebrew content with no video output
-  beyond the solid-color self-test cycle. A real GunCon2-compatible ISO is
-  still the only way to verify a *playable* gun game with real graphics, not
-  just driver-level input plumbing plus a synthetic color-cycle render check.
-- The multiport `rwebinput` patch was hand-applied directly to the WSL2
-  `~/amiga-build/RetroArch` checkout, not re-saved as an updated `.diff` in
-  `docs/patches/` — the existing
-  `docs/patches/rwebinput-lightgun-multiport.diff` no longer matches current
-  RetroArch master and will need regenerating (`git diff`) from that checkout
-  if another core needs relinking from a fresh clone.
+- GunCon2 input has been verified against the real USB driver stack (8/8,
+  synthetic color-cycle render) and real 3D rendering has been verified
+  (Time Crisis II cutscene, standard-pad navigation) — but not both
+  together yet: driving the GunCon2 *during actual real-game gameplay*
+  (past the intro, into an on-rails shooting stage) is the one remaining
+  unverified combination.
+- The multiport `rwebinput` patch AND the new `gl2.c` blit-present +
+  Y-flip patch were both hand-applied directly to the WSL2
+  `~/amiga-build/RetroArch` checkout, not saved as `.diff`s in
+  `docs/patches/` — the existing `docs/patches/rwebinput-lightgun-
+  multiport.diff` no longer matches current RetroArch master and both will
+  need regenerating (`git diff`) from that checkout if another core needs
+  relinking from a fresh clone.
 - A handful of `WebGL: INVALID_OPERATION: texParameter: no texture bound to
   target` / `INVALID_ENUM` warnings appear every frame starting right at GS
   texture-cache init, before any content-specific rendering. Non-blocking
   (doesn't stop boot or the freeze fix from working) but not yet root-caused
   — likely a texture-unit binding gap specific to `GSH_OpenGL_Libretro`'s
   init path vs. `ui_js`'s.
-- Real-game boot test with an actual PS2 ISO/BIOS (`C:\Devstuff\ROMs\PS2\`
-  has BIOS files but no game ISOs as of this writing).
+- `.cue`/`.chd` multi-file content still can't load (only single-file
+  `.iso`-style presentation works, per the discImageDevice design gap
+  above) — not needed for Time Crisis II (its `.bin` loads fine renamed to
+  `.iso`), but would block CHD-only dumps.
 - `-msimd128` and a size/perf pass on the release build haven't been
   revisited since the ASSERTIONS-era measurement.
 
