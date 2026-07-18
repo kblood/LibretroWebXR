@@ -272,14 +272,85 @@ the real `EmulatorClient`/RetroArch content-loading pipeline. Driving content
 through the *real* pipeline (this section) never actually got a pixel-level
 render check — and when one was finally done (GunCon2 verification below),
 screenshots came back solid black for every homebrew ELF tried, including a
-trivial infinite-magenta-fill-loop with zero SIF/USB logic. Root cause:
-`CGSH_OpenGL::FlipImpl()` (`Source/gs/GSH_OpenGL/GSH_OpenGL.cpp`) gates the
-entire present/blit call behind `if(framebuffer)`, where `framebuffer` is
-resolved by matching the CRTC's configured display-layer buffer against a
-cache of framebuffers Play! has seen actually rendered to — for this content
-under the real pipeline, that match/creation never happens, so nothing is
-ever drawn to the canvas. Real, previously-undiagnosed, and separate from the
-GunCon2 driver work below — tracked in "Remaining work".
+trivial infinite-magenta-fill-loop with zero SIF/USB logic. An initial theory
+(`if(framebuffer)` never resolving in `FlipImpl`) turned out to be wrong —
+see "Verified: real rendered frames reach the canvas" below for the actual
+root cause and fix, found the same day.
+
+## Verified: real rendered frames reach the canvas
+
+The black-screen bug above was **not** the `if(framebuffer)` gate (that
+resolves correctly every frame — confirmed via instrumented `glReadPixels`
+readback showing real, changing GS-rendered color data every single frame).
+The actual root cause was a two-layer bug, both halves the same underlying
+shape, in two different codebases:
+
+1. **Play!'s own present draw** (`CGSH_OpenGL::FlipImpl`,
+   `Source/gs/GSH_OpenGL/GSH_OpenGL.cpp`) samples `framebuffer->m_texture`
+   via a trivial pass-through shader (`GeneratePresentProgram`) to draw it
+   into `m_presentFramebuffer`. `framebuffer->m_texture` is *permanently*
+   attached as `framebuffer->m_framebuffer`'s COLOR_ATTACHMENT0 (used every
+   frame for real-time GS primitive rendering). Sampling a texture via a
+   shader while it is (even just still-attached-elsewhere, not
+   currently-bound) considered part of a framebuffer's attachment set
+   produces **no visible output beyond the very first frame** under this
+   Emscripten/WebGL2 target — reproduced identically on both SwiftShader
+   (software) and real D3D11-backed ANGLE (hardware GPU), ruling out a
+   driver-specific bug. Every piece of GL state (program, VAO, bindings,
+   viewport, blend/depth/scissor/colorMask) was confirmed correct every
+   frame; only the shader-sampled draw's *output* silently went black after
+   frame 1 — looks like a false-positive feedback-loop guard in ANGLE's
+   validation layer. Explicitly detaching/reattaching the texture around the
+   draw did **not** fix it.
+2. **RetroArch's own frontend present draw** has the identical shape, one
+   layer further out. `gfx/drivers/gl2.c` (the actual driver used for this
+   Emscripten/GLES3 build — **not** `gl3.c`, which is gated behind
+   `HAVE_GL_CORE`/desktop GL and unused here) permanently attaches each
+   `gl->texture[i]` as `gl->hw_render_fbo[i]`'s color target
+   (`gl2_init_hw_render`), then `gl2_frame()` samples
+   `gl->texture[gl->tex_index]` through the stock shader
+   (`gl->shader->set_params`/`set_coords`/`set_mvp` + `glDrawArrays`) to
+   present it. Same bug, same symptom: confirmed via an instrumented
+   `glReadPixels` inside Play!'s `FlipImpl` that real, correct, changing
+   color data (the homebrew test content's solid-color cycle) was landing in
+   `gl->hw_render_fbo[gl->tex_index]` every frame — proving the core→frontend
+   handoff was correct — while the actual browser canvas stayed solid black,
+   isolating the remaining bug to RetroArch's own present pass.
+
+**Fix, both layers:** replace the shader/sampler draw with `glBlitFramebuffer`
+(a direct GL_READ_FRAMEBUFFER → GL_DRAW_FRAMEBUFFER pixel copy), which
+sidesteps the programmable pipeline entirely and works reliably every frame:
+
+- `GSH_OpenGL.cpp`'s `FlipImpl`: blits `framebuffer->m_framebuffer` →
+  `m_presentFramebuffer` instead of drawing the present-shader quad. The old
+  `GeneratePresentProgram`/`m_presentProgram`/vertex-buffer/array plumbing is
+  left in place (dead code, unused by the new path) to keep the change
+  minimal.
+- `gl2.c`'s `gl2_frame()`: when hw-render is active and there are no
+  additional shader FBO passes (`GL2_FLAG_HW_RENDER_FBO_INIT` set,
+  `GL2_FLAG_FBO_INITED` clear — i.e. the plain/no-custom-shader present
+  case, which is what this project always uses), blits
+  `gl->hw_render_fbo[gl->tex_index]` → the default framebuffer instead of
+  the stock-shader `glDrawArrays` quad. Falls back to the original
+  shader-based draw for every other case (CPU-uploaded-frame cores,
+  active shader chains) — this patch is scoped to the exact hw-render/no-chain
+  case that was broken, not a blanket replacement.
+
+Both fixes were verified together: `tmp/diag-ps2-flip.mjs` (headless
+SwiftShader) and its `-gpu` variant (real D3D11 GPU, `headless: false`) both
+show real, non-black, changing PS2-rendered content
+(`tmp/diag-ps2-flip-canvas.png`) reaching the actual browser canvas for the
+first time — the homebrew test ELF's solid-color self-test cycle (blue → red
+→ green) is visible frame-to-frame. `tmp/verify-ps2-guncon2-real.mjs` still
+passes **8/8** against the fixed build — no regression to the light-gun input
+path.
+
+**Note for future rebuilds:** the `gl2.c` patch lives in the WSL2
+`~/amiga-build/RetroArch` checkout (same tree the `rwebinput` lightgun patch
+was hand-applied to), not in this repo or in Play!'s own source tree. Like
+the `rwebinput` patch, it isn't currently saved as a `.diff` under
+`docs/patches/` — regenerate one (`git diff -- gfx/drivers/gl2.c`) from that
+checkout before relinking from a fresh RetroArch clone.
 
 ## Verified: main-thread no longer freezes
 
@@ -378,21 +449,14 @@ See [[research/libretro-core-authoring/ps2-play-core-plan.md]]'s
 risk-ordered list. Done: GS/HW-render spike, real-content boot via
 `EmulatorClient`, GunCon2 USB device + controller-port wiring (confirmed via
 `SET_CONTROLLER_INFO` registering `"PS2 GunCon2"`), main-thread-freeze fix,
-GunCon2 real-driver input polling (see above, 8/8).
+GunCon2 real-driver input polling (see above, 8/8), real rendered frames
+reaching the canvas through the actual `EmulatorClient`/RetroArch pipeline
+(see "Verified: real rendered frames reach the canvas" above).
 Still open:
-- **`FlipImpl` never presents a frame for content driven through the real
-  `EmulatorClient`/RetroArch pipeline** (see the correction under "Verified:
-  real content boot" above) — every homebrew ELF tested this way screenshots
-  solid black, including trivial fill-loop content with no SIF/USB logic at
-  all. Root cause identified (`if(framebuffer)` gate in
-  `GSH_OpenGL::FlipImpl`, `Source/gs/GSH_OpenGL/GSH_OpenGL.cpp:169`) but not
-  yet fixed — real content will need this working to be visually playable at
-  all, even though EE-RAM-based verification (like the GunCon2 test above)
-  can route around it.
-- The GunCon2 test above still uses homebrew content with no video output a
-  player would see (paired with the `FlipImpl` bug, doubly true). A real
-  GunCon2-compatible ISO is still the only way to verify a *playable* gun
-  game, not just driver-level input plumbing.
+- The GunCon2 test above still uses homebrew content with no video output
+  beyond the solid-color self-test cycle. A real GunCon2-compatible ISO is
+  still the only way to verify a *playable* gun game with real graphics, not
+  just driver-level input plumbing plus a synthetic color-cycle render check.
 - The multiport `rwebinput` patch was hand-applied directly to the WSL2
   `~/amiga-build/RetroArch` checkout, not re-saved as an updated `.diff` in
   `docs/patches/` — the existing
