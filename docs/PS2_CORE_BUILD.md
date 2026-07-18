@@ -525,9 +525,27 @@ correctly, not just the earlier synthetic solid-color self-test. Diagnostic
 scripts: `tmp/diag-ps2-realgame.mjs` (boot + first render),
 `tmp/diag-ps2-realgame-play.mjs` (boot + input navigation into gameplay).
 
-**Not yet done**: actually verifying the GunCon2 *in* real gameplay (only
-the menu/cutscene path was driven, via the standard pad keys, not the gun);
-re-diffing the `gl2.c` blit-present + Y-flip patch into `docs/patches/`.
+**GunCon2 driving real menu logic, confirmed once (not yet reliable)**:
+booting with `inputDevices`/`remapName` from `lightgunLoadConfig('ps2', {})`
+(the same helper the real app uses, not hand-rolled) wires the GunCon2 in at
+boot. Firing `sendLightgun(u, v, trigger, 0)` at the "top menu" screen's
+"arcade" bubble advanced the game onto a real animated "LOADING" screen in
+one run (`tmp/diag-ps2-realgame-gun2.mjs`) — proof the gun's trigger reaches
+real in-game menu/selection logic, not just the standard-pad path. A repeat
+run with a much longer wait past that point (`tmp/diag-ps2-realgame-gun3.mjs`,
+90s) landed back on the attract-mode top menu instead of finishing the load
+— the exact select/confirm timing isn't yet reliable run-to-run (headless
+synthetic input timing vs. whatever this menu's frame-precise gun-trigger
+window actually is), so an on-rails shooting *stage* has not been reached
+yet. The building blocks (real gun input into a real game's menu system,
+real 3D rendering, a working load-a-mission path) are all independently
+proven; only the precise input choreography to chain them reliably is
+outstanding.
+
+**Not yet done**: reliably reaching (and then firing the gun *during*) an
+actual on-rails shooting stage — menu-level gun control is proven, in-stage
+gun control is not; re-diffing the `gl2.c` blit-present + Y-flip patch into
+`docs/patches/`.
 
 ## Remaining work
 
@@ -543,11 +561,14 @@ shim and rendering correct, right-side-up, playable 3D content (see
 "Verified: real commercial game boot" above).
 Still open:
 - GunCon2 input has been verified against the real USB driver stack (8/8,
-  synthetic color-cycle render) and real 3D rendering has been verified
-  (Time Crisis II cutscene, standard-pad navigation) — but not both
-  together yet: driving the GunCon2 *during actual real-game gameplay*
-  (past the intro, into an on-rails shooting stage) is the one remaining
-  unverified combination.
+  synthetic color-cycle render), real 3D rendering has been verified (Time
+  Crisis II cutscene, standard-pad navigation), AND the gun has been shown
+  to drive real in-game menu logic once (advanced the real "top menu" onto
+  a real "LOADING" screen — see "GunCon2 driving real menu logic" above).
+  What's still unverified is the full chain held together reliably: a
+  repeat attempt landed back on the attract menu instead of finishing the
+  load, so the exact input choreography needed to reach — and then fire the
+  gun *during* — an actual on-rails shooting stage isn't nailed down yet.
 - The multiport `rwebinput` patch AND the new `gl2.c` blit-present +
   Y-flip patch were both hand-applied directly to the WSL2
   `~/amiga-build/RetroArch` checkout, not saved as `.diff`s in
