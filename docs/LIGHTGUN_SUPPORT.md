@@ -105,6 +105,21 @@ Zapper ROM (Duck Hunt etc.) — nothing in the core or the `rwebinput` patch nee
   every dynamic HUD chunk in the buffer shares page `0x20` with the score chunk — worth
   remembering for any future NES game whose HUD spans more than one on-screen row via a
   single `set_vram_update()` buffer.
+- PS2 GunCon2: `games/ps2-guncon-range/` + `scripts/make-ps2-guncon-range.mjs` build the
+  CC0 "LWX GunCon Range" homebrew ELF, **registered** as "LWX GunCon Range"
+  (`"lightgun": true, "core": "play"`). First PS2 authored game — built with the PS2SDK
+  via the `ps2dev/ps2dev` Docker toolchain (see `docs/PS2_CORE_BUILD.md`), not a 2D
+  6502/65816 target. A target box spawns at a random position on a dark field; the
+  crosshair tracks the GunCon2 directly (no calibration step — GunCon2 position already
+  arrives in screen-output pixel space). On-target trigger pull = green flash + score++
+  + respawn; off-target = red flash + misses++; 5 misses briefly flashes game-over then
+  auto-resets, no menu. Reuses the real USB LDD GunCon2 driver stack proven in
+  `[[ps2-guncon2-real-driver-verified]]` (SIF RPC bridge to an IOP module) verbatim — the
+  game logic only ever talks to the shared `guncon2_state_t` struct, has no idea whether
+  input came from real USB hardware or the libretro core's own emulated GunCon2 device.
+  `score`/`misses`/`connected` are kept in a fixed EE-RAM probe struct for headless
+  verification via `retro_get_memory_data`, same technique as
+  `tmp/verify-ps2-guncon2-real.mjs`.
 
 ## ✅ Proof the fix works (patched nestopia)
 

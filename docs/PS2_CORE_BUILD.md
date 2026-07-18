@@ -443,6 +443,37 @@ trigger flips the real active-low bit (`buttons` drops from `65535` to
 poll → SIF RPC → the EE-side global, proven via the actual USB protocol, not
 Play!'s internal shortcut.
 
+## Authored game: LWX GunCon Range
+
+`games/ps2-guncon-range/` turns the GunCon2 driver-test harness above into an
+actual small, legally-shippable game — the PS2 entry in this project's
+"author our own CC0 test content per system" pattern (`games/nes-gallery`,
+`games/snes-scope`). Ships as `lwx-ps2-guncon-range.elf`, registered in
+`public/roms/manifest.json` with `"lightgun": true`, `"core": "play"`. Full
+design, licensing, and verification notes: `games/ps2-guncon-range/README.md`
+and `docs/LIGHTGUN_SUPPORT.md`'s "Authored game status" section.
+
+Built via `scripts/make-ps2-guncon-range.mjs`, which shells out to WSL2 +
+the `ps2dev/ps2dev` Docker image (same toolchain as the driver-test harness
+above) rather than the emsdk/CMake path used for the `play_libretro` core
+itself. Two build-environment gaps turned up authoring this, worth knowing
+for any future PS2SDK homebrew in this project:
+- The `ps2dev/ps2dev` image is Alpine-based and ships **no `make`** at all —
+  the build script installs it via `apk add --no-cache make` as the first
+  step inside each `docker run` (fast, no persistent image needed).
+- The `imports.lst`-based IOP-import codegen (`Makefile.iopglobal`) always
+  emits `#include "irx_imports.h"`, but no such header ships anywhere in
+  this ps2sdk build (confirmed via `find` across the whole toolchain image)
+  — only `<irx.h>` itself defines `DECLARE_IMPORT_TABLE`/etc. Needs a local
+  one-line forwarding shim (`games/ps2-guncon-range/iop/guncon2_ldd/irx_imports.h`
+  → `#include <irx.h>`); copied into every IOP-driver source tree that reuses
+  `imports.lst`, not just this game's.
+- The container runs as **root**, so a bind-mounted WSL2 scratch directory's
+  build artifacts (`obj/*.o`) come out root-owned and a plain host-side `rm
+  -rf` on a rebuild fails with `Permission denied`. The build script clears
+  the scratch directory from inside a (rootful) container before removing it
+  from the host shell.
+
 ## Verified: real commercial game boot — Time Crisis II via a new discImageDevice shim
 
 Every prior verification above used `.elf` homebrew content, which loads

@@ -54,6 +54,9 @@
       "license": "CC0", "credits": "LibretroWebXR (game in games/vb-demo, built with VUEngine ves-v0.6.0; see scripts/make-vb-demo.mjs). Move a box with the D-pad; A/B change stereo depth." },
 
     { "file": "freeware/lwx-amiga-demo.adf", "system": "amiga", "core": "puae", "title": "LWX Amiga Demo", "color": "#0a3a6a",
-      "license": "CC0", "credits": "LibretroWebXR (boot-block 68k intro in scripts/amiga-bootblock.s, packed by scripts/make-amiga-demo.mjs). Boots on PUAE's built-in AROS; cycles the background colour." }
+      "license": "CC0", "credits": "LibretroWebXR (boot-block 68k intro in scripts/amiga-bootblock.s, packed by scripts/make-amiga-demo.mjs). Boots on PUAE's built-in AROS; cycles the background colour." },
+
+    { "file": "freeware/lwx-ps2-guncon-range.elf", "system": "ps2", "core": "play", "title": "LWX GunCon Range", "color": "#1a2a4a", "lightgun": true,
+      "license": "CC0", "credits": "LibretroWebXR (game in games/ps2-guncon-range, built with the PS2SDK ps2dev/ps2dev toolchain + a real USB LDD GunCon2 driver; see scripts/make-ps2-guncon-range.mjs). GunCon2 shooting gallery — aim and pull the trigger to hit the target box; 5 misses resets score." }
   ]
 }

@@ -1,0 +1,27 @@
+#include <sysclib.h>
+#include <thbase.h>
+#include <sifcmd.h>
+#include <usbd.h>
+
+sysclib_IMPORTS_start
+I_memset
+sysclib_IMPORTS_end
+
+thbase_IMPORTS_start
+I_CreateThread
+I_StartThread
+I_GetThreadId
+thbase_IMPORTS_end
+
+sifcmd_IMPORTS_start
+I_sceSifSetRpcQueue
+I_sceSifRegisterRpc
+I_sceSifRpcLoop
+sifcmd_IMPORTS_end
+
+usbd_IMPORTS_start
+I_sceUsbdRegisterLdd
+I_sceUsbdScanStaticDescriptor
+I_sceUsbdOpenPipe
+I_sceUsbdTransferPipe
+usbd_IMPORTS_end
