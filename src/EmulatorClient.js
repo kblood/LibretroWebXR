@@ -21,6 +21,19 @@
 import { RETROARCH_CFG, RETROARCH_CFG_DIR, RETROARCH_CFG_PATH } from './RetroArchConfig.js';
 
 const ROM_VFS_DIR = '/rom';
+// Single-file whole-disc extensions Play!'s Js_DiscImageDeviceStream bridge can
+// serve (see DiscImageDevice below) — CreateOpticalMediaFromPath() opens exactly
+// ONE CreateImageStream() for each of these (confirmed by reading Play!'s
+// Source/DiskUtils.cpp: .chd routes through CreateOpticalMediaFromChd(), which
+// wraps a single CreateImageStream() in CChdCdImageStream — libchdr's chd_open
+// then does its own random-access hunk reads through that one stream, which the
+// bridge already supports via its offset-aware read()). `.cue` is deliberately
+// excluded: it parses into TWO CreateImageStream() calls (cue text + referenced
+// .bin), both hitting the same global Module.discImageDevice singleton with no
+// way to tell them apart — genuinely unsupported until this app's loader gains a
+// multi-file-per-ROM concept. `.elf` homebrew boots via the normal MEMFS path,
+// not this bridge, so it's excluded too.
+const DISC_IMAGE_EXTS = new Set(['iso', 'cso', 'isz', 'chd']);
 // Some cores identify content by its file *extension*, not by sniffing the
 // bytes — e.g. PUAE (Amiga) rejects a disk image named `.bin` with
 // "Unsupported file format". So the VFS content path carries the real
@@ -163,7 +176,14 @@ export class EmulatorClient extends EventTarget {
     // and before _writeRom — so extension-sensitive cores (e.g. PUAE) see e.g.
     // /rom/rom.adf instead of /rom/rom.bin.
     if (opts.contentExt) this._romPath = romVfsPath(opts.contentExt);
-    this._discImage = !!opts.discImage;
+    // opts.discImage is an explicit override (used by de-risk/diagnostic scripts);
+    // real call sites never set it, so auto-detect from the core + extension —
+    // otherwise every PS2 disc image silently fails to boot (see DISC_IMAGE_EXTS).
+    const coreForLoad = opts.coreName || this.coreName;
+    const extForLoad = String(opts.contentExt || '').toLowerCase().replace(/^\./, '');
+    this._discImage = opts.discImage !== undefined
+      ? !!opts.discImage
+      : (coreForLoad === 'play' && DISC_IMAGE_EXTS.has(extForLoad));
     if (opts.coreOptions && Object.keys(opts.coreOptions).length) this._coreOptions = opts.coreOptions;
     if (opts.inputDevices && Object.keys(opts.inputDevices).length) this._inputDevices = opts.inputDevices;
     if (opts.remapName) this._remapName = opts.remapName;

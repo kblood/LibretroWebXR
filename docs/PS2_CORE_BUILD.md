@@ -589,7 +589,11 @@ reaching the canvas through the actual `EmulatorClient`/RetroArch pipeline
 (see "Verified: real rendered frames reach the canvas" above), a real
 commercial game (Time Crisis II) booting through a new `discImageDevice`
 shim and rendering correct, right-side-up, playable 3D content (see
-"Verified: real commercial game boot" above).
+"Verified: real commercial game boot" above), and (2026-07-20) wiring the
+`discImageDevice` bridge into the REAL app (it was previously only exercised
+by bypass/diagnostic harnesses) — see "`.chd` now works" below; this also
+fixes `.iso`/`.cso`/`.isz` disc-image loading via the real file picker, which
+was equally broken until now.
 Still open:
 - GunCon2 input has been verified against the real USB driver stack (8/8,
   synthetic color-cycle render), real 3D rendering has been verified (Time
@@ -613,10 +617,45 @@ Still open:
   (doesn't stop boot or the freeze fix from working) but not yet root-caused
   — likely a texture-unit binding gap specific to `GSH_OpenGL_Libretro`'s
   init path vs. `ui_js`'s.
-- `.cue`/`.chd` multi-file content still can't load (only single-file
-  `.iso`-style presentation works, per the discImageDevice design gap
-  above) — not needed for Time Crisis II (its `.bin` loads fine renamed to
-  `.iso`), but would block CHD-only dumps.
+- `.cue` multi-file content still can't load (the discImageDevice bridge is a
+  single-global-file design — see the design-gap note above — and a `.cue`
+  sheet parses into TWO `CreateImageStream()` calls, cue text + referenced
+  `.bin`, both hitting the same global object). Genuinely unsupported until
+  this app's loader gains a multi-file-per-ROM concept.
+- **`.chd` now works, real content boot verified 2026-07-20.** Unlike `.cue`,
+  `.chd` routes through exactly ONE `CreateImageStream()` call
+  (`DiskUtils::CreateOpticalMediaFromChd()` wraps it in `CChdCdImageStream`,
+  and libchdr's `chd_open_core_file`/`chd_read` do their own random-access
+  hunk reads through that single stream — the bridge already supports
+  arbitrary-offset reads, so no C++/core change was needed). `deps/libchdr`
+  is already statically linked into `play_libretro.wasm` (confirmed: its
+  object files are present in `combine/libretro_emscripten.a`) — the
+  `HAVE_CHD=0` in the recipe's RetroArch link step (step 9) only gates
+  RetroArch's own unrelated `libretro-common/formats/cdfs/cdfs.c` (used by
+  achievements), not Play!'s CHD support, so no core rebuild was needed
+  either. **The actual bug was one level up**: `opts.discImage` was never
+  set anywhere in the real app (`main.js`/`ConsoleRuntime.js`/
+  `desktop/main.js` never passed it) — the whole `Module.discImageDevice`
+  bridge was dead code from the live UI's perspective, so no PS2 disc image
+  of ANY kind (not just `.chd`) ever actually booted through the real file
+  picker/cartridge-load paths, despite the diagnostic scripts above proving
+  the underlying mechanism worked. Fixed in `EmulatorClient.js`: `start()`
+  now auto-derives `_discImage` from `coreName === 'play'` +
+  `contentExt ∈ {iso, cso, isz, chd}` when the caller doesn't explicitly
+  pass `opts.discImage`, so every real call site gets it for free. Verified
+  by converting the already-verified Time Crisis II `.cue`/`.bin` dump to a
+  real `.chd` via `chdman createcd` and booting it through the actual
+  `#rom-input` file-picker path (not a bypass harness): `ready: true`,
+  `discImageDevice` installed with the correct byte length, real non-black
+  GS rendering. (A full 536MB CHD hit an unrelated headless-Chrome
+  large-Blob read failure — "requested file could not be read" — reproduced
+  identically for a same-size `.iso`-style pick, i.e. a headless-automation
+  artifact of very large local File reads, not a CHD or app bug; a ~30MB
+  truncated CHD, same code path, worked cleanly.) Known gap: secondary
+  (rack/multi-console) console spawns (`main.js`'s `runtime.load(buf, core,
+  { system, title })` call sites, ~lines 1203/5346) don't pass `contentExt`
+  at all, so this auto-detection (and PUAE's extension-sensitivity) doesn't
+  apply there yet — untouched by this fix, primary-console loading only.
 - `-msimd128` and a size/perf pass on the release build haven't been
   revisited since the ASSERTIONS-era measurement.
 
