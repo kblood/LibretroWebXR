@@ -52,7 +52,7 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
     positional.setMaxDistance(maxDistance);
     (sourceObject || listener).add(positional);
     positional.setNodeSource(sink);
-    const branch = { consoleId, sink, positional, sourceObject };
+    const branch = { consoleId, sink, positional, sourceObject, nextAudioTime: 0 };
     branches.push(branch);
     if (consoleId != null) byConsole.set(consoleId, branch);
     sink.gain.value = gainFor(consoleId);
@@ -99,6 +99,33 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
       applyGains();
     },
     focusedId: () => focusedId,
+    // Feed decoded PCM straight into a console's branch — for cores that run
+    // off the main thread (e.g. the PSX worker runtime) and so can't rely on
+    // the AudioContext-stub trick above, which only intercepts a same-thread
+    // `new AudioContext()` call.
+    pushSamples(consoleId, { samples, format = 'f32', channels = 2, sampleRate = 48000 } = {}) {
+      const branch = byConsole.get(consoleId);
+      if (!branch || !(samples instanceof ArrayBuffer) || !Number.isInteger(channels) || channels < 1) return;
+      const source = format === 's16' ? new Int16Array(samples) : new Float32Array(samples);
+      const frameCount = Math.floor(source.length / channels);
+      if (!frameCount) return;
+      const buffer = ctx.createBuffer(channels, frameCount, sampleRate);
+      for (let channel = 0; channel < channels; channel++) {
+        const output = buffer.getChannelData(channel);
+        for (let frame = 0; frame < frameCount; frame++) {
+          const sample = source[frame * channels + channel];
+          output[frame] = format === 's16' ? sample / 32768 : sample;
+        }
+      }
+      const node = ctx.createBufferSource();
+      node.buffer = buffer;
+      node.connect(branch.sink);
+      const now = ctx.currentTime;
+      if (branch.nextAudioTime < now || branch.nextAudioTime > now + 0.25) branch.nextAudioTime = now + 0.02;
+      node.start(branch.nextAudioTime);
+      branch.nextAudioTime += buffer.duration;
+      node.onended = () => node.disconnect();
+    },
     branches,
     context: ctx,
   };

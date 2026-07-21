@@ -103,6 +103,21 @@ const GENESIS_LIKE = {
 // platformers), Run/Stop on faceB.
 const C64_LIKE = NES_LIKE;
 
+// PlayStation digital pad. Quest does not expose enough independent buttons
+// for every DualShock control, so the in-headset profile prioritizes the four
+// symbols, L1/R1, Start and Select. A standards-mapped browser gamepad uses
+// the complete mapping in GameInputMgr, including L2/R2.
+const PSX_LIKE = {
+  holding: { trigger: 'B', faceA: 'A', faceB: 'R',     stickClick: 'Start'  }, // Cross, Circle, R1
+  free:    { trigger: 'Y', faceA: 'X', faceB: 'L',     stickClick: 'Select' }, // Square, Triangle, L1
+};
+
+export const PSX_RETROPAD_SEMANTICS = Object.freeze({
+  Cross: 'B', Circle: 'A', Square: 'Y', Triangle: 'X',
+  L1: 'L', R1: 'R', L2: 'L2', R2: 'R2',
+  Start: 'Start', Select: 'Select',
+});
+
 // Keys here MUST match the lowercase `system` values in
 // public/roms/manifest.json. Any unmapped system falls back to NES_LIKE.
 export const SYSTEM_MAPS = {
@@ -118,6 +133,7 @@ export const SYSTEM_MAPS = {
   gba:       GBA_LIKE,
   pce:       PCE_LIKE,
   c64:       C64_LIKE,
+  psx:       PSX_LIKE,
   default:   NES_LIKE,
 };
 

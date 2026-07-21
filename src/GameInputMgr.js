@@ -26,6 +26,16 @@ import {
 
 const STICK_THRESHOLD = 0.55;
 
+// W3C standard gamepad layout. This gives a real USB/Bluetooth PlayStation-
+// style pad the full RetroPad surface, unlike the intentionally compact
+// two-hand Quest mapping.
+const STANDARD_GAMEPAD_BUTTONS = {
+  0: 'B', 1: 'A', 2: 'Y', 3: 'X',
+  4: 'L', 5: 'R', 6: 'L2', 7: 'R2',
+  8: 'Select', 9: 'Start',
+  12: 'Up', 13: 'Down', 14: 'Left', 15: 'Right',
+};
+
 // Static metadata for the player-1 codes we dispatch. Used both to build the
 // KeyboardEvent payloads and as a closed set for the released-key sweep.
 const KEY_TABLE = {
@@ -198,6 +208,33 @@ export class GameInputMgr {
       if (sy >=  STICK_THRESHOLD) addRetro('Down');
       if (sx <= -STICK_THRESHOLD) addRetro('Left');
       if (sx >=  STICK_THRESHOLD) addRetro('Right');
+    }
+
+    // Prefer an actual standards-mapped pad whenever one is connected. XR
+    // controller gamepads normally use "xr-standard" and are excluded. A
+    // real pad always drives player 1 on the default console — there is no
+    // hand-holding concept to route it by.
+    const pads = globalThis.navigator?.getGamepads?.() || [];
+    const physical = Array.from(pads).find((pad) => pad?.connected && pad.mapping === 'standard' && pad.buttons?.length >= 10);
+    if (physical) {
+      const consoleId = this._defaultConsoleId;
+      const addPhysicalRetro = (btn) => {
+        if (!btn) return;
+        const lk = `${consoleId} 1\0${btn}`;
+        logical.set(lk, { player: 1, btn, consoleId });
+        for (const c of codesFor(1, btn)) {
+          desired.set(this._k(consoleId, c), { consoleId, code: c });
+        }
+      };
+      for (const [index, button] of Object.entries(STANDARD_GAMEPAD_BUTTONS)) {
+        if (physical.buttons[index]?.pressed) addPhysicalRetro(button);
+      }
+      const px = physical.axes?.[0] || 0;
+      const py = physical.axes?.[1] || 0;
+      if (py <= -STICK_THRESHOLD) addPhysicalRetro('Up');
+      if (py >=  STICK_THRESHOLD) addPhysicalRetro('Down');
+      if (px <= -STICK_THRESHOLD) addPhysicalRetro('Left');
+      if (px >=  STICK_THRESHOLD) addPhysicalRetro('Right');
     }
 
     // M1.1 client→host: emit one message per logical transition (diff vs last

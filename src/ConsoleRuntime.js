@@ -20,7 +20,7 @@
 // so dispose() pauses + detaches rather than truly freeing — RackBudget's
 // maxLive cap is what bounds live contexts.
 
-import { EmulatorClient } from './EmulatorClient.js';
+import { RuntimeEmulatorClient } from './RuntimeEmulatorClient.js';
 import { coreWeight } from './systems.js';
 
 export class ConsoleRuntime {
@@ -55,7 +55,7 @@ export class ConsoleRuntime {
       // of the page flow; the scene textures it onto a TV mesh.
       this.canvas.style.cssText = 'position:absolute;left:-9999px;top:0;width:320px;height:240px;';
       (doc.body || doc.documentElement).appendChild(this.canvas);
-      this.client = new EmulatorClient();
+      this.client = new RuntimeEmulatorClient();
     }
   }
 
@@ -86,6 +86,11 @@ export class ConsoleRuntime {
       // Per-core BIOS/Kickstart (e.g. PUAE Amiga). meta wins when the caller
       // strips `core` to {name,url,style}; else read it off the full core entry.
       systemFiles: meta.systemFiles ?? core.systemFiles,
+      // Execution topology (RuntimeEmulatorClient): absent/'main' for every
+      // core except the PSX JIT, which needs its own worker realm — see
+      // systems.js's mednafen_psx_hw entry.
+      execution: meta.execution ?? core.execution,
+      coreBuildHash: meta.buildHash ?? core.buildHash,
     });
     this.coreName = core.name;
     this.system = meta.system ?? null;

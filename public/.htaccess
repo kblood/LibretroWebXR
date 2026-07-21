@@ -1,11 +1,13 @@
 # Cross-origin isolation — required so window.crossOriginIsolated === true,
 # which is the gate Quest / Chrome / Firefox put around SharedArrayBuffer.
-# The libretro worker core (PROXY_TO_PTHREAD=1) needs a pthread pool backed
-# by SharedArrayBuffer; without these headers the core won't initialize and
-# the emulator will not run in VR.
+# The threaded libretro/JIT core imports shared Wasm memory backed by
+# SharedArrayBuffer; without these headers it will not initialize.
 <IfModule mod_headers.c>
   Header set Cross-Origin-Embedder-Policy "require-corp"
   Header set Cross-Origin-Opener-Policy   "same-origin"
+  # Allow the Lightrec/Play! WebAssembly backend to compile generated blocks.
+  # JS eval remains disabled: wasm-unsafe-eval is deliberately narrower.
+  Header set Content-Security-Policy "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:"
 
   # Cache discipline borrowed from castlemastervr — Quest browser is happy
   # to serve stale modules unless told otherwise.

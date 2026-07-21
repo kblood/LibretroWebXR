@@ -57,6 +57,20 @@ notification_show_remap_load = "false"
 menu_mouse_enable = "true"
 menu_pointer_enable = "true"
 pause_nonactive = "false"
+system_directory = "/home/web_user/retroarch/userdata/system"
+savefile_directory = "/home/web_user/retroarch/userdata/saves"
+savestate_directory = "/home/web_user/retroarch/userdata/states"
+block_sram_overwrite = "true"
+core_options_path = "/home/web_user/retroarch/userdata/retroarch-core-options.cfg"
+`;
+
+// Beetle deliberately defaults Lightrec to disabled even when it is compiled
+// in. Set both possible option prefixes so this works for the software and HW
+// variants while remaining harmless for every other libretro core.
+export const RETROARCH_CORE_OPTIONS = `beetle_psx_cpu_dynarec = "execute"
+beetle_psx_hw_cpu_dynarec = "execute"
+beetle_psx_dynarec_invalidate = "full"
+beetle_psx_hw_dynarec_invalidate = "full"
 `;
 
 // Players 2-4 keyboard binds, generated from the same table GameInputMgr
@@ -81,3 +95,4 @@ export const PLAYER_KEYBINDS = playerKeybinds();
 export const RETROARCH_CFG = NUL_KEYS + DEFAULT_KEYBINDS + PLAYER_KEYBINDS + EXTRA_CONFIG;
 export const RETROARCH_CFG_DIR = '/home/web_user/retroarch/userdata';
 export const RETROARCH_CFG_PATH = RETROARCH_CFG_DIR + '/retroarch.cfg';
+export const RETROARCH_CORE_OPTIONS_PATH = RETROARCH_CFG_DIR + '/retroarch-core-options.cfg';

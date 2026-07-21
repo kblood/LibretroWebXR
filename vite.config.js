@@ -1,15 +1,16 @@
 import { defineConfig } from 'vite';
 
 // Cross-origin isolation headers are required to enable SharedArrayBuffer,
-// which the worker-built libretro cores need for their pthread pool.
-// Without these, the SNES9X worker core falls back to a single thread
-// and the whole point of the architecture is gone.
+// which threaded libretro cores and the PSX JIT need for shared Wasm memory.
 const crossOriginIsolation = () => ({
   name: 'cross-origin-isolation',
   configureServer(server) {
     server.middlewares.use((_req, res, next) => {
       res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
       res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+      // Runtime Wasm compilation is the PSX dynarec's code-generation
+      // mechanism. This permits Wasm compilation without permitting JS eval.
+      res.setHeader('Content-Security-Policy', "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:");
       next();
     });
   },
@@ -17,6 +18,7 @@ const crossOriginIsolation = () => ({
     server.middlewares.use((_req, res, next) => {
       res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
       res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+      res.setHeader('Content-Security-Policy', "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:");
       next();
     });
   },

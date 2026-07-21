@@ -8,6 +8,9 @@ logger.init();
 
 import * as THREE from 'three';
 import { EmulatorClient } from './EmulatorClient.js';
+import { RuntimeEmulatorClient } from './RuntimeEmulatorClient.js';
+import { FirmwareStore } from './FirmwareStore.js';
+import { SaveRamStore } from './SaveRamStore.js';
 import { InputMgr } from './InputMgr.js';
 import { Bindings } from './Bindings.js';
 import { DesktopGamepad } from './DesktopGamepad.js';
@@ -30,7 +33,7 @@ import { GameInputMgr } from './GameInputMgr.js';
 import { installXRRafShim } from './XRRafShim.js';
 import { installSpatialAudio } from './SpatialAudio.js';
 import { createMemoryCard } from './MemoryCard.js';
-import { saveState, loadState, listStates } from './SaveState.js';
+import { saveState, loadState, listStates, checkSaveStateCompatibility } from './SaveState.js';
 import { createDebugHud } from './DebugHud.js';
 import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
@@ -107,6 +110,7 @@ const placeholderCanvas = $('#placeholder-canvas');
 // MUST be id="canvas" — RetroArch's input driver hardcodes that selector.
 const emuCanvas = $('#canvas');
 const romInput = $('#rom-input');
+const firmwareInput = $('#firmware-input');
 const resetBtn = $('#reset-btn');
 const status = $('#status');
 const titleEl = $('header h1');
@@ -131,7 +135,12 @@ const coreOverride = urlParams.get('core');
 // every consumer that captured it must be re-pointed via rebindPrimaryClient().
 // Code that needs the CURRENT primary client/canvas at call-time should prefer
 // rackMgr.get(CONSOLE_ID)?.client / primaryCanvas() over capturing these.
-let client = new EmulatorClient();
+let client = new RuntimeEmulatorClient();
+// BIOS storage (PSX etc. — see FirmwareStore.js) and native SaveRAM persistence
+// (SaveRamStore.js) for worker-mode cores. Both are plain local IndexedDB/OPFS
+// wrappers; nothing here is uploaded anywhere.
+const firmwareStore = new FirmwareStore();
+const saveRamStore = new SaveRamStore();
 // Desktop controller-binding model ([[src/Bindings.js]]): keyboard + PC-gamepad
 // remapping for the emulated RetroPad. Managed for all four couch-co-op players
 // so the historical P2-4 keyboard forwarding keeps working (defaults reproduce
@@ -5681,6 +5690,15 @@ function handleMemoryCardInserted(card) {
       card.userData.pulse(0xcc2222);
       return;
     }
+    // Filename+core already narrowed the obvious mismatch above; this catches
+    // the subtler case a PSX-JIT core rebuild introduces — a state saved
+    // against one build_hash isn't guaranteed binary-compatible with another.
+    const compat = checkSaveStateCompatibility(row, { coreId: currentMeta.core, coreBuildHash: client.buildHash });
+    if (!compat.compatible) {
+      setStatus(`slot ${card.userData.slot} incompatible with the loaded core build (${compat.reason})`);
+      card.userData.pulse(0xcc2222);
+      return;
+    }
     return client.unserializeState(row.data).then(() => {
       card.userData.pulse(0xffffff);
       setStatus(`loaded ${meta.title} from slot ${card.userData.slot}`);
@@ -5782,26 +5800,39 @@ async function addLocalRomToShelf(meta) {
 }
 
 romInput.addEventListener('change', async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  // Reset so the same file can be re-picked.
+  const files = Array.from(e.target.files || []);
+  if (!files.length) return;
+  // Reset so the same file(s) can be re-picked.
   romInput.value = '';
 
-  const coreInfo = detectCore(file.name, coreOverride);
-  if (!coreInfo) { setStatus(`no core known for "${file.name}" — check the extension`); return; }
+  const isMultiFile = files.length > 1;
+  // A multi-file pick (CUE+BIN, M3U+discs) may not put the entry file first —
+  // find whichever selected file resolves to a core that actually declares
+  // multiFile support, and detect off that one.
+  const primary = isMultiFile
+    ? (files.find((f) => detectCore(f.name, coreOverride)?.multiFile) || files[0])
+    : files[0];
+  const coreInfo = detectCore(primary.name, coreOverride);
+  if (!coreInfo) { setStatus(`no core known for "${primary.name}" — check the extension`); return; }
+  if (isMultiFile && !coreInfo.multiFile) {
+    setStatus(`${coreInfo.label} doesn't accept a multi-file selection — pick one file`);
+    return;
+  }
 
   // Derive system and a display title from the filename.
-  const system = systemForFile(file.name, coreOverride);
-  const title = file.name.replace(/\.[^.]+$/, ''); // strip extension
+  const system = systemForFile(primary.name, coreOverride);
+  const title = primary.name.replace(/\.[^.]+$/, ''); // strip extension
 
   // Build a normalised meta object identical in shape to what handleCartridgeInserted expects.
   // The first boot uses the ArrayBuffer in hand (the File is gone after this
   // event); meta.rom is finalised below once we've cached the bytes so the
   // shelf cartridge can be RE-booted later from the OPFS cache (sha1) instead
   // of a dead `roms/<file>` url fetch (the cause of the "ROM not installed"
-  // report when re-inserting a picked cart).
+  // report when re-inserting a picked cart). Multi-file bundles skip OPFS
+  // caching + the shelf entirely for now (single-ArrayBuffer-shaped, below) —
+  // they still boot, but won't survive a reload as a re-insertable cartridge.
   const meta = {
-    file: file.name,
+    file: primary.name,
     core: coreInfo.name,
     system: system || 'unknown',
     title,
@@ -5816,16 +5847,52 @@ romInput.addEventListener('change', async (e) => {
     return;
   }
 
-  // Boot the ROM directly from the ArrayBuffer (no resolver round-trip needed
-  // since we already have the bytes from the file-change event).
+  // Boot directly from the picked File(s) (no resolver round-trip needed
+  // since we already have them from the file-change event). A worker-mode
+  // core (PSX) reads bytes lazily inside RuntimeEmulatorClient/
+  // WorkerEmulatorClient, so a bare File (single file) or a ContentBundle
+  // (multiple files) can be handed straight through; every other, main-thread
+  // core still needs a real ArrayBuffer up front.
   setStatus(`loading "${title}" on ${coreInfo.label}…`);
   try {
-    const buffer = await file.arrayBuffer();
-    logger?.event?.('rom-picked', { file: meta.file, bytes: buffer?.byteLength ?? 0, core: coreInfo.name, coreUrl: coreInfo.url, opfs: opfsSupported() });
-    await client.start(primaryCanvas(), buffer, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style, contentExt: extOf(meta.file), coreOptions: coreInfo.coreOptions, systemFiles: coreInfo.systemFiles });
+    let content;
+    let buffer = null; // only set for the single-file, main-thread path (OPFS cache below needs real bytes)
+    if (isMultiFile) {
+      const { ContentBundle } = await import('./ContentBundle.js');
+      content = await ContentBundle.fromFiles(files, { entryExtensions: coreInfo.exts });
+    } else if (coreInfo.execution === 'worker') {
+      // Wrapped in a ContentBundle (not a bare File) even for a single file so
+      // it always carries a stable contentId — SaveRAM/save-state keying below
+      // needs one regardless of whether the pick was a lone .chd/.pbp/.exe or a
+      // CUE+BIN set.
+      const { ContentBundle } = await import('./ContentBundle.js');
+      content = await ContentBundle.fromFiles([primary], { entryExtensions: coreInfo.exts });
+    } else {
+      content = buffer = await primary.arrayBuffer();
+    }
+    // A worker-mode core with a firmwareProfile (PSX) needs its BIOS handed to
+    // the SAME start() call that boots the disc — the worker mounts it once,
+    // at launch. User-imported only; never shipped in this repo (see
+    // FirmwareStore.js / the "Import BIOS" input).
+    let firmware;
+    if (coreInfo.firmwareProfile) {
+      const record = await firmwareStore.getPreferred(coreInfo.firmwareProfile).catch(() => null);
+      if (record) firmware = { name: record.name, data: record.data };
+      else setStatus(`${coreInfo.label} needs a BIOS — use "Import BIOS" first, then pick the game again`);
+    }
+    // Restore any native SaveRAM this same disc/core/build previously flushed
+    // (see flushCurrentSaveRam below) — keyed off the content hash, not the
+    // filename, so re-picking the identical disc always finds it.
+    let restoredSaves;
+    if (coreInfo.execution === 'worker' && content?.contentId) {
+      const saved = await saveRamStore.load({ coreId: coreInfo.name, contentId: content.contentId }).catch(() => null);
+      if (saved?.data) restoredSaves = { data: saved.data, slot: 1 };
+    }
+    logger?.event?.('rom-picked', { file: meta.file, bytes: buffer?.byteLength ?? 0, core: coreInfo.name, coreUrl: coreInfo.url, opfs: opfsSupported(), multiFile: isMultiFile });
+    await client.start(primaryCanvas(), content, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style, contentExt: extOf(meta.file), coreOptions: coreInfo.coreOptions, systemFiles: coreInfo.systemFiles, execution: coreInfo.execution, requiresThreads: coreInfo.requiresThreads, coreBuildHash: coreInfo.buildHash, firmware, restoredSaves });
     rackMgr.get(CONSOLE_ID)?.noteLoaded(coreInfo.name, { system: meta.system, title });
     currentCore = coreInfo.name;
-    currentMeta = { core: coreInfo.name, file: meta.file, title, system: meta.system };
+    currentMeta = { core: coreInfo.name, file: meta.file, title, system: meta.system, contentId: content?.contentId || null };
     gameInput?.setSystem(meta.system);
     consoleObj?.userData.setPorts?.(portsForSystem(meta.system));
     setSystemLabel(coreInfo.name);
@@ -5847,8 +5914,10 @@ romInput.addEventListener('change', async (e) => {
 
     // Cache the bytes (content-addressed) so the shelf cartridge can re-boot
     // without the original File. On success the cart resolves via OPFS (sha1);
-    // pick stays as a last-resort fallback if OPFS is unavailable.
-    try {
+    // pick stays as a last-resort fallback if OPFS is unavailable. Only
+    // possible for the single-file, main-thread path — a multi-file bundle or
+    // a worker-mode File has no single `buffer` to hash here (see above).
+    if (buffer) try {
       const sha1 = await cacheRom(buffer);
       meta.rom = sha1 ? { sha1, sources: ['opfs', 'pick'] } : { source: 'pick' };
       // Persist to local-ROM library (sha1 entries only — pick-only can't
@@ -5873,6 +5942,50 @@ romInput.addEventListener('change', async (e) => {
     logger?.event?.('boot-error', { file: meta.file, system: meta.system, core: coreInfo.name, error: emsg, source: 'pick', opfs: opfsSupported() });
   }
 });
+
+// BIOS import (currently PSX-only — see FirmwareStore.js). Purely local:
+// validated against known SCPH-550x MD5s and stored in IndexedDB, never
+// uploaded. An unrecognized file is still imported (so an alternate/patched
+// BIOS the user knows is fine still works) but the status line flags it.
+if (firmwareInput) {
+  firmwareInput.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    firmwareInput.value = '';
+    if (!file) return;
+    try {
+      const record = await firmwareStore.import(file, { profile: 'psx' });
+      setStatus(`imported BIOS "${record.name}" (${record.region})`);
+    } catch (err) {
+      const validation = err?.validation;
+      setStatus(validation ? `BIOS not recognized: ${validation.message}` : `BIOS import failed: ${String(err?.message || err)}`);
+    }
+  });
+}
+
+// Native SaveRAM flush: worker-mode cores expose the emulated cart's SaveRAM
+// bytes via readSaveRam/flushSaveRam (both resolve null for a core/game with
+// no battery-backed RAM). A periodic safety-net flush plus a pagehide flush
+// (tab close / navigation) — there is no in-game "save" moment to hook, so
+// this is the only way native SaveRAM survives a reload. Restored on the next
+// boot of the same disc via SaveRamStore.load (see the romInput handler).
+async function flushCurrentSaveRam() {
+  if (!currentMeta?.contentId) return;
+  try {
+    const data = await client.flushSaveRam?.();
+    if (!data) return;
+    await saveRamStore.save({
+      coreId: currentMeta.core,
+      contentId: currentMeta.contentId,
+      data,
+      coreBuildHash: client.buildHash,
+      entryPath: currentMeta.file,
+    });
+  } catch (e) {
+    console.warn('[main] SaveRAM flush failed:', e);
+  }
+}
+setInterval(() => { flushCurrentSaveRam(); }, 30000);
+window.addEventListener('pagehide', () => { flushCurrentSaveRam(); });
 
 resetBtn.addEventListener('click', () => client.reset());
 

@@ -98,6 +98,39 @@ export const CORES = {
   // for the GunCon2 port-device override below to connect at boot (same
   // mechanism as every other light gun here — see CORES doc comment above).
   play:              { url: 'cores/play_libretro.js',              exts: ['elf','iso','cso','isz','cue','chd'], label: 'PlayStation 2 (Play!)', style: 'module', license: 'GPLv2', weight: 3, remapName: 'Play!' },
+  // PlayStation, via Beetle PSX HW + Lightrec + an adapter onto Play--CodeGen's
+  // Jitter Wasm backend — see the published build tooling at
+  // github.com/kblood/psx-wasm-jit-libretro and docs/PSX_CORE_BUILD.md for the
+  // recipe. Desktop vertical slice implemented + verified 2026-07-21 (boots a
+  // legal PS-X EXE, real non-black frames, live native Play--CodeGen blocks).
+  // Runs in its own dedicated execution worker (not main-thread, unlike every
+  // other core here — see src/RuntimeEmulatorClient.js) for Quest frame-timing
+  // and to give the JIT's runtime Wasm compilation its own realm. New,
+  // PSX-only schema fields (harmless no-ops for every other core):
+  //   execution           — 'worker' routes through RuntimeEmulatorClient's
+  //                          WorkerEmulatorClient delegate instead of the
+  //                          default main-thread EmulatorClient.
+  //   requiresThreads      — needs SharedArrayBuffer (COOP/COEP), same gate
+  //                          every threaded core here already needs.
+  //   contentIo            — 'transfer-memfs': content bytes are transferred
+  //                          into the worker and mounted in its own MEMFS.
+  //   multiFile            — content may be a CUE/M3U bundle of several
+  //                          files (see src/ContentBundle.js), not one blob.
+  //   companionExtensions  — non-entry files a multiFile bundle may reference
+  //                          (the .bin/.img/.sub tracks a .cue points at).
+  //   firmwareProfile      — BIOS requirement key for src/FirmwareStore.js
+  //                          (user-supplied SCPH-550x, validated + persisted
+  //                          locally — never shipped in this repo).
+  //   buildHash            — save-state compatibility tag (checked via
+  //                          checkSaveStateCompatibility in SaveState.js)
+  //                          when RuntimeEmulatorClient can't resolve one
+  //                          from the core's own build manifest at runtime.
+  // .cue/.chd collide with `play`'s exts above — see coreForFile's doc
+  // comment for how that's resolved.
+  mednafen_psx_hw:   { url: 'cores/mednafen_psx_jit_libretro.js',    exts: ['chd','cue','m3u','ccd','pbp','exe'], label: 'PlayStation (Beetle PSX + Wasm JIT)', style: 'module', license: 'GPLv2', weight: 3,
+    execution: 'worker', requiresThreads: true, contentIo: 'transfer-memfs', multiFile: true,
+    companionExtensions: ['bin','img','iso','sub','sbi'], firmwareProfile: 'psx',
+    buildHash: 'beetle-d6caed07-codegen-a5009f7d-jit-dev' },
 };
 
 // Rack budget calibration (see RackBudget.js). Tuned to the Phase-0 Quest-3
@@ -233,6 +266,7 @@ export const SYSTEMS = {
     // libretro's input path and the core builds/boots/renders with it present,
     // but "does a real GunCon2 game's driver actually attach to it" is untested.
     lightgun: { label: 'GunCon2', core: 'play', device: 260, port: 0, coreOptions: {} } },
+  psx:       { label: 'PlayStation',        defaultCore: 'mednafen_psx_hw',  cores: ['mednafen_psx_hw'],              exts: ['chd','cue','m3u','ccd','pbp','exe'], aliases: ['psx','ps1','playstation','sony playstation'], thumbnailRepo: 'Sony_-_PlayStation', medium: 'floppy' },
 };
 
 // Controller ports per system — how many controllers the base hardware
@@ -251,6 +285,7 @@ const SYSTEM_PORTS = {
   amiga: 2,   // two DB9 joystick/mouse ports
   dos: 2,     // mouse (port 0) + keyboard / second device
   ps2: 2,     // two native DualShock2 ports (no stock multitap)
+  psx: 2,     // two native digital-pad ports (no stock multitap)
 };
 // --- DOS mouse follow-up (do NOT implement here) -------------------------
 // DOS games are mouse-driven. The mouse transport is the SHARED
@@ -548,7 +583,23 @@ export function fourScoreLoadConfig(systemId, coreName) {
 // .bin is ambiguous (Atari 2600 / Mega Drive / PSX / …). When detection sees a
 // bare .bin we default to Atari 2600, the only .bin system we ship sample
 // content for. Override with an explicit `core`/`system`, or ?core= in the URL.
-const AMBIGUOUS_EXT_DEFAULT = { bin: 'stella2014' };
+//
+// .cue/.chd are ambiguous between `play` (PS2) and `mednafen_psx_hw` (PSX) —
+// both are real disc-image containers on both consoles, and this table can
+// only pick a name-based default, not read bytes. Defaults to `play` (the
+// console already shipping before PSX existed) to keep existing PS2 content
+// resolving exactly as it did. The file-picker path in main.js reads the
+// actual disc via src/DiscIdentity.js's identifyPlayStationDisc() first and
+// passes an explicit override down to coreForFile when it can — this default
+// only matters when that check is skipped or inconclusive.
+//
+// .exe is ALSO ambiguous, between `virtualxt` (DOS) and `mednafen_psx_hw`
+// (bare PS-X EXE homebrew) — unlike cue/chd there's no disc to sniff, so
+// there's no better-than-filename signal here at all. Defaults to `virtualxt`
+// (existing shipped behaviour); loading a PS-X EXE needs an explicit
+// override (`?core=mednafen_psx_hw`) until/unless this gets a real content
+// sniff (a PS-X EXE header starts with the ASCII magic "PS-X EXE").
+const AMBIGUOUS_EXT_DEFAULT = { bin: 'stella2014', cue: 'play', chd: 'play', exe: 'virtualxt' };
 
 /** Core short-name → its info, or null. */
 export function coreInfo(name) {
@@ -567,18 +618,12 @@ export function extOf(filename) {
  *   returns the core's info ({name,url,exts,label,style,...}) or null.
  * Mirrors the legacy detectCore() in main.js, now registry-driven.
  *
- * NOTE for whoever registers a PSX core alongside `play` here: PSX discs
- * (.iso/.cue/.chd) share extensions with PS2's ps2.exts above, and this
- * function's first-match-wins scan would then silently misroute one
- * console's discs to the other's core, the same way AMBIGUOUS_EXT_DEFAULT
- * already had to be added for .bin. Extension and size can't disambiguate a
- * disc under ~807 MiB (Sony's own SYSTEM.CNF BOOT vs BOOT2 boot-key
- * convention is the one reliable signal) — see src/DiscIdentity.js's
- * identifyPlayStationDisc(), already written, tested
- * (tmp/verify-disc-identity.mjs), and verified against a real commercial
- * PS2 disc. Call it before falling back to first-match when both cores
- * claim the same extension, and fall back to an explicit user prompt (not
- * a guess) if it returns console: null.
+ * `mednafen_psx_hw` (PSX) and `play` (PS2) both claim .cue/.chd — see
+ * AMBIGUOUS_EXT_DEFAULT above for the name-only default, and
+ * src/DiscIdentity.js's identifyPlayStationDisc() (tested:
+ * tmp/verify-disc-identity.mjs, verified against a real commercial PS2 disc)
+ * for the real, byte-level disambiguation main.js's file-picker path runs
+ * before falling back to this default.
  */
 export function coreForFile(filename, override) {
   if (override && CORES[override]) return coreInfo(override);
