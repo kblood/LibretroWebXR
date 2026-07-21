@@ -57,6 +57,12 @@
       "license": "CC0", "credits": "LibretroWebXR (boot-block 68k intro in scripts/amiga-bootblock.s, packed by scripts/make-amiga-demo.mjs). Boots on PUAE's built-in AROS; cycles the background colour." },
 
     { "file": "freeware/lwx-ps2-guncon-range.elf", "system": "ps2", "core": "play", "title": "LWX GunCon Range", "color": "#1a2a4a", "lightgun": true,
-      "license": "CC0", "credits": "LibretroWebXR (game in games/ps2-guncon-range, built with the PS2SDK ps2dev/ps2dev toolchain + a real USB LDD GunCon2 driver; see scripts/make-ps2-guncon-range.mjs). GunCon2 shooting gallery — aim and pull the trigger to hit the target box; 5 misses resets score." }
+      "license": "CC0", "credits": "LibretroWebXR (game in games/ps2-guncon-range, built with the PS2SDK ps2dev/ps2dev toolchain + a real USB LDD GunCon2 driver; see scripts/make-ps2-guncon-range.mjs). GunCon2 shooting gallery — aim and pull the trigger to hit the target box; 5 misses resets score." },
+
+    { "file": "freeware/lwx-n64-smoke.z64", "system": "n64", "core": "mupen64plus_next", "title": "LWX N64 Smoke Test", "color": "#2a2a2a",
+      "license": "CC0", "credits": "LibretroWebXR (game in games/n64-smoke, built with libdragon via the anacierdem/libdragon Docker toolchain; see scripts/make-n64-smoke.mjs and docs/N64_CORE_BUILD.md). No gameplay — a continuously shifting solid-color fill with a text overlay, used as the boot smoke test for the mupen64plus_next core (Phase N0 of docs/research/n64-wasm-jit-plan.md)." },
+
+    { "file": "freeware/lwx-n64-scene.z64", "system": "n64", "core": "mupen64plus_next", "title": "LWX N64 Orbit Cubes", "color": "#2a2a2a",
+      "license": "CC0", "credits": "LibretroWebXR (game in games/n64-scene, built with libdragon via the anacierdem/libdragon Docker toolchain; see scripts/make-n64-scene.mjs and docs/N64_CORE_BUILD.md). A rotating flat-shaded cube (real perspective-projected 3D, not a flat fill) — analog stick drives yaw/pitch, a persistent EEPROM boot counter, and a continuous generated tone through the audio HLE path. Stands in for a commercial 3D title for Phase N0 fps measurement (docs/research/n64-wasm-jit-plan.md) since no commercial N64 ROM is available or sourced for this repo." }
   ]
 }

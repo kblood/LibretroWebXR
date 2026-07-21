@@ -82,19 +82,35 @@ function installWorkerDomShim(offscreenCanvas) {
     offscreenCanvas.setAttribute ||= (name, value) => attributes.set(String(name), String(value));
     offscreenCanvas.removeAttribute ||= (name) => attributes.delete(String(name));
     offscreenCanvas.focus ||= () => {};
+    // clientWidth/clientHeight/getBoundingClientRect must reflect the fixed
+    // CSS layout size, NOT the live .width/.height backing-store resolution
+    // — same as a real HTMLCanvasElement, where CSS decides the box size
+    // independent of the canvas's internal pixel resolution. RetroArch's
+    // platform_emscripten.c relies on this: it deliberately stomps
+    // canvas.width/height to 64x64 as a CSS-constraint self-test, then
+    // later recomputes the REAL target size from clientWidth * DPR (see
+    // PlatformEmscriptenWatchCanvasSizeAndDpr in library_platform_emscripten.js).
+    // If clientWidth were aliased to the live .width (as it was before this
+    // fix), that recompute reads back the 64 it just wrote and the canvas
+    // can never recover its real size. Capture the actual requested size
+    // now (offscreenCanvas.width/height at construction, before any of
+    // RetroArch's own resize probing runs — see the `new OffscreenCanvas(
+    // payload.width, payload.height)` call site) and freeze it here.
+    const layoutWidth = offscreenCanvas.width;
+    const layoutHeight = offscreenCanvas.height;
     offscreenCanvas.getBoundingClientRect ||= () => ({
       left: 0,
       top: 0,
-      right: offscreenCanvas.width,
-      bottom: offscreenCanvas.height,
-      width: offscreenCanvas.width,
-      height: offscreenCanvas.height,
+      right: layoutWidth,
+      bottom: layoutHeight,
+      width: layoutWidth,
+      height: layoutHeight,
     });
     if (!('clientWidth' in offscreenCanvas)) {
-      Object.defineProperty(offscreenCanvas, 'clientWidth', { get: () => offscreenCanvas.width });
+      Object.defineProperty(offscreenCanvas, 'clientWidth', { get: () => layoutWidth });
     }
     if (!('clientHeight' in offscreenCanvas)) {
-      Object.defineProperty(offscreenCanvas, 'clientHeight', { get: () => offscreenCanvas.height });
+      Object.defineProperty(offscreenCanvas, 'clientHeight', { get: () => layoutHeight });
     }
     globalThis.getComputedStyle ||= (element) => element?.style || style;
     globalThis.ResizeObserver ||= class ResizeObserver {

@@ -131,6 +131,21 @@ export const CORES = {
     execution: 'worker', requiresThreads: true, contentIo: 'transfer-memfs', multiFile: true,
     companionExtensions: ['bin','img','iso','sub','sbi'], firmwareProfile: 'psx',
     buildHash: 'beetle-d6caed07-codegen-a5009f7d-jit-dev' },
+  // Nintendo 64, via mupen64plus-libretro-nx (GLideN64, GLES3/WebGL2) — see
+  // docs/N64_CORE_BUILD.md for the recipe. Phase N0 (interpreter baseline,
+  // no dynarec) per docs/research/n64-wasm-jit-plan.md: new_dynarec is
+  // native-x86/ARM-only and unusable in-browser (same wall PSX/PS2 hit —
+  // see that plan's section 5), so this is CPU-interpreted; GLideN64 is a
+  // real GPU plugin so 3D rendering is not emulated in software. Same
+  // dedicated-worker execution topology as PSX (see src/RuntimeEmulatorClient.js);
+  // no firmware/BIOS and single-file ROMs only, so multiFile/firmwareProfile
+  // are omitted (simpler than PSX per the plan's file-level change map).
+  // exts cover all three N64 ROM byte orders (.z64 big-endian native,
+  // .n64 little-endian/byteswapped, .v64 byteswapped-16); the core
+  // normalizes byte order internally.
+  mupen64plus_next:  { url: 'cores/mupen64plus_next_libretro.js',    exts: ['n64','z64','v64'], label: 'Nintendo 64 (Mupen64Plus-Next)', style: 'module', license: 'GPLv2', weight: 3,
+    execution: 'worker', requiresThreads: true, contentIo: 'transfer-memfs',
+    buildHash: 'mupen64plus-98c1b0d8-n0-interpreter' },
 };
 
 // Rack budget calibration (see RackBudget.js). Tuned to the Phase-0 Quest-3
@@ -267,6 +282,7 @@ export const SYSTEMS = {
     // but "does a real GunCon2 game's driver actually attach to it" is untested.
     lightgun: { label: 'GunCon2', core: 'play', device: 260, port: 0, coreOptions: {} } },
   psx:       { label: 'PlayStation',        defaultCore: 'mednafen_psx_hw',  cores: ['mednafen_psx_hw'],              exts: ['chd','cue','m3u','ccd','pbp','exe'], aliases: ['psx','ps1','playstation','sony playstation'], thumbnailRepo: 'Sony_-_PlayStation', medium: 'floppy' },
+  n64:       { label: 'Nintendo 64',        defaultCore: 'mupen64plus_next', cores: ['mupen64plus_next'],             exts: ['n64','z64','v64'], aliases: ['n64','nintendo 64'], thumbnailRepo: 'Nintendo_-_Nintendo_64', medium: 'cartridge' },
 };
 
 // Controller ports per system — how many controllers the base hardware
@@ -286,6 +302,7 @@ const SYSTEM_PORTS = {
   dos: 2,     // mouse (port 0) + keyboard / second device
   ps2: 2,     // two native DualShock2 ports (no stock multitap)
   psx: 2,     // two native digital-pad ports (no stock multitap)
+  n64: 4,     // four native controller ports
 };
 // --- DOS mouse follow-up (do NOT implement here) -------------------------
 // DOS games are mouse-driven. The mouse transport is the SHARED

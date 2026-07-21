@@ -40,7 +40,9 @@
     "probe-media": "node scripts/probe-media.mjs",
     "test:psx-foundations": "node --test test/psx-foundations.test.js",
     "test:runtime": "node --test test/runtime.test.js",
-    "probe:psx-core": "node scripts/probe-psx-core.js"
+    "probe:psx-core": "node scripts/probe-psx-core.js",
+    "probe:n64-core": "node scripts/probe-n64-core.js",
+    "measure:n64-fps": "node scripts/measure-n64-fps.js"
   },
   "devDependencies": {
     "jsnes": "^2.1.0",

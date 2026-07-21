@@ -118,6 +118,32 @@ export const PSX_RETROPAD_SEMANTICS = Object.freeze({
   Start: 'Start', Select: 'Select',
 });
 
+// N64. mupen64plus-next's standard (non-"C buttons mode") libretro mapping
+// (see emulate_game_controller_via_libretro.c's retro_input_descriptor
+// table) has 10 real buttons + D-pad + one analog stick — more than this
+// project's 8-slot two-hand scheme (4 per hand) can hold, so this drops
+// the least-essential two (C-Right, L Shoulder), same precedent as
+// GENESIS_LIKE dropping Mode/C/Z above. Trigger→A keeps this project's
+// "primary action on the trigger finger" convention. The analog stick
+// itself is NOT wired to true analog range yet — like every other system
+// here, GameInputMgr thresholds the Quest thumbstick into 8-way digital
+// D-pad presses (see STICK_THRESHOLD in GameInputMgr.js); N64 is the
+// first system where that's a real gameplay gap (camera speed, walk vs.
+// run), tracked in docs/N64_CORE_BUILD.md's "Known gaps" section rather
+// than fixed here.
+const N64_LIKE = {
+  holding: { trigger: 'B', faceA: 'A', faceB: 'Start', stickClick: 'L2' }, // A, C-Down, Start, Z
+  free:    { trigger: 'Y', faceA: 'X', faceB: 'L',      stickClick: 'R2' }, // B, C-Up, C-Left, R Shoulder
+};
+
+// Full standard mapping for reference (e.g. a future "standard"-mapped
+// physical-gamepad branch in GameInputMgr, mirroring PSX_RETROPAD_SEMANTICS)
+// — not all of these are reachable through N64_LIKE's compact Quest map above.
+export const N64_RETROPAD_SEMANTICS = Object.freeze({
+  A: 'B', B: 'Y', CUp: 'X', CDown: 'A', CLeft: 'L', CRight: 'R',
+  Z: 'L2', RShoulder: 'R2', LShoulder: 'Select', Start: 'Start',
+});
+
 // Keys here MUST match the lowercase `system` values in
 // public/roms/manifest.json. Any unmapped system falls back to NES_LIKE.
 export const SYSTEM_MAPS = {
@@ -134,6 +160,7 @@ export const SYSTEM_MAPS = {
   pce:       PCE_LIKE,
   c64:       C64_LIKE,
   psx:       PSX_LIKE,
+  n64:       N64_LIKE,
   default:   NES_LIKE,
 };
 

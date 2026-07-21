@@ -48,7 +48,9 @@ export class WorkerEmulatorClient extends EventTarget {
 
     this.worker = this._createWorker();
     this.worker.addEventListener('message', (event) => this._onMessage(event.data));
-    this.worker.addEventListener('error', (event) => this._fatal(event.message || 'execution worker failed'));
+    this.worker.addEventListener('error', (event) => this._fatal(
+      `${event.message || 'execution worker failed'} @ ${event.filename}:${event.lineno}:${event.colno} stack=${event.error?.stack}`
+    ));
     this.worker.addEventListener('messageerror', () => this._fatal('execution worker sent an unreadable message'));
 
     const prepared = await prepareLaunchPayload(content, opts);
