@@ -566,6 +566,19 @@ export function extOf(filename) {
  *   override   — explicit core short-name (wins if known)
  *   returns the core's info ({name,url,exts,label,style,...}) or null.
  * Mirrors the legacy detectCore() in main.js, now registry-driven.
+ *
+ * NOTE for whoever registers a PSX core alongside `play` here: PSX discs
+ * (.iso/.cue/.chd) share extensions with PS2's ps2.exts above, and this
+ * function's first-match-wins scan would then silently misroute one
+ * console's discs to the other's core, the same way AMBIGUOUS_EXT_DEFAULT
+ * already had to be added for .bin. Extension and size can't disambiguate a
+ * disc under ~807 MiB (Sony's own SYSTEM.CNF BOOT vs BOOT2 boot-key
+ * convention is the one reliable signal) — see src/DiscIdentity.js's
+ * identifyPlayStationDisc(), already written, tested
+ * (tmp/verify-disc-identity.mjs), and verified against a real commercial
+ * PS2 disc. Call it before falling back to first-match when both cores
+ * claim the same extension, and fall back to an explicit user prompt (not
+ * a guess) if it returns console: null.
  */
 export function coreForFile(filename, override) {
   if (override && CORES[override]) return coreInfo(override);
