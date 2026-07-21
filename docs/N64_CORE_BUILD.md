@@ -340,32 +340,42 @@ follow-up.
   *type* auto-detection (EEPROM vs SRAM vs FlashRAM per-game) was not
   separately exercised — there's only one homebrew ROM, not a library of
   real carts with varying save chips.
-- **Audio HLE: NOT working — a real, reproduced, unresolved core bug.**
-  Any single `audio_write()` call from guest code (following libdragon's
-  documented API: `audio_init()`, then `audio_get_buffer_length()`-sized
-  buffer, `audio_can_write()`/`audio_write()` in a loop) reproducibly
-  crashes the worker with `Uncaught RuntimeError: memory access out of
-  bounds`. Bisected by disabling code incrementally: `audio_init()` +
-  `audio_get_buffer_length()` + `malloc()` alone are fine; the crash is
-  specifically triggered by the first `audio_write()`. Likely lead (not yet
-  confirmed): `mupen64plus-core/src/device/rcp/ai/ai_controller.c`'s
-  `read_ai_regs()`/`ai_end_of_dma_event()` index RDRAM via
-  `&ai->ri->rdram->dram[ai->fifo[0].address/4]`, where `ai->fifo[0].address`
-  comes from whatever the guest wrote to `AI_DRAM_ADDR_REG` before
-  `AI_LEN_REG` (which triggers the DMA via `fifo_push()`) — if that address
-  is wrong (uninitialized/mistranslated) for any reason specific to this
-  build, the resulting RDRAM index would be out of bounds. Confirmed this
-  isn't a buffer-sizing bug in the ROM itself: the buffer size math
-  (`audio_get_buffer_length()` stereo samples, `* 2` for channels) matches
-  upstream libdragon's own `audio_callback()` implementation. Not
-  investigated further this session — audio HLE is real, useful follow-up
-  work, but Phase N0's actual exit-gate decision is fps-based, not
-  audio-based, so this was left as a documented open gap rather than a
-  second full diagnostic session. `games/n64-scene`'s ROM has all
-  audio code removed (kept crash-free for the fps measurement); re-enabling
-  it to reproduce is a one-line change (`audio_init(22050, 3)` +
-  `audio_write()` with a zeroed buffer of `audio_get_buffer_length()*2`
-  shorts is enough to trigger it, no need to actually play a real tone).
+- **Audio HLE: RESOLVED — real core bug found and fixed.** A single
+  `audio_write()` call from guest code (following libdragon's documented
+  API: `audio_init()`, then `audio_get_buffer_length()`-sized buffer,
+  `audio_can_write()`/`audio_write()` in a loop) reproducibly crashed the
+  worker with `Uncaught RuntimeError: memory access out of bounds`.
+  Bisected by disabling code incrementally: `audio_init()` +
+  `audio_get_buffer_length()` + `malloc()` alone were fine; the crash was
+  specifically triggered by the first `audio_write()`. Ruled out a
+  ROM-side buffer-sizing bug first (the size math —
+  `audio_get_buffer_length()` stereo samples, `* 2` for channels — matches
+  upstream libdragon's own `audio.c`). Root cause:
+  `mupen64plus-core/src/device/rcp/ai/ai_controller.c`'s
+  `read_ai_regs()`/`ai_end_of_dma_event()` indexed RDRAM via a **raw,
+  unmasked** `&ai->ri->rdram->dram[ai->fifo[0].address/4]`, where
+  `ai->fifo[0].address` is whatever the guest wrote to `AI_DRAM_ADDR_REG`.
+  libdragon's `audio_write()` buffers are allocated with
+  `malloc_uncached()`, which returns a KSEG1-tagged pointer (upper address
+  bits set, e.g. `0xA0xxxxxx`) — real N64 AI DMA hardware only has ~24
+  address pins wired and silently ignores those upper bits, but this code
+  used the full unmasked value as an array index. The analogous SI/PIF DMA
+  path in `si_controller.c` already wraps the same kind of address through
+  `rdram_dram_address()` (`device/rdram/rdram.h`: `(address & 0xffffff) >>
+  2`) before indexing — `ai_controller.c` was simply missing the same
+  masking. On native builds this silently corrupts unrelated heap memory
+  (UB, no crash, because native processes have huge virtual address
+  spaces); under WASM's small, bounds-checked linear memory the same OOB
+  index becomes a hard trap, which is why this dormant bug was never
+  noticed on other platforms. **Fix:** wrap both RDRAM-indexing sites in
+  `ai_controller.c` with `rdram_dram_address()`, matching
+  `si_controller.c`. Verified 2026-07-22: `games/n64-scene` now runs with
+  audio re-enabled (a continuous 220Hz tone via the polling
+  `audio_can_write()`/`audio_write()` model), `npm run measure:n64-fps`
+  shows real audio flowing (805 events / 386400 frames / 2ch / 48000Hz /
+  f32 over an 8s window, 0 dropped video frames), and `npm run
+  probe:n64-core` still passes cleanly (no regression to the
+  correctness gate).
 
 ## Known gaps (tracked, not blockers for N0's build step)
 

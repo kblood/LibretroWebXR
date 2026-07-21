@@ -13,14 +13,14 @@
  *  - analog stick input (continuous x/y, not just digital direction)
  *  - EEPROM save (a persistent boot counter)
  *
- * Audio HLE is NOT exercised here: a single audio_write() call reproducibly
- * crashes the worker with a WASM linear-memory OOB trap (confirmed via
- * bisection - audio_init()/audio_get_buffer_length() alone are fine, the
- * crash is specifically in the AI DMA triggered by audio_write()). This is
- * an unresolved, real core-side bug, not a ROM bug - see
- * docs/N64_CORE_BUILD.md's "Known gaps" section for the repro and the
- * ai_controller.c lead. Left out of this ROM so the 3D-scene fps
- * measurement stays crash-free.
+ * Audio HLE: a continuous 220Hz sine tone, pumped via the polling
+ * audio_can_write()/audio_write() model (the buffer-callback variant never
+ * fired any events on this core). This used to crash the worker with a WASM
+ * linear-memory OOB trap - root cause was a real core-side bug in
+ * mupen64plus-core's ai_controller.c, which indexed RDRAM with a raw,
+ * unmasked AI_DRAM_ADDR_REG value instead of wrapping it through
+ * rdram_dram_address() the way si_controller.c already did. Fixed upstream
+ * in the core; see docs/N64_CORE_BUILD.md for the full repro and fix.
  *
  * Note: this pinned libdragon build (anacierdem/libdragon, predates the
  * modern rdpq API) requires an explicit init_interrupts() call - see
@@ -28,6 +28,7 @@
  */
 #include <libdragon.h>
 #include <math.h>
+#include <stdlib.h>
 
 typedef struct { float x, y, z; } vec3_t;
 
@@ -57,6 +58,22 @@ static const eepfs_entry_t eeprom_files[] = {
     { "save", 8 },
 };
 
+#define AUDIO_FREQ 22050
+static float audio_phase = 0.0f;
+
+static void audio_fill(short *buf, int numsamples)
+{
+    for (int i = 0; i < numsamples; i++) {
+        float s = sinf(audio_phase) * 6000.0f;
+        audio_phase += 2.0f * (float)M_PI * 220.0f / (float)AUDIO_FREQ;
+        if (audio_phase > 2.0f * (float)M_PI)
+            audio_phase -= 2.0f * (float)M_PI;
+        short sample = (short)s;
+        buf[i * 2 + 0] = sample;
+        buf[i * 2 + 1] = sample;
+    }
+}
+
 int main(void)
 {
     init_interrupts();
@@ -71,6 +88,10 @@ int main(void)
         eepfs_write("save", &boot_count, sizeof(boot_count));
     }
 
+    audio_init(AUDIO_FREQ, 3);
+    int audio_buflen = audio_get_buffer_length();
+    short *audio_buf = malloc(sizeof(short) * 2 * audio_buflen);
+
     uint32_t face_color[6];
     for (int f = 0; f < 6; f++) {
         face_color[f] = graphics_make_color(
@@ -83,6 +104,11 @@ int main(void)
     float yaw = 0.0f, pitch = 0.3f;
 
     while (1) {
+        if (audio_can_write()) {
+            audio_fill(audio_buf, audio_buflen);
+            audio_write(audio_buf);
+        }
+
         struct controller_data pad;
         controller_read(&pad);
         float ax = (float)pad.c[0].x / 80.0f;
