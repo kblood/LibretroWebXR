@@ -73,6 +73,12 @@ void vr4300_play_block_destroy(struct vr4300_play_block *block);
 enum vr4300_play_run_result vr4300_play_block_run(struct vr4300_play_block *block, void *state);
 enum vr4300_play_block_mode vr4300_play_block_get_mode(const struct vr4300_play_block *block);
 
+/* Returns non-zero if `opcode` is a block-terminating branch/jump (the same
+ * classification vr4300_play_block_create() uses internally) - lets a
+ * caller scan raw memory for block boundaries without duplicating/drifting
+ * from this adapter's own notion of where a block ends. */
+int vr4300_play_is_block_terminator(uint32_t opcode);
+
 #ifdef __cplusplus
 }
 #endif

@@ -294,7 +294,7 @@ bool EmitBranchAndDelay(Jitter::CJitter& jit, const vr4300_play_layout& layout,
 	}
 
 	/* Conditional branches (BEQ/BNE/BLEZ/BGTZ, their *L likely forms, and
-	 * REGIMM's BLTZ/BGEZ/BLTZAL/BGEZAL/*ALL). AL variants link
+	 * REGIMM's BLTZ/BGEZ/BLTZAL/BGEZAL/BLTZALL/BGEZALL). AL variants link
 	 * unconditionally, before the branch condition is even evaluated -
 	 * matching real hardware (the link write is part of executing the
 	 * branch instruction, which happens before the delay slot regardless
@@ -414,7 +414,11 @@ vr4300_play_block_create(struct vr4300_play_backend *backend, const uint32_t *op
 		return nullptr;
 	}
 
-	auto block = std::make_unique<vr4300_play_block>();
+	/* std::unique_ptr<T>(new T()), not std::make_unique (C++14) - this
+	 * file is compiled as part of mupen64plus-core's real build under
+	 * -std=gnu++11 (see Makefile), unlike this repo's own standalone
+	 * native spike harness which builds under C++17 for fast iteration. */
+	std::unique_ptr<vr4300_play_block> block(new vr4300_play_block());
 	block->backend = backend;
 	block->startPc = start_pc;
 	block->opcodeCount = count;
@@ -515,4 +519,14 @@ extern "C" enum vr4300_play_block_mode
 vr4300_play_block_get_mode(const struct vr4300_play_block *block)
 {
 	return block ? block->mode : VR4300_PLAY_BLOCK_INTERPRETER;
+}
+
+extern "C" int vr4300_play_is_block_terminator(uint32_t opcode)
+{
+	/* Exposes the same classification vr4300_play_block_create() uses
+	 * internally to decide where a block's linear-instruction run ends,
+	 * so callers doing their own raw-memory block-boundary scanning
+	 * (see vr4300_jit_bridge.cpp) can't drift out of sync with what this
+	 * adapter actually treats as a terminator. */
+	return IsBranch(opcode) ? 1 : 0;
 }
