@@ -293,13 +293,28 @@ steps are:
    `last_addr` to the real post-jump PC after `generic_jump_to()`) should
    reproduce the interpreter's own Count-register accounting exactly, not
    approximately — this may not need to be a coarse approximation at all.
-   What's still unverified and must not be assumed: whether `gen_interrupt()`
-   itself (exception dispatch, EPC capture, `interrupt_unsafe_state`,
-   `skip_jump`) has additional ordering requirements on `delay_slot`/GPR
-   state beyond what `cp0.last_addr` captures — this needs to be read in
-   full and then tested against a real interrupt-triggering ROM before any
-   of this lands in the bridge, per this project's own verify-before-
-   claiming-done standard. No code for this has been written yet.
+   Further reading (`grep delay_slot` across every `r4300/*.c`) found the
+   concrete shape of the remaining risk: `cp0.c`'s exception paths (e.g.
+   the EPC/ErrorEPC computation, per its own comment "adjust ErrorEPC if
+   we were in a delay slot") read `r4300->delay_slot`, which `BridgeState`
+   doesn't track at all. The good news: `DECLARE_JUMP` itself already
+   resets `r4300->delay_slot = 0` immediately after executing the delay
+   slot instruction, *before* its own `gen_interrupt()` check — i.e. the
+   interpreter's own reference check point is always at `delay_slot == 0`.
+   Since this bridge's block model always fully retires its one terminator
+   + delay slot before reaching its own equivalent check point, the two
+   check points line up: `delay_slot` should read `0` at both, by
+   construction, for every block this bridge actually compiles or
+   interpreter-falls-back for (the only case that skips this entirely —
+   `LookupOrCompile()` finding no terminator before the page ends — already
+   routes straight to `cached_interp_NOTCOMPILED2()`, never through this
+   check at all). This is still a **read-the-source finding, not a tested
+   one** — `gen_interrupt()`'s callee handlers (registered per-interrupt-
+   type, not read yet in full) may have further requirements this hasn't
+   surfaced, and none of it has been tried against a real interrupt-firing
+   ROM. No code for this has been written yet; per this project's own
+   verify-before-claiming-done standard, it shouldn't be until it can
+   actually be tested.
 3. Build a real differential harness against actual ROM content
    (n64-systemtest, libdragon test suites, then a real game boot) once 1–2
    are done — this is the bulk of the remaining NJ1 work (the plan
