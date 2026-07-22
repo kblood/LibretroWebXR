@@ -371,6 +371,60 @@ steps are:
    ROM. No code for this has been written yet; per this project's own
    verify-before-claiming-done standard, it shouldn't be until it can
    actually be tested.
+
+   **Update: this design is now implemented in `vr4300_jit_bridge.cpp`,
+   compile-verified (not behaviorally verified).** `cached_interp_JIT_ENTRY`
+   now branches on `vr4300_play_block_run()`'s return value
+   (`VR4300_PLAY_RUN_COMPILED` vs `_INTERPRETED`): only the `COMPILED` case
+   runs a new `AccountBlockCycles()` helper, which reproduces
+   `cp0_update_count()`'s exact formula directly against `r4300_cp0_regs()`/
+   `r4300_cp0_cycle_count()`/`cp0.last_addr` (all confirmed real,
+   directly-accessible fields/accessors) — deliberately *not* by
+   temporarily repositioning the real PC and calling the real function,
+   since that would need `generic_jump_to()` twice per block exit, and (in
+   this build's `EMUMODE_INTERPRETER`) that resolves to
+   `cached_interpreter_jump_to()`, which has real side effects (`skip_jump`
+   early-return, `update_invalid_addr()`, conditional page re-decode) —
+   unsafe to trigger as a throwaway bookkeeping step. The `JitSlot` LUT now
+   tracks each block's `word_count` alongside its `vr4300_play_block*` so
+   the delay-slot checkpoint address (`blockStart + (word_count-1)*4`) is
+   available without rescanning. Verified: recompiles cleanly against the
+   real headers under the real `em++ -std=gnu++11 -DEMSCRIPTEN` flags
+   (`WITH_N64_JIT=1` build), and the **full core rebuild + rearchive +
+   relink** (the same real pipeline verified above) still succeeds
+   (`RELINK_EXIT=0`) and still **boots correctly**
+   (`scripts/probe-n64-core.js` PASSED again, same 5-frames/0-errors
+   result as before this change).
+
+   **An interesting, only-partly-explained observation from this second
+   relink:** the final `mupen64plus_next_libretro.wasm`/`.js` came out
+   **byte-for-byte identical** (same SHA256) to the pre-COP0-code relink,
+   despite `vr4300_jit_bridge.cpp` genuinely changing (confirmed via the
+   object file's rebuilt mtime and the `LD` line in the build log showing
+   a real re-run, not a stale/cached skip). The most likely explanation:
+   `cached_interp_JIT_ENTRY` (and everything only reachable from it) has
+   its address taken *nowhere* in the program — unlike every real
+   interpreter opcode handler, which is address-taken via `ci_table[]`
+   and therefore can't be proven dead — so an optimizer capable of
+   whole-program analysis could soundly eliminate it entirely regardless
+   of source changes inside it, while the earlier, separately-observed
+   +2.76 MB size growth (from adding the files at all) is more likely
+   explained by C++ static-initializer/exception-table/embind-runtime
+   overhead pulled in globally by `--bind -fexceptions`, not by this
+   function's own body being retained. This is a plausible reading, not a
+   proven one (a quick `strings` check for the new symbol names came back
+   empty, but that's inconclusive on its own since `-O3` release builds
+   typically strip the name section regardless). Practical upshot: the
+   boot-probe pass above should **not** be over-read as having exercised
+   this new code path — it's real evidence of "no regression to the
+   shipping build," not evidence the new COP0 logic itself does anything
+   in the current binary at all.
+
+   **Still NOT verified:** actual interrupt-firing behavior — there is
+   still no `ci_table` wiring to reach this code live and no
+   differential/interrupt-triggering ROM test. This closes the *design
+   and implementation* of
+   next-step 2, not the *testing* of it.
 3. Build a real differential harness against actual ROM content
    (n64-systemtest, libdragon test suites, then a real game boot) once 1–2
    are done — this is the bulk of the remaining NJ1 work (the plan

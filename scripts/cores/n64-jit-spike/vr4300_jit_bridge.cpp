@@ -3,15 +3,19 @@
  * docs/research/n64-jit-nj1-spike.md for what is and isn't proven yet.
  *
  * WHY THIS IS NOT WIRED INTO THE LIVE DISPATCH TABLE (ci_table) YET:
- * cached_interp_JIT_ENTRY() below does not call cp0_update_count() or
- * gen_interrupt() the way the interpreter and every DECLARE_JUMP branch do
- * per-instruction - COP0 timer-driven interrupts (VI, the RCP interrupts
- * lightweight-polled off cp0_cycle_count) simply wouldn't fire on schedule
- * inside a compiled block. That's explicitly Phase NJ2 scope in
- * docs/research/n64-wasm-jit-plan.md, not NJ1 - this file gets the
- * lowering/LUT/dispatch machinery real and buildable against the actual
- * core headers first, so NJ2's interrupt-accuracy work has a real
- * dispatch path to land in rather than starting from nothing.
+ * cached_interp_JIT_ENTRY() below now DOES call an equivalent of
+ * cp0_update_count()/gen_interrupt() once per compiled block (see
+ * AccountBlockCycles() and the COMPILED branch below), designed by close
+ * reading of cp0.c/interrupt.c/cached_interp.c to match the real
+ * interpreter's own per-branch accounting exactly - but none of it has
+ * been tested against a real interrupt-firing ROM yet (no ci_table wiring
+ * exists to reach it live, and no differential harness exists yet
+ * either). Wiring this in before that testing exists would risk a real,
+ * live regression to the currently-shipping, verified interpreter-only
+ * core for the sake of unverified progress - that's explicitly still
+ * gated on Phase NJ2's testing step in docs/research/n64-wasm-jit-plan.md,
+ * not a NJ1 exit requirement. Full derivation in
+ * docs/research/n64-jit-nj1-spike.md.
  *
  * Design choice: rather than have the compiled IR write directly into
  * r4300_core's real regs[]/hi/lo (which would require this file's layout
@@ -34,6 +38,7 @@
 extern "C" {
 #include "device/r4300/r4300_core.h"
 #include "device/r4300/cached_interp.h"
+#include "device/r4300/interrupt.h"
 #include "main/main.h"
 }
 
@@ -62,12 +67,21 @@ vr4300_play_layout MakeLayout()
 
 /* One page's worth of compiled-block slots, indexed the same way
  * cached_interp.blocks' precomp_instr array is: (address & 0xFFF) >> 2.
- * Lazily allocated, mirroring cached_interp_init_block()'s own pattern. */
+ * Lazily allocated, mirroring cached_interp_init_block()'s own pattern.
+ * word_count is tracked alongside the block itself so cached_interp_
+ * JIT_ENTRY() can find the delay-slot checkpoint address for COP0
+ * cycle accounting (see AccountBlockCycles() below) without rescanning. */
 constexpr size_t kPageShift = 12;
 constexpr size_t kPageCount = 0x100000;
 constexpr size_t kSlotsPerPage = (1u << kPageShift) / 4;
 
-vr4300_play_block **g_jit_pages[kPageCount];
+struct JitSlot
+{
+	vr4300_play_block *block = nullptr;
+	uint32_t word_count = 0;
+};
+
+JitSlot *g_jit_pages[kPageCount];
 vr4300_play_backend *g_backend = nullptr;
 
 /* Interpreter fallback for blocks vr4300_play_block_create() couldn't
@@ -91,14 +105,41 @@ uint32_t InterpretOneBlock(void *state, void *opaque, uint32_t pc)
 
 void FreePage(size_t pageIndex)
 {
-	vr4300_play_block **page = g_jit_pages[pageIndex];
+	JitSlot *page = g_jit_pages[pageIndex];
 	if(!page) return;
 	for(size_t i = 0; i < kSlotsPerPage; i++)
 	{
-		if(page[i]) vr4300_play_block_destroy(page[i]);
+		if(page[i].block) vr4300_play_block_destroy(page[i].block);
 	}
 	delete[] page;
 	g_jit_pages[pageIndex] = nullptr;
+}
+
+/* Reproduces cp0_update_count()'s exact formula (device/r4300/cp0.c) for
+ * a given checkpoint PC, without touching the real PC struct pointer -
+ * calling the real function would require repositioning *r4300_pc(r4300)
+ * first, and generic_jump_to() (the only real way to do that in this
+ * build's EMUMODE_INTERPRETER) has side effects (skip_jump early-return,
+ * update_invalid_addr, conditional page re-decode via cached_interpreter_
+ * jump_to()) that are wrong to trigger twice per block exit just for
+ * bookkeeping. Only valid for VR4300_PLAY_RUN_COMPILED blocks - see the
+ * call site and docs/research/n64-jit-nj1-spike.md for why the
+ * VR4300_PLAY_RUN_INTERPRETED case must not call this at all. */
+void AccountBlockCycles(struct r4300_core *r4300, uint32_t checkpointPc)
+{
+	struct cp0 *cp0 = &r4300->cp0;
+	uint32_t *cp0_regs = r4300_cp0_regs(cp0);
+	int *cp0_cycle_count = r4300_cp0_cycle_count(cp0);
+
+	uint32_t count = ((checkpointPc - cp0->last_addr) >> 2) * cp0->count_per_op;
+	if(cp0->count_per_op_denom_pot)
+	{
+		count += (1u << cp0->count_per_op_denom_pot) - 1;
+		count >>= cp0->count_per_op_denom_pot;
+	}
+	cp0_regs[CP0_COUNT_REG] += count;
+	*cp0_cycle_count += count;
+	cp0->last_addr = checkpointPc;
 }
 
 /* Scans raw instruction words starting at `startPc` for the block shape
@@ -131,18 +172,18 @@ bool ScanBlock(struct r4300_core *r4300, uint32_t startPc, uint32_t *outWords, s
 	return false;
 }
 
-vr4300_play_block *LookupOrCompile(struct r4300_core *r4300, uint32_t pc)
+JitSlot *LookupOrCompile(struct r4300_core *r4300, uint32_t pc)
 {
 	const size_t pageIndex = pc >> kPageShift;
 	const size_t slot = (pc & 0xFFFu) >> 2;
 
-	vr4300_play_block **page = g_jit_pages[pageIndex];
+	JitSlot *page = g_jit_pages[pageIndex];
 	if(!page)
 	{
-		page = new vr4300_play_block *[kSlotsPerPage]();
+		page = new JitSlot[kSlotsPerPage]();
 		g_jit_pages[pageIndex] = page;
 	}
-	if(page[slot]) return page[slot];
+	if(page[slot].block) return &page[slot];
 
 	/* Words remaining until the end of this 4KB page - a block can't
 	 * cross a page boundary here, matching cached_interp's own per-page
@@ -157,8 +198,10 @@ vr4300_play_block *LookupOrCompile(struct r4300_core *r4300, uint32_t pc)
 	char error[256];
 	vr4300_play_block *block = vr4300_play_block_create(
 		g_backend, words, count, pc, static_cast<uint32_t>(count), error, sizeof(error));
-	page[slot] = block;
-	return block;
+	if(!block) return nullptr;
+	page[slot].block = block;
+	page[slot].word_count = static_cast<uint32_t>(count);
+	return &page[slot];
 }
 
 } // namespace
@@ -198,8 +241,8 @@ extern "C" void cached_interp_JIT_ENTRY(void)
 	auto *r4300 = &g_dev.r4300;
 	const uint32_t pc = *r4300_pc(r4300);
 
-	vr4300_play_block *block = LookupOrCompile(r4300, pc);
-	if(!block)
+	JitSlot *slot = LookupOrCompile(r4300, pc);
+	if(!slot)
 	{
 		/* No clean single-terminator block could be scanned at all (e.g.
 		 * no branch found before the page ended) - run this one address
@@ -208,10 +251,11 @@ extern "C" void cached_interp_JIT_ENTRY(void)
 		return;
 	}
 
-	/* block may be VR4300_PLAY_BLOCK_COMPILED or _INTERPRETER - either
-	 * way vr4300_play_block_run() below does the right thing (runs the
-	 * compiled IR, or calls InterpretOneBlock() above), so both cases
-	 * are handled uniformly here. */
+	/* slot->block may be VR4300_PLAY_BLOCK_COMPILED or _INTERPRETER -
+	 * either way vr4300_play_block_run() below does the right thing (runs
+	 * the compiled IR, or calls InterpretOneBlock() above) - but the two
+	 * cases need different COP0 cycle-accounting treatment afterward, see
+	 * below. */
 	BridgeState state {};
 	std::memcpy(state.regs, r4300_regs(r4300), sizeof(state.regs));
 	state.hi = *r4300_mult_hi(r4300);
@@ -219,11 +263,45 @@ extern "C" void cached_interp_JIT_ENTRY(void)
 	state.cycle = 0;
 	state.exit_pc = pc;
 
-	vr4300_play_block_run(block, &state);
+	const vr4300_play_run_result result = vr4300_play_block_run(slot->block, &state);
 
 	std::memcpy(r4300_regs(r4300), state.regs, sizeof(state.regs));
 	*r4300_mult_hi(r4300) = state.hi;
 	*r4300_mult_lo(r4300) = state.lo;
 
-	generic_jump_to(r4300, state.exit_pc);
+	if(result == VR4300_PLAY_RUN_COMPILED)
+	{
+		/* The whole word_count-instruction span (linear body + terminator
+		 * + delay slot) just ran atomically as compiled IR with no
+		 * internal COP0 accounting at all - replicate DECLARE_JUMP's own
+		 * two-step protocol (device/r4300/cached_interp.c) exactly once
+		 * for the whole block: account cycles up to the delay-slot
+		 * address (BEFORE the jump), apply the real jump, reset
+		 * cp0.last_addr to the post-jump PC, THEN check for a due
+		 * interrupt - matching exception_general()'s EPC = *r4300_pc()
+		 * capture happening only after the jump is applied, and
+		 * delay_slot reading 0 at this point (this bridge never sets it),
+		 * matching the interpreter's own convention of resetting it
+		 * before this same check. See docs/research/n64-jit-nj1-spike.md
+		 * for the full derivation - this is NOT yet tested against a
+		 * real interrupt-firing ROM. */
+		AccountBlockCycles(r4300, pc + (slot->word_count - 1) * 4);
+		generic_jump_to(r4300, state.exit_pc);
+		r4300->cp0.last_addr = *r4300_pc(r4300);
+		if(*r4300_cp0_cycle_count(&r4300->cp0) >= 0) gen_interrupt(r4300);
+	}
+	else
+	{
+		/* VR4300_PLAY_RUN_INTERPRETED: InterpretOneBlock() executed
+		 * exactly one real instruction via cached_interp_NOTCOMPILED2()'s
+		 * unmodified .ops() handler, which - if that instruction was a
+		 * branch - already did its own correct cp0_update_count()/
+		 * gen_interrupt() internally, exactly as if reached through the
+		 * ordinary ci_table path (which it was). Adding another
+		 * accounting pass here, sized for the whole scanned block that
+		 * was never actually executed as a unit in this fallback path,
+		 * would double-count cycles or check an interrupt against a
+		 * bogus PC delta - so this path must do nothing extra. */
+		generic_jump_to(r4300, state.exit_pc);
+	}
 }
