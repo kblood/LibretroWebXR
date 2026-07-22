@@ -1,15 +1,70 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated
-2026-07-12, branch `main` (code @ `a778b44` + the gun/mouse disarm option +
-one more pending commit for SNES/C64 mouse support below — check `git log`
-for the actual HEAD).
+2026-07-22. **Branch topology matters right now — read this before trusting
+`git log` on whatever branch happens to be checked out:**
+- **`main`** (pushed, code @ `f32507c`) has everything through the full PS2
+  (Play!) core integration, the PSX/PS2 disc-image classifier, distance-grab/
+  socket placement, the SNES Opwolf two-gun fix, gun-aim-align, and
+  `scripts/kill-dev.ps1` — all deployed-or-deployable app work, no core-JIT
+  spike code.
+- **`n64-jit-plan`** (this checkout's branch as of this update, pushed to
+  `origin/n64-jit-plan`, 11 commits ahead of `main`) additionally carries the
+  **PSX (Beetle PSX HW + Lightrec + Wasm-JIT) worker core** and **all N64
+  (mupen64plus_next) work** — Phase N0 (interpreter-baseline core) through
+  Phase NJ1 (the VR4300→Jitter JIT spike). Neither is merged to `main` yet.
+- **`psx-jit-integration`** is a separate, now-redundant single-commit branch
+  carrying only the PSX core-add commit (identical to the one already on
+  `n64-jit-plan`) — a merge into `main` should come from `n64-jit-plan` (or
+  cherry-pick just that commit), not from reconciling both.
+- Other worktrees seen at last check: `feat/dos-support` (parked, blocked —
+  see below) and `feat/mouse-peripheral` (superseded — mouse shipped to
+  `main` already). Per [[libretrowebxr-concurrent-dev]], **re-run `git
+  branch -a` / `git worktree list` yourself** before assuming any of this is
+  still current — other agent sessions actively work in sibling worktrees,
+  including uncommitted in-progress edits under `scripts/cores/n64-jit-spike/`
+  as of this writing (an n64-systemtest shadow-check probe in flight — leave
+  it alone unless you're the one continuing it).
 
-**Current focus: everything below is now live — real-headset validation is
-what's left.** Deployed 2026-07-10 (see "Live build" below); `a778b44` (the
-desktop pointer-lock fix), the gun/mouse disarm option, and SNES/C64 mouse
-support (all 2026-07-11/12) are **committed + pushed but NOT yet deployed** —
-run `npm run deploy` before expecting them live. Highlights, newest first:
+**Current focus: real-headset validation of the app-layer features below is
+what's left there; the new PSX/N64 core work is a separate, unmerged track —
+see the "PSX / PS2 / N64 core status" section right after this list for the
+full picture, since it's too new to summarize in one line.** Deployed
+2026-07-10 (see "Live build" below, still the live app version); `a778b44`
+(the desktop pointer-lock fix), the gun/mouse disarm option, SNES/C64 mouse
+support, distance-grab, the Opwolf two-gun fix, and gun-aim-align are **on
+`main`, committed + pushed but NOT yet deployed** — run `npm run deploy`
+before expecting them live. Highlights, newest first:
+- **PSX / PS2 / N64 cores added (2026-07-17 through 2026-07-22, branch
+  `n64-jit-plan` + `main`).** Three new emulated systems, all built from
+  scratch in WSL2 and verified against real headless-Chrome boots (not just
+  compiled) — full detail in the dedicated section below this list, and in
+  `docs/PS2_CORE_BUILD.md` / `docs/PSX_CORE_BUILD.md` / `docs/N64_CORE_BUILD.md`
+  / `docs/research/n64-jit-nj1-spike.md`. Short version: **PS2 is merged to
+  `main`** and ships a real homebrew light-gun game (LWX GunCon Range); **PSX
+  and N64 are real, working, headless-verified worker cores sitting on the
+  unmerged `n64-jit-plan` branch**; PSX ships with a genuine Wasm-JIT
+  (`psxJitCompiledBlocks: 95` on a real boot) via the same Play--CodeGen
+  `Jitter_CodeGen_Wasm` backend PS2 pioneered; N64 ships interpreter-only for
+  now (~50-58 fps headless-software-rendered) with a JIT spike
+  (`n64-jit-plan`'s own namesake) that's real, linked, and boot-verified but
+  **deliberately not yet wired live** (shadow-differential harness shows
+  19/19 real-boot blocks matching the interpreter bit-for-bit, but that's
+  still far short of the plan's own exit bar).
+- **Distance-grab pull/push + point-and-place socket placement
+  (`20a9304`).** New `GrabMgr` interaction: pull a prop toward you or push it
+  away at range, and place it precisely into a socket by pointing rather than
+  only free-hand positioning.
+- **SNES Opwolf two-gun score cross-wiring fix (`90b3108`).** Fixed a real
+  Justifier two-gun latch-timing bug where each player's score could
+  attribute to the wrong gun.
+- **Gun-aim-align (`94e7810`).** Light gun now snaps its barrel to the
+  controller's aim direction on grab, instead of keeping its pre-grab
+  orientation.
+- **`scripts/kill-dev.ps1` (`8a67e53`).** Stops dev servers by port, not by
+  image name — a direct fix for the standing "never blanket-kill node.exe"
+  hazard (it would kill the harness itself); use this instead of
+  `taskkill /IM node.exe`.
 - **SNES Mouse + C64 (1351) Mouse support added (2026-07-12).** User asked if
   the mouse peripheral could cover systems that had real mouse hardware
   historically (named SNES, NES, C64). Checked actual libretro core support
@@ -137,6 +192,107 @@ run `npm run deploy` before expecting them live. Highlights, newest first:
 - **Rack / multi-console (mid June).** Live cross-core swap on a secondary
   console without a page reload; power/reset switches; rack layout persists
   across the (still-needed, for the primary console) cross-core reload.
+
+## PSX / PS2 / N64 core status (added 2026-07-17 through 2026-07-22)
+
+This whole section is new since the last handoff refresh and covers work
+spread across `main` and the unmerged `n64-jit-plan` branch (see the branch
+topology note at the very top of this doc). It supersedes the old "Phase C…
+BIOS systems (PSX/N64 — feasibility assessed 2026-06-15, N64 not viable on
+standalone Quest 3, PSX marginal)" line still further down this doc — that
+assessment predates all of this and was wrong about both systems once a
+Wasm-JIT path was actually built, not just researched.
+
+- **PS2 (Play!) — merged to `main`, real content boots.** First-ever
+  Emscripten build of Play!'s `ui_libretro` wrapper (`docs/PS2_CORE_BUILD.md`
+  has the full recipe + every patch/gotcha). Boots a real commercial game
+  (Time Crisis II) end-to-end via `EmulatorClient`; GunCon2 light-gun input
+  verified through the actual USB driver stack; a black-screen (two-layer
+  ANGLE present-shader) and a main-thread-freeze bug were both found and
+  fixed; disc image (incl. CHD) loading was fixed after shipping (`69701bb`)
+  when it turned out never to actually load in the real app. Shipped a real
+  CC0 homebrew light-gun game, **LWX GunCon Range**
+  (`games/ps2-guncon-range`), verified 9/9. A PS1/PS2 disc-image classifier
+  (`src/DiscIdentity.js`, sniffs `SYSTEM.CNF` `BOOT`/`BOOT2`) exists and is
+  tested but not yet wired into automatic core selection — reaching PSX vs
+  PS2 for an ambiguous `.cue`/`.chd`/`.exe` extension currently needs an
+  explicit `?core=` override.
+- **PSX (Beetle PSX HW + Lightrec + Wasm-JIT) — real, verified, NOT on
+  `main` yet (branch `n64-jit-plan`, commit `270c606`).** The interesting
+  part: every existing browser PSX core (including the one `webretro` uses)
+  ships with Beetle's Lightrec dynarec disabled, because Lightrec's native
+  code generator emits real machine code that's inert under Wasm — so they
+  all silently fall back to a plain interpreter. This integration instead
+  adapts Lightrec's IR to the same Play--CodeGen `Jitter_CodeGen_Wasm`
+  backend the PS2 core already proved (published separately as
+  [`kblood/psx-wasm-jit-libretro`](https://github.com/kblood/psx-wasm-jit-libretro),
+  since it's independently useful — this repo only vendors the integration
+  side, see `docs/PSX_CORE_BUILD.md`). **This is a genuine guest-code JIT,
+  not a faster interpreter**, and it's real: `npm run probe:psx-core`
+  passed 2026-07-21 with `psxJitCompiledBlocks: 95` on a real CC0 PS-X EXE
+  smoke test, non-blank rendered frames, forwarded audio, zero errors.
+  `src/FirmwareStore.js` (user-imported BIOS, IndexedDB, never shipped) and
+  `src/SaveRamStore.js` (native memory-card saves) back it; a new
+  worker-execution facade (`src/RuntimeEmulatorClient.js` + `src/runtime/`)
+  carries it since it's this repo's first worker-mode core. **Known gap:**
+  multi-file CUE+BIN local picks don't yet survive a page reload as a
+  re-insertable shelf cartridge.
+- **N64 (mupen64plus_next) — real, verified, NOT on `main` yet (branch
+  `n64-jit-plan`).** Two sub-phases, both per `docs/research/n64-wasm-jit-plan.md`:
+  - **Phase N0 (interpreter baseline) — done.** `docs/N64_CORE_BUILD.md` has
+    the full build (three real, non-obvious toolchain patches: GLES3 symbol
+    duplication, atomics/bulk-memory compile flags, a libretro-common
+    symbol-rename extension). Three independent real bugs were found and
+    fixed getting past a permanent black screen: `libco` never switched
+    stacks under Emscripten (needed a new Asyncify-fiber backend), a
+    miscast function pointer at the core's own `co_create()` call site, and
+    — the actual root cause — the pinned libdragon Docker image's homebrew
+    template needs an explicit `init_interrupts()` call modern libdragon
+    docs no longer mention. A real core bug was also found and fixed in
+    `ai_controller.c` (unmasked RDRAM address on AI DMA — silently corrupts
+    memory on native builds, hard-traps under Wasm's bounds-checked linear
+    memory). Result: boots+renders a hand-authored CC0 3D test title
+    (`games/n64-scene`, no commercial ROM used, matching this project's
+    standing rule), analog stick input works, EEPROM saves work, audio
+    works. **fps measured 2026-07-22: ~50-58 fps under headless
+    software-rendered Chrome (the worst case)** — real/Quest hardware is
+    expected faster but **Quest 3 fps itself is still unmeasured**, same
+    open gap as every other headset-validation item in this doc.
+  - **Phase NJ1 (JIT spike) — real progress, deliberately not live.** A
+    from-scratch VR4300→Jitter tier-1 IR-lowering adapter (integer ALU/
+    shifts/branches only; loads/stores/FPU/MULT-DIV/COP0 fall back to the
+    interpreter) is validated standalone (128/128 synthetic checks) AND is
+    now linked into the **full real core binary** via gated, opt-in
+    `WITH_N64_JIT`/`N64_JIT` Makefile flags (default off — every normal
+    build of this core is byte-for-byte unaffected). That full binary
+    **boots correctly with zero regressions** against the shipping
+    interpreter baseline. A purely-observational shadow-differential
+    harness (also gated, also dead-by-default) was then built to compare
+    the JIT's predicted block output against the real interpreter's actual
+    output on every real boot — result: **`checked=19 matched=19
+    mismatched=0`**, i.e. every tier-1-eligible block the smoke ROM's boot
+    sequence actually hit produced bit-identical register/PC state to the
+    interpreter. Bringing this up caught a real, previously-latent bug
+    (`Module.codeGenImportTable` uninitialized — the first time this
+    project's JIT codegen path has ever executed *live* in any core,
+    PS2/PSX included, since they never hit the zero-registered-externs
+    case this does). **Still explicitly NOT done, on purpose:** the JIT is
+    NOT wired into the real dispatch table (`ci_table`) — nothing in the
+    live core calls any of this compiled code yet. The blocker is a COP0/
+    interrupt-accounting design (worked out and now implemented, but only
+    compile-verified, not behavior-verified against a real interrupt-firing
+    ROM) — wiring in before that's proven would risk a real regression to
+    the currently-shipping, currently-correct interpreter core, which this
+    project's own standards treat as not an acceptable trade for
+    unverified progress. Full blow-by-blow: `docs/research/n64-jit-nj1-spike.md`.
+- **Net effect on the old "Phase C… BIOS-needing systems (PSX/N64)" line:**
+  both are no longer a feasibility question — both have real, working,
+  headless-verified cores. What's left before either could ship on `main`
+  is: merging `n64-jit-plan` (or cherry-picking the PSX commit off
+  `psx-jit-integration`), a real Quest 3 fps read for N64, and — if JIT
+  speed ever becomes the actual blocker rather than a nice-to-have — closing
+  out NJ1's COP0/interrupt verification and the broader differential-test
+  pass its own doc calls for before `ci_table` wiring.
 
 **Deployed 2026-07-10, confirmed live (two deploys today).** First deploy
 published code @ `e2a0ab3` ("LWX Frontline Fury"); a second deploy the same
@@ -300,7 +456,18 @@ forward-set.** Crosshair + control hint live in `index.html`. Verified headless
 (movement + room-clamp + synthetic grab/release of a prop) + screenshot.
 
 **Live build:** https://dionysus.dk/webxr/libretrowebxr2/ (this repo, **code @
-`b25abdc`, deployed 2026-07-10** — the "fix everything" pass (cover plaques,
+`b25abdc`, deployed 2026-07-10** as of the last time this doc's deploy
+narrative was written — but **a live check just now (2026-07-22) shows the
+deployed `roms/manifest.json` has an `Apache Last-Modified` of 2026-07-20 and
+already lists a `"system": "ps2"` cartridge**, so at least one more,
+undocumented deploy has happened since 2026-07-10 that shipped the PS2 work
+below. **No exact commit for that later deploy is recorded anywhere in this
+doc** — if you need to know precisely what's live, either check
+`git log --oneline` around 2026-07-19/20 on `main` against what the site
+serves, or just run `npm run deploy` to bring it fully current (PS2 is
+already `main`-merged and safe to redeploy; PSX/N64 are NOT — they're still
+only on the unmerged `n64-jit-plan` branch, so a deploy from `main` won't
+include them). — the "fix everything" pass (cover plaques,
 unresolvable-ROM badge, in-VR folder grants + Load Collection, portal
 retarget) on top of the same day's earlier deploy (`e2a0ab3`, "LWX Frontline
 Fury"), on top of the 2026-07-02 deploy (`a7aac29`), which carried everything
@@ -738,7 +905,11 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   (feasibility spike done: confirmed rewrite, not a slice — keep M1 streaming as
   shipped default; bare-core NES PoC as an opt-in spike first); **M3** crossplay.
 - **Phase C** — bundle chunking ✅ done; open prop package schema, community
-  gallery, BIOS-needing systems (PSX/N64), PWA.
+  gallery, PWA. **BIOS-needing systems (PSX/N64): no longer just a feasibility
+  question** — both have real, headless-verified working cores now (PS2
+  already merged to `main`; PSX + N64 sit on the unmerged `n64-jit-plan`
+  branch) — see "PSX / PS2 / N64 core status" above for the full picture and
+  what's actually left (branch merge, Quest fps read, N64 JIT wiring).
 - **Controller cords + spawnable screens** — user-deferred; parked at the bottom
   of `docs/ROADMAP.md`.
 
@@ -867,12 +1038,32 @@ inline. If you're picking up stale-looking doc claims again, check `git log
   (`Hub.js`'s `setState` has none); out of scope unless this proves to matter
   in practice.
 
-## Immediate next actions (as of 2026-07-11)
+## Immediate next actions (as of 2026-07-11, items 0/0.5/1-4 below; see the
+new item 00 for what changed since)
+
+00. **(New, 2026-07-22) Decide whether to merge `n64-jit-plan` to `main`.**
+    It carries a real, working, headless-verified PSX core (with a genuine
+    Wasm-JIT) and a real, working N64 interpreter core, both ready to ship as
+    new systems — see "PSX / PS2 / N64 core status" above. Nothing about
+    either blocks on more research; the remaining N64 JIT wiring
+    (`ci_table`) is intentionally separate/deferred work that doesn't need
+    to hold up merging the working interpreter-only N64 core. Before
+    merging: re-run `npm test` + the `probe:psx-core`/`probe:n64-core`/
+    `measure:n64-fps` scripts on the merge target (they were verified on
+    `n64-jit-plan`'s tip, not against a post-merge `main`), and decide
+    whether to keep chasing NJ1's COP0/interrupt verification on a branch or
+    park it (it's genuinely dead/dormant code either way — merging early is
+    low-risk by construction, gated behind opt-in build flags). Also fold in
+    the undocumented 2026-07-20 deploy gap noted in "Live build" above.
 
 `a778b44` (desktop pointer-lock fix + controller port-switch tests) and the
 gun/mouse **disarm option** (this session, see below) are **committed + pushed
 but NOT deployed yet** — `npm run deploy` first if you want them live (live is
-still `b25abdc`, 2026-07-10). Sensible next steps, in rough priority:
+still `b25abdc`, 2026-07-10, per the doc's own narrative — though see the
+"Live build" note above, an undocumented later deploy may have already
+covered some of this). Sensible next steps, in rough priority (pre-2026-07-22
+list, still accurate for the app-layer work, now item 00 above takes actual
+priority):
 
 0. **Deploy the pending commits.** Cheap, verified, no known regressions
    (`npm test` green; disarm feature end-to-end verified against a real dev
@@ -919,9 +1110,11 @@ still `b25abdc`, 2026-07-10). Sensible next steps, in rough priority:
    the desktop-netplay build) as the shipped default; do a bare-core spike on
    `fceumm` (NES only) as an opt-in PoC before deciding on full M2. Read
    `docs/research/M2-rollback-feasibility.md` first.
-5. **Phase C** — remaining: open prop-package schema, community gallery, BIOS
-   systems (PSX/N64 — feasibility assessed 2026-06-15, N64 not viable on
-   standalone Quest 3, PSX marginal), PWA install. Bundle chunking is done.
+5. **Phase C** — remaining: open prop-package schema, community gallery, PWA
+   install. Bundle chunking is done. ~~BIOS systems (PSX/N64 — feasibility
+   assessed 2026-06-15, N64 not viable on standalone Quest 3, PSX
+   marginal)~~ **superseded 2026-07-22 — see item 00 above and "PSX / PS2 /
+   N64 core status"; both are now real, working, headless-verified cores.**
 
 **2026-07-10 session (first pass):** deployed the pending "LWX Frontline
 Fury" game (`e2a0ab3`) that was committed but not yet live; audited the
