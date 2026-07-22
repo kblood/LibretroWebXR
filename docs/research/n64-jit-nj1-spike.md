@@ -293,6 +293,62 @@ steps are:
    `last_addr` to the real post-jump PC after `generic_jump_to()`) should
    reproduce the interpreter's own Count-register accounting exactly, not
    approximately — this may not need to be a coarse approximation at all.
+   Concrete requirement, found by reading `cp0.c`'s `exception_general()`
+   (the real dispatcher `check_int_handler()`/`CHECK_INT` calls, the
+   standard-interrupt path — as opposed to `nmi_int_handler`'s soft-reset
+   path, also read, same `delay_slot`-adjustment pattern): `EPC =
+   *r4300_pc(r4300)` is captured **at the moment `exception_general()`
+   runs**, then adjusted `-4` (and `CAUSE.BD` set) only if `delay_slot==1
+   ||3`. So the real PC must already read as "the address execution should
+   resume/appear interrupted at" *before* the interrupt check fires — for
+   the interpreter this is why `DECLARE_JUMP` applies the branch/fallthrough
+   *before* its `cp0.last_addr = *r4300_pc(r4300); if (...) gen_interrupt();`
+   tail, not after.
+   A second, more subtle finding while working out how to replicate this
+   for the bridge's own block-exit check: **the COMPILED and INTERPRETER
+   block modes need entirely different treatment, not the same call.**
+   For `VR4300_PLAY_RUN_INTERPRETED` (the adapter's per-block fallback —
+   `vr4300_play_block_run()` calls the registered interpreter callback
+   **exactly once**, confirmed by reading `vr4300_play_backend.cpp`'s
+   `vr4300_play_block_run()` directly — not once per scanned word), this
+   bridge's `InterpretOneBlock()` invokes `cached_interp_NOTCOMPILED2()`,
+   which executes **exactly one real instruction** via its real, unmodified
+   `.ops()` handler. If that one instruction happens to be a branch, its
+   own `DECLARE_JUMP`-generated body has *already* called
+   `cp0_update_count()`/`gen_interrupt()` correctly, entirely on its own —
+   adding another accounting pass on top in the bridge, sized for the
+   *whole scanned block* (which was never actually executed as a unit in
+   this fallback path — only one instruction was), would silently
+   double-count cycles or check for an interrupt using a bogus, unrelated
+   PC delta. **The block-level accounting this step is designing can only
+   ever be correct for `VR4300_PLAY_RUN_COMPILED`** — the interpreted case
+   needs nothing extra at all, since the real interpreter already handled
+   it exactly as if reached through the ordinary `ci_table` path (which,
+   functionally, it was).
+   A third finding, on *how* to get the real PC to read the right
+   "checkpoint" address for `cp0_update_count()`'s call (which reads
+   `*r4300_pc(r4300)` directly, so some real PC positioning is required
+   before calling it): the natural-seeming approach — call
+   `generic_jump_to(r4300, checkpointAddr)`, then `cp0_update_count()`,
+   then `generic_jump_to(r4300, realExitAddr)` — is **unsafe**, found by
+   reading what `generic_jump_to()` actually calls in this build's
+   `EMUMODE_INTERPRETER` mode: `cached_interpreter_jump_to()`, which is not
+   a plain pointer assignment — it early-returns if `r4300->skip_jump` is
+   set, calls `update_invalid_addr()` (real address-validity/TLB checking,
+   with its own side effects), and conditionally calls `init_block()` (a
+   real, potentially expensive page re-decode) if the target page is
+   marked invalid. Calling this twice per block exit purely for
+   bookkeeping risks triggering real side effects or interacting badly
+   with `skip_jump` state left over from a real jump elsewhere. The
+   correct-looking alternative — reproducing `cp0_update_count()`'s own
+   pure formula directly (`count = ((checkpointAddr - cp0.last_addr) >> 2)
+   * cp0.count_per_op`, with the same `count_per_op_denom_pot` rounding,
+   applied straight to `cp0_regs[CP0_COUNT_REG]`/`*cp0_cycle_count`/
+   `cp0.last_addr`) instead of calling the real function with a
+   temporarily-repositioned PC — avoids this, at the cost of duplicating
+   logic instead of calling it. Not yet checked: whether an
+   `r4300_cp0_regs()` accessor exists with the right signature for this
+   (only confirmed `r4300_cp0_cycle_count()` so far).
    Further reading (`grep delay_slot` across every `r4300/*.c`) found the
    concrete shape of the remaining risk: `cp0.c`'s exception paths (e.g.
    the EPC/ErrorEPC computation, per its own comment "adjust ErrorEPC if
