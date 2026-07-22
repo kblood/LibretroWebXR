@@ -3,10 +3,12 @@
 Status as of 2026-07-22: **standalone lowering layer validated natively
 (128/128); a real cached_interp.c bridge exists and compiles cleanly
 against the actual core headers under the real emscripten/gnu++11
-toolchain, but is not yet linked into a full core binary or wired into the
-live dispatch table.** This doc exists so that distinction is never lost —
-see [[n64-wasm-jit-plan.md]] Phase NJ1 for the full exit gate this spike is
-a step toward, not a completion of.
+toolchain; a clean Wasm-targeted Play--CodeGen/Framework build has been
+confirmed to link against the adapter with `--bind` — but none of this is
+yet linked into a full core binary or wired into the live dispatch
+table.** This doc exists so that distinction is never lost — see
+[[n64-wasm-jit-plan.md]] Phase NJ1 for the full exit gate this spike is a
+step toward, not a completion of.
 
 ## What this is
 
@@ -148,10 +150,30 @@ still 128/128.
 - `vr4300_jit_bridge_invalidate()` exists and is correct by inspection but
   is not called from anywhere real (`invalidate_r4300_cached_code()`'s
   actual dispatch chain isn't touched).
-- Play--CodeGen has not been linked into a full core binary build — only
-  compiled (`-c`, no link) in isolation. The Makefile itself has not been
-  touched (no `SOURCES_CXX`/`LDFLAGS` additions for these two new files or
-  for a Play--CodeGen static library yet), though the core's existing
+- Play--CodeGen has now been proven to **build and link for Wasm**, but
+  only via a synthetic check, not the real core yet. A clean,
+  dependency-only `libCodeGen.a`/`libFramework.a` pair was built straight
+  from the vendored `deps/CodeGen` checkout via `emcmake cmake && emmake
+  make CodeGen Framework` (no Play!-app-specific config involved), then
+  linked against `vr4300_play_backend.cpp` plus a minimal `main()` using
+  the real toolchain: `em++ -std=gnu++11 -DEMSCRIPTEN -DNO_ASM --bind`.
+  First attempt (without `--bind`) failed with `undefined symbol:
+  _emval_decref` — traced to a genuine, necessary embind dependency in
+  CodeGen's own `MemoryFunction.cpp` (`MEMFUNC_USE_WASM` path uses
+  `EM_JS`/`emscripten::EM_VAL` to dynamically instantiate the JIT-generated
+  inner Wasm module via JS at runtime), confirmed intrinsic to CodeGen
+  itself (not an artifact of Play!'s app build) by hitting the identical
+  error against a second, independently-built clean library set. Adding
+  `--bind` made the link succeed (exit 0, real `.js`/`.wasm` output). This
+  is still a **synthetic link-check** (`link_check_main.cpp`, not the real
+  core, and not the bridge file — the bridge references real core symbols
+  like `fast_mem_access`/`generic_jump_to` that only exist inside a full
+  core link), but it closes the "can CodeGen actually be built and linked
+  for Wasm at all" question with a real, reproducible yes: the real
+  Makefile integration needs `--bind` added to the final link's flags,
+  which was not obvious before this check. The Makefile itself has not
+  been touched yet (no `SOURCES_CXX`/`LDFLAGS` additions for these two new
+  files or for a Play--CodeGen static library), though the core's existing
   build already supports mixed C/C++ via `SOURCES_CXX` and `CXX = em++`
   (used today for GLideN64/parallel-rsp), which is real, de-risking
   evidence that adding these files to the real build is mechanical rather
@@ -187,10 +209,13 @@ steps are:
    `vr4300_jit_bridge.cpp` to `Makefile.common` (mirroring the existing
    GLideN64/parallel-rsp C++ source entries), and add a build step +
    `LDFLAGS`/`CXXFLAGS` wiring a locally-built Play--CodeGen static
-   library into the final link (the PSX adapter's own build faced the
-   same problem; its exact historical build script was not recoverable
-   from this session's WSL scratch directories, so this will need to be
-   solved fresh rather than copied).
+   library into the final link, now including `--bind` (confirmed
+   necessary above). The PSX adapter's own build faced the same problem;
+   its exact historical build script was not recoverable from this
+   session's WSL scratch directories, so this needs to be solved fresh
+   against `docs/N64_CORE_BUILD.md`'s real, already-working two-stage
+   recipe (core archive, then link against the patched RetroArch
+   checkout) rather than copied.
 2. Close (or explicitly, narrowly scope around) the COP0/interrupt gap
    before wiring `cached_interp_JIT_ENTRY` into `ci_table` for real — e.g.
    restrict JIT-eligible blocks to ones proven not to straddle an
