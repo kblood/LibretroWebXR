@@ -61,6 +61,39 @@ void vr4300_jit_bridge_invalidate(uint32_t address, uint32_t size);
  */
 void cached_interp_JIT_ENTRY(void);
 
+/*
+ * Shadow-differential validation harness (N64_JIT_SHADOW_CHECK, opt-in,
+ * layered on top of WITH_N64_JIT - independent flag, but the shadow harness
+ * reuses this bridge's own LookupOrCompile()/vr4300_play_block_run() code,
+ * so it only builds when WITH_N64_JIT's sources are also present). Purely
+ * observational: never touches ci_table, never changes what the real
+ * interpreter executes or what state it ends up in. See
+ * docs/research/n64-jit-nj1-spike.md for the full design and the real
+ * match/mismatch counts from running it against the smoke ROM.
+ *
+ * vr4300_jit_shadow_on_decode(): call from cached_interp_recompile_block()
+ * with the same `func` it was given (guaranteed to equal the real live PC
+ * at that moment - cached_interp_NOTCOMPILED() is recompile_block's only
+ * real call site, and always passes *r4300_pc(r4300)). If the tier-1
+ * adapter can fully lower a block there, this snapshots the CURRENT real
+ * architectural state (GPRs, hi, lo) into a private copy, runs the
+ * compiled block against ONLY that copy, and stashes the predicted
+ * post-block state (GPRs, hi, lo, exit PC) for later comparison. Never
+ * writes to the real r4300_core state. COP0 registers are explicitly NOT
+ * snapshotted or compared yet - see the doc for why.
+ *
+ * vr4300_jit_shadow_poll(): call after every real instruction retires
+ * (i.e. right after every ->ops() call in run_cached_interpreter()'s main
+ * loop). Cheap no-op scan when nothing is pending. Once the real PC has
+ * moved outside a pending entry's tracked block span - this harness's
+ * signal for "the interpreter just finished retiring this block" -
+ * compares the REAL state at that instant against the entry's predicted
+ * state and logs any mismatch via DebugMessage(); never aborts, never
+ * mutates real state either way.
+ */
+void vr4300_jit_shadow_on_decode(struct r4300_core *r4300, uint32_t func);
+void vr4300_jit_shadow_poll(struct r4300_core *r4300);
+
 #ifdef __cplusplus
 }
 #endif

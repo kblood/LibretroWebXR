@@ -108,6 +108,10 @@ export async function runN64CoreE2E({ coreUrl, contentUrl, romFilename = 'lwx-n6
       logCount: logs.length,
       errorLogCount: errorLogs.length,
       workerErrors,
+      // Only ever populated by an N64_JIT_SHADOW_CHECK=1 build (see
+      // docs/research/n64-jit-nj1-spike.md) - empty on every normal build,
+      // including the shipping baseline, since that flag defaults off.
+      shadowLogs: logs.filter((record) => /N64_JIT_SHADOW/.test(record.text)),
     };
   } finally {
     await client.stop();

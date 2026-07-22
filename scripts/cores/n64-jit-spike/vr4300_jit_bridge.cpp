@@ -33,13 +33,22 @@
 #include "vr4300_play_backend.h"
 
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
+
+#if defined(N64_JIT_SHADOW_CHECK)
+#define __STDC_FORMAT_MACROS
+#include <cinttypes>
+#endif
 
 extern "C" {
 #include "device/r4300/r4300_core.h"
 #include "device/r4300/cached_interp.h"
 #include "device/r4300/interrupt.h"
 #include "main/main.h"
+#if defined(N64_JIT_SHADOW_CHECK)
+#include "api/callbacks.h"
+#endif
 }
 
 namespace
@@ -206,9 +215,249 @@ JitSlot *LookupOrCompile(struct r4300_core *r4300, uint32_t pc)
 
 } // namespace
 
+#if defined(N64_JIT_SHADOW_CHECK)
+namespace
+{
+
+/*
+ * One pending shadow prediction: a block LookupOrCompile() found and
+ * confirmed VR4300_PLAY_BLOCK_COMPILED for, already run against a private
+ * BridgeState copy at decode time (see vr4300_jit_shadow_on_decode()
+ * below), waiting for the real interpreter to retire the same address
+ * range so the two can be compared. A small fixed-capacity array, not a
+ * dynamic container - this is a purely observational probe, and dropping
+ * an over-capacity entry (counted in g_shadowDropped) is preferable to
+ * adding allocation or contention to the hot per-instruction poll.
+ */
+struct ShadowEntry
+{
+	bool active = false;
+	uint32_t startPc = 0;
+	uint32_t wordCount = 0;
+	int64_t regs[32] = {};
+	int64_t hi = 0;
+	int64_t lo = 0;
+	uint32_t exitPc = 0;
+};
+
+constexpr size_t kMaxPendingShadow = 16;
+ShadowEntry g_shadowPending[kMaxPendingShadow];
+uint32_t g_shadowChecked = 0;
+uint32_t g_shadowMatched = 0;
+uint32_t g_shadowMismatched = 0;
+uint32_t g_shadowDropped = 0;
+
+/*
+ * Every shadow-check log line is explicitly prefixed "[info] " so this
+ * project's worker-side classifyCoreLog() (src/runtime/coreLog.js)
+ * deterministically tags it 'info' regardless of whether the mupen64plus
+ * DebugMessage() callback happens to route through stdout or stderr in
+ * this build - the stderr path's un-prefixed fallback is 'error', which
+ * would otherwise turn every shadow-check line (match or mismatch alike)
+ * into a real console.warn() on the host page and trip probe-n64-core.js's
+ * "no browser warnings" assertion, even though nothing regressed. Using
+ * M64MSG_WARNING/M64MSG_ERROR here would not fix that (classification is
+ * purely text-prefix-based, not tied to the M64MSG_* level passed in) -
+ * only the literal "[info] " prefix does.
+ */
+void LogFieldMismatch(uint32_t startPc, const char *field, int64_t expected, int64_t actual)
+{
+	/* Uses fprintf(stderr, ...) rather than DebugMessage() - the
+	 * decode-tally diagnostic below found that DebugMessage(M64MSG_INFO,...)
+	 * lines never reach the worker's log listener in this build (most
+	 * likely RetroArch's own core log-level cvar filtering INFO-level
+	 * messages before they reach retro_log()/Module.printErr - not
+	 * confirmed further, but a raw libc stdio call bypasses that path
+	 * entirely and is confirmed to arrive, so it's used here too). */
+	std::fprintf(stderr,
+		"[info] N64_JIT_SHADOW mismatch: block_pc=%08" PRIx32 " field=%s jit=%016" PRIx64 " interp=%016" PRIx64 "\n",
+		startPc, field, (uint64_t)expected, (uint64_t)actual);
+}
+
+/* Compares the real, just-retired architectural state against this entry's
+ * decode-time shadow prediction. Only ever reads real state - never writes
+ * it, regardless of match/mismatch. GPRs/hi/lo/PC are compared; COP0 is
+ * explicitly out of scope (the shadow run's BridgeState has no COP0 fields
+ * at all - see docs/research/n64-jit-nj1-spike.md for why extending this
+ * to COP0 was not attempted in this pass). */
+void CompareAndReport(struct r4300_core *r4300, const ShadowEntry &entry)
+{
+	g_shadowChecked++;
+	bool mismatch = false;
+
+	const int64_t *realRegs = r4300_regs(r4300);
+	for(int i = 0; i < 32; i++)
+	{
+		if(realRegs[i] != entry.regs[i])
+		{
+			char name[16];
+			std::snprintf(name, sizeof(name), "gpr[%d]", i);
+			LogFieldMismatch(entry.startPc, name, entry.regs[i], realRegs[i]);
+			mismatch = true;
+		}
+	}
+	if(*r4300_mult_hi(r4300) != entry.hi)
+	{
+		LogFieldMismatch(entry.startPc, "hi", entry.hi, *r4300_mult_hi(r4300));
+		mismatch = true;
+	}
+	if(*r4300_mult_lo(r4300) != entry.lo)
+	{
+		LogFieldMismatch(entry.startPc, "lo", entry.lo, *r4300_mult_lo(r4300));
+		mismatch = true;
+	}
+	const uint32_t realPc = *r4300_pc(r4300);
+	if(realPc != entry.exitPc)
+	{
+		LogFieldMismatch(entry.startPc, "pc", entry.exitPc, realPc);
+		mismatch = true;
+	}
+
+	if(mismatch) g_shadowMismatched++;
+	else g_shadowMatched++;
+
+	/* A running summary line on every checked block (not just mismatches)
+	 * so a short-lived probe run still leaves a final tally in whatever
+	 * log capture is watching, even if it stops before any explicit
+	 * teardown/report call. */
+	std::fprintf(stderr,
+		"[info] N64_JIT_SHADOW summary: checked=%" PRIu32 " matched=%" PRIu32 " mismatched=%" PRIu32
+		" dropped=%" PRIu32 " last_block_pc=%08" PRIx32 " last_result=%s\n",
+		g_shadowChecked, g_shadowMatched, g_shadowMismatched, g_shadowDropped,
+		entry.startPc, mismatch ? "MISMATCH" : "match");
+}
+
+} // namespace
+
+void vr4300_jit_shadow_on_decode(struct r4300_core *r4300, uint32_t func)
+{
+	/* Self-initializing on first use - real ci_table dispatch never calls
+	 * vr4300_jit_bridge_init() today (nothing wires cached_interp_JIT_ENTRY
+	 * in), so the shadow harness lazily brings up the same backend/LUT
+	 * cached_interp_JIT_ENTRY would use if it were ever wired, rather than
+	 * requiring a separate real-init-path edit for this probe. */
+	if(!g_backend)
+	{
+		vr4300_jit_bridge_init(r4300);
+		if(!g_backend) return;
+	}
+
+	static uint32_t s_decodeCalls = 0;
+	static uint32_t s_compiledEligible = 0;
+	static uint32_t s_lookupFailed = 0;
+	s_decodeCalls++;
+
+	JitSlot *slot = LookupOrCompile(r4300, func);
+	if(!slot || !slot->block)
+	{
+		s_lookupFailed++;
+		if((s_decodeCalls & 0xFFF) == 0)
+		{
+			std::fprintf(stderr,
+				"[info] N64_JIT_SHADOW decode-tally: decode_calls=%u compiled_eligible=%u lookup_failed=%u\n",
+				s_decodeCalls, s_compiledEligible, s_lookupFailed);
+		}
+		return;
+	}
+	if(vr4300_play_block_get_mode(slot->block) != VR4300_PLAY_BLOCK_COMPILED)
+	{
+		/* Same tier-1 opcode-coverage criteria the (still-dead) real JIT
+		 * entry point would use, reused via vr4300_play_block_get_mode()
+		 * rather than re-implemented here - a block the adapter itself
+		 * flags as interpreter-fallback has nothing to shadow-compare. */
+		if((s_decodeCalls & 0xFFF) == 0)
+		{
+			std::fprintf(stderr,
+				"[info] N64_JIT_SHADOW decode-tally: decode_calls=%u compiled_eligible=%u lookup_failed=%u\n",
+				s_decodeCalls, s_compiledEligible, s_lookupFailed);
+		}
+		return;
+	}
+	s_compiledEligible++;
+	std::fprintf(stderr,
+		"[info] N64_JIT_SHADOW decode-tally: decode_calls=%u compiled_eligible=%u lookup_failed=%u (COMPILED block_pc=%08" PRIx32 ")\n",
+		s_decodeCalls, s_compiledEligible, s_lookupFailed, func);
+
+	size_t freeIndex = kMaxPendingShadow;
+	for(size_t i = 0; i < kMaxPendingShadow; i++)
+	{
+		if(!g_shadowPending[i].active) { freeIndex = i; break; }
+	}
+	if(freeIndex == kMaxPendingShadow)
+	{
+		g_shadowDropped++;
+		return;
+	}
+
+	BridgeState state {};
+	std::memcpy(state.regs, r4300_regs(r4300), sizeof(state.regs));
+	state.hi = *r4300_mult_hi(r4300);
+	state.lo = *r4300_mult_lo(r4300);
+	state.cycle = 0;
+	state.exit_pc = func;
+
+	if(vr4300_play_block_run(slot->block, &state) != VR4300_PLAY_RUN_COMPILED) return;
+
+	ShadowEntry &entry = g_shadowPending[freeIndex];
+	entry.active = true;
+	entry.startPc = func;
+	entry.wordCount = slot->word_count;
+	std::memcpy(entry.regs, state.regs, sizeof(entry.regs));
+	entry.hi = state.hi;
+	entry.lo = state.lo;
+	entry.exitPc = state.exit_pc;
+}
+
+void vr4300_jit_shadow_poll(struct r4300_core *r4300)
+{
+	if(!g_backend) return;
+	const uint32_t pc = *r4300_pc(r4300);
+	for(size_t i = 0; i < kMaxPendingShadow; i++)
+	{
+		ShadowEntry &entry = g_shadowPending[i];
+		if(!entry.active) continue;
+		const uint32_t blockEnd = entry.startPc + entry.wordCount * 4;
+		if(pc >= entry.startPc && pc < blockEnd) continue; /* still inside - not retired yet */
+		CompareAndReport(r4300, entry);
+		entry.active = false;
+	}
+}
+#endif // N64_JIT_SHADOW_CHECK
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+/*
+ * Real bug found the first time this bridge ever ran live (via the
+ * shadow-check harness): Play--CodeGen's own WasmCreateFunction
+ * (MemoryFunction.cpp) unconditionally instantiates every compiled block
+ * module with an `env.fctTable` import bound to `Module.codeGenImportTable`
+ * - but that table is only ever lazily created as a side effect of
+ * CWasmFunctionRegistry::RegisterFunction() registering at least one
+ * extern helper (Jitter_CodeGen_Wasm.cpp's RegisterExternFunction). Every
+ * block this project has compiled before now (PS2 EE, PSX) always
+ * references at least one helper (memory access, syscalls, ...), so this
+ * never surfaced. Tier-1 VR4300 blocks (pure ALU/shifts/branches, no
+ * loads/stores/helpers by design - see docs/research/n64-jit-nj1-spike.md)
+ * can legitimately compile with zero registered externs, leaving
+ * `Module.codeGenImportTable` undefined and crashing instantiation with
+ * "table import requires a WebAssembly.Table". Fixed here, not in the
+ * vendored CodeGen source, by forcing the same lazy-init CodeGen itself
+ * would eventually do, once, before this bridge ever compiles a block.
+ */
+EM_JS(void, EnsureCodeGenImportTable, (), {
+	if(Module.codeGenImportTable === undefined) {
+		Module.codeGenImportTable = new WebAssembly.Table({ element: 'anyfunc', initial: 32 });
+		Module.codeGenImportTableNextIndex = 0;
+	}
+});
+#else
+static void EnsureCodeGenImportTable(void) {}
+#endif
+
 void vr4300_jit_bridge_init(struct r4300_core *)
 {
 	if(g_backend) return;
+	EnsureCodeGenImportTable();
 	vr4300_play_layout layout = MakeLayout();
 	g_backend = vr4300_play_backend_create(&layout, InterpretOneBlock, nullptr);
 	for(size_t i = 0; i < kPageCount; i++) g_jit_pages[i] = nullptr;

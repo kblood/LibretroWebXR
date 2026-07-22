@@ -429,3 +429,155 @@ steps are:
    (n64-systemtest, libdragon test suites, then a real game boot) once 1–2
    are done — this is the bulk of the remaining NJ1 work (the plan
    estimates 3–5 weeks for the whole phase).
+
+   **Update: this step is now done for the smoke ROM's boot sequence, with a
+   real, non-zero match/mismatch verdict.** Built a purely-observational
+   shadow-differential harness, gated behind a new, independent, opt-in
+   `N64_JIT_SHADOW_CHECK` flag (nested inside `WITH_N64_JIT`'s block, since
+   it reuses this bridge's own `LookupOrCompile()`/`vr4300_play_block_run()`
+   rather than duplicating them — still never touches `ci_table`, so this
+   remains dormant/dead code from the running core's perspective exactly as
+   before). Design: on every real block decode
+   (`cached_interp_recompile_block()`), if the tier-1 adapter can fully
+   lower it (`vr4300_play_block_get_mode() == VR4300_PLAY_BLOCK_COMPILED`),
+   snapshot the real live GPRs[32]/hi/lo into a private `BridgeState` copy,
+   run the compiled block against *only* that copy, and stash the predicted
+   post-block state in a small fixed-capacity ring (`ShadowEntry
+   g_shadowPending[16]`, over-capacity entries dropped and counted in
+   `g_shadowDropped` — never blocks real execution). On every real
+   instruction retirement (`run_cached_interpreter()`'s main dispatch
+   loop), once the real PC has moved outside a pending entry's tracked
+   block span — i.e. the interpreter just actually retired that block —
+   compare real GPRs/hi/lo/PC against the stashed prediction and log any
+   mismatch. Never aborts, never mutates real state either way, regardless
+   of match or mismatch.
+
+   The two external, untracked-repo diffs this needed (recorded here since
+   they can't be committed directly — see the "external checkouts" note at
+   the top of this doc):
+
+   `Makefile.common` (nested inside the existing `WITH_N64_JIT` block):
+   ```makefile
+   ifeq ($(N64_JIT_SHADOW_CHECK), 1)
+   	# Shadow-differential validation harness (see "shadow-check" above).
+   	# Independent flag, but nested inside WITH_N64_JIT's block since it
+   	# reuses this bridge's own LookupOrCompile()/vr4300_play_block_run()
+   	# code rather than duplicating it - only meaningful, and only
+   	# buildable, with the bridge sources above also present. Purely
+   	# observational: still does not touch ci_table.
+   	CFLAGS += -DN64_JIT_SHADOW_CHECK
+   	CXXFLAGS += -DN64_JIT_SHADOW_CHECK
+   endif
+   ```
+
+   `cached_interp.c` — the include, plus two call sites:
+   ```c
+   #if defined(N64_JIT_SHADOW_CHECK)
+   /* Opt-in, purely observational shadow-differential harness - layered on
+    * top of WITH_N64_JIT, independent flag. Never touches ci_table/dispatch;
+    * only ever reads real state to compare against a private shadow-run
+    * copy, and only ever logs, never aborts. */
+   #include "vr4300_jit_bridge.h"
+   #endif
+   ```
+   in `cached_interp_recompile_block()`:
+   ```c
+   #if defined(N64_JIT_SHADOW_CHECK)
+       /* `func` here is always the real live PC (this function's only real
+        * call site, cached_interp_NOTCOMPILED() above, always passes
+        * *r4300_pc(r4300)) - exactly the precondition vr4300_jit_shadow_
+        * on_decode() needs to snapshot correct "before" state. Purely
+        * observational: does not change anything about the decode below. */
+       vr4300_jit_shadow_on_decode(r4300, func);
+   #endif
+   ```
+   in `run_cached_interpreter()`'s main loop, right after
+   `(*r4300_pc_struct(r4300))->ops();`:
+   ```c
+   #if defined(N64_JIT_SHADOW_CHECK)
+       /* Fires after every real instruction retirement. Cheap no-op scan
+        * when nothing is pending; otherwise compares real state against
+        * any shadow prediction whose tracked block the real PC has now
+        * moved outside of. Read-only against real state either way. */
+       vr4300_jit_shadow_poll(r4300);
+   #endif
+   ```
+
+   **A real, previously-latent bug was found and fixed while bringing this
+   up: `Module.codeGenImportTable` undefined.** The very first
+   `WITH_N64_JIT=1 N64_JIT_SHADOW_CHECK=1` boot crashed instantiating a
+   compiled block's `WebAssembly.Instance` with an undefined
+   `env.fctTable` import. Root cause, found by reading Play--CodeGen
+   itself: `MemoryFunction.cpp`'s `WasmCreateFunction` (EM_JS)
+   unconditionally references `Module.codeGenImportTable` as an import for
+   *every* compiled block, but `Jitter_CodeGen_Wasm.cpp`'s
+   `RegisterExternFunction` (EM_JS) only *lazily* creates that table (`new
+   WebAssembly.Table({element:'anyfunc', initial:32})`) as a side effect of
+   registering at least one extern helper via
+   `CWasmFunctionRegistry::RegisterFunction()`. Every block this codebase
+   has ever compiled before now — PS2 EE, PSX — always references at least
+   one helper (memory access, syscalls), so this path never surfaced.
+   Tier-1 VR4300 blocks are explicitly pure ALU/shift/branch by design (no
+   loads/stores, no helpers) and are the first blocks in this project's
+   history that can legitimately compile with *zero* registered externs —
+   and, not incidentally, **this was the first time the JIT codegen path
+   has ever executed live in any core in this project** (PS2/PSX included;
+   `cached_interp_JIT_ENTRY` was previously dead code, and PS2/PSX always
+   go through their own always-populated dispatch). Fixed with a new
+   `EnsureCodeGenImportTable()` EM_JS function added directly in
+   `vr4300_jit_bridge.cpp` (project-owned code, not vendored CodeGen
+   source), guarded `#if defined(__EMSCRIPTEN__)` with a no-op `#else`
+   stub, called once at the start of `vr4300_jit_bridge_init()` — forces
+   the same lazy-init CodeGen would eventually do anyway, before this
+   bridge ever compiles a block.
+
+   **A second, smaller fix: `DebugMessage(M64MSG_INFO, ...)` lines never
+   reached the worker's log listener.** `CompareAndReport()`'s and
+   `LogFieldMismatch()`'s summary/mismatch lines stayed invisible in
+   `shadowLogs` even once the harness was confirmed to be firing (see
+   below) — most likely RetroArch's own core log-level cvar filtering
+   INFO-level messages before they reach `retro_log()`/`Module.printErr`
+   (not confirmed further). A raw `std::fprintf(stderr, ...)` call
+   reliably reaches the worker's log listener, matching the technique
+   already used successfully by the decode-tally diagnostic below — both
+   logging functions were converted to it.
+
+   **Proof the hook genuinely fires on real content, via a throttled
+   decode-tally diagnostic** (`vr4300_jit_shadow_on_decode()`, static
+   counters printed via `fprintf(stderr, ...)` every 4096 decode calls plus
+   on every COMPILED-eligible find): across the smoke ROM's boot sequence,
+   `decode_calls=77 compiled_eligible=19 lookup_failed=1` — i.e. roughly
+   19/77 (~25%) of decoded real blocks were fully tier-1-compilable
+   (pure ALU/shift/branch), intersecting real N64 boot code, not just
+   hand-picked test instructions.
+
+   **The actual differential verdict, captured via
+   `scripts/probe-n64-core.js`'s `result.shadowLogs` after the fprintf
+   fix:**
+   ```
+   N64_JIT_SHADOW summary: checked=19 matched=19 mismatched=0 dropped=0
+   ```
+   All 19 tier-1-compiled blocks that the real interpreter actually
+   retired during the smoke ROM's boot produced GPR[32]/hi/lo/PC state
+   bit-identical to the real interpreter's own result. This is the first
+   real, non-synthetic differential-correctness data this spike has ever
+   produced — a genuinely positive signal for the tier-1 lowering logic,
+   though scoped honestly: it covers only the smoke ROM's short boot
+   window (no loop-heavy gameplay code, no interrupt-heavy code, no
+   overlay/self-modifying-code paths), only 19 samples, and only fully-
+   tier-1-eligible blocks (the ~75% of blocks needing loads/stores/FPU/
+   MULT-DIV/interpreter-fallback are untested by this harness by design —
+   they never enter the COMPILED path this checks). A clean 19/19 on a
+   real boot is meaningfully more evidence than the prior 128/128 synthetic
+   unit tests, but is not yet the "instruction-suite ROMs + real game boot
+   sequences" breadth the plan's next-step 3 actually calls for.
+
+   **Not yet done:** running this same harness against n64-systemtest/
+   libdragon instruction-suite ROMs (broader tier-1 opcode coverage,
+   including edge cases the smoke ROM's boot path doesn't exercise) or a
+   longer real-game play session (loop-heavy code, more blocks, higher
+   chance of surfacing a rare mismatch); any mismatch investigation (there
+   were none to investigate this round); `ci_table` wiring is still
+   correctly gated on broader coverage than this one clean result,
+   consistent with this doc's own standing caution against over-reading a
+   single clean result as sufficient.
