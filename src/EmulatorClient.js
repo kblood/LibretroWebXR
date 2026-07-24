@@ -222,6 +222,7 @@ export class EmulatorClient extends EventTarget {
       this._applyPauseState();
       this.dispatchEvent(new CustomEvent('ready'));
     } catch (e) {
+      console.error('[EmulatorClient] callMain exception:', e, e?.stack);
       this._fail(`callMain threw: ${e.message || e}`);
     }
   }

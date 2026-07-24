@@ -578,6 +578,57 @@ actual on-rails shooting stage — menu-level gun control is proven, in-stage
 gun control is not; re-diffing the `gl2.c` blit-present + Y-flip patch into
 `docs/patches/`.
 
+## Investigated: "GLctx" crash on a large real-disc CHD — not reproducible, likely environmental
+
+A user-supplied real dump (`Time Crisis II (Europe)`, PAL, converted from a
+4,694,573,056-byte `.iso` to a 900MB `createdvd`-style `.chd`) at one point
+reliably crashed on load, both headless and headed, with `callMain threw:
+Cannot read properties of undefined (reading 'GLctx')` — a generic
+Emscripten GL-glue error thrown when code touches a WebGL context that isn't
+there. Chased as a possible real core bug (per the user's explicit choice to
+attempt a core-level fix rather than just document the limitation), with
+every content-based hypothesis constructed and tested rigorously:
+
+- **Region (PAL/Europe vs NTSC/Japan)** — ruled out: other PAL/DVD-style
+  CHDs boot cleanly.
+- **DVD-style vs CD-style CHD** (`CChdCdImageStream`'s `DATA_TYPE_DVD` path,
+  `chd_get_metadata(..., DVD_METADATA_TAG, ...)`) — read in full alongside
+  `ChdImageStream`, `ChdStreamSupport`, `DiskUtils::CreateOpticalMediaFromChd`,
+  `Js_DiscImageDeviceStream`, and `ISO9660::BlockProvider`. All size/offset
+  arithmetic on these paths already correctly uses `uint64`/proper 64-bit
+  splitting; `chdman info` confirmed the crashing file has the exact
+  `Tag='DVD '`/`Unit Size: 2,048` metadata the DVD-detection code expects. No
+  bug found in any of this.
+- **Total logical size crossing 4GiB (2^32 bytes)** — the crashing file
+  (4.69GB) is just over this boundary while every previously-verified-good
+  file was under it, so this was the leading hypothesis. **Refuted**: a CHD
+  built from real (non-degenerate, tiled) disc content, deliberately sized
+  to 4,404,019,200 bytes (past 4GiB), booted with no crash, normal init log,
+  normal texture-cache warnings — identical to the small working cases.
+- **The exact original crashing file, re-tested twice more** (after the
+  bracketing tests above, no core/JS changes other than an added
+  `e?.stack` diagnostic log in `EmulatorClient.js`'s `callMain` catch) — **did
+  not crash either time.** Booted cleanly to `running` /
+  "added to shelf", same log shape as every known-good file.
+
+No code change reproduces or explains a fix, because nothing reproduces the
+crash anymore at all — not even the identical file that used to trigger it
+every time. The likely explanation is transient browser/GPU resource
+contention rather than a deterministic content-driven bug: over the course
+of this investigation, ~21 stale Chrome processes (orphaned Puppeteer
+instances from earlier killed test tasks) were found accumulated on the test
+machine, and Chrome can silently evict/lose a WebGL context under GPU/memory
+pressure — which would throw exactly this generic error the next time
+Emscripten's GL glue touches `GLctx`. This would explain why the crash
+reproduced "identically" earlier (same loaded-down system both times) and
+why it stopped once the environment was less contended.
+
+**Conclusion: no core rebuild attempted or needed** — there is no
+reproducible bug left to fix as of 2026-07-22. If this resurfaces, check for
+resource contention (stale browser/test processes, many concurrent tabs)
+before re-opening a content-specific investigation; the region/codec/size
+avenues above are already closed off.
+
 ## Remaining work
 
 See [[research/libretro-core-authoring/ps2-play-core-plan.md]]'s
