@@ -48,15 +48,83 @@ probe:lightgun` (9/9) run directly.
   URLs. The hardcoded fallback to the old archived sibling checkout is
   gone.
 
-**Not done in Phase A, still open (unchanged from Part 2 below):** P1-8
-("new tests aren't in `npm test`") is only *partially* addressed — the new
-`test-runtime-facade.mjs` is wired in, but the pre-existing
-`test:psx-foundations`/`test:runtime` remain separate `npm run` scripts,
-not part of the main `npm test` chain. Everything in Phases B/C/D is
-unstarted. P0-2 through P0-6 (worker-core reachability, mode-switch
-recovery, audio, SaveRAM, OOM risk) are all still live on `main` — A4 only
-*hides* the affected systems from casual users, it doesn't fix the
-underlying gaps.
+**Phase B is also done.** Commit `7455531` on `n64-jit-plan`, **committed
+but NOT pushed** (stacked on top of the still-unpushed Phase A/doc commits
+— `git push` will need to send all of them together). Independently
+re-verified: `npm test` green, plus direct re-runs of the two new probes
+(not just trusting the report) — `npm run probe:mode-switch` 11/11 and
+`npm run probe:worker-cartridge-insert` 12/12, both passing cleanly.
+
+- **B1 — done.** A shared `buildStartOptions()` helper in `main.js` now
+  threads `execution`/`firmware`/`restoredSaves` through every boot path
+  (`loadCartridge`, `pickLocalRom`, the file-input handler, `spawnConsole`,
+  `swapConsoleCore`), and `ConsoleRuntime.load()` forwards the same for
+  secondary/rack consoles.
+- **B2 — done, via live-swap (approach a).** `RuntimeEmulatorClient` throws
+  a structured `RuntimeModeSwitchError` (was a bare, silent dead end);
+  `bootOnPrimary()` in `main.js` reuses the existing
+  `bootFreshRuntime`/`rebindPrimaryClient` live-reboot mechanism (already
+  proven for gun/mouse arm-reboots) to give a cross-mode boot a clean fresh
+  client instead of ever mutating a live delegate's mode in place.
+  **Independently confirmed: NES → PSX → NES on one page, no dead end, no
+  error, both directions.**
+- **B3 — done, with a real bug caught mid-implementation.** Worker
+  `'audio'` events now reach `SpatialAudio.pushSamples` via a new
+  `ensureBranch()`, wired from both `ConsoleRuntime.load()` **and**
+  `bootOnPrimary`'s direct-start branch — the second wiring point only
+  exists because the implementing agent's own audio probe caught that the
+  primary console's first-ever worker-core boot bypasses
+  `ConsoleRuntime.load()` entirely and would otherwise have stayed silent
+  despite "B3 done" looking complete from the `ConsoleRuntime` change
+  alone. Good example of why every phase in this doc insists on a real
+  probe, not just a code read.
+- **B4 — partially done.** `autosave_interval = "10"` added to
+  `RetroArchConfig.js` (config-only fix, as this doc's Phase B section
+  preferred over a core rebuild). `flushSaveRam`/`readSaveRam` confirmed to
+  do live (non-aliased) reads. **But end-to-end persistence is still
+  unconfirmed**: the shipped N64 EEPROM test ROM (`lwx-n64-scene.z64`)
+  never produced saveram bytes in testing, most likely because
+  `mupen64plus_next`'s save-type detection is CRC/game-database-driven and
+  doesn't recognize a from-scratch homebrew ROM — i.e. `SAVE_RAM` size is
+  probably reporting 0, so there's nothing for autosave to persist. This
+  is a plausible **content/core-detection gap, not proof the config fix is
+  wrong** — needs either forcing a save type or content with a
+  core-recognized one to actually settle. Left open, informational only in
+  `scripts/probe-worker-audio-saveram.mjs`.
+- **B5 — done.** `EmulatorWorkerRuntime.setPaused` now prefers
+  `Module.pauseMainLoop()`/`resumeMainLoop()` (falls back to `_cmd_pause()`
+  only if absent), matching the main-thread client; the frame pump now
+  actually checks `paused` before producing/transferring frames.
+- **B6 — done, defensively.** `FrameBridge`'s frame-request function is now
+  injectable (for testability — it was already correctly picking up
+  `XRRafShim`'s monkeypatch before this change, so this wasn't fixing an
+  observed live bug, just making the assumption testable). A 500ms
+  `FRAME_ACK` stall watchdog now clears `framePending` and counts
+  `staleFrameAcks` if an ack never arrives, so a temporarily-stalled page
+  can't starve the worker forever.
+
+**New permanent regression probes**, all independently re-run and passing:
+`npm run probe:mode-switch` (T-X4, the P0-3 guard), `npm run
+probe:worker-cartridge-insert` (T-X5, the P0-2 guard — boots BOTH
+`mednafen_psx_hw` and `mupen64plus_next` through the literal
+`GrabMgr`/`handleCartridgeInserted` real-insert callback, not a bypass
+harness), and `npm run probe:worker-audio-saveram` (opportunistic B3/B4
+coverage, B4 half informational per above).
+
+**Still open after Phase A + B:** P1-8 ("new tests aren't in `npm test`")
+remains only partially addressed (the Phase A/B probes are separate `npm
+run` scripts, not folded into the main `npm test` chain — by design, since
+they need a live dev server + Puppeteer, unlike the pure-logic `npm test`
+suite). B4's SaveRAM persistence needs the content/detection gap above
+resolved before it can be called done. **Everything in Phase C (PSX
+content pipeline: streaming/OOM, disc-classifier wiring, BIOS-import
+fix, multi-file shelf persistence, PS2 `.cue`) and Phase D (N64 JIT
+COP0/interrupt verification before `ci_table`) is still unstarted.**
+Also in flight, from a separate concurrent effort at the time of this
+update (not yet landed/reviewed): an attempt to author real PSX CD-ROM
+test content (`games/psx-testdisc/`, T-PSX-2) — check its own commit/
+report separately once it lands, this doc will get another update pass
+once it does.
 
 ## Part 0 — Premise corrections (read first)
 
@@ -85,24 +153,30 @@ underlying gaps.
   needs a headset re-validation pass (H-7 below) and a `git push` before
   the live deploy is actually fixed** — the deployed build is still
   broken until then.
-- **P0-2 — Worker cores unreachable from the real in-VR cartridge path.**
-  `execution:'worker'` is only threaded through the desktop file-picker
-  (`main.js:5892`), not `loadCartridge` (`:5225`) or `pickLocalRom`
-  (`:2693`) — the paths VR actually uses. The shipped N64 shelf cartridges
-  (`lwx-n64-smoke.z64`, `lwx-n64-scene.z64`) have never been booted through
-  the real insert path.
-- **P0-3 — One-way runtime mode lock, no recovery.** Switching between a
-  main-thread core and a worker core (in either direction) after the first
-  boot throws `runtime switch ... requires page reload` with no reload
-  offered — a dead end for the rest of the page's life.
-- **P0-4 — Worker cores have no audio in the app.** `SpatialAudio.pushSamples`
-  has zero callers; nothing subscribes to the worker's `'audio'` event
-  outside the isolated test harness. The "forwarded audio" claim in the PSX
-  commit message is only true inside `test/psx-core-e2e/`.
-- **P0-5 — Native SaveRAM never captures new progress.** No
-  `autosave_interval` in `RetroArchConfig.js`, and
-  `WorkerEmulatorClient.flushSaveRam()` just re-reads the boot-time bytes
-  instead of flushing. Progress is never actually persisted.
+- **P0-2 — ✅ FIXED (2026-07-25, `7455531`, not pushed).** Worker cores
+  were unreachable from the real in-VR cartridge path — `execution:'worker'`
+  was only threaded through the desktop file-picker (`main.js:5892`), not
+  `loadCartridge` (`:5225`) or `pickLocalRom` (`:2693`). Independently
+  re-verified: both `mednafen_psx_hw` and `mupen64plus_next` now boot
+  correctly through the literal `GrabMgr`/`handleCartridgeInserted` insert
+  callback (`npm run probe:worker-cartridge-insert`, 12/12).
+- **P0-3 — ✅ FIXED (2026-07-25, `7455531`).** The one-way runtime mode
+  lock (switching main-thread↔worker threw a permanent dead end) is fixed
+  via a live-swap approach reusing the existing arm-reboot mechanism.
+  Independently re-verified: NES → PSX → NES on one page, no dead end,
+  either direction (`npm run probe:mode-switch`, 11/11).
+- **P0-4 — ✅ FIXED (2026-07-25, `7455531`).** Worker cores had no audio in
+  the app (`SpatialAudio.pushSamples` had zero callers). Now wired via
+  `ensureBranch()` from both `ConsoleRuntime.load()` and the primary
+  console's direct-start path (the latter only found because the
+  implementing agent's own probe caught it as a second, separate gap).
+- **P0-5 — ⚠️ PARTIAL (2026-07-25, `7455531`).** `autosave_interval` added
+  to `RetroArchConfig.js`; `flushSaveRam`/`readSaveRam` confirmed to do
+  live reads. But end-to-end persistence is still unconfirmed — testing
+  against the shipped N64 EEPROM ROM produced no saveram bytes, likely
+  because `mupen64plus_next`'s CRC/database-driven save-type detection
+  doesn't recognize a from-scratch homebrew ROM. Needs real
+  content with a recognized save type (or forcing one) to settle.
 - **P0-6 — Real disc images will OOM.** Content is copied in full three
   times before a core even starts (`ContentBundle.computeContentId` hash,
   `WorkerEmulatorClient.prepareLaunchPayload` slice, MEMFS `writeFile`) — a
@@ -117,11 +191,13 @@ C3**. `DiscIdentity.js` disc classifier is dead code — **the doc comments
 falsely claiming it's wired are fixed (2026-07-25); it's still genuinely
 dead code, tracked as C2.** `DiscControl.js` is dead/duplicated vs. the
 worker's inline copy (open, C6); duplicate `'error'` dispatch in
-`WorkerEmulatorClient.js:188-189` (open); worker pause doesn't stop the
-frame pump, breaking `RackBudget` auto-pause (open, B5); `FrameBridge`
-uses window `rAF` instead of `XRRafShim`, likely cause of any "PSX/N64
-black in VR" (open, B6); fixed 16ms frame pacing ignores real core
-refresh rate (open, B6); `test:psx-foundations`/`test:runtime` still
+`WorkerEmulatorClient.js:188-189` (open); worker pause not stopping the
+frame pump / breaking `RackBudget` auto-pause — **fixed 2026-07-25 (B5)**;
+`FrameBridge`'s frame-request path made injectable/testable — **fixed
+2026-07-25 (B6), defensively** (it was already correctly picking up
+`XRRafShim`'s monkeypatch before this change, so this wasn't confirmed as
+a live bug, just hardened); fixed 16ms frame pacing still ignores real
+core refresh rate (open, no B-item covers this specifically); `test:psx-foundations`/`test:runtime` still
 aren't wired into `npm test` (open — only the new facade test was, see
 Status above). **`fetch-cores.mjs` not knowing about the three custom
 cores, and its hardcoded sibling-checkout path — both fixed 2026-07-25
@@ -142,7 +218,8 @@ A2 add a real-app light-gun/mouse regression probe; A3 correct
 land; A5 add the three cores to `fetch-cores.mjs`, remove the hardcoded
 sibling-checkout path.
 
-**Phase B — make worker cores actually usable:**
+**Phase B — make worker cores actually usable — ✅ DONE 2026-07-25 (commit
+`7455531`, not pushed — see Status at the top of this doc; B4 partial):**
 B1 thread `execution`/`firmware`/`restoredSaves` through every boot path
 (extract one `buildStartOptions` helper); B2 handle the mode switch
 (teardown + reconstruct, or an explicit reload prompt) instead of a dead
@@ -230,29 +307,43 @@ P0-1 is fixed; and a multi-console rack test with a worker core (exercises
 
 ## Suggested sequencing
 
-1. ~~A1 + A2 + T-X2~~ — **done 2026-07-25**, see Status above.
+1. ~~A1 + A2 + T-X2~~ — **done 2026-07-25.**
 2. ~~A3/A4/A5~~ — **done 2026-07-25.**
-3. **Next: `git push` the Phase A commit** (`528910c`) — it's currently
-   local-only, so the live deploy is still running the broken
-   `RuntimeEmulatorClient`. Needs explicit go-ahead (not authorized by
-   "implement Phase A" alone).
-4. T-0 (app-probe tier) — prevents the next P0-shaped miss. Note A2
-   already built one instance of this pattern
-   (`probe-lightgun-regression.mjs`); T-0 generalizes it into a reusable
-   harness rather than one-off scripts per probe.
-5. B1–B5, gated by T-X4/T-X5/T-PSX-4/T-PSX-5.
-6. `games/psx-testdisc` (T-PSX-2) early — independent, unblocks most of
-   the PSX matrix.
-7. C1 (streaming content) — the largest single piece; nothing about real
-   PSX discs is trustworthy until it lands.
-8. D1–D3 in parallel with the above (different files/skillset) — but D1
-   (commit the mismatch finding) is still outstanding and increasingly
-   stale; `scripts/cores/n64-jit-spike/vr4300_jit_bridge.cpp` was still
-   uncommitted (someone else's in-flight WIP) as of this update.
-9. H-1/H-2/H-3 at the first headset session, **plus H-7** (a full
-   gun/mouse re-validation pass, now that P0-1 is fixed) — H-3 may
-   invalidate frame-pacing design choices in B6, so don't over-invest
-   there first.
+3. ~~B1–B6~~ — **done 2026-07-25** (`7455531`; B4 partial — see Status).
+   `main` was fast-forward-merged to include Phase A (`b0b3463`) and
+   pushed 2026-07-25 — **but Phase B (`7455531`) is still local-only on
+   `n64-jit-plan`, not yet merged to `main` or pushed.** The live deploy
+   has the gun/mouse fix but NOT the worker-core reachability fixes yet.
+4. **Next: merge `7455531` to `main` + push**, same fast-forward pattern
+   as Phase A. Then redeploy (`npm run deploy`) if the intent is to make
+   PSX/N64 actually reachable in the live app (remember they're still
+   behind `?experimental=1` from A4 either way).
+5. T-0 (generalized app-probe tier) — Phase A/B ended up building THREE
+   one-off instances of this pattern (`probe-lightgun-regression.mjs`,
+   `probe-mode-switch.mjs`, `probe-worker-cartridge-insert.mjs`) rather
+   than one reusable harness. Worth consolidating now, before a fourth
+   probe repeats the boilerplate a fourth time.
+6. In flight (separate concurrent effort, not yet reviewed as of this
+   update): authoring real PSX CD-ROM test content (`games/psx-testdisc/`,
+   T-PSX-2) — this doc needs another pass once it lands, to record which
+   tier was reached and fold its findings in.
+7. C1 (streaming content) — the largest single remaining piece; nothing
+   about real PSX discs (as opposed to a small homebrew test disc) is
+   trustworthy until it lands.
+8. Remaining Phase C items (C2 disc-classifier wiring, C3 BIOS-import fix,
+   C4 multi-file shelf persistence, C5 PS2 `.cue`, C6 delete
+   `DiscControl.js` duplication) — C4 in particular blocks
+   `games/psx-testdisc` (once authored) from being a normal, re-insertable
+   shelf cartridge.
+9. D1–D3 (N64 JIT COP0/interrupt verification) in parallel with the
+   above — but D1 (commit the mismatch finding) is still outstanding and
+   increasingly stale; `scripts/cores/n64-jit-spike/vr4300_jit_bridge.cpp`
+   was still uncommitted (someone else's in-flight WIP) as of this update.
+10. H-1/H-2/H-3 at the first headset session, **plus H-7** (a full
+    gun/mouse re-validation pass, now that P0-1 is fixed, and now
+    genuinely reachable in-headset once B1/B2 are on `main`) — H-3 may
+    invalidate frame-pacing design choices in B6, so don't over-invest
+    there first.
 
 ## Critical files for implementation
 
