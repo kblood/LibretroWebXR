@@ -48,6 +48,8 @@
     "probe:worker-cartridge-insert": "node scripts/probe-worker-cartridge-insert.mjs",
     "probe:mode-switch": "node scripts/probe-mode-switch.mjs",
     "probe:worker-audio-saveram": "node scripts/probe-worker-audio-saveram.mjs",
+    "probe:n64-scene-render": "node scripts/probe-n64-scene-render.mjs",
+    "probe:ps2-guncon": "node scripts/probe-ps2-guncon-regression.mjs",
     "measure:n64-fps": "node scripts/measure-n64-fps.js"
   },
   "devDependencies": {
