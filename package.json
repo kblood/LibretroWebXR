@@ -42,6 +42,8 @@
     "test:runtime": "node --test test/runtime.test.js",
     "probe:lightgun": "node scripts/probe-lightgun-regression.mjs",
     "probe:psx-core": "node scripts/probe-psx-core.js",
+    "make-psx-testdisc": "node scripts/make-psx-testdisc.mjs",
+    "probe:psx-testdisc": "node scripts/probe-psx-testdisc.js",
     "probe:n64-core": "node scripts/probe-n64-core.js",
     "probe:worker-cartridge-insert": "node scripts/probe-worker-cartridge-insert.mjs",
     "probe:mode-switch": "node scripts/probe-mode-switch.mjs",

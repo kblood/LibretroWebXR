@@ -137,6 +137,16 @@ next reads that doc knows to reconcile it against this one.
 
 ## Remaining work
 
+- **A real content-rendering gap was found (2026-07-25)** while authoring
+  `games/psx-testdisc` (the first real PSn00bSDK-built PSX title in this
+  repo): every normally-linked PSn00bSDK executable tested (7 independent
+  variants, CD-boot and raw-`.exe`) renders a fixed, content-independent
+  color sequence instead of its own draw calls, while the bare
+  hand-assembled smoke exe referenced below (which bypasses PSn00bSDK's
+  `crt0`/library entirely) renders correctly. This means the "PASSED
+  (2026-07-21)" result below is still true on its own narrow terms but does
+  not generalize to real PSn00bSDK content — see `docs/PSX_TESTDISC.md`
+  "Known gap" for the full isolation-testing writeup.
 - Beta-scope items from the upstream repo's own plan (Quest-performance
   gating, full native R3000A opcode coverage beyond the current
   integer/control-flow tier, `.m3u` multi-disc in-VR swap UX, long-session
