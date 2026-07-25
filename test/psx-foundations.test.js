@@ -13,8 +13,9 @@ const { checkSaveStateCompatibility, prepareSaveStatePayload } = await import('.
 test('PSX registry is reachable by explicit override; bare .bin still defaults to Atari', () => {
   // .cue is ALSO a PS2 (`play`) extension — coreForFile can only go by filename,
   // so it defaults to `play` (see systems.js's AMBIGUOUS_EXT_DEFAULT comment).
-  // Real disambiguation happens in main.js via src/DiscIdentity.js before an
-  // override reaches here; an explicit override always wins regardless.
+  // src/DiscIdentity.js could do real byte-level disambiguation but is dead
+  // code today — nothing in main.js calls it (2026-07-24 review finding).
+  // An explicit override always wins regardless of that gap.
   assert.equal(coreForFile('Game.cue').name, 'play');
   assert.equal(coreForFile('Game.cue', 'mednafen_psx_hw').name, 'mednafen_psx_hw');
   assert.equal(coreForFile('Game.bin').name, 'stella2014');

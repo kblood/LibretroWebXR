@@ -58,14 +58,38 @@ const CORES = [
   'virtualxt',
 ];
 
-// Candidate local source dirs, in priority order.
+// PS2/PSX/N64 (2026-07-17..22 work): CUSTOM cores built from source in WSL2,
+// NOT on the libretro buildbot — this script can only COPY already-built
+// artifacts, it cannot build them. See docs/PS2_CORE_BUILD.md,
+// docs/PSX_CORE_BUILD.md, docs/N64_CORE_BUILD.md for the actual build
+// recipes. Registry basenames (src/systems.js CORES keys) can differ from
+// the on-disk file basename — e.g. the PSX registry entry is keyed
+// `mednafen_psx_hw` but its built artifact is `mednafen_psx_jit_libretro.*`
+// (systems.js's `url` field is the source of truth). The worker-execution
+// ones (PSX, N64) also ship a `.worker.js` (pthreads) and a `.build.json`
+// (sha256 manifest RuntimeEmulatorClient.resolveCoreBuildHash reads for
+// save-state compatibility checks) — copied best-effort alongside .js/.wasm.
+//
+// A 2026-07-24 review (docs/research/psx-ps2-n64-review-2026-07-24.md)
+// found `npm run deploy` was silently shipping a build where these three
+// systems are registered and visible in the app but their core files 404 —
+// this script had no idea they existed. See the hard-error check below.
+const CUSTOM_CORES = ['play', 'mednafen_psx_jit', 'mupen64plus_next'];
+const CUSTOM_CORE_EXTRA_EXTS = ['worker.js', 'build.json']; // best-effort, no warning if absent
+
+// Candidate local source dirs, in priority order. No hardcoded sibling-
+// checkout path here on purpose (2026-07-24 review finding: this used to
+// default to `C:\LLM\Projects\ClaudeTest\LibretroWebXR\public\cores`, the
+// OLD archived checkout this repo was forked from — not guaranteed to exist,
+// not guaranteed correct, and not this machine's canonical source anymore).
+// Use --from / $LIBRETRO_CORES_DIR, or just keep whatever's already in
+// public/cores/ from a previous fetch (the hard-error check below only
+// cares about the end state of DEST, not how it got there).
 function candidateDirs() {
   const dirs = [];
   const argFrom = process.argv.indexOf('--from');
   if (argFrom !== -1 && process.argv[argFrom + 1]) dirs.push(process.argv[argFrom + 1]);
   if (process.env.LIBRETRO_CORES_DIR) dirs.push(process.env.LIBRETRO_CORES_DIR);
-  // The scratch workspace this repo was forked from (see PROVENANCE.md).
-  dirs.push('C:\\LLM\\Projects\\ClaudeTest\\LibretroWebXR\\public\\cores');
   return dirs.filter(Boolean);
 }
 
@@ -89,7 +113,49 @@ function tryCopyFrom(srcDir) {
       }
     }
   }
+  for (const core of CUSTOM_CORES) {
+    for (const ext of ['js', 'wasm', ...CUSTOM_CORE_EXTRA_EXTS]) {
+      const name = `${core}_libretro.${ext}`;
+      if (have.has(name)) {
+        copyFileSync(join(srcDir, name), join(DEST, name));
+        copied++;
+      } else if (ext === 'js' || ext === 'wasm') {
+        console.warn(`  ! missing in source (custom-built core — see the CUSTOM_CORES comment above): ${name}`);
+      }
+    }
+  }
   return copied;
+}
+
+// Hard-error if a custom core's .js/.wasm are missing from DEST once every
+// candidate source has been tried — checked against the END STATE of
+// public/cores/, not just this run's copy count, so a core already fetched
+// by a prior run (and simply not overwritten this time) doesn't false-fail.
+// `play` (PS2) ships live/default; PSX/N64 are gated behind ?experimental=1
+// (src/systems.js) but still need real files for anyone testing with that
+// flag — and for `npm run deploy`, which halts on this script's exit code.
+function checkCustomCoresPresent() {
+  const missing = [];
+  for (const core of CUSTOM_CORES) {
+    const hasJs = existsSync(join(DEST, `${core}_libretro.js`));
+    const hasWasm = existsSync(join(DEST, `${core}_libretro.wasm`));
+    if (!hasJs || !hasWasm) missing.push(core);
+  }
+  if (!missing.length) return;
+  console.error(`
+ERROR: custom-built core(s) missing from ${DEST}: ${missing.join(', ')}
+
+These are NOT on the libretro buildbot — this script can only copy an
+already-built artifact, never build one. See:
+  docs/PS2_CORE_BUILD.md   (play)
+  docs/PSX_CORE_BUILD.md   (mednafen_psx_jit)
+  docs/N64_CORE_BUILD.md   (mupen64plus_next)
+
+Build (or copy from wherever they were last built) into ${DEST} and re-run,
+or pass --allow-missing-custom-cores if you deliberately don't need these
+systems yet (e.g. a fresh clone only doing classic-console work).
+`);
+  if (!process.argv.includes('--allow-missing-custom-cores')) process.exit(1);
 }
 
 function instructions() {
@@ -99,7 +165,10 @@ No local core source found. Get the cores one of these ways:
   A) Copy from a folder you already have:
        node scripts/fetch-cores.mjs --from <dir-with-*_libretro.js/.wasm>
 
-  B) From the libretro buildbot (official; ships ONE ~760 MB archive):
+  B) From the libretro buildbot (official; ships ONE ~760 MB archive) — only
+     covers the standard cores below. It does NOT have play/mednafen_psx_jit/
+     mupen64plus_next (custom WSL builds — see the CUSTOM_CORES comment near
+     the top of this script for the build docs):
        1. Download https://buildbot.libretro.com/nightly/emscripten/RetroArch.7z
        2. Extract just the cores we need, e.g.:
 ${CORES.map(c => `            7z e RetroArch.7z -o"${DEST}" retroarch/${c}_libretro.js retroarch/${c}_libretro.wasm`).join('\n')}
@@ -120,3 +189,8 @@ for (const dir of candidateDirs()) {
   if (n > 0) { total = n; console.log(`Copied ${n} files into ${DEST}`); break; }
 }
 if (total === 0) instructions();
+// Always check the END STATE of public/cores/ for the custom cores, even
+// when nothing was copied this run (e.g. no --from/$LIBRETRO_CORES_DIR given
+// but a prior run already populated DEST) — this is what actually stops
+// `npm run deploy` from silently shipping 404 core URLs.
+checkCustomCoresPresent();

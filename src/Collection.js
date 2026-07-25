@@ -44,16 +44,26 @@ export function normalizeGame(raw) {
  *        or { cartridges: [...] }  (legacy manifest)
  * Unloadable entries are dropped (with a warning) rather than throwing, so one
  * bad row doesn't blank the whole wall.
+ *
+ * `experimental` (default false): systems flagged `experimental: true` in
+ * SYSTEMS (see systems.js — currently PSX/N64, per the 2026-07-24 review's
+ * Phase A item A4: their worker cores aren't yet reachable from the real
+ * in-VR cartridge-insert path) are dropped from the shelf/manifest UI unless
+ * this is true. main.js sets it from the `?experimental=1` URL param — this
+ * is the ONE place that gate is enforced, so every collection source (the
+ * default manifest, a dropped/pasted collection, an extra loaded collection,
+ * the local-ROM overlay) goes through the same filter.
  */
-export function parseCollection(obj, { sourceLabel = 'collection' } = {}) {
+export function parseCollection(obj, { sourceLabel = 'collection', experimental = false } = {}) {
   const rawList = Array.isArray(obj?.games) ? obj.games
                 : Array.isArray(obj?.cartridges) ? obj.cartridges
                 : [];
   const games = [];
   for (const raw of rawList) {
     const g = normalizeGame(raw);
-    if (g) games.push(g);
-    else console.warn(`[collection] dropped unloadable entry in ${sourceLabel}:`, raw);
+    if (!g) { console.warn(`[collection] dropped unloadable entry in ${sourceLabel}:`, raw); continue; }
+    if (!experimental && SYSTEMS[g.system]?.experimental) continue;
+    games.push(g);
   }
   return {
     id: obj?.id || sourceLabel,
@@ -67,12 +77,12 @@ export function parseCollection(obj, { sourceLabel = 'collection' } = {}) {
  * Fetch + parse a collection from a URL (browser only).
  * Returns { id, title, games[] } (games possibly empty on failure).
  */
-export async function loadCollection(url, { fetchImpl = fetch } = {}) {
+export async function loadCollection(url, { fetchImpl = fetch, experimental = false } = {}) {
   try {
     const r = await fetchImpl(url);
     if (!r.ok) throw new Error(`${url} → ${r.status}`);
     const obj = await r.json();
-    return parseCollection(obj, { sourceLabel: url });
+    return parseCollection(obj, { sourceLabel: url, experimental });
   } catch (e) {
     console.warn('[collection] load failed:', e.message || e);
     return { id: url, title: url, games: [] };

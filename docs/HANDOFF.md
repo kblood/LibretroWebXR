@@ -1,22 +1,40 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated
-2026-07-22. **Branch topology matters right now — read this before trusting
-`git log` on whatever branch happens to be checked out:**
-- **`main`** (pushed, code @ `f32507c`) has everything through the full PS2
-  (Play!) core integration, the PSX/PS2 disc-image classifier, distance-grab/
-  socket placement, the SNES Opwolf two-gun fix, gun-aim-align, and
-  `scripts/kill-dev.ps1` — all deployed-or-deployable app work, no core-JIT
-  spike code.
-- **`n64-jit-plan`** (this checkout's branch as of this update, pushed to
-  `origin/n64-jit-plan`, 11 commits ahead of `main`) additionally carries the
-  **PSX (Beetle PSX HW + Lightrec + Wasm-JIT) worker core** and **all N64
-  (mupen64plus_next) work** — Phase N0 (interpreter-baseline core) through
-  Phase NJ1 (the VR4300→Jitter JIT spike). Neither is merged to `main` yet.
-- **`psx-jit-integration`** is a separate, now-redundant single-commit branch
-  carrying only the PSX core-add commit (identical to the one already on
-  `n64-jit-plan`) — a merge into `main` should come from `n64-jit-plan` (or
-  cherry-pick just that commit), not from reconciling both.
+2026-07-25 (branch-topology + PSX/PS2/N64 status refreshed after a
+2026-07-24 review found the sections below had gone stale — see
+`docs/research/psx-ps2-n64-review-2026-07-24.md`). **Branch topology matters
+right now — read this before trusting `git log` on whatever branch happens
+to be checked out:**
+- **`main`** (pushed, code @ `7d9e0c9`) was fast-forwarded to include
+  **everything** that used to live only on `n64-jit-plan`: the full PS2
+  (Play!) core, the **PSX (Beetle PSX HW + Lightrec + Wasm-JIT) worker
+  core**, and **all N64 (mupen64plus_next) work** through Phase NJ1 (the
+  VR4300→Jitter JIT spike). The "PSX/N64 unmerged, only on `n64-jit-plan`"
+  claim below and in the status section further down is **no longer true as
+  of this refresh** — it described real state as of 2026-07-22, before the
+  fast-forward; kept below only because it's still useful history of how the
+  work was built up in phases.
+- **`n64-jit-plan`** (pushed to `origin/n64-jit-plan`) is now only **1 commit
+  ahead of `main`** — a docs-only commit closing out a non-reproducible PS2
+  "GLctx" crash investigation. It carries no unmerged code.
+- **`psx-jit-integration`** is fully redundant now (its one commit is already
+  in `main` via `n64-jit-plan`) — safe to delete once nothing else references it.
+- A 2026-07-24 code review (`docs/research/psx-ps2-n64-review-2026-07-24.md`)
+  found this newly-merged PSX/N64/PS2 work carries several live P0
+  regressions on `main` (not quarantined on a branch — they ship in the real
+  app right now). Highest-severity: **P0-1, all light-gun/mouse support
+  broken** (the `RuntimeEmulatorClient` facade never forwarded
+  `sendLightgun`/`sendMouse`) — **fixed 2026-07-25** (Phase A of that
+  review's plan; see `scripts/test-runtime-facade.mjs` +
+  `scripts/probe-lightgun-regression.mjs` for the regression guards).
+  Still-open P0s as of this refresh: worker cores are unreachable from the
+  real in-VR cartridge-insert path (P0-2); no reload recovery when switching
+  main-thread↔worker cores (P0-3); worker cores have no audio in the app
+  (P0-4); native SaveRAM never actually persists (P0-5); real disc images
+  will OOM the browser (P0-6). `mednafen_psx_hw` and `mupen64plus_next` are
+  gated behind `?experimental=1` in the shipped UI until these land (see
+  `src/systems.js`) — see the review doc's Phase B/C for the fix plan.
 - Other worktrees seen at last check: `feat/dos-support` (parked, blocked —
   see below) and `feat/mouse-peripheral` (superseded — mouse shipped to
   `main` already). Per [[libretrowebxr-concurrent-dev]], **re-run `git
@@ -195,13 +213,26 @@ before expecting them live. Highlights, newest first:
 
 ## PSX / PS2 / N64 core status (added 2026-07-17 through 2026-07-22)
 
-This whole section is new since the last handoff refresh and covers work
-spread across `main` and the unmerged `n64-jit-plan` branch (see the branch
-topology note at the very top of this doc). It supersedes the old "Phase C…
-BIOS systems (PSX/N64 — feasibility assessed 2026-06-15, N64 not viable on
+This section originally covered work spread across `main` and the (at the
+time) unmerged `n64-jit-plan` branch. **As of the 2026-07-25 refresh, that's
+no longer accurate: `main` was fast-forwarded to `n64-jit-plan`'s tip and now
+carries all of it** (see the branch topology note at the very top of this
+doc) — the "NOT on `main` yet" callouts below are kept as historical
+build-order notes, not current state. It supersedes the old "Phase C… BIOS
+systems (PSX/N64 — feasibility assessed 2026-06-15, N64 not viable on
 standalone Quest 3, PSX marginal)" line still further down this doc — that
 assessment predates all of this and was wrong about both systems once a
 Wasm-JIT path was actually built, not just researched.
+
+**Merged ≠ shippable-to-real-users yet.** A 2026-07-24 code review
+(`docs/research/psx-ps2-n64-review-2026-07-24.md`) found this work carries
+several live P0 regressions on `main`. P0-1 (all light-gun/mouse support
+broken) is fixed as of 2026-07-25; P0-2 through P0-6 (worker cores
+unreachable from the real cartridge-insert path, no mode-switch recovery, no
+worker audio, SaveRAM never persists, real discs will OOM) are still open.
+Until those land, `mednafen_psx_hw` (PSX) and `mupen64plus_next` (N64) are
+gated behind `?experimental=1` and hidden from the default shelf/manifest —
+see `src/systems.js`'s `experimental` flag.
 
 - **PS2 (Play!) — merged to `main`, real content boots.** First-ever
   Emscripten build of Play!'s `ui_libretro` wrapper (`docs/PS2_CORE_BUILD.md`
@@ -217,8 +248,9 @@ Wasm-JIT path was actually built, not just researched.
   tested but not yet wired into automatic core selection — reaching PSX vs
   PS2 for an ambiguous `.cue`/`.chd`/`.exe` extension currently needs an
   explicit `?core=` override.
-- **PSX (Beetle PSX HW + Lightrec + Wasm-JIT) — real, verified, NOT on
-  `main` yet (branch `n64-jit-plan`, commit `270c606`).** The interesting
+- **PSX (Beetle PSX HW + Lightrec + Wasm-JIT) — real, verified, merged to
+  `main`** (landed on `n64-jit-plan` at commit `270c606`; `main` was
+  fast-forwarded to include it 2026-07-2x). The interesting
   part: every existing browser PSX core (including the one `webretro` uses)
   ships with Beetle's Lightrec dynarec disabled, because Lightrec's native
   code generator emits real machine code that's inert under Wasm — so they
@@ -237,8 +269,8 @@ Wasm-JIT path was actually built, not just researched.
   carries it since it's this repo's first worker-mode core. **Known gap:**
   multi-file CUE+BIN local picks don't yet survive a page reload as a
   re-insertable shelf cartridge.
-- **N64 (mupen64plus_next) — real, verified, NOT on `main` yet (branch
-  `n64-jit-plan`).** Two sub-phases, both per `docs/research/n64-wasm-jit-plan.md`:
+- **N64 (mupen64plus_next) — real, verified, merged to `main`.** Two
+  sub-phases, both per `docs/research/n64-wasm-jit-plan.md`:
   - **Phase N0 (interpreter baseline) — done.** `docs/N64_CORE_BUILD.md` has
     the full build (three real, non-obvious toolchain patches: GLES3 symbol
     duplication, atomics/bulk-memory compile flags, a libretro-common
@@ -287,12 +319,16 @@ Wasm-JIT path was actually built, not just researched.
     unverified progress. Full blow-by-blow: `docs/research/n64-jit-nj1-spike.md`.
 - **Net effect on the old "Phase C… BIOS-needing systems (PSX/N64)" line:**
   both are no longer a feasibility question — both have real, working,
-  headless-verified cores. What's left before either could ship on `main`
-  is: merging `n64-jit-plan` (or cherry-picking the PSX commit off
-  `psx-jit-integration`), a real Quest 3 fps read for N64, and — if JIT
-  speed ever becomes the actual blocker rather than a nice-to-have — closing
-  out NJ1's COP0/interrupt verification and the broader differential-test
-  pass its own doc calls for before `ci_table` wiring.
+  headless-verified cores, and both are merged to `main`. What's left before
+  either is shippable to real users (not just merged) is the P0 list at the
+  top of this section (worker cores unreachable from the real cartridge-
+  insert path, no mode-switch recovery, no worker audio, SaveRAM never
+  persists, real discs will OOM — see
+  `docs/research/psx-ps2-n64-review-2026-07-24.md` Phase B/C), plus a real
+  Quest 3 fps read for N64, and — if JIT speed ever becomes the actual
+  blocker rather than a nice-to-have — closing out NJ1's COP0/interrupt
+  verification and the broader differential-test pass its own doc calls for
+  before `ci_table` wiring.
 
 **Deployed 2026-07-10, confirmed live (two deploys today).** First deploy
 published code @ `e2a0ab3` ("LWX Frontline Fury"); a second deploy the same

@@ -127,6 +127,12 @@ if (!self.crossOriginIsolated) {
 
 const urlParams = new URLSearchParams(location.search);
 const coreOverride = urlParams.get('core');
+// Experimental systems (PSX/N64 as of the 2026-07-24 review — see
+// systems.js's `experimental` flag) are hidden from the default shelf/
+// manifest UI: their worker cores are real but not yet reachable from the
+// real in-VR cartridge-insert path (P0-2), so they'd otherwise dead-end a
+// real user. `?experimental=1` opts back in for testing.
+const experimentalSystems = urlParams.get('experimental') === '1';
 
 // `client` is the PRIMARY console's EmulatorClient. It starts as the singleton
 // adopted by primaryRuntime, but a live primary reboot (armLiveReboot — used to
@@ -1851,7 +1857,7 @@ function readDroppedWorld() {
     const { kind, text } = JSON.parse(raw);
     const obj = JSON.parse(text);
     if (kind === 'room') return { room: parseRoom(obj, { sourceLabel: 'dropped room' }), inline: [] };
-    const col = parseCollection(obj, { sourceLabel: 'dropped collection' });
+    const col = parseCollection(obj, { sourceLabel: 'dropped collection', experimental: experimentalSystems });
     const ref = `dropped:${col.id || 'collection'}`;
     return { room: defaultRoom(ref), inline: [[ref, col]] };
   } catch (e) {
@@ -1919,7 +1925,7 @@ async function resolveWorld() {
   if (!urlParams.get('collection')) {
     try {
       const localRef = 'roms/local/local.collection.json';
-      const localCol = await loadCollection(localRef);
+      const localCol = await loadCollection(localRef, { experimental: experimentalSystems });
       if (localCol?.games?.length) {
         room.collections.push(localRef);
         // A freestanding bookcase (3 rows × 5 = up to 15 carts) on the open floor
@@ -1948,7 +1954,7 @@ async function loadRoomCollections(room, inline) {
   for (const [ref, col] of inline) register([ref], col);
   for (const ref of roomCollectionRefs(room)) {
     if (byKey.has(ref)) continue;
-    register([ref], await loadCollection(ref));
+    register([ref], await loadCollection(ref, { experimental: experimentalSystems }));
   }
   return { byKey, list };
 }
@@ -3865,7 +3871,7 @@ async function loadExtraCollection() {
   if (!pending.length) { setStatus('all known collections already loaded'); return null; }
   const url = pending[_extraCollIdx % pending.length];
   setStatus(`loading ${url}…`);
-  const col = await loadCollection(url);
+  const col = await loadCollection(url, { experimental: experimentalSystems });
   if (!col.games.length) { setStatus(`"${url}" has no games`); return null; }
   currentCollections.byKey.set(url, col);
   if (col.id) currentCollections.byKey.set(col.id, col);
@@ -5945,8 +5951,15 @@ romInput.addEventListener('change', async (e) => {
 
 // BIOS import (currently PSX-only — see FirmwareStore.js). Purely local:
 // validated against known SCPH-550x MD5s and stored in IndexedDB, never
-// uploaded. An unrecognized file is still imported (so an alternate/patched
-// BIOS the user knows is fine still works) but the status line flags it.
+// uploaded. An unrecognized file is REJECTED outright (FirmwareStore.import()
+// throws FirmwareValidationError — see FirmwareStore.js's import(), ~:48) —
+// only the 3 canonical SCPH-5500/5501/5502 MD5s in PSX_FIRMWARE are accepted,
+// so most real-world BIOS dumps (other revisions/regions, patched images)
+// currently fail import; the catch block below just surfaces that rejection
+// on the status line. (2026-07-24 review finding: this comment previously,
+// incorrectly, claimed unrecognized files still import with a warning — see
+// docs/research/psx-ps2-n64-review-2026-07-24.md Phase C for the actual
+// import-with-warning + missing-MD5s fix, not done here.)
 if (firmwareInput) {
   firmwareInput.addEventListener('change', async (e) => {
     const file = e.target.files?.[0];

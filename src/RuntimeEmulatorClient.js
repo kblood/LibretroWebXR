@@ -53,6 +53,8 @@ export class RuntimeEmulatorClient extends EventTarget {
   resume() { return this.delegate?.resume(); }
   stop() { return this.delegate?.stop?.(); }
   sendInput(...args) { return this.delegate?.sendInput(...args); }
+  sendLightgun(...args) { return this.delegate?.sendLightgun?.(...args); }
+  sendMouse(...args) { return this.delegate?.sendMouse?.(...args); }
   canSerialize() { return !!this.delegate?.canSerialize?.(); }
   serializeState() { return this.delegate?.serializeState(); }
   unserializeState(data) { return this.delegate?.unserializeState(data); }

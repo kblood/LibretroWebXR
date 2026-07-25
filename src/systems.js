@@ -127,10 +127,14 @@ export const CORES = {
   //                          from the core's own build manifest at runtime.
   // .cue/.chd collide with `play`'s exts above — see coreForFile's doc
   // comment for how that's resolved.
+  // experimental: true — see the matching note on SYSTEMS.psx below; this
+  // core is real and headless-verified but not yet reachable from the real
+  // in-VR cartridge-insert path (2026-07-24 review, P0-2), so it's hidden
+  // from the default shelf/manifest UI until Phase B lands.
   mednafen_psx_hw:   { url: 'cores/mednafen_psx_jit_libretro.js',    exts: ['chd','cue','m3u','ccd','pbp','exe'], label: 'PlayStation (Beetle PSX + Wasm JIT)', style: 'module', license: 'GPLv2', weight: 3,
     execution: 'worker', requiresThreads: true, contentIo: 'transfer-memfs', multiFile: true,
     companionExtensions: ['bin','img','iso','sub','sbi'], firmwareProfile: 'psx',
-    buildHash: 'beetle-d6caed07-codegen-a5009f7d-jit-dev' },
+    buildHash: 'beetle-d6caed07-codegen-a5009f7d-jit-dev', experimental: true },
   // Nintendo 64, via mupen64plus-libretro-nx (GLideN64, GLES3/WebGL2) — see
   // docs/N64_CORE_BUILD.md for the recipe. Phase N0 (interpreter baseline,
   // no dynarec) per docs/research/n64-wasm-jit-plan.md: new_dynarec is
@@ -143,9 +147,11 @@ export const CORES = {
   // exts cover all three N64 ROM byte orders (.z64 big-endian native,
   // .n64 little-endian/byteswapped, .v64 byteswapped-16); the core
   // normalizes byte order internally.
+  // experimental: true — see the matching note on SYSTEMS.n64 below; same
+  // P0-2 reachability gap as PSX above.
   mupen64plus_next:  { url: 'cores/mupen64plus_next_libretro.js',    exts: ['n64','z64','v64'], label: 'Nintendo 64 (Mupen64Plus-Next)', style: 'module', license: 'GPLv2', weight: 3,
     execution: 'worker', requiresThreads: true, contentIo: 'transfer-memfs',
-    buildHash: 'mupen64plus-98c1b0d8-n0-interpreter' },
+    buildHash: 'mupen64plus-98c1b0d8-n0-interpreter', experimental: true },
 };
 
 // Rack budget calibration (see RackBudget.js). Tuned to the Phase-0 Quest-3
@@ -281,8 +287,20 @@ export const SYSTEMS = {
     // libretro's input path and the core builds/boots/renders with it present,
     // but "does a real GunCon2 game's driver actually attach to it" is untested.
     lightgun: { label: 'GunCon2', core: 'play', device: 260, port: 0, coreOptions: {} } },
-  psx:       { label: 'PlayStation',        defaultCore: 'mednafen_psx_hw',  cores: ['mednafen_psx_hw'],              exts: ['chd','cue','m3u','ccd','pbp','exe'], aliases: ['psx','ps1','playstation','sony playstation'], thumbnailRepo: 'Sony_-_PlayStation', medium: 'floppy' },
-  n64:       { label: 'Nintendo 64',        defaultCore: 'mupen64plus_next', cores: ['mupen64plus_next'],             exts: ['n64','z64','v64'], aliases: ['n64','nintendo 64'], thumbnailRepo: 'Nintendo_-_Nintendo_64', medium: 'cartridge' },
+  // `experimental: true` (PSX + N64 below) hides a system's cartridges from
+  // the default shelf/manifest UI (see Collection.js's parseCollection /
+  // loadCollection `experimental` option, gated in main.js on the
+  // `?experimental=1` URL param) without removing the system's registration
+  // or its content — the underlying worker-execution cores are real and
+  // headless-verified, but per the 2026-07-24 review (docs/research/
+  // psx-ps2-n64-review-2026-07-24.md, Phase A item A4) worker cores are not
+  // yet reachable from the real in-VR cartridge-insert path (P0-2) and
+  // weren't shippable-clean until the P0-1 gun/mouse regression was fixed —
+  // this flag keeps them out of normal users' hands until Phase B lands, while
+  // staying reachable for testing via the query param. Remove this flag (not
+  // the mechanism — it's generic and cheap to keep) once Phase B ships.
+  psx:       { label: 'PlayStation',        defaultCore: 'mednafen_psx_hw',  cores: ['mednafen_psx_hw'],              exts: ['chd','cue','m3u','ccd','pbp','exe'], aliases: ['psx','ps1','playstation','sony playstation'], thumbnailRepo: 'Sony_-_PlayStation', medium: 'floppy', experimental: true },
+  n64:       { label: 'Nintendo 64',        defaultCore: 'mupen64plus_next', cores: ['mupen64plus_next'],             exts: ['n64','z64','v64'], aliases: ['n64','nintendo 64'], thumbnailRepo: 'Nintendo_-_Nintendo_64', medium: 'cartridge', experimental: true },
 };
 
 // Controller ports per system — how many controllers the base hardware
@@ -605,10 +623,12 @@ export function fourScoreLoadConfig(systemId, coreName) {
 // both are real disc-image containers on both consoles, and this table can
 // only pick a name-based default, not read bytes. Defaults to `play` (the
 // console already shipping before PSX existed) to keep existing PS2 content
-// resolving exactly as it did. The file-picker path in main.js reads the
-// actual disc via src/DiscIdentity.js's identifyPlayStationDisc() first and
-// passes an explicit override down to coreForFile when it can — this default
-// only matters when that check is skipped or inconclusive.
+// resolving exactly as it did. src/DiscIdentity.js's identifyPlayStationDisc()
+// exists and is tested (byte-level BOOT/BOOT2 sniffing of SYSTEM.CNF) but is
+// NOT wired into any live code path — nothing in main.js imports or calls it
+// (2026-07-24 review finding). Until it's wired in (this repo's Phase C), the
+// only way to pick `mednafen_psx_hw` for an ambiguous .cue/.chd is an
+// explicit `?core=mednafen_psx_hw` / `override` argument to coreForFile.
 //
 // .exe is ALSO ambiguous, between `virtualxt` (DOS) and `mednafen_psx_hw`
 // (bare PS-X EXE homebrew) — unlike cue/chd there's no disc to sniff, so
@@ -636,11 +656,14 @@ export function extOf(filename) {
  * Mirrors the legacy detectCore() in main.js, now registry-driven.
  *
  * `mednafen_psx_hw` (PSX) and `play` (PS2) both claim .cue/.chd — see
- * AMBIGUOUS_EXT_DEFAULT above for the name-only default, and
- * src/DiscIdentity.js's identifyPlayStationDisc() (tested:
+ * AMBIGUOUS_EXT_DEFAULT above for the name-only default this function falls
+ * back to. src/DiscIdentity.js's identifyPlayStationDisc() (tested:
  * tmp/verify-disc-identity.mjs, verified against a real commercial PS2 disc)
- * for the real, byte-level disambiguation main.js's file-picker path runs
- * before falling back to this default.
+ * COULD do real byte-level disambiguation but is currently dead code — no
+ * caller in main.js or anywhere else in src/ invokes it (2026-07-24 review
+ * finding; was previously, incorrectly, documented here as already wired
+ * in). An ambiguous .cue/.chd today always needs an explicit `override` to
+ * reach `mednafen_psx_hw`.
  */
 export function coreForFile(filename, override) {
   if (override && CORES[override]) return coreInfo(override);
