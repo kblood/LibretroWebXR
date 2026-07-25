@@ -4,15 +4,15 @@ Produced by an Opus 5 subagent (Plan mode, read-only) reviewing the actual
 diffs (not just doc claims) on `main`/`n64-jit-plan`. Kept verbatim except
 for this header — see git blame / session log for provenance.
 
-## Status (updated 2026-07-25)
+## Status (updated 2026-07-25, third pass)
 
-**Phase A is done.** Commit `528910c` on branch `n64-jit-plan` (content-
-identical to `main` at this point + this review + this closure — see the
-commit message for the full breakdown), **committed but NOT pushed** —
-push needs separate authorization. Independently re-verified (not just
-trusting the implementing subagent's own report): `git show` on the actual
-diff for every item below, plus a fresh `npm test` (green) and `npm run
-probe:lightgun` (9/9) run directly.
+**Phase A is done AND merged+pushed.** Commit `528910c` (plus the
+doc-update commit `b0b3463`) — fast-forward-merged into `main` and pushed
+to `origin/main` on 2026-07-25 at the user's explicit request. `main`/
+`origin/main` are currently at `b0b3463`. Independently re-verified (not
+just trusting the implementing subagent's own report): `git show` on the
+actual diff for every item below, plus a fresh `npm test` (green) and `npm
+run probe:lightgun` (9/9) run directly.
 
 - **A1 (the critical fix) — done.** `src/RuntimeEmulatorClient.js` now
   forwards `sendLightgun`/`sendMouse`; these were the only two gaps against
@@ -48,12 +48,12 @@ probe:lightgun` (9/9) run directly.
   URLs. The hardcoded fallback to the old archived sibling checkout is
   gone.
 
-**Phase B is also done.** Commit `7455531` on `n64-jit-plan`, **committed
-but NOT pushed** (stacked on top of the still-unpushed Phase A/doc commits
-— `git push` will need to send all of them together). Independently
-re-verified: `npm test` green, plus direct re-runs of the two new probes
-(not just trusting the report) — `npm run probe:mode-switch` 11/11 and
-`npm run probe:worker-cartridge-insert` 12/12, both passing cleanly.
+**Phase B is also done.** Commit `7455531` on `n64-jit-plan`, stacked
+directly on `main`'s tip (`b0b3463`) — **committed but NOT pushed/merged**,
+awaiting separate authorization. Independently re-verified: `npm test`
+green, plus direct re-runs of the two new probes (not just trusting the
+report) — `npm run probe:mode-switch` 11/11 and `npm run
+probe:worker-cartridge-insert` 12/12, both passing cleanly.
 
 - **B1 — done.** A shared `buildStartOptions()` helper in `main.js` now
   threads `execution`/`firmware`/`restoredSaves` through every boot path
@@ -120,11 +120,61 @@ resolved before it can be called done. **Everything in Phase C (PSX
 content pipeline: streaming/OOM, disc-classifier wiring, BIOS-import
 fix, multi-file shelf persistence, PS2 `.cue`) and Phase D (N64 JIT
 COP0/interrupt verification before `ci_table`) is still unstarted.**
-Also in flight, from a separate concurrent effort at the time of this
-update (not yet landed/reviewed): an attempt to author real PSX CD-ROM
-test content (`games/psx-testdisc/`, T-PSX-2) — check its own commit/
-report separately once it lands, this doc will get another update pass
-once it does.
+
+**T-PSX-2 (real PSX CD-ROM test content) landed, but surfaced a new,
+significant, unresolved finding: PSX Tier 1 (real content actually
+rendering) is NOT verified.** Commit `7e801c4` on `n64-jit-plan` (stacked
+on Phase B, also unpushed) adds `games/psx-testdisc/` — the first real
+PSn00bSDK-built PSX title in this repo (a CC0 GTE cube + HUD + low-level
+BIOS memory-card save/load), built via the `luksamuk/psxtoolchain` Docker
+image and a genuine `mkpsxiso` CUE+BIN. I independently read the full
+writeup (`docs/PSX_TESTDISC.md`) and the `docs/PSX_CORE_BUILD.md` diff —
+both check out; the isolation methodology is sound and the conclusion is
+appropriately hedged, not overclaimed.
+
+The disc **does** boot cleanly through the app's real disc-loading path
+(`probe:psx-testdisc`: no track/file/fatal errors, continuous native
+Lightrec JIT compilation, PCM audio, non-blank frames at 3 checkpoints)
+— but while trying to capture a screenshot as visual proof, every
+checkpoint showed only a flat two-color background cycle
+(`(0,66,90)`/`(58,16,0)`, content-independent, ~5s period), with no cube,
+HUD text, or any of several unmistakable debug markers ever appearing.
+Eight independent isolation builds were tested (full game; minimal
+VSync/DrawSync background-cycle; +moving tile; `DrawPrim`-only with no
+VSync at all; raw GP0/GP1 MMIO pokes via the normal PSn00bSDK
+toolchain/`crt0`; division-free; patched stack-pointer header) across both
+CD-boot and raw-`.exe` loading — **all seven PSn00bSDK-toolchain-built
+variants produced the byte-identical, content-independent two-color
+sequence at the same frame counts.** Only the pre-existing bare
+hand-assembled MIPS smoke `.exe` (`generate-smoke-exe.js`, which pokes
+GP0/GP1 directly and never links against PSn00bSDK's `crt0`/library at
+all) renders correctly.
+
+This points at a real gap between "a normally-linked PSn00bSDK
+executable's BIOS handoff/`crt0` startup" and "this project's PSX
+worker-runtime video-output path reflecting subsequent CPU execution" —
+**not** a bug in the test disc's content, CD image structure, or build
+toolchain. Exact mechanism not conclusively identified (candidates:
+`GPREL`/initial-`$gp` setup, an entry-point-vs-load-address header gap, or
+a genuine worker-runtime canvas/video-blit bug) — root-causing it means
+editing `src/runtime/*`/`src/RuntimeEmulatorClient.js`/
+`src/RetroArchConfig.js`, deliberately left out of scope for the testdisc
+agent (a separate concurrent session was already working in related
+worker-runtime files this session).
+
+**Consequence: `docs/PSX_CORE_BUILD.md`'s existing "PASSED (2026-07-21)"
+claim is still true on its own narrow terms (the hand-assembled smoke
+exe's raw MMIO writes do reach the screen) but does NOT generalize to any
+real-world PSX game** (which would all be normally-linked, not
+hand-assembled bypass code). Tier 2 (visible spinning cube) and Tier 3
+(memory-card round-trip — `readSaveRam(1)` returned `null` in every run)
+are consequently also unverified. **This is now the single most important
+open item for PSX**, ahead of the rest of Phase C: there is no confirmed
+evidence yet that any real PSX game will display anything but this same
+two-color cycle in this app. A focused follow-up investigation into the
+worker-runtime video/GPU path (coordinating with whichever session owns
+those files) should happen before further PSX content work or before
+Phase C's PSX items are prioritized.
 
 ## Part 0 — Premise corrections (read first)
 
