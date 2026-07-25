@@ -88,6 +88,25 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
   return {
     // Label the NEXT core's audio branch (call right before booting it).
     expect(consoleId, sourceObject) { pending = { consoleId, sourceObject }; },
+    // Directly register (or return the existing) branch for `consoleId` without
+    // going through the AudioContext-stub trick above — that trick only ever
+    // fires for a same-thread `new AudioContext()` call, which worker-execution
+    // cores (PSX/N64 — see src/runtime/EmulatorWorkerRuntime.js's pushAudio)
+    // never make: they run off the main thread and push decoded PCM straight
+    // into pushSamples() instead. Without a branch pushSamples() silently
+    // no-ops forever, so this is the missing half of wiring worker audio (B3,
+    // 2026-07-25 review). Consumes a matching `pending` set by an `expect()`
+    // call made just before booting (the established per-boot pattern every
+    // call site already follows), so it labels the branch identically to the
+    // AudioContext-trick path; falls back to `sourceObject`/defaultSource if
+    // no matching `pending` is queued. Idempotent per console.
+    ensureBranch(consoleId, sourceObject) {
+      const existing = byConsole.get(consoleId);
+      if (existing) return existing;
+      const target = sourceObject ?? (pending?.consoleId === consoleId ? pending.sourceObject : defaultSource);
+      if (pending?.consoleId === consoleId) pending = null;
+      return makeBranch(target, consoleId);
+    },
     // Make only `consoleId` audible; mute the rest. null → unmute all.
     setFocus(consoleId) {
       focusedId = consoleId;

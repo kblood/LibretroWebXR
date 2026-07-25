@@ -1,8 +1,21 @@
+// Default frame-request function: the global requestAnimationFrame, resolved
+// dynamically at CALL time (not cached here at module-load time) so this
+// naturally picks up src/XRRafShim.js's monkeypatch of window.rAF while an XR
+// session is active — the shim replaces window.requestAnimationFrame itself,
+// and every unqualified `requestAnimationFrame` call (this one included)
+// resolves through that same global, exactly like every other rendering path
+// in the app already does. Exposed as an injectable constructor option (not
+// hardcoded) so this dependency is explicit and unit-testable — see
+// test/runtime.test.js — rather than an implicit global reference that's easy
+// to accidentally bypass in a future refactor (B6, 2026-07-25 review).
+const defaultRequestFrame = (callback) => requestAnimationFrame(callback);
+
 export class FrameBridge {
-  constructor(canvas, { onPresented = null } = {}) {
+  constructor(canvas, { onPresented = null, requestFrame = defaultRequestFrame } = {}) {
     if (!canvas) throw new Error('FrameBridge requires an output canvas');
     this.canvas = canvas;
     this.onPresented = onPresented;
+    this._requestFrame = requestFrame;
     this._pending = null;
     this._scheduled = false;
     this.framesPresented = 0;
@@ -24,7 +37,7 @@ export class FrameBridge {
     this._height = height || bitmap.height;
     if (!this._scheduled) {
       this._scheduled = true;
-      requestAnimationFrame(() => this._present());
+      this._requestFrame(() => this._present());
     }
   }
 

@@ -43,6 +43,9 @@
     "probe:lightgun": "node scripts/probe-lightgun-regression.mjs",
     "probe:psx-core": "node scripts/probe-psx-core.js",
     "probe:n64-core": "node scripts/probe-n64-core.js",
+    "probe:worker-cartridge-insert": "node scripts/probe-worker-cartridge-insert.mjs",
+    "probe:mode-switch": "node scripts/probe-mode-switch.mjs",
+    "probe:worker-audio-saveram": "node scripts/probe-worker-audio-saveram.mjs",
     "measure:n64-fps": "node scripts/measure-n64-fps.js"
   },
   "devDependencies": {

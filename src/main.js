@@ -797,7 +797,7 @@ const cableAdapter = {
 // rack with no behaviour change and no second WebGL context; spawned consoles
 // add more (Phase 3 gives them their own TVs). applyBudget() is a no-op at N=1.
 const rackMgr = new RackMgr({ logger });
-const primaryRuntime = new ConsoleRuntime({ id: CONSOLE_ID, adopt: { client, canvas: emuCanvas } });
+const primaryRuntime = new ConsoleRuntime({ id: CONSOLE_ID, adopt: { client, canvas: emuCanvas }, audio: audioRouter });
 rackMgr.add(primaryRuntime);
 rackMgr.setFocus(CONSOLE_ID);
 
@@ -1198,7 +1198,7 @@ async function spawnConsole(system, opts = {}) {
 
   // Own-mode runtime: fresh isolated core in its own canvas (Phase 0 proved N
   // module cores coexist). Boot the resolved ROM into it.
-  const runtime = new ConsoleRuntime({ id: consoleId });
+  const runtime = new ConsoleRuntime({ id: consoleId, audio: audioRouter });
   const buf = await resolveRom(meta);
   // Build this console's TV first so the audio branch can anchor on it, then
   // label the NEXT core's audio branch before booting it (the core's
@@ -1215,7 +1215,17 @@ async function spawnConsole(system, opts = {}) {
   audioRouter.expect(consoleId, tv.group);
   // CORES entries are keyed by name and carry no `name` field; ConsoleRuntime
   // wants { name, url, style }, so graft the key on.
-  await runtime.load(buf, { ...core, name: meta.core }, { system: meta.system, title: meta.title });
+  const spawnCoreInfo = { ...core, name: meta.core };
+  // B1 (2026-07-25 review): worker-execution cores need their content wrapped
+  // (stable contentId for SaveRAM keying) and their BIOS/restored-SaveRAM
+  // resolved, same as the primary console's boot paths — a spawned rack
+  // console previously got neither.
+  const spawnContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, spawnCoreInfo) : buf;
+  const spawnStart = await buildStartOptions(spawnCoreInfo, { file: meta.file }, spawnContent);
+  await runtime.load(spawnContent, spawnCoreInfo, {
+    system: meta.system, title: meta.title,
+    firmware: spawnStart.firmware, restoredSaves: spawnStart.restoredSaves,
+  });
   rackMgr.add(runtime);
   // FIX B: record this console's system so connectKeyboardTo() can pick the
   // correct layout (c64/standard) when the keyboard is plugged into a secondary
@@ -2526,7 +2536,11 @@ async function buildCartridgeWorld() {
     route: () => routeVideo(),
     focus: (id) => { rackMgr.setFocus(id); rackMgr.applyBudget(); refreshAudioFocus(); return rackMgr.focusedId(); },
     focused: () => rackMgr.focusedId(),
-    audio: () => audioRouter.branches.map((b) => ({ console: b.consoleId, gain: b.sink.gain.value })),
+    // nextAudioTime stays 0 until pushSamples() (worker-audio path, B3
+    // 2026-07-25 review) or the AudioContext-stub trick schedules a buffer on
+    // this branch — a cheap headless signal that a console's audio pipeline
+    // actually delivered at least one buffer, not just that a branch exists.
+    audio: () => audioRouter.branches.map((b) => ({ console: b.consoleId, gain: b.sink.gain.value, nextAudioTime: b.nextAudioTime })),
     clearSaved: () => { clearRack(); spawnedMetas.length = 0; return 'cleared'; },
     saved: () => loadRack(),
     autoPause: (on) => { if (on !== undefined) { rackMgr.setBudgetEnabled(on); saveAutoPause(on); rackMgr.applyBudget(); refreshAudioFocus(); } return rackMgr.isBudgetEnabled(); },
@@ -2633,6 +2647,16 @@ async function buildCartridgeWorld() {
   // Headless hook: exercise addLocalRomToShelf() with a synthetic meta entry.
   // Usage: await window.__addLocalRom({ file:'test.sfc', system:'snes', core:'snes9x', title:'Test' })
   window.__addLocalRom = (meta) => addLocalRomToShelf(meta);
+  // Headless hook: drive the REAL cartridge-insert path — the exact function
+  // GrabMgr.js calls (onCartridgeInserted) when a physical cart snaps into a
+  // console's slot. Unlike __pickLocalRom (a substitute for the desktop
+  // file-picker) this exercises handleCartridgeInserted itself: same-core
+  // hot-swap, cross-core reload+PENDING_KEY, and multi-console targeting all
+  // run unmodified. Only the 3D grab/slot gesture is skipped (there is no
+  // headless XR input to simulate it) — the boot logic it calls is identical
+  // to what a real VR cartridge insert triggers (T-X5, 2026-07-25 review).
+  // Usage: window.__insertCartridge({file, core, system, title, consoleId?})
+  window.__insertCartridge = (meta, opts = {}) => handleCartridgeInserted(meta, opts);
   // Headless hook: exercise the ROM resolver (OPFS cache round-trip etc.).
   window.__rom = { resolve: resolveRom, cacheRom };
   // Headless hook: inspect the persisted local-ROM library.
@@ -2655,13 +2679,21 @@ async function buildCartridgeWorld() {
    * @param {object} [opts]    optional meta hints (e.g. { twoGun:true } to seat
    *                           the two-gun Justifier when armed — used by the
    *                           two-Justifier verify harness, since a picked file
-   *                           has no manifest twoGun flag).
+   *                           has no manifest twoGun flag). { core, system }
+   *                           bypass filename-based auto-detection entirely —
+   *                           needed for content whose extension is ambiguous
+   *                           between two registered cores (e.g. a PSX raw
+   *                           .exe smoke file vs. DOS's .exe, which
+   *                           AMBIGUOUS_EXT_DEFAULT in systems.js resolves to
+   *                           virtualxt by default) — see
+   *                           scripts/probe-mode-switch.mjs (T-X4, 2026-07-25
+   *                           review), the first caller that needs this.
    */
   window.__pickLocalRom = async (name, data, opts = {}) => {
     const buf = data instanceof ArrayBuffer ? data : data.buffer;
-    const coreInfo = detectCore(name, coreOverride);
+    const coreInfo = (opts.core && CORES[opts.core]) ? { name: opts.core, ...CORES[opts.core] } : detectCore(name, coreOverride);
     if (!coreInfo) throw new Error(`no core for "${name}"`);
-    const system = systemForFile(name, coreOverride);
+    const system = opts.system || systemForFile(name, coreOverride);
     const title = name.replace(/\.[^.]+$/, '');
     const meta = {
       file: name,
@@ -2696,10 +2728,19 @@ async function buildCartridgeWorld() {
     // inputDevices port override at boot.
     const remapName = window.__forceRemapName || gun?.remapName || fourScore?.remapName || coreInfo.remapName;
     logLightgunBoot('pickLocalRom', meta, gun, { forcedInputDevices: !!window.__forceInputDevices });
-    await client.start(primaryCanvas(), buf, { coreUrl: bootCore.url, coreName: bootCore.name, moduleStyle: bootCore.style, contentExt: extOf(name), coreOptions, inputDevices, remapName, systemFiles: bootCore.systemFiles });
+    // B1/B2 (2026-07-25 review): mirror loadCartridge — wrap worker-execution
+    // content + resolve firmware/restoredSaves, then boot through bootOnPrimary
+    // so a cross-core (or cross-execution-mode) pick live-swaps to a fresh
+    // canvas/runtime instead of hitting RuntimeEmulatorClient's mode-switch
+    // throw. Unlike the real cartridge-insert path (which reloads the page on a
+    // core mismatch — see handleCartridgeInserted), this hook already holds the
+    // bytes in memory, so there's nothing to lose by swapping live instead.
+    const content = bootCore.execution === 'worker' ? await wrapWorkerContent(name, buf, bootCore) : buf;
+    const startOptions = await buildStartOptions(bootCore, { file: name, coreOptions, inputDevices, remapName, systemFiles: bootCore.systemFiles }, content);
+    await bootOnPrimary(meta, bootCore, content, startOptions);
     rackMgr.get(CONSOLE_ID)?.noteLoaded(bootCore.name, { system: meta.system, title });
     currentCore = bootCore.name;
-    currentMeta = { core: bootCore.name, file: meta.file, title, system: meta.system };
+    currentMeta = { core: bootCore.name, file: meta.file, title, system: meta.system, contentId: content?.contentId ?? null };
     gameInput?.setSystem(meta.system);
     // Cache content-addressed in OPFS so the shelf cart can re-resolve later.
     const sha1 = await cacheRom(buf);
@@ -5182,6 +5223,70 @@ async function disarmMouseAndReload() {
   syncPeripheralArmButtons();
 }
 
+// --- Shared boot-option building (B1, 2026-07-25 review) -----------------
+//
+// Before this, only the desktop file-picker (the romInput handler below)
+// threaded execution/firmware/restoredSaves through to client.start() — the
+// paths VR actually uses (loadCartridge, __pickLocalRom) silently dropped
+// them, so a worker-execution core (PSX/N64) booted through cartridge-insert
+// never got its BIOS or its previously-flushed native SaveRAM back, and never
+// even reached WorkerEmulatorClient (P0-2). This is the single source of
+// truth for that resolution now, shared by every primary-console boot path.
+
+// Wrap raw ROM bytes for a worker-execution core into a ContentBundle (needed
+// for a stable contentId — SaveRAM/save-state keying — even for a lone single
+// file). Main-thread cores keep using the raw ArrayBuffer/File directly.
+async function wrapWorkerContent(filename, source, coreInfo) {
+  const { ContentBundle } = await import('./ContentBundle.js');
+  return ContentBundle.fromNamedSources([{ path: filename, source }], { entryExtensions: coreInfo.exts });
+}
+
+/**
+ * Build the options object for client.start() / ConsoleRuntime.load(), given a
+ * resolved core + boot meta + already-prepared content. `meta` carries the
+ * per-boot overrides callers have already computed (coreOptions/inputDevices/
+ * remapName/systemFiles from gun/mouse/four-score wiring), falling back to the
+ * core registry's own defaults when a caller omits one. `content` is used only
+ * to key a restored-SaveRAM lookup (its `.contentId`, present once wrapped via
+ * wrapWorkerContent/ContentBundle).
+ *
+ * Worker-execution cores ADDITIONALLY resolve:
+ *   - firmware: this core's preferred imported BIOS (FirmwareStore), if it
+ *     declares a firmwareProfile (PSX).
+ *   - restoredSaves: previously-flushed native SaveRAM for this exact
+ *     core+content (SaveRamStore), if any was saved.
+ * Used by every primary-console AND secondary/rack boot path (the latter via
+ * ConsoleRuntime.load(), which separately handles its OWN audio-branch
+ * registration for its console id — see ConsoleRuntime.js).
+ */
+async function buildStartOptions(coreInfo, meta = {}, content = null) {
+  const options = {
+    coreUrl: coreInfo.url,
+    coreName: coreInfo.name,
+    moduleStyle: coreInfo.style,
+    contentExt: extOf(meta.file),
+    coreOptions: meta.coreOptions ?? coreInfo.coreOptions,
+    inputDevices: meta.inputDevices,
+    remapName: meta.remapName ?? coreInfo.remapName,
+    systemFiles: meta.systemFiles ?? coreInfo.systemFiles,
+    execution: coreInfo.execution,
+    requiresThreads: coreInfo.requiresThreads,
+    coreBuildHash: coreInfo.buildHash,
+  };
+  if (coreInfo.execution !== 'worker') return options;
+
+  if (coreInfo.firmwareProfile) {
+    const record = await firmwareStore.getPreferred(coreInfo.firmwareProfile).catch(() => null);
+    if (record) options.firmware = { name: record.name, data: record.data };
+    else setStatus(`${coreInfo.label} needs a BIOS — use "Import BIOS" first, then pick the game again`);
+  }
+  if (content?.contentId) {
+    const saved = await saveRamStore.load({ coreId: coreInfo.name, contentId: content.contentId }).catch(() => null);
+    if (saved?.data) options.restoredSaves = { data: saved.data, slot: 1 };
+  }
+  return options;
+}
+
 async function loadCartridge(meta, { echo = true } = {}) {
   setStatus(`loading ${meta.title}…`);
   // Boot telemetry (diagnoses headset boot failures): how the ROM resolves +
@@ -5228,13 +5333,17 @@ async function loadCartridge(meta, { echo = true } = {}) {
     logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url, lightgun: !!gun, twoGun: !!(gun && gun.guns?.length > 1), mouse: !!mouse, twoMouse: !!(mouse && mouse.mice?.length > 1), fourScore: !!fourScore });
     logLightgunBoot('loadCartridge', meta, gun);
     if (mouse) logger?.event?.('mouse-boot', { where: 'loadCartridge', system: meta.system, inputDevices: mouse.inputDevices, mice: mouse.mice, remapName: mouse.remapName });
-    await client.start(primaryCanvas(), buf, {
-      coreUrl: core.url, coreName, moduleStyle: core.style, contentExt: extOf(meta.file),
-      coreOptions, inputDevices, remapName, systemFiles: core.systemFiles,
-    });
+    // B1 (2026-07-25 review): a worker-execution core (PSX/N64) needs its bytes
+    // wrapped in a ContentBundle (stable contentId for SaveRAM keying) plus its
+    // BIOS/restored-SaveRAM resolved — previously only the desktop file-picker
+    // did this, so the real cartridge-insert path never gave a worker core its
+    // BIOS or a chance to restore native SaveRAM.
+    const content = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, core) : buf;
+    const startOptions = await buildStartOptions({ ...core, name: coreName }, { file: meta.file, coreOptions, inputDevices, remapName, systemFiles: core.systemFiles }, content);
+    await bootOnPrimary(meta, { name: coreName, url: core.url, style: core.style }, content, startOptions);
     rackMgr.get(CONSOLE_ID)?.noteLoaded(coreName, { system: meta.system, title: meta.title });
     currentCore = coreName;
-    currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system };
+    currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system, contentId: content?.contentId ?? null };
     _lastLoadedMeta = meta;            // full meta (keeps rom.source) for gun-reload
     _lightgunArmedConsole = !!gun;     // did this boot connect the gun device?
     // Two-gun co-op: record the active device's seated libretro ports (e.g. [1,2]).
@@ -5358,7 +5467,15 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
     if (!core) throw new Error(`no core registered as "${meta.core}"`);
     logger?.event?.('rom-resolved', { consoleId, file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url });
     // CORES entries carry no `name`; ConsoleRuntime.load wants { name, url, style }.
-    await runtime.load(buf, { ...core, name: meta.core }, { system: meta.system, title: meta.title });
+    const intoCoreInfo = { ...core, name: meta.core };
+    // B1 (2026-07-25 review): worker-execution content wrapping + BIOS/restored-
+    // SaveRAM resolution, same as every other boot path.
+    const intoContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, intoCoreInfo) : buf;
+    const intoStart = await buildStartOptions(intoCoreInfo, { file: meta.file }, intoContent);
+    await runtime.load(intoContent, intoCoreInfo, {
+      system: meta.system, title: meta.title,
+      firmware: intoStart.firmware, restoredSaves: intoStart.restoredSaves,
+    });
     // Repaint via the patch graph (idempotent) so this console's TV samples its
     // canvas and no other TV is touched — the fix for "game showed on both screens".
     // Loading into a console implies it's on — keep power state + switch in sync.
@@ -5409,10 +5526,16 @@ async function swapConsoleCore(consoleId, meta) {
   // NES Four Score on a secondary console: same fceumm-only P3/P4 gamepad wiring
   // as the primary path. null (no-op) for nestopia / non-NES boots.
   const fourScore = fourScoreLoadConfig(meta.system, meta.core);
+  const swapCoreInfo = { ...core, name: meta.core };
+  // B1 (2026-07-25 review): worker-execution content wrapping + BIOS/restored-
+  // SaveRAM resolution, same as every other boot path.
+  const swapContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, swapCoreInfo) : buf;
+  const swapStart = await buildStartOptions(swapCoreInfo, { file: meta.file }, swapContent);
   await bootFreshRuntime(consoleId, meta, {
-    core: { ...core, name: meta.core }, romBuffer: buf,
+    core: swapCoreInfo, romBuffer: swapContent,
     inputDevices: fourScore?.inputDevices,
     remapName: fourScore?.remapName ?? core.remapName,
+    firmware: swapStart.firmware, restoredSaves: swapStart.restoredSaves,
   });
   // Persist so a later reload restores the game now on this console.
   _updateSpawnedMeta(consoleId, meta);
@@ -5437,12 +5560,17 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
 
   // Boot the new core first (TV keeps showing the old canvas until it's ready),
   // then atomically retire the old runtime and install the new one under this id.
-  const next = new ConsoleRuntime({ id: consoleId });
+  const next = new ConsoleRuntime({ id: consoleId, audio: audioRouter });
   if (tvGroup) audioRouter.expect(consoleId, tvGroup);
   await next.load(romBuffer, core, {
     system: meta.system, title: meta.title, contentExt: extOf(meta.file),
     coreOptions: bootOpts.coreOptions, inputDevices: bootOpts.inputDevices, remapName: bootOpts.remapName,
-    systemFiles: bootOpts.systemFiles,
+    systemFiles: bootOpts.systemFiles, execution: bootOpts.execution ?? core.execution,
+    requiresThreads: bootOpts.requiresThreads ?? core.requiresThreads,
+    // Worker-mode BIOS + restored native SaveRAM (B1) — pre-resolved by the
+    // caller (buildStartOptions) since resolving them needs IndexedDB stores
+    // this class deliberately doesn't hold a reference to.
+    firmware: bootOpts.firmware, restoredSaves: bootOpts.restoredSaves,
   });
   rackMgr.remove(consoleId);   // dispose old (pause + detach its canvas)
   rackMgr.add(next);
@@ -5466,6 +5594,56 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
   rackMgr.applyBudget();
   refreshAudioFocus();
   return next;
+}
+
+// Boot resolved content into the PRIMARY console, live-swapping to a fresh
+// ConsoleRuntime/canvas (bootFreshRuntime) instead of reusing the running
+// delegate when the target core differs from what's currently loaded.
+//
+// Why a swap and not a reload: RuntimeEmulatorClient throws a
+// RuntimeModeSwitchError when the target core needs a different execution
+// topology (main-thread <-> worker) than what's already running on the
+// PRIMARY canvas — a <canvas> can only ever host one context type (WebGL vs.
+// FrameBridge's 2D) for its whole life. Historically every cross-core pick on
+// the primary hit a full page.reload() (see handleCartridgeInserted) because
+// the bytes in hand (a File, or content resolved async) couldn't survive one.
+// This helper is for the two boot paths that already hold the bytes as an
+// in-memory ArrayBuffer/ContentBundle with nothing to lose across a reload —
+// so it reuses bootFreshRuntime + rebindPrimaryClient, the SAME live-reboot
+// mechanism rebootPrimaryConsole already uses for a light-gun-driven core
+// swap (e.g. SMS -> genesis_plus_gx for the Light Phaser) — instead of
+// forcing a reload OR letting the mode-switch throw dead-end the caller
+// (P0-3/B2, 2026-07-25 review).
+async function bootOnPrimary(meta, bootCore, content, startOptions) {
+  if (currentCore && currentCore !== bootCore.name) {
+    const next = await bootFreshRuntime(CONSOLE_ID, meta, {
+      core: { name: bootCore.name, url: bootCore.url, style: bootCore.style },
+      romBuffer: content,
+      coreOptions: startOptions.coreOptions,
+      inputDevices: startOptions.inputDevices,
+      remapName: startOptions.remapName,
+      systemFiles: startOptions.systemFiles,
+      execution: startOptions.execution,
+      requiresThreads: startOptions.requiresThreads,
+      firmware: startOptions.firmware,
+      restoredSaves: startOptions.restoredSaves,
+    });
+    rebindPrimaryClient(next.client);
+    wireClientEvents(next.client);
+    next.client.resume?.();
+    return next.client;
+  }
+  // Mirrors ConsoleRuntime.load()'s ensureBranch call (B3, 2026-07-25 review):
+  // this direct-start branch is the PRIMARY console's path when it's booting
+  // its very first core (currentCore is still null, so the cross-core swap
+  // above never runs and ConsoleRuntime.load() — the only other ensureBranch
+  // call site — never gets a turn either). Without this, the primary
+  // console's first-ever worker-execution boot had no audio branch to push
+  // into: pushSamples() would silently no-op forever for exactly the most
+  // common case (a session's first PSX/N64 game).
+  if (startOptions.execution === 'worker') audioRouter?.ensureBranch?.(CONSOLE_ID);
+  await client.start(primaryCanvas(), content, startOptions);
+  return client;
 }
 
 // Live reboot of the PRIMARY console (CONSOLE_ID) — re-boot the SAME ROM with new
@@ -5845,13 +6023,15 @@ romInput.addEventListener('change', async (e) => {
     rom: { source: 'pick' },
   };
 
-  // If a different core is already loaded we must reload (libretro cores can't
-  // unload). Local file bytes are lost on reload, so we can't bridge them —
-  // tell the user to reload/refresh the page manually first, then pick again.
-  if (currentCore && currentCore !== coreInfo.name) {
-    setStatus(`"${title}" needs ${coreInfo.label} but ${CORES[currentCore]?.label || currentCore} is loaded. Reload the page, then pick the ROM again.`);
-    return;
-  }
+  // A different core than what's currently loaded needs a fresh runtime — a
+  // running libretro core can't unload, and (for a worker <-> main-thread
+  // execution-mode change) the primary canvas can't switch context type in
+  // place either (RuntimeEmulatorClient's mode lock). Unlike a REMOTE re-fetch,
+  // the picked File(s) are already in hand and stay valid for the rest of this
+  // page's life (only a page RELOAD loses them) — so bootOnPrimary below can
+  // live-swap to a fresh canvas/runtime (the same mechanism the light-gun/mouse
+  // arm-reboot already uses) instead of forcing the user to manually reload and
+  // re-pick (P0-3/B2, 2026-07-25 review — this used to hard-refuse here).
 
   // Boot directly from the picked File(s) (no resolver round-trip needed
   // since we already have them from the file-change event). A worker-mode
@@ -5876,26 +6056,15 @@ romInput.addEventListener('change', async (e) => {
     } else {
       content = buffer = await primary.arrayBuffer();
     }
-    // A worker-mode core with a firmwareProfile (PSX) needs its BIOS handed to
-    // the SAME start() call that boots the disc — the worker mounts it once,
-    // at launch. User-imported only; never shipped in this repo (see
-    // FirmwareStore.js / the "Import BIOS" input).
-    let firmware;
-    if (coreInfo.firmwareProfile) {
-      const record = await firmwareStore.getPreferred(coreInfo.firmwareProfile).catch(() => null);
-      if (record) firmware = { name: record.name, data: record.data };
-      else setStatus(`${coreInfo.label} needs a BIOS — use "Import BIOS" first, then pick the game again`);
-    }
-    // Restore any native SaveRAM this same disc/core/build previously flushed
-    // (see flushCurrentSaveRam below) — keyed off the content hash, not the
-    // filename, so re-picking the identical disc always finds it.
-    let restoredSaves;
-    if (coreInfo.execution === 'worker' && content?.contentId) {
-      const saved = await saveRamStore.load({ coreId: coreInfo.name, contentId: content.contentId }).catch(() => null);
-      if (saved?.data) restoredSaves = { data: saved.data, slot: 1 };
-    }
+    // BIOS + restored native SaveRAM (worker-execution cores only) + every
+    // other boot option, via the shared helper (B1, 2026-07-25 review) — a
+    // worker-mode core (PSX) needs its BIOS handed to the SAME start() call
+    // that boots the disc (the worker mounts it once, at launch); SaveRAM is
+    // restored keyed off the content hash, not the filename, so re-picking the
+    // identical disc always finds it (see flushCurrentSaveRam below).
+    const startOptions = await buildStartOptions(coreInfo, { file: meta.file }, content);
     logger?.event?.('rom-picked', { file: meta.file, bytes: buffer?.byteLength ?? 0, core: coreInfo.name, coreUrl: coreInfo.url, opfs: opfsSupported(), multiFile: isMultiFile });
-    await client.start(primaryCanvas(), content, { coreUrl: coreInfo.url, coreName: coreInfo.name, moduleStyle: coreInfo.style, contentExt: extOf(meta.file), coreOptions: coreInfo.coreOptions, systemFiles: coreInfo.systemFiles, execution: coreInfo.execution, requiresThreads: coreInfo.requiresThreads, coreBuildHash: coreInfo.buildHash, firmware, restoredSaves });
+    await bootOnPrimary(meta, coreInfo, content, startOptions);
     rackMgr.get(CONSOLE_ID)?.noteLoaded(coreInfo.name, { system: meta.system, title });
     currentCore = coreInfo.name;
     currentMeta = { core: coreInfo.name, file: meta.file, title, system: meta.system, contentId: content?.contentId || null };

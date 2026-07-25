@@ -61,6 +61,18 @@ const NUL_KEYS = 'input_ai_service = "nul"\ninput_ai_service_axis = "nul"\ninput
 // prefers a *per-core* options file/directory (keyed by core name) over
 // core_options_path even with game_specific_options off - set "true" here
 // to force every core onto the single shared file this project writes.
+// autosave_interval is in SECONDS (RetroArch's autosave.c spins up a
+// dedicated background thread on this timer that reads the core's battery-
+// backed SRAM via retro_get_memory and rewrites the .srm file in place — a
+// core-side mechanism, not something this app's JS drives). It defaults to
+// "0" (disabled) in every RetroArch config this project writes, which is the
+// root cause of native SaveRAM never actually persisting for worker-execution
+// cores (PSX/N64): WorkerEmulatorClient.flushSaveRam() just re-reads whatever
+// is currently in MEMFS, and without autosave_interval nothing ever rewrites
+// that file during play — only a restoredSaves boot-time write (if any) ever
+// touched it, so every "flush" read back the exact same boot-time bytes. 10s
+// keeps saved progress fresh without autosaving so often it's a meaningful
+// per-frame cost (2026-07-25 review, B4/P0-5).
 const EXTRA_CONFIG = `rgui_show_start_screen = "false"
 notification_show_remap_load = "false"
 menu_mouse_enable = "true"
@@ -70,6 +82,7 @@ system_directory = "/home/web_user/retroarch/userdata/system"
 savefile_directory = "/home/web_user/retroarch/userdata/saves"
 savestate_directory = "/home/web_user/retroarch/userdata/states"
 block_sram_overwrite = "true"
+autosave_interval = "10"
 core_options_path = "/home/web_user/retroarch/userdata/retroarch-core-options.cfg"
 game_specific_options = "false"
 global_core_options = "true"

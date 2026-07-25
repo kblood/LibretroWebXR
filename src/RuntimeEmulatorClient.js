@@ -15,6 +15,28 @@ export async function resolveCoreBuildHash(coreUrl, fallback = 'unversioned', fe
   }
 }
 
+// Thrown by start() instead of a generic Error when a caller asks for a
+// different execution topology (main-thread <-> worker) than the one already
+// running on this facade. This can't be serviced in place: a <canvas> element
+// can only ever host ONE context type (WebGL for EmulatorClient, 2D for
+// WorkerEmulatorClient's FrameBridge) for its whole lifetime, so switching
+// requires a fresh canvas, not just a fresh delegate. Structured (not a bare
+// Error) so callers can recover deliberately instead of the switch being a
+// silent, permanent dead end for the rest of the page's life (P0-3, 2026-07-25
+// review) — see main.js's bootOnPrimary/bootFreshRuntime for the actual
+// recovery (a live fresh-canvas swap, the same mechanism the light-gun/mouse
+// arm-reboot already uses) and RomInput's cross-core handling for the reload
+// fallback used where the content can't be re-handed to a fresh boot.
+export class RuntimeModeSwitchError extends Error {
+  constructor(currentMode, desiredMode) {
+    super(`runtime switch from ${currentMode} to ${desiredMode} requires a fresh canvas/delegate (a <canvas> can't change context type in place) — see RuntimeModeSwitchError`);
+    this.name = 'RuntimeModeSwitchError';
+    this.code = 'MODE_SWITCH_REQUIRED';
+    this.currentMode = currentMode;
+    this.desiredMode = desiredMode;
+  }
+}
+
 // Stable facade used by input, save-state and UI code while selecting the
 // execution topology per core. Classic cores retain their proven page-bound
 // loader; the modular PSX JIT core always runs in its dedicated worker.
@@ -36,7 +58,7 @@ export class RuntimeEmulatorClient extends EventTarget {
       ? await resolveCoreBuildHash(options.coreUrl, options.coreBuildHash)
       : options.coreBuildHash || 'unversioned';
     if (this.delegate && desiredMode !== this.mode) {
-      throw new Error(`runtime switch from ${this.mode} to ${desiredMode} requires page reload`);
+      throw new RuntimeModeSwitchError(this.mode, desiredMode);
     }
     if (!this.delegate) {
       this.mode = desiredMode;

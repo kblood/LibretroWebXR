@@ -245,10 +245,41 @@ function hydrateLaunch(payload) {
   disc = { index: 0, ejected: false, discCount: Math.max(1, payload.discCount || 1) };
 }
 
+// How long to wait for a FRAME_ACK before assuming it's never coming and
+// un-sticking the pump ourselves (B6, 2026-07-25 review). The main thread's
+// FrameBridge only acks after actually presenting a frame via
+// requestAnimationFrame — if that rAF stalls (a backgrounded tab, or a
+// mis-wired XR session that isn't actually routing through XRRafShim; see
+// FrameBridge.js), framePending latches true forever and this pump would
+// silently stop producing frames for the rest of the session with no way to
+// recover. 500ms is generous relative to a healthy ~16ms cadence — long
+// enough to never fire during normal jitter, short enough that a real stall
+// only costs a fraction of a second of missing video.
+const FRAME_ACK_TIMEOUT_MS = 500;
+let frameAckWatchdog = null;
+
+function armFrameAckWatchdog() {
+  clearTimeout(frameAckWatchdog);
+  frameAckWatchdog = setTimeout(() => {
+    if (!framePending) return;
+    framePending = false;
+    metrics.staleFrameAcks = (metrics.staleFrameAcks || 0) + 1;
+  }, FRAME_ACK_TIMEOUT_MS);
+}
+
+function clearFrameAckWatchdog() {
+  clearTimeout(frameAckWatchdog);
+  frameAckWatchdog = null;
+}
+
 function startFramePump(interval) {
   const pump = () => {
     frameTimer = setTimeout(pump, interval);
-    if (!canvas || framePending || typeof canvas.transferToImageBitmap !== 'function') {
+    // Paused (B5, 2026-07-25 review): stop producing/transferring frames
+    // entirely rather than keep pumping into a core the JS side believes is
+    // stopped — RackBudget's auto-pause-idle-cores feature relies on a paused
+    // console actually going quiet, not just accepting a no-op pause command.
+    if (paused || !canvas || framePending || typeof canvas.transferToImageBitmap !== 'function') {
       if (framePending) metrics.framesSkipped++;
       return;
     }
@@ -263,6 +294,7 @@ function startFramePump(interval) {
         width: canvas.width,
         height: canvas.height,
       }, [bitmap]);
+      armFrameAckWatchdog();
     } catch (error) {
       metrics.errors++;
       postMessage(eventMessage('error', serializeError(error)));
@@ -325,6 +357,7 @@ function postMetrics() {
 function stop() {
   clearTimeout(frameTimer);
   clearInterval(metricsTimer);
+  clearFrameAckWatchdog();
   frameTimer = null;
   metricsTimer = null;
   jit?.clear();
@@ -382,10 +415,27 @@ function readSaveRam(slot) {
   catch { return null; }
 }
 
+// Prefer Module.pauseMainLoop()/resumeMainLoop() — Emscripten's generic
+// MAIN_LOOP support (the SAME exports the main-thread EmulatorClient.js uses,
+// see its pause()/resume() ~:255-263) — over _cmd_pause(), a single TOGGLE
+// command tracked only by the `paused` JS boolean below. Before this fix,
+// setPaused always called _cmd_pause() for BOTH directions: any desync between
+// that boolean and the core's real state (e.g. a dropped/duplicate request)
+// could invert pause permanently with no way to recover. pauseMainLoop/
+// resumeMainLoop are each idempotent and directional, so they can't desync the
+// same way; _cmd_pause() is kept only as a last-resort fallback for a core
+// that doesn't export them (B5, 2026-07-25 review).
 function setPaused(next) {
   if (paused === next) return;
-  if (typeof moduleInstance?._cmd_pause !== 'function') throw new Error('core has no pause command');
-  moduleInstance._cmd_pause();
+  if (next) {
+    if (typeof moduleInstance?.pauseMainLoop === 'function') moduleInstance.pauseMainLoop();
+    else if (typeof moduleInstance?._cmd_pause === 'function') moduleInstance._cmd_pause();
+    else throw new Error('core has no pause command');
+  } else {
+    if (typeof moduleInstance?.resumeMainLoop === 'function') moduleInstance.resumeMainLoop();
+    else if (typeof moduleInstance?._cmd_pause === 'function') moduleInstance._cmd_pause();
+    else throw new Error('core has no resume command');
+  }
   paused = next;
 }
 
@@ -433,7 +483,7 @@ self.addEventListener('message', async (event) => {
   let message;
   try { message = assertProtocolMessage(event.data); }
   catch (error) { postMessage(eventMessage('error', serializeError(error))); return; }
-  if (message.type === WorkerMessage.FRAME_ACK) { framePending = false; return; }
+  if (message.type === WorkerMessage.FRAME_ACK) { framePending = false; clearFrameAckWatchdog(); return; }
   if (message.type !== WorkerMessage.REQUEST) return;
   try {
     const result = await handle(message.method, message.payload);

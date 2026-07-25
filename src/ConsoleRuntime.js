@@ -31,8 +31,15 @@ export class ConsoleRuntime {
    * @param {Document} [opts.document]          DOM document (for tests/headless)
    * @param {number} [opts.width]  canvas width  (own mode, default 640)
    * @param {number} [opts.height] canvas height (own mode, default 480)
+   * @param {object} [opts.audio]  SpatialAudio router ({ ensureBranch, pushSamples, ... },
+   *                               see src/SpatialAudio.js). Optional — omitted in most
+   *                               tests. When supplied, worker-execution cores (PSX/N64)
+   *                               get their audio routed into it (B3, 2026-07-25 review);
+   *                               main-thread cores are unaffected (they never emit an
+   *                               'audio' event — see EmulatorClient.js — so binding this
+   *                               listener unconditionally is harmless for them).
    */
-  constructor({ id, adopt = null, document: doc = (typeof document !== 'undefined' ? document : null), width = 640, height = 480 } = {}) {
+  constructor({ id, adopt = null, document: doc = (typeof document !== 'undefined' ? document : null), width = 640, height = 480, audio = null } = {}) {
     this.id = id;
     this.adopted = !!adopt;
     this.coreName = null;
@@ -41,6 +48,7 @@ export class ConsoleRuntime {
     this.weight = 1;
     this.loaded = false;
     this._disposed = false;
+    this._audio = audio;
 
     if (adopt) {
       this.client = adopt.client;
@@ -57,6 +65,9 @@ export class ConsoleRuntime {
       (doc.body || doc.documentElement).appendChild(this.canvas);
       this.client = new RuntimeEmulatorClient();
     }
+    if (this._audio && typeof this.client?.addEventListener === 'function') {
+      this.client.addEventListener('audio', (event) => this._audio.pushSamples(this.id, event.detail));
+    }
   }
 
   /** True once a ROM has booted (or, in adopt mode, if the client is ready). */
@@ -68,11 +79,20 @@ export class ConsoleRuntime {
   /**
    * Boot a ROM into this console's core. `core` is the systems.js core info
    * ({ name, url, style }); `meta` carries system/title for labelling.
-   * @param {ArrayBuffer} romBuffer
+   * @param {ArrayBuffer|ContentBundle} romBuffer
    * @param {{name:string,url:string,style:string}} core
-   * @param {{system?:string,title?:string}} [meta]
+   * @param {{system?:string,title?:string,firmware?:object,restoredSaves?:object}} [meta]
    */
   async load(romBuffer, core, meta = {}) {
+    const execution = meta.execution ?? core.execution;
+    // Worker-execution cores (PSX/N64) push decoded PCM straight into
+    // pushSamples() instead of creating a same-thread AudioContext (see
+    // SpatialAudio.js's ensureBranch doc comment) — register the branch before
+    // the core can possibly emit its first sample. Consumes whatever `expect()`
+    // the caller queued just before this call (the established pattern every
+    // spawn/swap site already follows for main-thread cores); harmless no-op
+    // for a main-thread boot (B3, 2026-07-25 review).
+    if (execution === 'worker') this._audio?.ensureBranch?.(this.id);
     await this.client.start(this.canvas, romBuffer, {
       coreUrl: core.url, coreName: core.name, moduleStyle: core.style,
       contentExt: meta.contentExt,
@@ -87,10 +107,19 @@ export class ConsoleRuntime {
       // strips `core` to {name,url,style}; else read it off the full core entry.
       systemFiles: meta.systemFiles ?? core.systemFiles,
       // Execution topology (RuntimeEmulatorClient): absent/'main' for every
-      // core except the PSX JIT, which needs its own worker realm — see
-      // systems.js's mednafen_psx_hw entry.
-      execution: meta.execution ?? core.execution,
+      // core except the worker-execution ones (PSX/N64 — see systems.js).
+      execution,
+      requiresThreads: meta.requiresThreads ?? core.requiresThreads,
       coreBuildHash: meta.buildHash ?? core.buildHash,
+      // Worker-mode BIOS + restored native SaveRAM (B1, 2026-07-25 review): both
+      // were silently dropped here before — a secondary/rack console booting a
+      // firmware-gated worker core (PSX) never got its BIOS, and never got its
+      // previously-flushed SaveRAM back. Pre-resolved by the caller (main.js's
+      // buildStartOptions) since resolving them needs FirmwareStore/SaveRamStore
+      // (IndexedDB), which this class deliberately doesn't depend on — it stays
+      // pure enough to unit-test with fakes (see RackMgr.js's doc comment).
+      firmware: meta.firmware,
+      restoredSaves: meta.restoredSaves,
     });
     this.coreName = core.name;
     this.system = meta.system ?? null;
