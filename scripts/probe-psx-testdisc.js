@@ -3,14 +3,15 @@
 // browser core artifact via WorkerEmulatorClient, exercising the actual
 // CD-ROM/BIOS disc-boot path (not a bare .exe like scripts/probe-psx-core.js
 // exercises). This proves the disc loads through the real content pipeline
-// with no track/file/fatal errors and produces continuous audio + JIT
-// execution + a non-blank frame. It does NOT prove our authored content's
-// own draw calls are what's on screen — see docs/PSX_TESTDISC.md "Known
-// gap" for the isolation testing behind that distinction, and
-// test/psx-core-e2e/harness-disc.js's header comment for specifics. The
-// memory-card round-trip fields are captured for completeness but are
-// expected to read back null in this environment (P0-5 SaveRAM-flush
-// plumbing, being addressed by a separate, concurrent effort).
+// with no track/file/fatal errors, and that our OWN authored draw calls are
+// what ends up on screen: the assertions below require near-white HUD text in
+// the upper part of the frame plus a multi-colour frame, neither of which a
+// blank screen, a flat background fill, or the core's built-in OpenBIOS shell
+// demo can produce. It also asserts the memory-card round trip (the save block
+// games/psx-testdisc writes must read back with its magic and a non-zero save
+// count both mid-session and after a soft reset).
+// See docs/PSX_TESTDISC.md for the two real bugs these assertions were
+// tightened to catch.
 
 import assert from 'node:assert/strict';
 import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
@@ -138,6 +139,32 @@ try {
   assert.ok(result.videoAtBoot.lit > 0, 'real PSX disc-boot output remained blank');
   assert.ok(result.videoAfterSave.lit > 0, 'real PSX disc video went blank after the save trigger');
   assert.ok(result.videoAfterReset.lit > 0, 'real PSX disc video went blank after soft reset');
+  // Proof the authored content itself is rendering, not just "something lit".
+  assert.ok(
+    result.videoAfterSave.brightTop >= 250,
+    `authored HUD text not on screen (brightTop=${result.videoAfterSave.brightTop})`,
+  );
+  assert.ok(
+    result.videoAfterSave.distinctColors >= 4,
+    `frame is a flat fill, not rendered content (distinctColors=${result.videoAfterSave.distinctColors})`,
+  );
+  assert.ok(
+    result.videoAfterReset.brightTop >= 250,
+    `authored HUD text did not come back after soft reset (brightTop=${result.videoAfterReset.brightTop})`,
+  );
+  // Memory-card round trip: the game's own save block must be readable back
+  // out of the emulated card, and must survive a soft reset.
+  assert.equal(result.midSessionError, null);
+  assert.equal(result.postResetError, null);
+  assert.ok(result.midSessionCardImage, 'no memory-card image read back mid-session');
+  assert.ok(result.postResetCardImage, 'no memory-card image read back after soft reset');
+  assert.equal(result.midSessionCardImage.saveBlock.magic, 0x31585754);
+  assert.ok(result.midSessionCardImage.saveBlock.save_count > 0, 'save count never incremented');
+  assert.equal(result.postResetCardImage.saveBlock.magic, 0x31585754);
+  assert.ok(
+    result.postResetCardImage.saveBlock.save_count >= result.midSessionCardImage.saveBlock.save_count,
+    'save block regressed across the soft reset',
+  );
   assert.equal(result.errorLogCount, 0);
   assert.deepEqual(result.workerErrors, []);
   assert.deepEqual(browserErrors, []);
@@ -150,7 +177,7 @@ try {
 
   writeFileSync(resolve(shotDir, 'psx-testdisc-result.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2));
-  console.log('Real PSX disc-boot browser probe PASSED (disc-boot pipeline verified; see docs/PSX_TESTDISC.md for what this does/does not prove about on-screen content)');
+  console.log('Real PSX disc-boot browser probe PASSED (disc boots, the authored HUD/cube render on the canvas, and the memory-card save survives a soft reset)');
 } catch (error) {
   console.error('Real PSX disc-boot browser probe FAILED');
   if (browserErrors.length) console.error(browserErrors.join('\n'));

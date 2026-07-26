@@ -9,19 +9,17 @@
 // (a free/open-source clean-room BIOS reimplementation, MIT-licensed,
 // from the PCSX-Redux project) baked into mednafen_psx_jit_libretro.wasm.
 //
-// IMPORTANT (see docs/PSX_TESTDISC.md "Known gap"): the assertions below
-// prove the disc loads through the real content/CD pipeline (no track/file
-// errors, no fatal core errors, continuous audio + JIT execution, a
-// non-blank frame). They do NOT prove our authored PS-X content's own draw
-// calls are what's on screen. Extensive isolation testing found every
-// PSn00bSDK-built payload (this game, and several minimal test builds using
-// raw GPU register pokes with no library/BIOS graphics calls at all) render
-// the exact same content-independent, deterministic two-color sequence,
-// while only the original hand-assembled smoke .exe (which pokes GP0/GP1
-// directly with no PSn00bSDK toolchain involved) showed genuinely different
-// output. This points at a worker-runtime video-path gap specific to this
-// project's HW/GL-accelerated PSX core build, not a bug in this file's
-// content or in mkpsxiso's disc image.
+// The assertions below deliberately go past "a non-blank frame appeared" and
+// prove our OWN authored draw calls are on screen: games/psx-testdisc's HUD is
+// PSn00bSDK debug-font text in the top rows of a 320x240 framebuffer whose
+// clear colour is a near-black navy, so near-white pixels concentrated in the
+// upper part of the frame cannot come from a blank screen, a flat fill, or the
+// core's built-in OpenBIOS shell demo (which draws no text at all). See
+// `contentEvidence()` below and docs/PSX_TESTDISC.md.
+//
+// This matters because both earlier failure modes passed a "non-blank frame"
+// check: an unbootable disc left the OpenBIOS demo running, and the core's
+// default OpenGL renderer presented only the framebuffer's background fill.
 
 import { WorkerEmulatorClient } from '../../src/runtime/WorkerEmulatorClient.js';
 
@@ -47,7 +45,7 @@ async function waitFor(predicate, description, timeoutMs) {
   let lastError = null;
   while (performance.now() < deadline) {
     try {
-      const result = predicate();
+      const result = await predicate();
       if (result) return result;
     } catch (error) {
       lastError = error;
@@ -73,7 +71,54 @@ function frameEvidence(canvas) {
     return [...pixel];
   });
   const lit = samples.filter(([r, g, b]) => r + g + b > 30).length;
-  return { width: canvas.width, height: canvas.height, lit, samples };
+  return { width: canvas.width, height: canvas.height, lit, samples, ...contentEvidence(canvas, context) };
+}
+
+// Whole-frame evidence that the authored content (and not a flat fill, a blank
+// screen, or the core's OpenBIOS shell demo) is being presented.
+//
+//  - brightTop: near-white pixels in the upper 40% of the frame. That is where
+//    games/psx-testdisc's FntPrint() HUD lives ("LWX PSX TEST DISC", the save
+//    counter, the memory-card status line). The 320x240 framebuffer is cleared
+//    to RGB(12,14,24), and nothing else the core can put on screen without our
+//    executable running produces white text there.
+//  - distinctColors: RGB555-quantised unique colours. A flat/background-only
+//    presentation gives 2 (the fill plus the letterbox bars); the real frame
+//    has the fill, the bars, the white font and the cube's shaded faces.
+//  - background: pixels matching our clear colour, RGB(12,14,24) quantised to
+//    RGB555 and presented as (8,8,24). Required alongside brightTop so that a
+//    bright BIOS/boot screen (which is light and near-white over most of the
+//    frame) cannot be mistaken for our HUD.
+function contentEvidence(canvas, context) {
+  const width = canvas.width;
+  const height = canvas.height;
+  const topRows = Math.floor(height * 0.4);
+  const { data } = context.getImageData(0, 0, width, height);
+  let bright = 0;
+  let brightTop = 0;
+  let background = 0;
+  const colors = new Set();
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      if (r > 200 && g > 200 && b > 200) {
+        bright++;
+        if (y < topRows) brightTop++;
+      }
+      if (r < 40 && g < 40 && b >= 16 && b < 80 && b > g) background++;
+      if (colors.size < 4096) colors.add(((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3));
+    }
+  }
+  return { bright, brightTop, background, distinctColors: colors.size };
+}
+
+// The frame carries our authored content: white HUD glyphs in the top rows
+// AND the game's own dark navy clear colour over most of the frame.
+function showsAuthoredContent(evidence) {
+  return evidence.brightTop >= 250 && evidence.background >= 80000 && evidence.distinctColors >= 4;
 }
 
 function bytesToHex(bytes, start, len) {
@@ -89,6 +134,16 @@ function bytesToHex(bytes, start, len) {
 function readU32LE(bytes, offset) {
   if (!bytes || bytes.length < offset + 4) return null;
   return (bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0;
+}
+
+// games/psx-testdisc/main.c: MC_MAGIC, written into memory-card sector 16.
+const MC_MAGIC = 0x31585754;
+
+function isValidSaveBlock(block) {
+  return !!block
+    && block.magic === MC_MAGIC
+    && block.save_count > 0
+    && block.checksum === ((block.magic ^ block.save_count ^ block.last_save_frame) >>> 0);
 }
 
 function decodeSaveBlockFromCardImage(cardImage) {
@@ -178,13 +233,27 @@ export async function runPsxDiscE2E({
       'enough presented frames for the in-game auto-save trigger',
       Math.max(bootTimeoutMs, 25000),
     );
-    const videoAfterSave = frameEvidence(output);
+    // Now insist on our OWN content: the disc has to have actually booted (a
+    // failed boot leaves the core's OpenBIOS shell demo running) and the
+    // presented frame has to carry the drawn HUD text, not just a background
+    // fill. Both of those were previously-shipped failure modes.
+    const videoAfterSave = await waitFor(() => {
+      const evidence = frameEvidence(output);
+      return showsAuthoredContent(evidence) ? evidence : null;
+    }, "games/psx-testdisc's own HUD text on screen", Math.max(bootTimeoutMs, 30000));
 
+    // The game auto-saves at its own frame 180 (~3s after main() starts) and
+    // RetroArch only flushes SRAM to the virtual FS periodically, so poll
+    // rather than taking a single reading.
     let midSessionCardImage = null;
     let midSessionError = null;
     try {
-      const raw = await client.readSaveRam(1);
-      midSessionCardImage = raw ? Array.from(raw) : null;
+      midSessionCardImage = await waitFor(async () => {
+        const raw = await client.readSaveRam(1);
+        if (!raw) return null;
+        const image = Array.from(raw);
+        return isValidSaveBlock(decodeSaveBlockFromCardImage(image)) ? image : null;
+      }, "games/psx-testdisc's save block on the emulated memory card", 30000);
     } catch (error) {
       midSessionError = String(error?.message || error);
     }
@@ -202,13 +271,23 @@ export async function runPsxDiscE2E({
       'frames presented after soft reset',
       bootTimeoutMs,
     );
-    const videoAfterReset = frameEvidence(output);
+    // ...and the rebooted game has to draw its HUD again, which is also the
+    // visible half of the save round trip (it prints the save count it read
+    // back off the card).
+    const videoAfterReset = await waitFor(() => {
+      const evidence = frameEvidence(output);
+      return showsAuthoredContent(evidence) ? evidence : null;
+    }, "games/psx-testdisc's HUD text on screen after soft reset", Math.max(bootTimeoutMs, 30000));
 
     let postResetCardImage = null;
     let postResetError = null;
     try {
-      const raw = await client.readSaveRam(1);
-      postResetCardImage = raw ? Array.from(raw) : null;
+      postResetCardImage = await waitFor(async () => {
+        const raw = await client.readSaveRam(1);
+        if (!raw) return null;
+        const image = Array.from(raw);
+        return isValidSaveBlock(decodeSaveBlockFromCardImage(image)) ? image : null;
+      }, "games/psx-testdisc's save block still on the card after soft reset", 30000);
     } catch (error) {
       postResetError = String(error?.message || error);
     }

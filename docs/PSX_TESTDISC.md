@@ -1,14 +1,18 @@
-# LWX PSX Test Disc — authoring recipe + a real rendering-pipeline gap found while verifying it
+# LWX PSX Test Disc — authoring recipe, and the two bugs that stopped it rendering
 
 `games/psx-testdisc/` is this repo's first PSX title authored as a real,
 bootable CD image (CUE+BIN), as opposed to
 `scripts/cores/psx/test-content/generate-smoke-exe.js` (a ~40-instruction
 hand-assembled raw MIPS `.exe` that never touches CD-ROM reading, BIOS boot,
-or memory-card save/load — see `docs/PSX_CORE_BUILD.md`). This doc covers the
-toolchain recipe and, importantly, a real content-independent rendering gap
-found in this project's PSX worker runtime while trying to verify the disc
-visually — read the "Known gap" section before trusting any screenshot of
-this disc as proof our game's own draw calls are on screen.
+or memory-card save/load — see `docs/PSX_CORE_BUILD.md`).
+
+For a while this disc appeared not to render: every screenshot showed a flat,
+near-uniform colour that alternated between two fixed values, with no cube, no
+HUD text, and no reaction to deliberately unmistakable debug markers. That was
+**two separate real bugs stacked on top of each other**, both now found and
+fixed (2026-07-26) — see "Root causes" below. The disc now boots, renders, and
+round-trips a memory-card save, and `npm run probe:psx-testdisc` asserts all
+three.
 
 ## Content
 
@@ -52,7 +56,9 @@ docker run --rm -v <game-dir>:/work -w /work luksamuk/psxtoolchain \
   `build/psxtest.cue` via `mkpsxiso`, driven by `games/psx-testdisc/iso.xml`
   (volume `LWX_PSX_TESTDISC`, files `SYSTEM.CNF` + `PSXTEST.EXE`, no license
   file — see "License data" below).
-- `system.cnf` sets `BOOT=cdrom:\PSXTEST.EXE;1`.
+- `system.cnf` sets `BOOT=cdrom:\SLUS_000.01;1` and `iso.xml` names the
+  executable `SLUS_000.01`. **The Sony-style serial name is load-bearing, not
+  cosmetic** — see "Root cause 1" below.
 - **Docker socket gotcha (WSL2 Ubuntu):** if `systemctl status docker`
   reports "active (running)" but `docker ps`/`docker run` hang or fail to
   connect, `docker.socket`'s socket-activation can be in a broken state where
@@ -81,113 +87,154 @@ consoles to region-check a disc before booting it. PSn00bSDK does not ship
 one ("License files are not distributed with PSn00bSDK for obvious reasons"
 — its own template's comment), and this repo cannot legally include one
 either (see `docs/LICENSING.md`) — `games/psx-testdisc/iso.xml` has no
-`<license>` element. This is not believed to be the cause of the rendering
-gap below (see that section — the same gap reproduces via a bare `.exe`,
-which never goes through CD-ROM/TOC/license logic at all).
+`<license>` element.
+
+The absence of that license blob **did** matter, just not the way you would
+expect: Beetle PSX accepts a disc with no license data as long as the boot
+executable is named like a Sony serial, which is exactly the workaround this
+disc now uses (Root cause 1). No license blob is required.
+
+## Root causes of the "it doesn't render" symptom
+
+Both were found by dumping a save state out of the running core and decoding
+it offline (`tmp/` helper scripts, not shipped): decoding the MDFNSVST
+sections gave the CD controller's last response bytes, the CPU PC, main RAM,
+and a full 1 MB copy of GPU VRAM that could be rendered to a PNG.
+
+### Root cause 1 — the disc never booted; we were photographing OpenBIOS's demo
+
+`system.cnf` said `BOOT=cdrom:\PSXTEST.EXE;1`. Beetle PSX decides whether a
+disc is a PlayStation disc in `CalcDiscSCEx()`, which accepts either
+"licensedby" text in the license area at sectors 0-15 **or** a Sony-format
+serial on the `BOOT=` line — the name after `cdrom:\` must be four characters,
+start with `S`, then `C`/`L`/`I`, then `E`/`U`/`K`/`B`/`P`
+(`CalcDiscSCEx_BySYSTEMCNF()` in the core's `libretro.c`). `PSXTEST.EXE`
+matches neither, and this disc ships no license blob, so `scex_ids[0]` stayed
+`NULL`, `PS_CDC_SetDisc()` set `IsPSXDisc = false`, and `CdlGetID` answered
+with the unlicensed-disc error `0a 90 20 00 ff 00 00 00` plus a
+`CDCIRQ_DISC_ERROR` — verified byte-for-byte in the save state.
+
+The core embeds PCSX-Redux's OpenBIOS (`deps/openbios/openbios.bin.h`), which
+on an unbootable disc simply runs its own built-in shell demo: a large rotating
+single-colour cube on a slowly colour-cycling background, with SPU music.
+**That demo's background cycle is the `(0,66,90)` / `(58,16,0)`
+"content-independent two-colour sequence"** the earlier isolation testing kept
+recording. Every payload produced identical output because none of them ever
+ran: the previous eight-payload isolation matrix was, unknowingly, eight
+photographs of the same BIOS demo. Corroborating state evidence:
+`BACKED_PC = 0x80031db4` (OpenBIOS shell region), main RAM at `0x10000` all
+zero (our executable never loaded), all-zero GTE registers, and
+`DisplayMode = 0x27` (640x480 interlaced — the demo, not our 320x240 program).
+
+**Fix:** rename the boot executable to a Sony-serial-shaped name in both
+`system.cnf` and `iso.xml` (`SLUS_000.01`) and rebuild the disc. Nothing about
+the game code changed.
+
+> Trap worth recording: an early attempt to test this hypothesis hex-patched
+> the filename directly inside the `.bin`. That silently broke the Mode2 Form1
+> EDC/ECC of the two sectors it touched, so `CDIF_ValidateRawSector()` failed,
+> `CDIF_ReadSector()` returned 0, and the experiment showed "no change" —
+> nearly discarding a correct hypothesis. Always rebuild with mkpsxiso.
+
+### Root cause 2 — the core's OpenGL renderer presents only the background fill
+
+With the disc booting, the game ran (`SET_SYSTEM_AV_INFO: 320x240`) and VRAM
+dumped out of the save state showed **both** double buffers fully rendered —
+"LWX PSX TEST DISC", "SAVE COUNT 1", "MEMORY CARD SLOT 1: OK", the HUD, and
+the flat-shaded cube — while the canvas at the same instant was a single flat
+colour.
+
+Beetle PSX HW defaults `renderer` to `hardware` (Hardware (Auto)) and
+`renderer_software_fb` to `enabled`, i.e. it presents the OpenGL renderer's
+output while keeping a native-resolution software copy of VRAM in the
+background for framebuffer effects and save states. In this project's
+worker/`OffscreenCanvas` GL context the OpenGL path presents **only the
+framebuffer's background fill** — no polygons, sprites or text ever reach the
+canvas. That is why the flat colour tracked whatever program was running
+(OpenBIOS's demo clear colour before fix 1, our `setRGB0(12,14,24)` after it).
+
+**Fix:** `src/RetroArchConfig.js` now sets `beetle_psx_renderer = "software"`
+(and the `beetle_psx_hw_` prefixed variant, since `BEETLE_OPT()` changes prefix
+in `HAVE_HW` builds). It is a "Restart required" option, so it has to be in the
+core-options file before content loads — which is what that constant is for.
+The underlying GL-path bug in the core artifact is not fixed, just avoided.
+
+### Side effect found on the way: Lightrec segfaults on real content
+
+Once the disc actually booted, the run died ~2 s in with
+`[Lightrec]: Segmentation fault in recompiled code: invalid load/store at
+address PC 0x5ffffcfc` while executing a block at `PC 0x000036f8` (BIOS kernel
+RAM, during the CD exec/load path), after which the core stopped presenting
+frames. `execute`, `execute` + `dynarec_invalidate = dma`, and
+`run_interpreter` (Lightrec's own interpreter, no Wasm codegen at all) all fail
+identically; only `disabled` (Beetle's own CPU interpreter) works. Because
+Lightrec's plain interpreter fails the same way, the fault is in the Lightrec
+layer's shared memory-map / block-invalidation path and **not** in the Wasm
+code generator. `beetle_psx_cpu_dynarec` is therefore pinned to `"disabled"` in
+`src/RetroArchConfig.js`; the full reasoning and the one-line revert are in the
+comment above `RETROARCH_CORE_OPTIONS`. Fixing it properly means rebuilding
+`kblood/psx-wasm-jit-libretro`.
+
+### Third bug found on the way: save/state paths never matched RetroArch's
+
+RetroArch 1.22 defaults `sort_savefiles_enable` / `sort_savestates_enable` to
+`true`, which redirects SRAM and save states into a per-core **subdirectory**
+("[Override] Redirecting save file to .../saves/Beetle PSX/<content>.srm").
+`EmulatorWorkerRuntime` computes `${SAVE_DIR}/${saveStem}.srm` and
+`${STATE_DIR}/${saveStem}.state` with no core-name segment, so **every**
+worker core's `readSaveRam()` read a path that never existed (returning `null`
+— which is exactly what this doc used to record) and `serializeState()` polled
+for a state file the core was writing elsewhere, failing with "save state did
+not stabilize within 2s". `src/RetroArchConfig.js` now turns all four
+`sort_save*` options off. This affects every worker core, not just PSX.
 
 ## Verification performed
 
-- `npm run probe:psx-testdisc` boots the real CUE+BIN through the app's real
-  disc-loading path (`WorkerEmulatorClient` → `mednafen_psx_jit` /
-  Beetle-PSX-HW + Lightrec, `entrypoint: 'retroarch'`, `requiresThreads:
-  true`), asserting: cross-origin isolation, ≥3 presented frames, a
-  non-blank frame at three checkpoints (boot / after the frame-180
-  save-trigger / after a `client.reset()` soft-reset), zero worker errors,
-  zero real core error-log lines, and continuous native Lightrec JIT
-  compilation + PCM audio forwarding. **This passed** (no track/file errors,
-  no fatal markers — the disc genuinely loads through the real content
-  pipeline). See `test/psx-core-e2e/harness-disc.js` /
-  `scripts/probe-psx-testdisc.js`.
-- What this does **not** prove: that our own authored draw calls (the cube,
-  the HUD text, anything) are what's actually on screen. See below.
+`npm run probe:psx-testdisc` boots the real CUE+BIN through the app's real
+disc-loading path (`WorkerEmulatorClient` -> `mednafen_psx_jit` /
+Beetle-PSX-HW, `entrypoint: 'retroarch'`, `requiresThreads: true`) and asserts:
 
-## Known gap: PSn00bSDK-built content doesn't visibly render in this project's PSX worker runtime
+- cross-origin isolation, at least 3 presented frames, zero worker errors,
+  zero real core error-log lines, no fatal markers;
+- **our own draw calls on screen**: at least 250 near-white pixels in the top
+  40% of the frame (the `FntPrint` HUD), at least 80000 pixels of the game's
+  own `RGB(12,14,24)` clear colour, and at least 4 distinct RGB555 colours. The
+  background requirement is what stops a bright BIOS boot screen counting as a
+  pass, and the HUD requirement is what stops a flat fill or the OpenBIOS demo
+  (which draws no text at all) counting as a pass — both were real shipped
+  failure modes;
+- the same content check again **after a `client.reset()` soft reset**;
+- a **memory-card round trip**: the game's save block (magic `TWX1`, save
+  count, frame number, checksum) must be readable back off the emulated card
+  mid-session, and must still be there after the soft reset.
 
-While trying to capture a screenshot of the cube as visual proof, every
-checkpoint showed a flat, near-uniform screen color that slowly alternated
-between two fixed values (`(0,66,90)` and `(58,16,0)`, roughly every ~5
-real seconds) with no visible cube, HUD text, or any of several deliberately
-unmistakable debug markers (a full-screen pure-red/green/green background
-cycle, a solid 2D debug rectangle, a 16×16 white tile sweeping across the
-screen). Meanwhile `psxJitCompiledBlocks` (native Lightrec compiled-block
-count) climbed only from ~95 to ~122 over 90 real seconds — implausibly low
-for a BIOS boot plus a running GTE/font/pad/memory-card game loop, which
-touches far more unique code than that.
-
-Isolation testing (`tmp/debug-psx-*.mjs`, `tmp/minimal-test/*` during this
-session — not part of the shipped deliverable) built and booted **eight**
-independent payloads:
-
-1. The full game (cube + GTE + font + memory card), via CUE+BIN.
-2. A minimal PSn00bSDK build doing *only* a full-screen background-color
-   cycle via the standard double-buffer `DRAWENV`/`isbg`/`VSync`/`DrawSync`
-   pattern (verified byte-for-byte structurally identical to PSn00bSDK's own
-   official `examples/graphics/gte/main.c`), via CUE+BIN and via a raw `.exe`.
-3. The same, plus a moving 16×16 tile.
-4. A variant using PSn00bSDK's `DrawPrim()`/`TILE` primitives directly with
-   **no** `VSync`/`DrawSync` calls at all (rules out a vblank-IRQ wait hang).
-5. A variant using **raw GP0/GP1 MMIO pokes** (matching the known-working
-   hand-assembled smoke test's own approach) with **no** PSn00bSDK graphics
-   library calls at all — still built/linked via the normal PSn00bSDK
-   toolchain (`psn00bsdk_add_executable`, real `crt0`/libc startup).
-6. The same, with every division/modulo operation replaced by bitwise
-   shifts (rules out a MIPS `DIV`/`DIVU` dynarec bug).
-7. The same, with the `.exe` header's stack-pointer field hex-patched from
-   `0` to a real address matching the smoke test's own header (rules out a
-   null-stack-pointer corruption theory).
-
-**All seven of these PSn00bSDK-toolchain-built payloads produced the
-byte-identical, content-independent two-color sequence at the same frame
-counts**, regardless of CD-boot vs. raw-`.exe` loading, regardless of
-`VSync`/`DrawSync` use, regardless of division, regardless of the patched
-stack pointer. Only the **original hand-assembled smoke test**
-(`generate-smoke-exe.js`, which pokes GP0/GP1 directly and was never linked
-against any PSn00bSDK library or `crt0` startup code) shows genuinely
-different, content-correct output (a single fixed fill color consistent with
-its own hardcoded GP0 fill command).
-
-This strongly points at a gap somewhere between "a normally-linked
-PSn00bSDK executable's BIOS handoff / `crt0` startup" and "this project's
-PSX worker-runtime video-output path actually reflecting subsequent CPU
-execution" — **not** a bug in this disc's content, in `mkpsxiso`'s CD image
-structure, or in the build toolchain. The exact mechanism was not
-conclusively identified (candidates not yet ruled out: something specific to
-`GPREL` linking / initial `$gp` setup, the ~0x90-byte gap between this
-build's load address and its recorded entry point in the `.exe` header vs.
-the smoke test's entry-equals-load-address header, or a genuine bug in the
-worker runtime's canvas/video-blit path specific to this core's hardware/GL
-renderer) — root-causing further would mean editing `src/runtime/*` /
-`src/RuntimeEmulatorClient.js` / `src/RetroArchConfig.js`, which is
-explicitly out of scope for this work (see the task boundary notes in
-`docs/research/psx-ps2-n64-review-2026-07-24.md`) and where a separate,
-concurrent session is already working on worker-core runtime issues.
-
-**Consequence for `docs/PSX_CORE_BUILD.md`'s existing "PASSED (2026-07-21)"
-claim:** that verification is still valid on its own narrow terms (the
-hand-assembled smoke exe's own MMIO writes really do reach the screen), but
-it does not generalize to "any real PSn00bSDK-built PSX program renders
-correctly in this app" — this doc's finding is new information that
-narrows what that pass actually covers.
+Measured on a passing run (2026-07-26): 1747 frames presented, 0 dropped;
+`brightTop` 4080 / `background` 231744 before the reset and 3416 / 232890
+after it; save block `54 57 58 31 01 00 00 00 b4 00 00 00 e1 57 58 31`
+(`magic=TWX1, save_count=1, last_save_frame=180`) both mid-session and after
+the reset. `scripts/probe-psx-testdisc.js` also writes
+`tmp/psx-testdisc-boot.png` and `tmp/psx-testdisc-final.png`; the final shot
+shows the cube plus "LWX PSX TEST DISC / SAVE COUNT: 1 / MEMORY CARD SLOT 1:
+OK / X: SAVE  D-PAD L/R: SPIN SPEED".
 
 ## Memory-card (Tier 3) status
 
-Not independently verifiable given the above: `client.readSaveRam(1)`
-returned `null` in every run, both mid-session and after a soft reset. This
-is consistent with (a) our content never actually reaching its main loop for
-the reasons above, and/or (b) the separately-tracked P0-5 SaveRAM-autosave
-gap (`autosave_interval` is set, but `WorkerEmulatorClient.flushSaveRam()`
-only re-reads MEMFS — a different, concurrently-being-fixed issue). The
-game's own save/load code (`mc_init`/`save_load`/`save_write` in `main.c`)
-is written and structurally correct against the documented BIOS low-level
-memory-card protocol, but round-trip proof could not be captured.
+Working and asserted — see above. The earlier `readSaveRam(1) === null`
+recorded here was the `sort_savefiles_enable` path bug, not the game's own
+save code.
 
 ## Bottom line / tier reached
 
-**Tier 1 is not fully verified.** The toolchain and CD-image build pipeline
-are real, reproducible, and proven (`npm run make-psx-testdisc` produces a
-structurally valid CUE+BIN every time), and the disc **does** boot through
-the app's real disc-loading path with no file/track/fatal errors and
-continuous JIT execution + audio — but conclusive visual proof that our
-authored content (not just the pipeline around it) is what's rendering could
-not be obtained, for the reasons documented above. Tier 2 (visible spinning
-cube) and Tier 3 (memory-card round trip) are consequently also unverified.
+**Tiers 1, 2 and 3 are all verified.** The toolchain and CD-image build
+pipeline are real and reproducible (`npm run make-psx-testdisc`), the disc
+boots through the app's real disc-loading path, the authored cube and HUD are
+confirmed on the canvas by both a screenshot and an automated pixel assertion,
+and the memory-card save survives a soft reset.
+
+Outstanding, both in the core artifact rather than in this repo:
+
+- Lightrec (and therefore the Wasm JIT this core exists for) segfaults on real
+  content, so PSX currently runs on Beetle's CPU interpreter.
+- Beetle's OpenGL renderer presents only background fills in this worker GL
+  context, so PSX currently runs on the software renderer. Performance on a
+  Quest has not been measured under either constraint.

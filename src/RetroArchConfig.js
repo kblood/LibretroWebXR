@@ -73,7 +73,23 @@ const NUL_KEYS = 'input_ai_service = "nul"\ninput_ai_service_axis = "nul"\ninput
 // touched it, so every "flush" read back the exact same boot-time bytes. 10s
 // keeps saved progress fresh without autosaving so often it's a meaningful
 // per-frame cost (2026-07-25 review, B4/P0-5).
-const EXTRA_CONFIG = `rgui_show_start_screen = "false"
+// sort_savefiles_enable / sort_savestates_enable default to stock "true" in
+// RetroArch 1.22, which makes RA redirect SRAM and save states into a
+// per-core SUBDIRECTORY of the configured directory ("[Override] Redirecting
+// save file to .../saves/Beetle PSX/<content>.srm"). EmulatorWorkerRuntime
+// computes its own paths as `${SAVE_DIR}/${saveStem}.srm` /
+// `${STATE_DIR}/${saveStem}.state` with no core-name segment, so every
+// worker-core readSaveRam() read a path that never existed (returning null)
+// and serializeState() polled for a state file the core was writing
+// elsewhere, failing with "save state did not stabilize within 2s". Turning
+// the sorting off puts RA's real paths back where the worker runtime looks
+// (2026-07-26; found while root-causing the psx-testdisc rendering gap —
+// this is why docs/PSX_TESTDISC.md recorded readSaveRam(1) === null).
+const EXTRA_CONFIG = `sort_savefiles_enable = "false"
+sort_savestates_enable = "false"
+sort_savefiles_by_content_enable = "false"
+sort_savestates_by_content_enable = "false"
+rgui_show_start_screen = "false"
 notification_show_remap_load = "false"
 menu_mouse_enable = "true"
 menu_pointer_enable = "true"
@@ -88,13 +104,61 @@ game_specific_options = "false"
 global_core_options = "true"
 `;
 
-// Beetle deliberately defaults Lightrec to disabled even when it is compiled
-// in. Set both possible option prefixes so this works for the software and HW
-// variants while remaining harmless for every other libretro core.
-export const RETROARCH_CORE_OPTIONS = `beetle_psx_cpu_dynarec = "execute"
-beetle_psx_hw_cpu_dynarec = "execute"
-beetle_psx_dynarec_invalidate = "full"
-beetle_psx_hw_dynarec_invalidate = "full"
+// Beetle's Lightrec dynarec is set to "disabled" (= Beetle's own CPU
+// interpreter) DELIBERATELY, and this is currently the only setting real PSX
+// content runs under in the shipped mednafen_psx_jit build.
+//
+// This used to be "execute" (Lightrec + the Wasm JIT backend that is the
+// whole point of that core build — see docs/PSX_CORE_BUILD.md). Booting the
+// repo's own CC0 disc (games/psx-testdisc) with any Lightrec mode enabled
+// reproducibly kills the emulated machine ~2 s in, while the BIOS is copying
+// the game executable out of the CD into RAM and jumping to it:
+//
+//   [Lightrec]: Segmentation fault in recompiled code:
+//               invalid load/store at address PC 0x5ffffcfc
+//   [Lightrec]: Was executing block PC 0x000036f8   (BIOS kernel RAM)
+//   Segfault at cycle 0x00009023
+//
+// after which the core stops presenting frames entirely. Verified 2026-07-26
+// against the real disc through the real worker path:
+//   cpu_dynarec = "execute"                              -> segfault, dead
+//   cpu_dynarec = "execute", dynarec_invalidate = "dma"   -> segfault, dead
+//   cpu_dynarec = "run_interpreter" (Lightrec's own
+//                 interpreter, no Wasm codegen at all)    -> segfault, dead
+//   cpu_dynarec = "disabled"  (Beetle interpreter)        -> game boots and
+//                                                           runs correctly
+// dynarec_spgp_opt is already "disabled" by the core's own default, so the
+// "sp/gp always hit RAM" hack is not what is faulting. Because Lightrec's
+// plain interpreter fails identically to the recompiler, the bug is in the
+// Lightrec layer's shared memory-map / block-invalidation path (the emitted
+// Wasm is not implicated) — i.e. it is a bug in the core artifact, fixable
+// only by rebuilding kblood/psx-wasm-jit-libretro, not from this repo.
+//
+// Flip these two back to "execute" to re-test once that core is rebuilt;
+// nothing else here depends on the value.
+//
+// The renderer is forced to "software" for the same kind of reason. Beetle PSX
+// HW defaults `renderer` to "hardware" (Hardware (Auto)) and defaults
+// `renderer_software_fb` to "enabled" — i.e. it presents the OpenGL renderer's
+// output while ALSO keeping a native-resolution software copy of VRAM in the
+// background. In this project's worker/OffscreenCanvas GL context the OpenGL
+// path presents only the framebuffer background fill: the screen shows one
+// flat colour that tracks the running program's clear colour, and no polygons,
+// sprites or text ever appear. That is exactly the symptom docs/PSX_TESTDISC.md
+// recorded as "content-independent alternating colours"; the colours were the
+// clear colours of whatever was running. Proof the emulation itself was fine:
+// dumping GPURAM out of a save state showed the fully-rendered frames (cube,
+// HUD text, both double buffers) at the same instant the canvas was flat — the
+// software framebuffer had the picture, the presented GL surface did not.
+// Selecting the software renderer makes the real frames reach the canvas.
+// Both option prefixes are set because BEETLE_OPT() is "beetle_psx_hw_" in
+// HAVE_HW builds and "beetle_psx_" otherwise; the unused one is ignored.
+// Note this option is "Restart required" in the core, so it has to be in the
+// core-options file before content loads (which is what this constant is for).
+export const RETROARCH_CORE_OPTIONS = `beetle_psx_cpu_dynarec = "disabled"
+beetle_psx_hw_cpu_dynarec = "disabled"
+beetle_psx_renderer = "software"
+beetle_psx_hw_renderer = "software"
 `;
 
 // Players 2-4 keyboard binds, generated from the same table GameInputMgr

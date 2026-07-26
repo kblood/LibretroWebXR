@@ -20,7 +20,7 @@
 
 		<directory_tree>
 			<file name="SYSTEM.CNF"	type="data" source="${PROJECT_SOURCE_DIR}/system.cnf" />
-			<file name="PSXTEST.EXE"	type="data" source="psxtest.exe" />
+			<file name="SLUS_000.01"	type="data" source="psxtest.exe" />
 
 			<dummy sectors="32"/>
 		</directory_tree>

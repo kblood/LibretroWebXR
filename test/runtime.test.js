@@ -44,10 +44,29 @@ test('core stderr keeps RetroArch warning severity', () => {
   assert.equal(classifyCoreLog('unclassified stderr', 'error'), 'error');
 });
 
-test('PSX worker configuration selects the compiled Lightrec tier', () => {
+// The Lightrec dynarec and the OpenGL renderer are both deliberately switched
+// off: they crash / present nothing in the current core artifact. The long
+// comment above RETROARCH_CORE_OPTIONS in src/RetroArchConfig.js has the
+// evidence, and docs/PSX_CORE_BUILD.md tracks re-enabling them. Pin the values
+// here so neither can be flipped back silently — flipping them is fine, but it
+// has to come with a core rebuild and an update to this test.
+test('PSX worker configuration pins the known-good CPU/renderer tiers', () => {
   assert.match(RETROARCH_CFG, /core_options_path = ".*retroarch-core-options\.cfg"/);
-  assert.match(RETROARCH_CORE_OPTIONS, /beetle_psx_cpu_dynarec = "execute"/);
-  assert.match(RETROARCH_CORE_OPTIONS, /beetle_psx_hw_cpu_dynarec = "execute"/);
+  assert.match(RETROARCH_CORE_OPTIONS, /beetle_psx_cpu_dynarec = "disabled"/);
+  assert.match(RETROARCH_CORE_OPTIONS, /beetle_psx_hw_cpu_dynarec = "disabled"/);
+  assert.match(RETROARCH_CORE_OPTIONS, /beetle_psx_renderer = "software"/);
+  assert.match(RETROARCH_CORE_OPTIONS, /beetle_psx_hw_renderer = "software"/);
+});
+
+// RetroArch 1.22 defaults these to "true", which redirects SRAM/save states
+// into a per-core subdirectory that EmulatorWorkerRuntime's own path builder
+// knows nothing about — every worker core's readSaveRam() then read a path
+// that never existed. See the comment above EXTRA_CONFIG.
+test('worker save/state paths are not redirected into per-core subdirectories', () => {
+  assert.match(RETROARCH_CFG, /sort_savefiles_enable = "false"/);
+  assert.match(RETROARCH_CFG, /sort_savestates_enable = "false"/);
+  assert.match(RETROARCH_CFG, /sort_savefiles_by_content_enable = "false"/);
+  assert.match(RETROARCH_CFG, /sort_savestates_by_content_enable = "false"/);
 });
 
 test('core build manifest supplies the exact Wasm hash used by saves', async () => {

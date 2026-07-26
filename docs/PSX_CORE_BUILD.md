@@ -111,15 +111,48 @@ PSX-specific worker code was needed. What PSX-specific integration exists:
   binary required).
 - `npm run probe:psx-core` — real browser (Puppeteer) boot of a legal,
   CC0 PS-X EXE smoke-test binary (`scripts/cores/psx/test-content/
-  psx-jit-smoke.exe`) through the actual compiled core artifact, asserting
-  on real rendered frame pixels, real native Lightrec JIT compilation
-  counters (`psxJitCompiledBlocks`), and real forwarded PCM audio. Requires
+  psx-jit-smoke.exe`) through the actual compiled core artifact. Requires
   the built artifact to already be in `public/cores/` (see above).
+- `npm run probe:psx-testdisc` — the one that proves real PSX **content**
+  runs: it boots the repo's authored CC0 CD image (`games/psx-testdisc`) and
+  asserts our own HUD text and clear colour are on the canvas plus a
+  memory-card save round trip. See `docs/PSX_TESTDISC.md`.
 
-Both were run against this integration and passed (2026-07-21): 6/6, 9/9,
-and a real end-to-end browser boot with `psxJitCompiledBlocks: 95`,
-non-blank rendered frames, and forwarded audio, with zero worker/console
-errors.
+**Correction to the earlier "PASSED (2026-07-21)" claim on this page.** That
+run reported `psxJitCompiledBlocks: 95`, non-blank frames and forwarded audio
+— all of which were true, but none of which came from the smoke executable.
+Established 2026-07-26 (save-state VRAM dump + screenshot): **the bare PS-X EXE
+path does not execute the payload in this build at all.** Beetle's `LoadEXE()`
+hands the executable to the BIOS by patching `BIOSROM` at offset `0x6990`, an
+address that only means anything in a retail Sony BIOS. This repo ships no
+BIOS, so the core falls back to its bundled PCSX-Redux OpenBIOS, the patch
+lands on unrelated code, and OpenBIOS runs its own built-in shell demo — a
+rotating single-colour cube on a colour-cycling background. The "rendered
+frames" in that pass were that demo, and the JIT counters were it being
+executed. `probe:psx-core` is therefore now scoped honestly to "the core
+artifact loads and stays alive end-to-end"; its strict JIT assertion is behind
+`PSX_REQUIRE_JIT=1` (see the next bullet) and real content coverage moved to
+`probe:psx-testdisc`.
+
+Two core-artifact defects were found on 2026-07-26 while getting real content
+to render, both currently worked around from `src/RetroArchConfig.js` rather
+than fixed (fixing them means rebuilding the core):
+
+- **Lightrec segfaults on real content.** `[Lightrec]: Segmentation fault in
+  recompiled code: invalid load/store at address PC 0x5ffffcfc`, in a block at
+  `PC 0x000036f8` (BIOS kernel RAM, during the CD exec/load path), ~2 s into a
+  real disc boot; the core then stops presenting frames. `execute`, `execute` +
+  `dynarec_invalidate = dma`, and `run_interpreter` (Lightrec's own
+  interpreter, no Wasm codegen at all) all fail identically — so the fault is
+  in Lightrec's shared memory-map / block-invalidation path, **not** in the
+  `Jitter_CodeGen_Wasm` backend. `beetle_psx_cpu_dynarec` is pinned to
+  `"disabled"` (Beetle's own CPU interpreter), which works. Until this is
+  fixed, the JIT that is the entire point of this core build is not in use.
+- **The OpenGL renderer presents only background fills** in this project's
+  worker/`OffscreenCanvas` GL context: polygons, sprites and text never reach
+  the canvas, while the parallel software framebuffer (`renderer_software_fb`,
+  default enabled) shows the frames rendering correctly. `beetle_psx_renderer`
+  is pinned to `"software"`.
 
 ## Known gap vs. `docs/research/psx-n64-feasibility.md`
 
@@ -137,16 +170,16 @@ next reads that doc knows to reconcile it against this one.
 
 ## Remaining work
 
-- **A real content-rendering gap was found (2026-07-25)** while authoring
-  `games/psx-testdisc` (the first real PSn00bSDK-built PSX title in this
-  repo): every normally-linked PSn00bSDK executable tested (7 independent
-  variants, CD-boot and raw-`.exe`) renders a fixed, content-independent
-  color sequence instead of its own draw calls, while the bare
-  hand-assembled smoke exe referenced below (which bypasses PSn00bSDK's
-  `crt0`/library entirely) renders correctly. This means the "PASSED
-  (2026-07-21)" result below is still true on its own narrow terms but does
-  not generalize to real PSn00bSDK content — see `docs/PSX_TESTDISC.md`
-  "Known gap" for the full isolation-testing writeup.
+- **Re-enable the JIT and the OpenGL renderer.** Both are switched off in
+  `src/RetroArchConfig.js` because of the two core-artifact defects described
+  under "Verification" above; each is a one-line revert plus a rebuild of
+  `kblood/psx-wasm-jit-libretro`. The 2026-07-25 "content-independent colour
+  sequence" gap previously listed here is **resolved** — it was an unbootable
+  disc (non-Sony-serial `BOOT=` name) plus the OpenGL renderer defect, not a
+  PSn00bSDK/`crt0` problem; full writeup in `docs/PSX_TESTDISC.md`.
+- **Raw PS-X EXE loading does not work without a retail BIOS** (`LoadEXE()`'s
+  `0x6990` patch, above). If bare-`.exe` support matters, it needs an
+  OpenBIOS-aware load path in the core.
 - Beta-scope items from the upstream repo's own plan (Quest-performance
   gating, full native R3000A opcode coverage beyond the current
   integer/control-flow tier, `.m3u` multi-disc in-VR swap UX, long-session

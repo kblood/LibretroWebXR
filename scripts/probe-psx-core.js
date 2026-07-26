@@ -1,6 +1,19 @@
-// Boots the legal PS-X EXE smoke workload in the real browser core artifact.
-// Unlike the adapter/unit probes, this must exercise WorkerEmulatorClient,
-// RetroArch, Beetle PSX, rendered output, and the native JIT as one system.
+// Boots the legal PS-X EXE smoke workload in the real browser core artifact,
+// exercising WorkerEmulatorClient + RetroArch + Beetle PSX + the worker video
+// and audio paths as one system.
+//
+// Scope warning, please read before trusting a PASS here: the bare-.exe path
+// does not actually execute the smoke payload in this build (Beetle's
+// LoadEXE() patches a retail-Sony-BIOS address that means nothing to the
+// bundled OpenBIOS, which then just runs its own shell demo), and the
+// Lightrec/Wasm JIT is deliberately disabled in RETROARCH_CORE_OPTIONS because
+// it segfaults on real content. Both are explained at length in
+// test/psx-core-e2e/harness.js's header, src/RetroArchConfig.js and
+// docs/PSX_CORE_BUILD.md. A PASS here therefore means "the core artifact loads
+// and stays alive end-to-end", not "our PSX content ran" and not "the JIT
+// worked". Set PSX_REQUIRE_JIT=1 to re-arm the strict JIT assertion once the
+// core is rebuilt and beetle_psx_cpu_dynarec is turned back on.
+// Real authored-content coverage is `npm run probe:psx-testdisc`.
 
 import assert from 'node:assert/strict';
 import { createReadStream, existsSync, statSync } from 'node:fs';
@@ -100,18 +113,24 @@ try {
     coreUrl: `${origin}/cores/${CORE_BASENAME}.js`,
     contentUrl: `${origin}/scripts/cores/psx/test-content/psx-jit-smoke.exe`,
     bootTimeoutMs: Number(process.env.PSX_CORE_BOOT_TIMEOUT_MS || 30000),
+    requireJit: process.env.PSX_REQUIRE_JIT === '1',
   });
 
   assert.equal(result.crossOriginIsolated, true);
   assert.ok(result.frames.presented >= 3, 'real PSX core did not present three frames');
   assert.ok(result.video.lit > 0, 'real PSX core output remained blank');
-  assert.ok(result.jit.psxJitCompiledBlocks > 0 || result.jit.bridge?.compiled > 0, 'real PSX core produced no JIT evidence');
+  if (process.env.PSX_REQUIRE_JIT === '1') {
+    assert.ok(result.jit, 'real PSX core produced no JIT evidence');
+    assert.ok(result.jit.psxJitCompiledBlocks > 0 || result.jit.bridge?.compiled > 0, 'real PSX core produced no JIT evidence');
+  }
   assert.equal(result.errorLogCount, 0);
   assert.deepEqual(result.workerErrors, []);
   assert.deepEqual(browserErrors, []);
 
   console.log(JSON.stringify(result, null, 2));
-  console.log('Real PSX worker-core browser probe PASSED');
+  console.log(process.env.PSX_REQUIRE_JIT === '1'
+    ? 'Real PSX worker-core browser probe PASSED (including the strict JIT assertion)'
+    : 'Real PSX worker-core browser probe PASSED (core loads/stays alive; JIT assertion parked, see this file header)');
 } catch (error) {
   console.error('Real PSX worker-core browser probe FAILED');
   if (browserErrors.length) console.error(browserErrors.join('\n'));

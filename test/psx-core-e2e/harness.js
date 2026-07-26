@@ -1,3 +1,26 @@
+// Boots the hand-assembled bare PS-X EXE smoke payload
+// (scripts/cores/psx/test-content/psx-jit-smoke.exe) through the worker PSX
+// core. Companion to harness-disc.js, which boots a real CD image.
+//
+// IMPORTANT — what this can and cannot prove (established 2026-07-26):
+//
+//  * The bare-.exe path does NOT actually run our payload in this build.
+//    Beetle's LoadEXE() hands the executable to the BIOS by patching BIOSROM
+//    at offset 0x6990, an address that only means anything in a retail Sony
+//    BIOS. This repo ships no BIOS, so the core falls back to its bundled
+//    PCSX-Redux OpenBIOS, the patch lands on unrelated code, and OpenBIOS just
+//    runs its own built-in shell demo (a rotating single-colour cube on a
+//    slowly colour-cycling background). Verified by screenshotting the frame
+//    and by dumping GPURAM out of a save state: the cube on screen is
+//    OpenBIOS's, not the smoke payload's. So "a non-blank frame appeared" here
+//    is evidence the CORE and the worker video path are alive, and nothing
+//    more. Real content coverage lives in harness-disc.js.
+//  * The Lightrec/Wasm JIT is currently switched off in RETROARCH_CORE_OPTIONS
+//    (see the long comment in src/RetroArchConfig.js — it segfaults on real
+//    content), so the native JIT counters are legitimately zero. The JIT
+//    assertion is therefore opt-in via requireJit / PSX_REQUIRE_JIT=1; turn it
+//    back on together with beetle_psx_cpu_dynarec once the core is rebuilt.
+
 import { WorkerEmulatorClient } from '../../src/runtime/WorkerEmulatorClient.js';
 
 function assert(condition, message) {
@@ -57,7 +80,7 @@ function nativeJitEvidence(metrics) {
   return null;
 }
 
-export async function runPsxCoreE2E({ coreUrl, contentUrl, bootTimeoutMs = 30000 }) {
+export async function runPsxCoreE2E({ coreUrl, contentUrl, bootTimeoutMs = 30000, requireJit = false }) {
   assert(crossOriginIsolated, 'PSX worker page is not cross-origin isolated');
   const response = await fetch(contentUrl, { cache: 'no-store' });
   assert(response.ok, `PSX smoke executable request failed with HTTP ${response.status}`);
@@ -108,7 +131,9 @@ export async function runPsxCoreE2E({ coreUrl, contentUrl, bootTimeoutMs = 30000
     assert(errorLogs.length === 0, `core emitted error output: ${errorLogs.map((record) => record.text).join('; ')}`);
     assert(fatalText.length === 0, `core startup log contains a fatal marker: ${fatalText.map((record) => record.text).join('; ')}`);
 
-    const jit = await waitFor(() => {
+    // Only a hard requirement when the dynarec is actually enabled; see this
+    // file's header comment.
+    const waitForJit = () => waitFor(() => {
       const evidence = nativeJitEvidence(client.metrics);
       if (evidence) return evidence;
       if (client.metrics) {
@@ -120,7 +145,10 @@ export async function runPsxCoreE2E({ coreUrl, contentUrl, bootTimeoutMs = 30000
         })}`);
       }
       return null;
-    }, 'native PSX JIT compilation evidence', bootTimeoutMs);
+    }, 'native PSX JIT compilation evidence', requireJit ? bootTimeoutMs : 3000);
+    let jit = null;
+    if (requireJit) jit = await waitForJit();
+    else { try { jit = await waitForJit(); } catch (_) { jit = null; } }
     await waitFor(() => audio.events > 0 && audio.frames > 0 && Number(client.metrics?.psxAudioFramesForwarded || 0) > 0,
       'native PSX audio forwarded through the execution-worker bridge', bootTimeoutMs);
     assert(audio.format === 'f32' && audio.channels === 2, `unexpected native audio format ${JSON.stringify(audio)}`);
