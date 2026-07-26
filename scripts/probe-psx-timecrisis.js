@@ -315,6 +315,19 @@ try {
      shots.some((s) => s && (s.saturatedRed > s.total * 0.002 || s.nearWhite > s.total * 0.002)),
      `saturatedRed/nearWhite fraction per snapshot: ${shots.map((s) => s && s.total ? `${(s.saturatedRed/s.total).toFixed(4)}/${(s.nearWhite/s.total).toFixed(4)}` : 'n/a').join(', ')}`);
 
+  // [Codex review, 2026-07-27] The check above only requires SOME frame
+  // anywhere in the whole boot window to show red/white — the transient
+  // "Produced by namco" splash card is ALSO red/white, so a regression that
+  // got stuck there forever (never reaching the actual title screen) would
+  // still pass it. The real title screen is an ATTRACT-MODE state that holds
+  // on screen indefinitely waiting for input, unlike the splash which plays
+  // once and moves on — so require the strong red-sky signal to hold across
+  // BOTH of the last two captures (~25s and ~30s), not just flash once.
+  const lastTwo = shots.slice(-2);
+  ok('[TITLE-SCREEN SIGNAL] settles onto and HOLDS the title screen (large orange-sky red fraction persists across the last two captures, not a one-frame flash)',
+     lastTwo.length === 2 && lastTwo.every((s) => s && s.saturatedRed > s.total * 0.03),
+     `last-two saturatedRed fractions: ${lastTwo.map((s) => s && s.total ? (s.saturatedRed / s.total).toFixed(4) : 'n/a').join(', ')}`);
+
   // Motion: content is animating (CD-audio-driven attract demo / logo
   // assembly), not a single frozen frame.
   let anyMotion = false;
@@ -328,17 +341,17 @@ try {
   ok('content is animating somewhere across the run (frame pump is not frozen on a single static frame)',
      anyMotion, `diffs=${diffs.map((d) => d.toFixed(2)).join(',')}`);
 
-  // --- Bonus/informational: try Start (Enter) then Cross ("h", this app's
-  // input_player1_a bind — see src/RetroArchConfig.js's DEFAULT_KEYBINDS) via
-  // the REAL client.sendInput() primitive (RuntimeEmulatorClient.sendInput ->
+  // --- Try Start (Enter) then Cross ("h", this app's input_player1_a bind —
+  // see src/RetroArchConfig.js's DEFAULT_KEYBINDS) via the REAL
+  // client.sendInput() primitive (RuntimeEmulatorClient.sendInput ->
   // WorkerEmulatorClient.sendInput -> the worker's real input handler; the
   // same primitive GameInputMgr/Keyboard/DesktopGamepad all use — mirrors
   // scripts/probe-ps2-timecrisis2.mjs's press() helper). This is NOT a
   // GunCon substitute (Time Crisis's actual gameplay input is analog gun
-  // position, which sendInput cannot provide), and no hard assertion is
-  // pinned to it — purely observational, to see whether the boot-up attract
-  // sequence responds to ANY digital-pad input at all before the report
-  // characterizes the control situation.
+  // position, which sendInput cannot provide) — real gameplay/aiming is not
+  // exercised. But the state ADVANCE itself (title screen -> intro cutscene)
+  // IS asserted below: a real menu transition produces a signature diff far
+  // above the ~0-3 noise floor seen between idle attract-mode frames.
   async function press(code, key) {
     await page.evaluate((code, key) => window.__client.sendInput('keydown', code, key), code, key);
     await sleep(120);
@@ -355,9 +368,11 @@ try {
   if (afterCrossShot) saveShot(afterCrossShot.dataUrl, 'psx-timecrisis-after-input.png');
   const inputDiff1 = signatureDiff(preInputShot?.signature, afterStartShot?.signature);
   const inputDiff2 = signatureDiff(afterStartShot?.signature, afterCrossShot?.signature);
-  info(`digital-pad Start/Cross press observation (NOT a GunCon substitute, informational only): ` +
-    `signature diff pre->afterStart=${inputDiff1.toFixed(2)}, afterStart->afterCross=${inputDiff2.toFixed(2)} ` +
-    `(a real menu/state change would show as a diff clearly above the ~0-3 noise floor seen between idle attract-mode frames)`);
+  info(`digital-pad Start/Cross press observation (NOT a GunCon substitute — real gameplay/aiming not exercised): ` +
+    `signature diff pre->afterStart=${inputDiff1.toFixed(2)}, afterStart->afterCross=${inputDiff2.toFixed(2)}`);
+  ok('[CUTSCENE-ADVANCE SIGNAL] digital Start/Cross input genuinely advances disc state (title screen -> intro cutscene), not a frozen/ignored input',
+     (inputDiff1 > 10 || inputDiff2 > 10),
+     `diffs pre->afterStart=${inputDiff1.toFixed(2)}, afterStart->afterCross=${inputDiff2.toFixed(2)} (idle attract-mode noise floor is ~0-3)`);
 
   // --- Frame-health metrics (same baseline sanity layer as the N64 real-content probe) ---
   const metricsLog = await page.evaluate(() => window.__psxMetrics || []);
