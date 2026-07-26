@@ -1,0 +1,47 @@
+diff --git a/GLideN64/src/gDP.cpp b/GLideN64/src/gDP.cpp
+index adf9d4a..343b59c 100644
+--- a/GLideN64/src/gDP.cpp
++++ b/GLideN64/src/gDP.cpp
+@@ -1137,7 +1137,7 @@ void LLETriangle::draw(bool _shade, bool _texture, bool _zbuffer, u32 * _pData)
+ 		dzde = pDataSigned[42];
+ 	}
+ 
+-	std::array<SPVertex, 8> vertices;
++	std::array<SPVertex, 8> vertices{};
+ 
+ 	auto cscale = [](int c) {
+ 		return _FIXED2FLOATCOLOR((((c) > 0x3ff0000 ? 0x3ff0000 : ((c) < 0 ? 0 : (c))) >> 18), 8);
+@@ -1184,8 +1184,33 @@ void LLETriangle::draw(bool _shade, bool _texture, bool _zbuffer, u32 * _pData)
+ 	f32 hc = xhf - hk * yhf;
+ 	f32 mc = xmf - mk * yhf;
+ 
++	// LibretroWebXR fix: a *non-shaded* LLE triangle (RDP commands 0x08/0x09,
++	// i.e. gDPTriFill/gDPTriFillZ) carries no per-vertex colour at all, so the
++	// `if (_shade)` block below never wrote vtx->r/g/b/a and the vertices went
++	// to the drawer with whatever happened to be on the stack. That was already
++	// undefined behaviour, but it only becomes *visible* in G_CYC_FILL:
++	// CombinerInfo::update() replaces the colour combiner with a pure
++	// "shade only" program for FILL cycle type, so the fragment colour IS the
++	// (never-written) vertex shade. Real RDP hardware in FILL mode ignores the
++	// combiner completely and writes SET_FILL_COLOR, which is exactly what
++	// gDPFillRectangle() already reproduces for rectangles via gDP.rectColor -
++	// LLE triangles were simply missing the equivalent. Symptom: low-level
++	// libdragon content (rdp_enable_primitive_fill() + rdp_set_primitive_color()
++	// + rdp_draw_filled_triangle(), the pre-rdpq API) drew correctly-shaped but
++	// solid-black triangles while its fill *rectangles* were correctly coloured.
++	f32 flatColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
++	if (!_shade && gDP.otherMode.cycleType == G_CYC_FILL)
++		gDPGetFillColor(flatColor);
++
+ 	auto updateVtx = [&](SPVertex * vtx, f32 diffY, f32 diffx)
+ 	{
++		if (!_shade) {
++			vtx->r = flatColor[0];
++			vtx->g = flatColor[1];
++			vtx->b = flatColor[2];
++			vtx->a = flatColor[3];
++		}
++
+ 		if (_shade) {
+ 			auto colorClamp = [](f32 c) -> f32
+ 			{

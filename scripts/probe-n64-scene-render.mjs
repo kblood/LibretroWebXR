@@ -17,21 +17,20 @@
 // background color (8,8,16) already sums to 32, so ANY frame with just the
 // background cleared, cube or no cube, colored or black, would read as "lit".
 //
-// REAL FINDING from this probe (2026-07-26, verified via both the coarse
+// ORIGINAL FINDING from this probe (2026-07-26, verified via both the coarse
 // 8x8-grid signature below AND a direct pixel-histogram scan of the cube's
 // screen-space bounding box across three captures 2s/5.5s/9s into a real
-// boot): the cube's GEOMETRY renders correctly — right silhouette shape,
-// right screen position, and its projected area visibly changes over the
+// boot): the cube's GEOMETRY rendered correctly — right silhouette shape,
+// right screen position, and its projected area visibly changed over the
 // three captures (silhouette pixel count 29911 -> 32613 -> 32454 in one
-// concrete run), proving the transform/rotation/depth-sort pipeline is alive
-// and the frame pump is NOT stalled (261 frames produced over 9.3s, 0 stale
+// concrete run), proving the transform/rotation/depth-sort pipeline was alive
+// and the frame pump was NOT stalled (261 frames produced over 9.3s, 0 stale
 // FRAME_ACKs, 0 core errors). But the cube's SIX ASSIGNED FLAT FACE COLORS
 // (red/green/blue/yellow/magenta/cyan via rdp_set_primitive_color +
-// rdp_draw_filled_triangle in games/n64-scene/main.c) never appear anywhere
-// in its bounding box: the fill is solid (0,0,0) black, with only
+// rdp_draw_filled_triangle in games/n64-scene/main.c) never appeared anywhere
+// in its bounding box: the fill was solid (0,0,0) black, with only
 // antialiased gray ramps between black and the (8,8,16) background at the
-// silhouette edge. See the header of the color-fill assertions below for how
-// this is asserted; screenshots are saved to tmp/ as direct visual evidence
+// silhouette edge. Screenshots are saved to tmp/ as direct visual evidence
 // (n64-scene-t1/2/3.png), decoded straight from canvas.toDataURL() rather
 // than a Puppeteer elementHandle.screenshot() — the latter was tried first
 // and produced a MISLEADING full-viewport capture instead of #canvas's own
@@ -39,21 +38,37 @@
 // (index.html: `position:absolute;left:-99999px`, a WebGL/2D texture source
 // for the TV mesh, not the visible viewport — see SceneMgr.js).
 //
-// This gap is almost certainly a pre-existing core/GFX-plugin limitation
-// (mupen64plus_next's HLE graphics plugin not correctly implementing the
-// low-level, pre-rdpq libdragon `rdp_set_primitive_color`/fixed-function
-// fill path this ROM uses), NOT something the Phase A/B facade changes
-// caused — none of those touch color/pixel output (they're JS-side
+// RESOLVED 2026-07-26 — real core bug, fixed in GLideN64 and rebuilt.
+// It was indeed a GFX-plugin gap and NOT anything the Phase A/B facade
+// changes caused (none of those touch color/pixel output — they're JS-side
 // plumbing: sendLightgun/sendMouse forwarding, buildStartOptions, audio
 // wiring, autosave_interval, pause handling, the frame-ack watchdog). The
-// R4300 CPU side is independently confirmed correct too: this build's
+// R4300 CPU side was independently confirmed correct too: this build's
 // N64_JIT_SHADOW harness logs checked=31/matched=31/mismatched=0 for this
 // exact boot, and the core log confirms the "Cached Interpreter" (not any
-// JIT) is the one actually executing. Nothing here is safely fixable via an
-// app-facade JS edit — it would need native core/GFX-plugin work inside the
-// pinned mupen64plus_next_libretro.wasm build, out of scope for this probe
-// (and public/cores/ is gitignored/off-limits here regardless). Filed as a
-// new, real, open finding rather than attempted as a fix.
+// JIT) is the one actually executing.
+//
+// Root cause (GLideN64/src/gDP.cpp, LLETriangle::draw): a NON-SHADED
+// low-level RDP triangle — command 0x08/0x09, i.e. gDPTriFill/gDPTriFillZ,
+// which is exactly what libdragon's pre-rdpq rdp_draw_filled_triangle()
+// emits — carries no per-vertex color, and the function's updateVtx() lambda
+// only ever assigned vtx->r/g/b/a inside an `if (_shade)` branch. The
+// vertices therefore reached the drawer with their color fields never
+// written at all (undefined behaviour; deterministically zero => black under
+// wasm). That is invisible in normal 1/2-cycle content, but fatal in
+// G_CYC_FILL: CombinerInfo::update() replaces the color combiner with a
+// pure "shade only" program for FILL cycle type, so the fragment color IS
+// that never-written vertex shade. Real RDP hardware ignores the combiner
+// entirely in FILL mode and writes SET_FILL_COLOR — which gDPFillRectangle()
+// already reproduced for rectangles (via gDP.rectColor <- gDPGetFillColor),
+// but LLE triangles were simply missing the equivalent. That asymmetry is
+// exactly what this ROM's output showed: its background rect (also drawn
+// with rdp_set_primitive_color + rdp_draw_filled_rectangle) came out at the
+// correct (8,8,16), while all 12 cube triangles came out black.
+// Fix: seed non-shaded LLE-triangle vertices from gDPGetFillColor() when
+// cycleType == G_CYC_FILL (white otherwise, matching the function's own
+// `int r = 0xff, g = 0xff, ...` initialisation intent), and value-initialise
+// the local SPVertex array. See docs/N64_CORE_BUILD.md.
 //
 // Also collects the worker's periodic 'metrics' events (framesProduced,
 // framesSkipped, staleFrameAcks, errors — see EmulatorWorkerRuntime.js's
@@ -74,10 +89,10 @@
 //   node scripts/probe-n64-scene-render.mjs
 //
 // Exit code: 0 = all PASS assertions passed, 1 = at least one failed / setup
-// error. NOTE: as of the 2026-07-26 finding above, this probe is EXPECTED to
-// fail its color-fill assertions (by design — that's the regression signal)
-// until the underlying core/GFX-plugin gap is fixed; the rotation/frame-pump/
-// audio/no-error assertions are expected to keep passing.
+// error. Since the GLideN64 fix above landed this probe is expected to pass
+// in full; the color-fill assertions are now a live regression guard against
+// the fill-mode LLE-triangle path breaking again (e.g. after a core rebuild
+// from a fresh mupen64plus-libretro-nx clone that doesn't carry the patch).
 
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
@@ -191,17 +206,29 @@ function signatureDiff(a, b) {
 // 512x448-canvas coordinate space) — cheaper and far more sensitive than the
 // coarse whole-canvas grid above for two specific questions: (1) does ANY
 // pixel in the region the cube actually occupies show one of its six bright
-// assigned face colors, and (2) does the region's "dark silhouette" pixel
-// count change over time (a rotation signal that survives even if color
-// output is broken, since the projected area of a rotating cube changes
-// regardless of what color it's filled with).
+// assigned face colors, and (2) does the region's silhouette (non-background)
+// pixel count change over time, which is a rotation signal independent of what
+// color the faces come out as, since the projected area of a rotating cube
+// changes regardless of its fill color.
+//
+// `silhouetteCount` deliberately keys off "differs from the scene's own
+// (8,8,16) background", NOT off "is near-black": an earlier revision of this
+// probe used a near-black `darkCount` because at the time the GLideN64
+// fill-mode LLE-triangle bug (see header) made every face render solid black,
+// so black WAS the silhouette. Once that core bug was fixed the faces became
+// correctly colored and `darkCount` went to a constant 0, making the motion
+// assertions fail for the wrong reason. The background-difference form works
+// in both regimes.
 async function scanCubeBBox(page) {
   return page.evaluate(() => {
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
     const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const x0 = 100, x1 = Math.min(360, width), y0 = 130, y1 = Math.min(380, height);
-    let brightCount = 0, darkCount = 0, maxSum = 0;
+    // games/n64-scene/main.c clears with graphics_make_color(8, 10, 18, 255),
+    // which quantizes through RGBA5551 to exactly (8, 8, 16) on output.
+    const BG = [8, 8, 16];
+    let brightCount = 0, darkCount = 0, silhouetteCount = 0, maxSum = 0;
     let maxPixel = null;
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
@@ -213,12 +240,14 @@ async function scanCubeBBox(page) {
         // always has at least one channel near-saturated far above the
         // (8,8,16) background/black-fill range.
         if (r > 100 || g > 100 || b > 60) brightCount++;
-        // Near-black fill (vs the (8,8,16) background) — used as a
-        // rotation-independent-of-color silhouette-area proxy.
+        // Retained for diagnostics only: distinguishes "black fill" (the old
+        // core bug's signature) from "colored fill".
         if (sum < 20) darkCount++;
+        if (Math.abs(r - BG[0]) > 6 || Math.abs(g - BG[1]) > 6 || Math.abs(b - BG[2]) > 6)
+          silhouetteCount++;
       }
     }
-    return { maxSum, maxPixel, brightCount, darkCount, area: (x1 - x0) * (y1 - y0) };
+    return { maxSum, maxPixel, brightCount, darkCount, silhouetteCount, area: (x1 - x0) * (y1 - y0) };
   });
 }
 
@@ -315,10 +344,10 @@ try {
   if (shot2) saveShot(shot2.dataUrl, 'n64-scene-t2.png');
 
   const diff12 = signatureDiff(shot1?.signature, shot2?.signature);
-  info(`snapshot #1->#2 whole-canvas color-average diff (expected ~0 given the color-fill finding above — this is NOT a stall signal, see bbox silhouette-area check instead): meanAbsChannelDiff=${diff12.toFixed(2)}`);
-  ok('snapshot #1->#2: cube silhouette AREA changes (rotation is real, independent of the color-fill bug — the frame pump is not frozen/stalled)',
-     bbox1.darkCount !== bbox2.darkCount,
-     `darkCount ${bbox1.darkCount} -> ${bbox2.darkCount}`);
+  info(`snapshot #1->#2 whole-canvas color-average diff: meanAbsChannelDiff=${diff12.toFixed(2)}`);
+  ok('snapshot #1->#2: cube silhouette AREA changes (rotation is real, independent of face color — the frame pump is not frozen/stalled)',
+     bbox1.silhouetteCount !== bbox2.silhouetteCount,
+     `silhouetteCount ${bbox1.silhouetteCount} -> ${bbox2.silhouetteCount} (darkCount ${bbox1.darkCount} -> ${bbox2.darkCount})`);
 
   await sleep(3500);
   const shot3 = await captureCanvas(page);
@@ -329,8 +358,8 @@ try {
   const diff23 = signatureDiff(shot2?.signature, shot3?.signature);
   info(`snapshot #2->#3 whole-canvas color-average diff: meanAbsChannelDiff=${diff23.toFixed(2)}`);
   ok('snapshot #2->#3: cube silhouette AREA keeps changing (motion continues across the whole run, no later stall)',
-     bbox2.darkCount !== bbox3.darkCount,
-     `darkCount ${bbox2.darkCount} -> ${bbox3.darkCount}`);
+     bbox2.silhouetteCount !== bbox3.silhouetteCount,
+     `silhouetteCount ${bbox2.silhouetteCount} -> ${bbox3.silhouetteCount} (darkCount ${bbox2.darkCount} -> ${bbox3.darkCount})`);
   info(`snapshot #3 bbox color check (restates the #1 assertion above, not a separate pass/fail axis): brightCount=${bbox3.brightCount}/${bbox3.area}, brightest pixel in bbox=${JSON.stringify(bbox3.maxPixel)} (sum=${bbox3.maxSum})`);
 
   // --- Frame-health metrics (informational — no established headless fps

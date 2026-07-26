@@ -467,3 +467,66 @@ P0-1 is fixed; and a multi-console rack test with a worker core (exercises
 - `src/systems.js` — P1-2 (false `DiscIdentity` claims `:606-614`,
   `:636-643`), P1-12 (`play` lacks `multiFile` `:101`), core
   registrations `:130-148`
+
+## Status update (2026-07-26, fifth pass): the N64 color-fill gap is ROOT-CAUSED and FIXED
+
+The fourth-pass N64 finding above ("geometry renders, color does not")
+turned out to be a single, concrete, one-function bug in **GLideN64's
+low-level RDP triangle path**, not a broad HLE-plugin limitation. It is
+now fixed in the core's C++ source, rebuilt, and verified end-to-end.
+See `docs/N64_CORE_BUILD.md` ("GLideN64 fill-mode LLE-triangle color
+fix") for the full write-up; the short version:
+
+- `GLideN64/src/gDP.cpp`, `LLETriangle::draw()` — its `updateVtx()`
+  lambda only assigned `vtx->r/g/b/a` inside an `if (_shade)` branch.
+  A **non-shaded** LLE triangle (RDP command `0x08`/`0x09`,
+  `gDPTriFill`/`gDPTriFillZ`) therefore reached the drawer with its
+  vertex color fields never written at all — undefined behaviour that is
+  deterministically zero (black) under wasm.
+- That is normally invisible, but is fatal in `G_CYC_FILL`:
+  `CombinerInfo::update()` swaps the color combiner for a pure
+  "shade only" program in FILL cycle type, so the fragment color **is**
+  that never-written vertex shade. Real RDP hardware ignores the combiner
+  entirely in FILL mode and writes `SET_FILL_COLOR`, which
+  `gDPFillRectangle()` already reproduced for rectangles (via
+  `gDP.rectColor` ← `gDPGetFillColor()`) — LLE triangles were simply
+  missing the equivalent.
+- That asymmetry explains the exact symptom seen: `games/n64-scene`'s
+  background *rectangle* (also drawn via `rdp_set_primitive_color` +
+  `rdp_draw_filled_rectangle`) came out at the correct `(8,8,16)`, while
+  all 12 cube *triangles* came out black. The hypothesis that
+  `rdp_set_primitive_color` itself was mishandled was therefore wrong —
+  `SET_FILL_COLOR` was decoded fine all along; only the triangle
+  consumer of it was missing.
+- Fix: seed non-shaded LLE-triangle vertices from `gDPGetFillColor()`
+  when `cycleType == G_CYC_FILL` (white otherwise, matching the
+  function's own `int r = 0xff, g = 0xff, ...` initialisation intent),
+  plus value-initialise the local `SPVertex` array.
+
+**Verification (before/after, same probe, same ROM, real app flow):**
+
+| | baseline core | fixed core |
+|---|---|---|
+| `probe:n64-scene-render` | 16/18 | **18/18** |
+| bbox bright-face-color pixels | `0 / 65000` | `32571 / 65000` |
+| brightest bbox pixel | `(8,8,16)` = background | `(49,255,255)` = cyan face |
+| whole-canvas frame-to-frame diff | `0.08` / `0.29` | `15.43` / `4.56` |
+| `tmp/n64-scene-t1.png` | uniformly black cube | green front + cyan top |
+| `tmp/n64-scene-t3.png` | uniformly black cube | red front + cyan top + yellow edge |
+
+No regressions: `npm test` (all suites green),
+`npm run probe:worker-cartridge-insert` 12/12 (both PSX and N64),
+`npm run probe:mode-switch` 11/11, and `npm run probe:n64-core` PASSED
+with the N64_JIT_SHADOW harness still reporting `mismatched=0`.
+
+One probe change was needed as a *consequence* of the fix, not to mask
+it: the two motion assertions used a near-black `darkCount` as a
+"silhouette area" proxy, which was only meaningful while the cube was
+rendering black. With colors restored, `darkCount` is a constant `0`.
+Those checks now key off `silhouetteCount` (pixels differing from the
+scene's own `(8,8,16)` background), which is correct in both regimes.
+
+**Net effect: N64 is now closed alongside PS2 — geometry, rotation,
+audio, frame pump, save/EEPROM API, and now real face color all verified
+through the real cartridge-insert path. PSX remains the one core with an
+open rendering gap.**

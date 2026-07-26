@@ -287,6 +287,108 @@ been masked by the earlier black-screen failure the whole time:
   Confirmed fixed via `npm run probe:n64-core`: zero error-level console
   logs, zero worker errors, non-blank video, frames presented — clean pass.
 
+## GLideN64 fill-mode LLE-triangle color fix (2026-07-26)
+
+Once `games/n64-scene` was rendering at all, a further real bug surfaced
+that `npm run probe:n64-core`'s coarse "video is not blank" check could
+not see: the scene's rotating cube rendered with **correct geometry,
+correct rotation, and completely black faces**, while the *same ROM's*
+background rectangle — set with the *same* `rdp_set_primitive_color()`
+call — came out at its correct `(8,8,16)`. That rectangle-works /
+triangle-doesn't asymmetry is the whole diagnosis in one observation, and
+it rules out the obvious hypothesis (that `SET_FILL_COLOR` decoding or
+the pre-`rdpq` libdragon path was broken) before any instrumentation:
+the fill color was decoded fine, only the *triangle* consumer of it was
+missing.
+
+What `games/n64-scene/main.c` emits (this pinned `anacierdem/libdragon`
+image predates `rdpq`, so it is all raw low-level RDP):
+
+| libdragon call | RDP command |
+|---|---|
+| `rdp_enable_primitive_fill()` | `SET_OTHER_MODES` (`0xEF`) with cycle type = `G_CYC_FILL` |
+| `rdp_set_primitive_color(c)` | `SET_FILL_COLOR` (`0xF7`) — *not* `SET_PRIM_COLOR`, despite the name |
+| `rdp_draw_filled_rectangle()` | `FILL_RECTANGLE` (`0xF6`) → `gDPFillRectangle()` |
+| `rdp_draw_filled_triangle()` | non-shaded triangle (`0x08`) → `gDPTriFill()` → `LLETriangle::draw(shade=0, …)` |
+
+**Root cause** — `GLideN64/src/gDP.cpp`, `LLETriangle::draw()`:
+
+- Its `updateVtx()` lambda only assigned `vtx->r/g/b/a` inside an
+  `if (_shade)` branch. For a non-shaded triangle (`gDPTriFill` /
+  `gDPTriFillZ`) the vertices therefore reached
+  `GraphicsDrawer::drawScreenSpaceTriangle()` with their color fields
+  **never written at all** — reading uninitialised `std::array<SPVertex, 8>`
+  stack storage. That is already UB; under wasm it is deterministically
+  zero, i.e. black.
+- It is invisible in normal 1-/2-cycle content (whose combiner rarely
+  references `SHADE` for LLE triangles), but fatal in `G_CYC_FILL`:
+  `CombinerInfo::update()` (`Combiner.cpp`) replaces the color combiner
+  with a pure *shade-only* program for FILL cycle type, so the fragment
+  color **is** that never-written vertex shade.
+- Real RDP hardware ignores the color combiner entirely in FILL mode and
+  writes `SET_FILL_COLOR`. GLideN64 already reproduces that for
+  rectangles — `gDPFillRectangle()` copies `gDPGetFillColor()` into
+  `gDP.rectColor` before `drawer.drawRect()` — but LLE triangles had no
+  equivalent. Hence rectangles coloured, triangles black.
+
+**Fix** (in `LLETriangle::draw()`): give non-shaded triangles a *defined*
+vertex color — from `gDPGetFillColor()` when
+`gDP.otherMode.cycleType == G_CYC_FILL`, otherwise white, which is what
+the function's own (previously dead) `int r = 0xff, g = 0xff, b = 0xff,
+a = 0xff;` initialisation already intended. The local `SPVertex` array is
+also value-initialised (`vertices{}`) so no other field can leak stack
+garbage. ~30 lines, one file, no behaviour change for shaded triangles.
+
+**Verified** with `npm run probe:n64-scene-render`, before and after,
+against the same ROM through the real `GrabMgr`/`handleCartridgeInserted`
+cartridge-insert path:
+
+| | baseline core | fixed core |
+|---|---|---|
+| probe result | 16/18 | **18/18** |
+| bright face-color pixels in the cube's bbox | `0 / 65000` | `32571 / 65000` |
+| brightest bbox pixel | `(8,8,16)` = the background | `(49,255,255)` = a cyan face |
+| whole-canvas frame-to-frame color diff | `0.08` / `0.29` | `15.43` / `4.56` |
+| `tmp/n64-scene-t1.png` | uniformly black cube | green front face + cyan top |
+| `tmp/n64-scene-t3.png` | uniformly black cube | red front face + cyan top + yellow edge |
+
+`npm run probe:n64-core` still passes (N64_JIT_SHADOW `mismatched=0`),
+and `npm test` / `probe:worker-cartridge-insert` / `probe:mode-switch`
+are unaffected.
+
+**Rebuild gotcha discovered while doing this:** the shared WSL checkout
+now also carries the opt-in NJ1 JIT-spike sources
+(`vr4300_jit_bridge.cpp` / `vr4300_play_backend.cpp`, see
+[[research/n64-jit-nj1-spike.md]]), and `cached_interp.c`'s shadow harness
+references them, so **every** relink of this core must now pass the JIT
+libs or wasm-ld fails with a wall of `undefined symbol: Jitter::…`:
+
+```bash
+emmake make -f Makefile.emscripten LIBRETRO=mupen64plus_next \
+  HAVE_THREADS=1 HAVE_OPENGLES3=1 \
+  RWEBAUDIO_JS_LIBRARY=emscripten/library_libretrowebxr_rwebaudio.js \
+  INITIAL_HEAP=268435456 ASYNC=1 \
+  N64_JIT=1 \
+  N64_JIT_CODEGEN_LIB=~/n64-jit-spike/build-wasm-codegen/libCodeGen.a \
+  N64_JIT_FRAMEWORK_LIB=~/n64-jit-spike/build-wasm-codegen/Framework/libFramework.a \
+  -j$(nproc)
+```
+
+A single-file iteration on the core (as here) does **not** need the slow
+full `make` — build just the one object, then rearchive and relink:
+
+```bash
+cd ~/n64-build/mupen64plus-libretro-nx
+rm -f GLideN64/src/gDP.o
+emmake make platform=emscripten GLideN64/src/gDP.o   # ~15s, not a full rebuild
+bash ~/rearchive-n64.sh                              # step 4 above
+# then the relink command above
+```
+
+(The `glsym_es3.o` rename splice from step 5 survives this — `make` will
+not rebuild that object because the renamed `.o` is newer than its
+source.)
+
 Produces `mupen64plus_next_libretro.{js,wasm,worker.js}` — standard
 `MODULARIZE=1 EXPORT_ES6=1` module, same shape `RuntimeEmulatorClient`
 already expects (`execution: 'worker'` in `src/systems.js`, identical
