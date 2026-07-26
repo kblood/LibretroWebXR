@@ -181,15 +181,44 @@ try {
     img.src = 'data:image/png;base64,' + dataUrl;
   }), shot);
   ok('screenshot captured to tmp/probe-ps2-guncon-regression.png', existsSync(SCREENSHOT_PATH));
-  // Loose threshold: the app chrome (menus, VR room geometry, TV bezel) is
-  // already non-black on its own, so this only needs to rule out a fully
-  // blank/black page — real per-content pixel-level verification (the actual
-  // GS render surface) was already established in docs/PS2_CORE_BUILD.md via
-  // dedicated diagnostic scripts; this is a coarse "did SOMETHING render"
-  // regression guard for the real end-to-end app page.
-  ok('captured frame is not entirely black (real content rendering)',
+  // Whole-page non-black check is only a sanity floor: the app chrome (menus,
+  // VR room geometry, TV bezel) is non-black on its own regardless of whether
+  // the PS2 core renders anything, so it can't actually detect "TV shows a
+  // black screen, everything else is fine" — the exact shape a real GS-render
+  // regression would take. codex exec review (2026-07-26) flagged this.
+  ok('captured frame is not entirely black (coarse sanity floor, not the real check below)',
      pixelStats.nonBlack > pixelStats.totalPixels * 0.01,
      `nonBlack=${pixelStats.nonBlack}/${pixelStats.totalPixels}`);
+
+  // Real check: scope to the TV screen's interior in this scene's fixed
+  // default camera view (the same region a human would look at to judge
+  // "is the game rendering"), excluding the bezel/room/UI chrome entirely.
+  // Coordinates are a conservative inset of the TV's on-screen box for this
+  // probe's fixed 1024x768 viewport + default camera pose (see
+  // tmp/probe-ps2-guncon-regression.png for the reference frame this was
+  // measured against).
+  const TV_RECT = { x: 365, y: 390, w: 295, h: 190 };
+  const tvStats = await page.evaluate((dataUrl, rect) => new Promise((res) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = rect.w; c.height = rect.h;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
+      const d = ctx.getImageData(0, 0, rect.w, rect.h).data;
+      let nonBlack = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i] > 8 || d[i + 1] > 8 || d[i + 2] > 8) nonBlack++;
+      }
+      res({ totalPixels: d.length / 4, nonBlack });
+    };
+    img.onerror = () => res({ totalPixels: 0, nonBlack: 0, error: true });
+    img.src = 'data:image/png;base64,' + dataUrl;
+  }), shot, TV_RECT);
+  ok('TV-screen region (excludes bezel/room/UI chrome) shows real non-black GS content',
+     tvStats.nonBlack > 0 && tvStats.nonBlack < tvStats.totalPixels * 0.98,
+     `nonBlack=${tvStats.nonBlack}/${tvStats.totalPixels} rect=${JSON.stringify(TV_RECT)} — ` +
+     `(some-but-not-all non-black rules out both an all-black TV and a coincidentally-uniform-lit TV)`);
 
   // --- Step 3: arm the GunCon2 via the real in-app hook (live reboot) ---
   const armRes = await page.evaluate(async () => {
