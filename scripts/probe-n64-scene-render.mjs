@@ -1,0 +1,391 @@
+// N64 real-content rendering + frame-health verification (2026-07-26 review
+// follow-up). Boots the authored CC0 3D scene ROM (public/roms/freeware/
+// lwx-n64-scene.z64 — a rotating flat-shaded cube, EEPROM boot counter, and a
+// continuous audio tone, see games/n64-scene/main.c) through the REAL app
+// flow: window.__insertCartridge, the exact passthrough to
+// handleCartridgeInserted(meta) that GrabMgr.js's onCartridgeInserted callback
+// invokes on a real physical cart-slot interaction (same pattern as
+// scripts/probe-worker-cartridge-insert.mjs / probe-worker-audio-saveram.mjs).
+//
+// Why this probe exists: probe:worker-cartridge-insert and probe:mode-switch
+// only assert `client.mode === 'worker' && client.ready === true` — "boots
+// clean" — which the concurrent PSX-testdisc investigation (2026-07-26, see
+// docs/research/psx-ps2-n64-review-2026-07-24.md) found is NOT the same as
+// "the real content is what's actually on screen" for PSX, and the existing
+// N64 harness's own "lit" check (test/n64-core-e2e/harness.js: r+g+b > 30)
+// is too weak to catch the same class of gap — the scene's own dark-navy
+// background color (8,8,16) already sums to 32, so ANY frame with just the
+// background cleared, cube or no cube, colored or black, would read as "lit".
+//
+// REAL FINDING from this probe (2026-07-26, verified via both the coarse
+// 8x8-grid signature below AND a direct pixel-histogram scan of the cube's
+// screen-space bounding box across three captures 2s/5.5s/9s into a real
+// boot): the cube's GEOMETRY renders correctly — right silhouette shape,
+// right screen position, and its projected area visibly changes over the
+// three captures (silhouette pixel count 29911 -> 32613 -> 32454 in one
+// concrete run), proving the transform/rotation/depth-sort pipeline is alive
+// and the frame pump is NOT stalled (261 frames produced over 9.3s, 0 stale
+// FRAME_ACKs, 0 core errors). But the cube's SIX ASSIGNED FLAT FACE COLORS
+// (red/green/blue/yellow/magenta/cyan via rdp_set_primitive_color +
+// rdp_draw_filled_triangle in games/n64-scene/main.c) never appear anywhere
+// in its bounding box: the fill is solid (0,0,0) black, with only
+// antialiased gray ramps between black and the (8,8,16) background at the
+// silhouette edge. See the header of the color-fill assertions below for how
+// this is asserted; screenshots are saved to tmp/ as direct visual evidence
+// (n64-scene-t1/2/3.png), decoded straight from canvas.toDataURL() rather
+// than a Puppeteer elementHandle.screenshot() — the latter was tried first
+// and produced a MISLEADING full-viewport capture instead of #canvas's own
+// backing store, because #canvas is deliberately positioned off-page
+// (index.html: `position:absolute;left:-99999px`, a WebGL/2D texture source
+// for the TV mesh, not the visible viewport — see SceneMgr.js).
+//
+// This gap is almost certainly a pre-existing core/GFX-plugin limitation
+// (mupen64plus_next's HLE graphics plugin not correctly implementing the
+// low-level, pre-rdpq libdragon `rdp_set_primitive_color`/fixed-function
+// fill path this ROM uses), NOT something the Phase A/B facade changes
+// caused — none of those touch color/pixel output (they're JS-side
+// plumbing: sendLightgun/sendMouse forwarding, buildStartOptions, audio
+// wiring, autosave_interval, pause handling, the frame-ack watchdog). The
+// R4300 CPU side is independently confirmed correct too: this build's
+// N64_JIT_SHADOW harness logs checked=31/matched=31/mismatched=0 for this
+// exact boot, and the core log confirms the "Cached Interpreter" (not any
+// JIT) is the one actually executing. Nothing here is safely fixable via an
+// app-facade JS edit — it would need native core/GFX-plugin work inside the
+// pinned mupen64plus_next_libretro.wasm build, out of scope for this probe
+// (and public/cores/ is gitignored/off-limits here regardless). Filed as a
+// new, real, open finding rather than attempted as a fix.
+//
+// Also collects the worker's periodic 'metrics' events (framesProduced,
+// framesSkipped, staleFrameAcks, errors — see EmulatorWorkerRuntime.js's
+// postMetrics, emitted every 1s) across the run as an INFO-only frame-rate /
+// stall-behavior report (not asserted pass/fail — no established fps
+// baseline for a headless-swiftshader run exists to regress against; see
+// scripts/measure-n64-fps.js for the dedicated fps baseline measurement).
+//
+// SaveRAM/autosave (B4): calls flushSaveRam() same as
+// probe-worker-audio-saveram.mjs and reports INFO only — this ROM is already
+// documented (see that probe's header comment) to most likely report a
+// zero-size SAVE_RAM because mupen64plus_next's CRC/database-driven
+// save-type detection doesn't recognize a from-scratch homebrew ROM. Not
+// re-litigated here.
+//
+// Usage:
+//   npm run probe:n64-scene-render
+//   node scripts/probe-n64-scene-render.mjs
+//
+// Exit code: 0 = all PASS assertions passed, 1 = at least one failed / setup
+// error. NOTE: as of the 2026-07-26 finding above, this probe is EXPECTED to
+// fail its color-fill assertions (by design — that's the regression signal)
+// until the underlying core/GFX-plugin gap is fixed; the rotation/frame-pump/
+// audio/no-error assertions are expected to keep passing.
+
+import puppeteer from 'puppeteer-core';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(__dirname, '..');
+const PORT = 5198;
+const BASE = `http://localhost:${PORT}/?experimental=1`;
+const ROM = resolve(ROOT, 'public', 'roms', 'freeware', 'lwx-n64-scene.z64');
+const META = { file: 'lwx-n64-scene.z64', core: 'mupen64plus_next', system: 'n64', title: 'N64 Scene Render Probe' };
+const SHOT_DIR = resolve(ROOT, 'tmp');
+
+const CHROME = [
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+].find(existsSync);
+
+if (!CHROME) {
+  console.error('ERROR: no Chrome/Edge binary found');
+  process.exit(1);
+}
+if (!existsSync(ROM)) {
+  console.error(`ERROR: test ROM not found at ${ROM}`);
+  process.exit(1);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const results = [];
+const ok = (name, cond, extra = '') => {
+  results.push(!!cond);
+  console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? '  — ' + extra : ''}`);
+};
+const info = (name, extra = '') => console.log(`INFO  ${name}${extra ? '  — ' + extra : ''}`);
+
+mkdirSync(SHOT_DIR, { recursive: true });
+const romB64 = readFileSync(ROM).toString('base64');
+
+const vite = spawn('npx', ['vite', '--port', String(PORT), '--strictPort'],
+  { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], shell: true });
+
+async function waitForServer(url, tries = 80) {
+  for (let i = 0; i < tries; i++) {
+    try { const r = await fetch(url); if (r.ok) return true; } catch (_) {}
+    await sleep(500);
+  }
+  return false;
+}
+
+// In-page pixel analysis: decodes the canvas's own toDataURL() output back
+// through an <img> into a fresh, throwaway 2D canvas (works regardless of
+// whether #canvas itself is a WebGL or 2D-context canvas) and returns coarse
+// stats + a low-res per-cell-average "signature" cheap enough to ship back
+// over the CDP channel, so two captures can be diffed in Node without a PNG
+// decoder dependency.
+async function captureCanvas(page) {
+  return page.evaluate(async () => {
+    const canvas = document.getElementById('canvas');
+    if (!canvas) return null;
+    const dataUrl = canvas.toDataURL('image/png');
+    const img = await new Promise((res, rej) => {
+      const im = new Image();
+      im.onload = () => res(im);
+      im.onerror = () => rej(new Error('canvas snapshot image failed to decode'));
+      im.src = dataUrl;
+    });
+    const off = document.createElement('canvas');
+    off.width = img.width; off.height = img.height;
+    const octx = off.getContext('2d');
+    octx.drawImage(img, 0, 0);
+    const { data } = octx.getImageData(0, 0, img.width, img.height);
+
+    const GRID = 8;
+    const cellW = Math.max(1, Math.floor(img.width / GRID));
+    const cellH = Math.max(1, Math.floor(img.height / GRID));
+    const signature = [];
+    const colorBuckets = new Set();
+    let maxChannel = 0;
+
+    for (let gy = 0; gy < GRID; gy++) {
+      for (let gx = 0; gx < GRID; gx++) {
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let y = gy * cellH; y < Math.min(img.height, (gy + 1) * cellH); y += 2) {
+          for (let x = gx * cellW; x < Math.min(img.width, (gx + 1) * cellW); x += 2) {
+            const i = (y * img.width + x) * 4;
+            r += data[i]; g += data[i + 1]; b += data[i + 2]; n++;
+          }
+        }
+        if (n === 0) n = 1;
+        const ar = r / n, ag = g / n, ab = b / n;
+        signature.push(Math.round(ar), Math.round(ag), Math.round(ab));
+        colorBuckets.add(`${ar >> 5},${ag >> 5},${ab >> 5}`);
+        maxChannel = Math.max(maxChannel, ar, ag, ab);
+      }
+    }
+    return { width: img.width, height: img.height, signature, distinctColorBuckets: colorBuckets.size, maxChannel, dataUrl };
+  });
+}
+
+function signatureDiff(a, b) {
+  if (!a || !b || a.length !== b.length) return Infinity;
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+  return sum / a.length;
+}
+
+// Targeted scan of the cube's approximate screen-space bounding box (in this
+// 512x448-canvas coordinate space) — cheaper and far more sensitive than the
+// coarse whole-canvas grid above for two specific questions: (1) does ANY
+// pixel in the region the cube actually occupies show one of its six bright
+// assigned face colors, and (2) does the region's "dark silhouette" pixel
+// count change over time (a rotation signal that survives even if color
+// output is broken, since the projected area of a rotating cube changes
+// regardless of what color it's filled with).
+async function scanCubeBBox(page) {
+  return page.evaluate(() => {
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const x0 = 100, x1 = Math.min(360, width), y0 = 130, y1 = Math.min(380, height);
+    let brightCount = 0, darkCount = 0, maxSum = 0;
+    let maxPixel = null;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const i = (y * width + x) * 4;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        const sum = r + g + b;
+        if (sum > maxSum) { maxSum = sum; maxPixel = [x, y, r, g, b]; }
+        // A face color (red/green/blue/yellow/magenta/cyan at ~255,51,51 etc.)
+        // always has at least one channel near-saturated far above the
+        // (8,8,16) background/black-fill range.
+        if (r > 100 || g > 100 || b > 60) brightCount++;
+        // Near-black fill (vs the (8,8,16) background) — used as a
+        // rotation-independent-of-color silhouette-area proxy.
+        if (sum < 20) darkCount++;
+      }
+    }
+    return { maxSum, maxPixel, brightCount, darkCount, area: (x1 - x0) * (y1 - y0) };
+  });
+}
+
+let browser;
+try {
+  if (!(await waitForServer(`http://localhost:${PORT}/`))) throw new Error('vite dev server never came up');
+
+  browser = await puppeteer.launch({
+    executablePath: CHROME,
+    headless: true,
+    args: ['--enable-features=SharedArrayBuffer', '--no-sandbox'],
+  });
+  const page = await browser.newPage();
+  page.setDefaultTimeout(60000);
+  const pageErrors = [];
+  const consoleErrors = [];
+  page.on('pageerror', (e) => pageErrors.push(e.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text());
+  });
+
+  await page.goto(BASE, { waitUntil: 'load' });
+  const ready = await page.waitForFunction(
+    () => !!window.__client && typeof window.__rom?.cacheRom === 'function'
+       && typeof window.__addLocalRom === 'function' && typeof window.__insertCartridge === 'function'
+       && typeof window.__rack?.audio === 'function',
+    { timeout: 30000 },
+  ).then(() => true).catch(() => false);
+  ok('app booted with required test hooks ready', ready);
+  if (!ready) throw new Error('app never finished initialising');
+
+  await page.evaluate(() => {
+    window.__n64Metrics = [];
+    window.__client.addEventListener('metrics', (e) => window.__n64Metrics.push({ t: performance.now(), ...e.detail }));
+  });
+
+  // --- Mint + insert via the REAL cartridge-insert path ---
+  const mint = await page.evaluate(async (b64, meta) => {
+    const bin = atob(b64);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    const sha1 = await window.__rom.cacheRom(buf.buffer);
+    if (!sha1) return { ok: false, reason: 'cacheRom returned no sha1' };
+    await window.__addLocalRom({ ...meta, rom: { sha1, sources: ['opfs'] } });
+    return { ok: true, sha1 };
+  }, romB64, META);
+  ok('shelf cartridge minted (real addLocalRomToShelf path)', mint.ok, mint.reason || '');
+  if (!mint.ok) throw new Error(mint.reason);
+
+  const insert = await page.evaluate(async (meta, sha1) => {
+    try { await window.__insertCartridge({ ...meta, rom: { sha1, sources: ['opfs'] } }); return { ok: true }; }
+    catch (e) { return { ok: false, reason: String(e?.message || e) }; }
+  }, META, mint.sha1);
+  ok('real cartridge-insert path (handleCartridgeInserted) resolves without throwing', insert.ok, insert.reason || '');
+
+  const booted = await page.waitForFunction(
+    () => window.__client?.mode === 'worker' && window.__client?.ready === true,
+    { timeout: 45000 },
+  ).then(() => true).catch(() => false);
+  ok('client booted into worker mode and ready', booted);
+  if (!booted) throw new Error('N64 core never reported ready');
+
+  // Writes canvas.toDataURL()'s own base64 PNG bytes straight to disk — this
+  // reads the SAME backing store captureCanvas()/scanCubeBBox() analyze, so
+  // the saved file is guaranteed to be actual evidence of what was measured
+  // (unlike a Puppeteer elementHandle.screenshot() on this off-page canvas,
+  // which was tried first and returned an unrelated full-viewport capture).
+  function saveShot(dataUrl, name) {
+    try { writeFileSync(resolve(SHOT_DIR, name), Buffer.from(dataUrl.replace(/^data:image\/png;base64,/, ''), 'base64')); }
+    catch (_) { /* best-effort evidence artifact */ }
+  }
+
+  // Let the core run past its initial boot frames before the first capture.
+  await sleep(2000);
+  const shot1 = await captureCanvas(page);
+  const bbox1 = await scanCubeBBox(page);
+  ok('canvas snapshot #1 captured', !!shot1);
+  if (shot1) saveShot(shot1.dataUrl, 'n64-scene-t1.png');
+
+  ok('snapshot #1: canvas is not blank (multiple distinct color regions present)',
+     !!shot1 && shot1.distinctColorBuckets >= 4,
+     `distinctColorBuckets=${shot1?.distinctColorBuckets}`);
+  ok('snapshot #1 [REGRESSION SIGNAL]: a real cube-face color (bright/saturated pixel) appears in the cube\'s own bounding box, not just an all-black fill',
+     bbox1.brightCount > 0,
+     `brightCount=${bbox1.brightCount}/${bbox1.area}, brightest pixel in bbox=${JSON.stringify(bbox1.maxPixel)} (sum=${bbox1.maxSum})`);
+
+  // Wait well past the FRAME_ACK stall-watchdog timeout (500ms) and long
+  // enough for visible cube rotation (~0.012 rad/frame -> a full lap in a
+  // few hundred frames), then capture again.
+  await sleep(3500);
+  const shot2 = await captureCanvas(page);
+  const bbox2 = await scanCubeBBox(page);
+  ok('canvas snapshot #2 captured', !!shot2);
+  if (shot2) saveShot(shot2.dataUrl, 'n64-scene-t2.png');
+
+  const diff12 = signatureDiff(shot1?.signature, shot2?.signature);
+  info(`snapshot #1->#2 whole-canvas color-average diff (expected ~0 given the color-fill finding above — this is NOT a stall signal, see bbox silhouette-area check instead): meanAbsChannelDiff=${diff12.toFixed(2)}`);
+  ok('snapshot #1->#2: cube silhouette AREA changes (rotation is real, independent of the color-fill bug — the frame pump is not frozen/stalled)',
+     bbox1.darkCount !== bbox2.darkCount,
+     `darkCount ${bbox1.darkCount} -> ${bbox2.darkCount}`);
+
+  await sleep(3500);
+  const shot3 = await captureCanvas(page);
+  const bbox3 = await scanCubeBBox(page);
+  ok('canvas snapshot #3 captured', !!shot3);
+  if (shot3) saveShot(shot3.dataUrl, 'n64-scene-t3.png');
+
+  const diff23 = signatureDiff(shot2?.signature, shot3?.signature);
+  info(`snapshot #2->#3 whole-canvas color-average diff: meanAbsChannelDiff=${diff23.toFixed(2)}`);
+  ok('snapshot #2->#3: cube silhouette AREA keeps changing (motion continues across the whole run, no later stall)',
+     bbox2.darkCount !== bbox3.darkCount,
+     `darkCount ${bbox2.darkCount} -> ${bbox3.darkCount}`);
+  info(`snapshot #3 bbox color check (restates the #1 assertion above, not a separate pass/fail axis): brightCount=${bbox3.brightCount}/${bbox3.area}, brightest pixel in bbox=${JSON.stringify(bbox3.maxPixel)} (sum=${bbox3.maxSum})`);
+
+  // --- Frame-health metrics (informational — no established headless fps
+  // baseline to assert a pass/fail threshold against; see measure-n64-fps.js) ---
+  const metricsLog = await page.evaluate(() => window.__n64Metrics || []);
+  const last = metricsLog[metricsLog.length - 1] || null;
+  const first = metricsLog[0] || null;
+  const elapsedS = last && first ? (last.t - first.t) / 1000 : 0;
+  const framesDelta = last && first ? (last.framesProduced - first.framesProduced) : 0;
+  info(`metrics samples captured: ${metricsLog.length}`);
+  if (last) {
+    info(`latest metrics snapshot: ${JSON.stringify({
+      framesProduced: last.framesProduced, framesSkipped: last.framesSkipped,
+      staleFrameAcks: last.staleFrameAcks || 0, errors: last.errors, uptimeMs: last.uptimeMs,
+    })}`);
+    info(`approx fps over probe window: ${elapsedS > 0 ? (framesDelta / elapsedS).toFixed(1) : 'n/a'} (headless swiftshader, not representative of Quest/native GPU)`);
+  }
+  ok('metrics: no core-reported errors across the run', !last || last.errors === 0, last ? `errors=${last.errors}` : 'no metrics captured');
+  ok('metrics: stale FRAME_ACK count is not runaway (frame pump is not silently stalling)',
+     !last || (last.staleFrameAcks || 0) < Math.max(5, framesDelta * 0.1),
+     last ? `staleFrameAcks=${last.staleFrameAcks || 0} framesDelta=${framesDelta}` : 'no metrics captured');
+
+  // --- B3 quick check: primary console's audio branch actually advanced ---
+  const audioState = await page.evaluate(() => window.__rack.audio());
+  const primaryBranch = audioState.find((b) => b.console === 'console0');
+  ok('audio: primary console (console0) SpatialAudio branch received pushed buffers',
+     (primaryBranch?.nextAudioTime || 0) > 0, `nextAudioTime=${primaryBranch?.nextAudioTime}`);
+
+  // --- B4 SaveRAM/autosave: informational only (known content/detection gap) ---
+  const flush = await page.evaluate(async () => {
+    try {
+      const data = await window.__client.flushSaveRam();
+      if (!data) return { ok: true, present: false };
+      const bytes = new Uint8Array(data);
+      return { ok: true, present: true, byteLength: bytes.byteLength, allZero: bytes.every((b) => b === 0) };
+    } catch (e) { return { ok: false, reason: String(e?.message || e) }; }
+  });
+  ok('saveram: flushSaveRam() does not throw', flush.ok, flush.reason || '');
+  info('saveram: flushSaveRam() result (see B4 note — this ROM likely has no recognized save type)', JSON.stringify(flush));
+
+  ok('NO pageerror across the whole boot/render/metrics run', pageErrors.length === 0, JSON.stringify(pageErrors));
+  const relevantConsoleErrors = consoleErrors.filter((m) =>
+    !/^\[core\]/.test(m) && !/^Failed to load resource/.test(m));
+  ok('NO console error across the whole boot/render/metrics run', relevantConsoleErrors.length === 0, JSON.stringify(relevantConsoleErrors));
+
+  console.log(`\nScreenshots saved (real canvas.toDataURL() bytes, not a viewport capture): ${resolve(SHOT_DIR, 'n64-scene-t1.png')}, n64-scene-t2.png, n64-scene-t3.png`);
+} catch (e) {
+  console.error('ERROR', e);
+  results.push(false);
+} finally {
+  if (browser) await browser.close();
+  vite.kill();
+  try { process.kill(-vite.pid); } catch (_) {}
+}
+
+const passed = results.filter(Boolean).length;
+console.log(`\n${passed}/${results.length} checks passed`);
+process.exit(passed === results.length && results.length ? 0 : 1);
