@@ -50,6 +50,7 @@
     "probe:worker-audio-saveram": "node scripts/probe-worker-audio-saveram.mjs",
     "probe:ps2-guncon": "node scripts/probe-ps2-guncon-regression.mjs",
     "probe:n64-scene-render": "node scripts/probe-n64-scene-render.mjs",
+    "probe:n64-mario64": "node scripts/probe-n64-mario64.mjs",
     "measure:n64-fps": "node scripts/measure-n64-fps.js"
   },
   "devDependencies": {
