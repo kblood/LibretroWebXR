@@ -168,13 +168,70 @@ exe's raw MMIO writes do reach the screen) but does NOT generalize to any
 real-world PSX game** (which would all be normally-linked, not
 hand-assembled bypass code). Tier 2 (visible spinning cube) and Tier 3
 (memory-card round-trip — `readSaveRam(1)` returned `null` in every run)
-are consequently also unverified. **This is now the single most important
-open item for PSX**, ahead of the rest of Phase C: there is no confirmed
-evidence yet that any real PSX game will display anything but this same
-two-color cycle in this app. A focused follow-up investigation into the
-worker-runtime video/GPU path (coordinating with whichever session owns
-those files) should happen before further PSX content work or before
-Phase C's PSX items are prioritized.
+are consequently also unverified. This was the single most important open
+item for PSX, ahead of the rest of Phase C — see the fourth-pass update
+below for where the fix effort landed.
+
+## Status update (2026-07-26, fourth pass): PS2 confirmed clean, N64 has its own real color-fill finding
+
+The user set a standing goal (see memory `three-cores-playable-goal.md`)
+to keep looping plan→implement→verify until PSX/PS2/N64 are all
+genuinely confirmed playing real games, using the Codex CLI (`codex exec
+review`) as an independent reviewer at each checkpoint alongside my own
+re-verification. Three parallel investigations were run this pass:
+
+- **PS2: confirmed still working, no regression.** A new committed probe
+  (`scripts/probe-ps2-guncon-regression.mjs`, `npm run probe:ps2-guncon`)
+  boots `games/ps2-guncon-range` through the real `window.__pickLocalRom`
+  path and fires the GunCon2 through the real `LightGunMgr.tick()` →
+  `sendLightgun()` chain — 15/15 passing, with a real screenshot showing
+  the game's actual orange target box rendering on the TV (visually
+  confirmed, not just a pixel-count heuristic). `codex exec review`
+  caught two real issues in the first draft (a stray `package.json` line
+  from a concurrent agent's uncommitted work, and a whole-page 1%
+  non-black threshold that app chrome alone would satisfy regardless of
+  whether PS2 rendered anything) — both fixed and re-verified
+  (commit `c57ef69`). PS2 remains the one core with zero open rendering
+  issues.
+- **N64: a real, distinct rendering bug found — geometry/rotation/audio
+  all correct, but face colors never appear.** A new committed probe
+  (`scripts/probe-n64-scene-render.mjs`, `npm run probe:n64-scene-render`)
+  boots `lwx-n64-scene.z64` through the real `GrabMgr`/
+  `handleCartridgeInserted` cartridge-insert path. Frame pump (0 stale
+  `FRAME_ACK`s, ~260-350 frames over ~9.3s, 0 core errors), worker audio
+  (`SpatialAudio` branch advancing), and the CPU side (N64_JIT_SHADOW
+  checked=31/matched=31/mismatched=0) are all healthy and unaffected by
+  the Phase A/B facade changes. But a direct pixel histogram of the
+  cube's own bounding box, across three timed captures, never finds any
+  of its six assigned flat face colors (red/green/blue/yellow/magenta/
+  cyan) — only the scene's `(8,8,16)` background color and antialiasing
+  gradients toward black. The cube renders as a correctly-shaped,
+  reproducibly non-black-silhouetted, solid **black** fill instead of
+  colored faces. (I independently re-ran the probe and visually confirmed
+  this from the saved `tmp/n64-scene-t1.png`/`t3.png` screenshots — a
+  clear cube silhouette, uniformly black.) Full detail:
+  memory `n64-color-fill-regression.md`. This is judged (by the
+  investigating agent, not yet independently root-caused) as a likely
+  pre-existing limitation in `mupen64plus_next`'s HLE graphics-plugin
+  handling of this ROM's low-level `rdp_set_primitive_color` fill path —
+  not something the Phase A/B JS-side facade changes could have caused,
+  since none of them touch pixel/color output. `codex exec review` on
+  this commit (`ef71ff7`) found two probe-quality issues (a metrics-null
+  false-positive risk, and a Windows dev-server cleanup bug that could
+  leak a `node` process holding the port for the next run) — both fixed
+  and re-verified, including confirming via `netstat` that the port is
+  actually released after the fixed cleanup (commit `84570f6`).
+
+**Net effect: two of three cores now have a real, confirmed,
+independently-verified rendering gap blocking "plays games" — PSX (no
+authored content visibly renders at all) and N64 (geometry renders,
+color does not). PS2 is the only core with no open item.** Both gaps are
+believed to live in native/WASM core code, not the JS-side app facade —
+the PSX gap needs root-causing inside `src/runtime/*`/core boot handoff,
+and the N64 gap needs root-causing inside `mupen64plus_next`'s pinned GFX
+plugin (out of reach via JS-only edits; would need a native rebuild, same
+category of effort as `docs/N64_CORE_BUILD.md`'s original core build).
+Both are now open follow-up tasks, not yet closed.
 
 ## Part 0 — Premise corrections (read first)
 
