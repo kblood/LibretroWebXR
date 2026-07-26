@@ -222,16 +222,94 @@ re-verification. Three parallel investigations were run this pass:
   and re-verified, including confirming via `netstat` that the port is
   actually released after the fixed cleanup (commit `84570f6`).
 
-**Net effect: two of three cores now have a real, confirmed,
+**Net effect at the time: two of three cores had a real, confirmed,
 independently-verified rendering gap blocking "plays games" — PSX (no
 authored content visibly renders at all) and N64 (geometry renders,
-color does not). PS2 is the only core with no open item.** Both gaps are
-believed to live in native/WASM core code, not the JS-side app facade —
-the PSX gap needs root-causing inside `src/runtime/*`/core boot handoff,
-and the N64 gap needs root-causing inside `mupen64plus_next`'s pinned GFX
-plugin (out of reach via JS-only edits; would need a native rebuild, same
-category of effort as `docs/N64_CORE_BUILD.md`'s original core build).
-Both are now open follow-up tasks, not yet closed.
+color does not). PS2 was the only core with no open item.** Both gaps
+were fixed within the same session — see the fifth-pass update below.
+
+## Status update (2026-07-26, fifth pass): N64 color-fill FIXED, PSX rendering gap FIXED — all three cores now confirmed genuinely playing real content
+
+**N64 (commit `cb060b9`).** Root-caused for real (not just the
+GFX-plugin-limitation guess from the fourth pass): `GLideN64/src/gDP.cpp`'s
+`LLETriangle::draw()` only wrote vertex colors inside an `if (_shade)`
+branch, so a non-shaded low-level RDP fill-mode triangle (exactly what
+libdragon's pre-`rdpq` `rdp_draw_filled_triangle()` emits) reached the
+drawer with color fields never written — deterministically black. Fixed
+by seeding those vertices from `gDPGetFillColor()` in `G_CYC_FILL` mode
+(matching what `gDPFillRectangle()` already did for rectangles — the
+game's background rect rendered its correct color the whole time, which
+was the actual tell). One-file patch
+(`scripts/cores/n64/gliden64-fill-mode-lle-triangle-color.patch`), core
+rebuilt. Verified before→after: `probe:n64-scene-render` 16/18→18/18,
+`0/65000`→`32571/65000` bright face pixels in the cube's bounding box,
+screenshots flip from a uniformly black cube to genuinely colored,
+rotating faces. I independently re-ran the probe, `npm test`, and
+`probe:worker-cartridge-insert` myself and viewed the screenshots
+directly; `codex exec review --commit cb060b9` found no issues.
+
+**PSX (commit `45271e9`).** Two stacked bugs, not the single
+"crt0/BIOS-handoff gap" hypothesized in the third pass:
+1. `games/psx-testdisc/system.cnf`'s `BOOT=cdrom:\PSXTEST.EXE;1` isn't a
+   valid Sony-format disc serial, so Beetle never recognized the disc as
+   licensed and its embedded OpenBIOS fell through to its own built-in
+   shell demo — whose slow color-cycle was exactly the
+   "content-independent two-color sequence" the third pass's 8-payload
+   isolation matrix recorded (8 photos of the same BIOS demo, not 8
+   photos of our game). Fixed by renaming the boot executable to a
+   valid-looking serial (`SLUS_000.01`) — no game code changed.
+2. Even after the disc booted, Beetle's OpenGL hardware renderer only
+   ever presented the background fill in this project's worker/
+   OffscreenCanvas GL context, though a GPURAM save-state dump proved the
+   hardware renderer's own buffers held the correct cube+HUD the whole
+   time. Worked around (not fixed) by pinning `beetle_psx_renderer` to
+   `"software"`.
+
+   A third bug was found on the way: Lightrec (the JIT) segfaults on real
+   content ~2s into a boot, reproducing identically under the Wasm
+   codegen, DMA-invalidate mode, AND Lightrec's own plain interpreter —
+   the bug is in Lightrec's shared memory-map/block-invalidation path,
+   not the `Jitter_CodeGen_Wasm` backend. Worked around (not fixed) by
+   pinning `beetle_psx_cpu_dynarec` to `"disabled"`.
+
+   Also fixed as a drive-by, affecting ALL worker cores (PSX and N64):
+   RetroArch 1.22's `sort_savefiles_enable`/`sort_savestates_enable`
+   default to `true` and redirect saves into a per-core subdirectory this
+   project's path builder didn't know about, breaking
+   `readSaveRam()`/`serializeState()` everywhere. All four `sort_save*`
+   options now off.
+
+   Verified: `probe:psx-testdisc` PASSED (real HUD text + a lit cube on
+   screen, save-block round-trip surviving a soft reset — screenshot
+   `tmp/psx-testdisc-final.png`). I independently re-ran the probe myself
+   (one transient failure on the first attempt that passed cleanly on
+   retry — resource contention, not a regression, same pattern as
+   [[ps2-glctx-crash-not-reproducible]]/`docs/PS2_CORE_BUILD.md`), viewed
+   the screenshot directly, re-ran `npm test`/`probe:mode-switch`/
+   `probe:worker-cartridge-insert`/`probe:lightgun` (all green), and got a
+   clean `codex exec review --commit 45271e9` (which went as far as
+   inspecting the built `.wasm` binary to confirm the new RetroArch option
+   strings are real, not typos).
+
+**Net effect: all three cores (PS2, N64, PSX) are now independently
+confirmed genuinely rendering real authored content end-to-end through
+the real app flow, closing the core "plays games" bar this whole review
+was chasing.** Two real, open follow-up items remain for PSX specifically
+— it currently runs on CPU interpretation + software rendering rather
+than its intended Wasm-JIT + hardware-GL architecture:
+- Restore the Lightrec JIT (root-cause + fix the memory-map/
+  block-invalidation segfault, then re-enable `beetle_psx_cpu_dynarec`).
+- Restore the hardware GL renderer (root-cause why this project's worker/
+  OffscreenCanvas GL context doesn't present Beetle's hardware-renderer
+  output even though the renderer itself draws correctly, then re-enable
+  `beetle_psx_renderer=hardware`).
+
+Neither is measured for real-world performance impact yet (no fps
+baseline was captured for the interpreter+software configuration). Phase
+C (PSX content pipeline: streaming/OOM, disc-classifier wiring, BIOS-import
+fix, multi-file shelf persistence) and PS2's `.cue` support remain
+separately open, lower-priority now that the rendering bar is met for all
+three cores.
 
 ## Part 0 — Premise corrections (read first)
 
