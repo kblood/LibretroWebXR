@@ -283,25 +283,47 @@ try {
   // client.sendInput() path (same primitive GameInputMgr uses), mirroring the
   // prior confirmation's proven Start/Cross navigation ---
   async function press(code, key) {
-    await withTimeout(page.evaluate((code, key) => window.__client.sendInput('keydown', code, key), code, key), 15000, 'sendInput-down');
+    const down = await withTimeout(page.evaluate((code, key) => window.__client.sendInput('keydown', code, key), code, key), 15000, 'sendInput-down');
     await sleep(120);
-    await withTimeout(page.evaluate((code, key) => window.__client.sendInput('keyup', code, key), code, key), 15000, 'sendInput-up');
+    const up = await withTimeout(page.evaluate((code, key) => window.__client.sendInput('keyup', code, key), code, key), 15000, 'sendInput-up');
     await sleep(700);
+    return down.ok && up.ok;
   }
-  for (let i = 0; i < 4; i++) await press('Enter', 'Enter');
+  let allPressesOk = true;
+  for (let i = 0; i < 4; i++) allPressesOk = (await press('Enter', 'Enter')) && allPressesOk;
   const shot3 = await captureNamed('probe-ps2-timecrisis2-03-afterstart.png', 500);
-  for (let i = 0; i < 6; i++) await press('KeyH', 'h');
+  for (let i = 0; i < 6; i++) allPressesOk = (await press('KeyH', 'h')) && allPressesOk;
   const shot4 = await captureNamed('probe-ps2-timecrisis2-04-aftercross.png', 500);
   const shot5 = await captureNamed('probe-ps2-timecrisis2-05-final.png', 5000);
 
+  // [Codex review, 2026-07-27] press() previously discarded withTimeout()'s
+  // {ok:false} result on a throw/timeout, so a regression that broke the
+  // real Start/Cross sendInput() path entirely would go unnoticed — the
+  // palette/frame-change checks below can still pass off the pre-input boot
+  // animation alone. Assert the synthetic input calls themselves actually
+  // succeeded, not just that the game kept rendering something.
+  ok('all synthetic Start/Cross sendInput() calls resolved without throwing/timing out',
+     allPressesOk, `allPressesOk=${allPressesOk}`);
+
   const allShots = [shot1, shot2, shot3, shot4, shot5];
+  const cutsceneSignature = (s) => s.stats && (
+    (s.stats.grayPanel > s.stats.tvTotal * 0.05 && s.stats.darkBanner > s.stats.tvTotal * 0.02) ||
+    (s.stats.nightSky > s.stats.tvTotal * 0.05 && s.stats.whiteBeam > 0)
+  );
   ok('[REAL-CONTENT] at least one post-input frame shows recognizable memory-card-screen OR cutscene palette '
      + '(gray panel / dark banner / violet highlight box, OR night-sky / white spotlight-beam colors)',
-     allShots.some((s) => s.stats && (
-       (s.stats.grayPanel > s.stats.tvTotal * 0.05 && s.stats.darkBanner > s.stats.tvTotal * 0.02) ||
-       (s.stats.nightSky > s.stats.tvTotal * 0.05 && s.stats.whiteBeam > 0)
-     )),
+     allShots.some(cutsceneSignature),
      allShots.map((s) => `${s.name}: gray=${s.stats?.grayPanel} dark=${s.stats?.darkBanner} violet=${s.stats?.violetHighlight} sky=${s.stats?.nightSky} beam=${s.stats?.whiteBeam}`).join(' | '));
+
+  // [Codex review, 2026-07-27] The check above only requires SOME frame in
+  // the whole run (including shot1, the pre-input Namco splash, which
+  // already trips the nightSky/whiteBeam heuristic) to match — it can't
+  // actually tell "Start/Cross advanced into the cutscene" apart from "the
+  // splash screen alone happened to match the palette buckets". Pin it to
+  // the actual final post-input capture specifically.
+  ok('[CUTSCENE-ADVANCE SIGNAL] the FINAL post-input capture (well after both Start and Cross) specifically shows the cutscene/menu palette, not just some earlier frame',
+     cutsceneSignature(shot5),
+     `${shot5.name}: gray=${shot5.stats?.grayPanel} dark=${shot5.stats?.darkBanner} sky=${shot5.stats?.nightSky} beam=${shot5.stats?.whiteBeam}`);
 
   ok('[REAL-CONTENT] frame content changed across the run (not a single frozen frame — boot animation / menu / input response)',
      (() => {
