@@ -348,9 +348,15 @@ try {
     })}`);
     info(`approx fps over probe window: ${elapsedS > 0 ? (framesDelta / elapsedS).toFixed(1) : 'n/a'} (headless swiftshader, not representative of Quest/native GPU)`);
   }
-  ok('metrics: no core-reported errors across the run', !last || last.errors === 0, last ? `errors=${last.errors}` : 'no metrics captured');
+  // codex exec review (2026-07-26): the two checks below used to short-circuit
+  // to PASS via `!last` whenever metrics forwarding was broken/misattached —
+  // i.e. "no telemetry received" read as "telemetry looks healthy". Require
+  // real samples first so a metrics-pipe regression fails loudly instead.
+  ok('metrics: at least one sample was actually captured (telemetry pipe is alive)',
+     metricsLog.length >= 1, `metricsLog.length=${metricsLog.length}`);
+  ok('metrics: no core-reported errors across the run', !!last && last.errors === 0, last ? `errors=${last.errors}` : 'no metrics captured');
   ok('metrics: stale FRAME_ACK count is not runaway (frame pump is not silently stalling)',
-     !last || (last.staleFrameAcks || 0) < Math.max(5, framesDelta * 0.1),
+     !!last && (last.staleFrameAcks || 0) < Math.max(5, framesDelta * 0.1),
      last ? `staleFrameAcks=${last.staleFrameAcks || 0} framesDelta=${framesDelta}` : 'no metrics captured');
 
   // --- B3 quick check: primary console's audio branch actually advanced ---
@@ -382,8 +388,26 @@ try {
   results.push(false);
 } finally {
   if (browser) await browser.close();
-  vite.kill();
-  try { process.kill(-vite.pid); } catch (_) {}
+  // codex exec review (2026-07-26): with shell:true, vite.pid is the shell's
+  // pid, not the actual node/vite process — vite.kill() only kills the shell,
+  // and process.kill(-vite.pid) is a POSIX process-group idiom that throws
+  // (silently swallowed) on Windows, so the real vite process can survive and
+  // keep PORT bound for the next run. On win32, kill the whole process tree
+  // via taskkill instead; POSIX keeps the existing process-group kill.
+  if (process.platform === 'win32') {
+    // Must be awaited: spawn() alone races the script's own exit below, so the
+    // taskkill child can itself get cut off before it finishes reaping the
+    // vite process tree (observed: port stayed bound after a prior version of
+    // this fix that didn't wait).
+    await new Promise((res) => {
+      const tk = spawn('taskkill', ['/pid', String(vite.pid), '/t', '/f'], { stdio: 'ignore' });
+      tk.on('exit', res);
+      tk.on('error', res);
+    });
+  } else {
+    vite.kill();
+    try { process.kill(-vite.pid); } catch (_) {}
+  }
 }
 
 const passed = results.filter(Boolean).length;
