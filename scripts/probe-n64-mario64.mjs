@@ -285,6 +285,22 @@ try {
      shots.some((s) => s && (s.skyBlue > s.total * 0.01 || s.grassGreen > s.total * 0.01)),
      `skyBlue/grassGreen fraction per snapshot: ${shots.map((s) => s && s.total ? `${(s.skyBlue/s.total).toFixed(3)}/${(s.grassGreen/s.total).toFixed(3)}` : 'n/a').join(', ')}`);
 
+  // [Codex review, 2026-07-27] The four checks above only require SOME
+  // snapshot anywhere in the whole run to show red/blue — a regression that
+  // stalls forever on the tumbling intro logo (or anything else colorful)
+  // would still satisfy them. Pin the actual claim from the header comment:
+  // from ~12s onward the run settles onto, and STAYS on, the title screen
+  // specifically (red Mario-face + blue tiled wallpaper simultaneously in
+  // EVERY late capture, not just once). This is the discriminator that
+  // actually distinguishes "reached and held the title screen" from
+  // "flashed something colorful once" — e.g. the ~4s tumbling-logo capture
+  // (skyBlue fraction 0.011) would fail this threshold even though it passes
+  // the looser checks above.
+  const lateShots = shots.slice(4);
+  ok('[TITLE-SCREEN SIGNAL] settles onto and STAYS ON a title-screen-consistent frame from ~12s onward (red Mario-face + blue wallpaper together, in every late capture)',
+     lateShots.length > 0 && lateShots.every((s) => s && s.saturatedRed > s.total * 0.02 && s.skyBlue > s.total * 0.02),
+     `late (>=12s) saturatedRed/skyBlue fractions: ${lateShots.map((s) => s && s.total ? `${(s.saturatedRed / s.total).toFixed(3)}/${(s.skyBlue / s.total).toFixed(3)}` : 'n/a').join(', ')}`);
+
   // Motion: content is animating (camera pans / logo assembly / attract
   // demo), not a single frozen frame — same whole-canvas signature-diff
   // technique as probe-n64-scene-render.mjs, but here asserted across the
