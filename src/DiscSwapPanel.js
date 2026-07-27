@@ -120,8 +120,13 @@ export function createDiscSwapPanel({ onPrev, onNext } = {}) {
 
   // status: DiscControlBridge.status() shape — { index, discCount, ejected,
   // supported, ... } — or null/undefined (no disc control / single disc).
+  // `supported` is checked separately from discCount: an M3U bundle can report
+  // discCount > 1 (from its own file listing) while the loaded core exposes
+  // neither the explicit nor sequential disc-control export — showing Prev/
+  // Next there would just make every press fail with "does not expose disc
+  // control" (Codex review finding, P2 on commit 8552959).
   group.userData.setStatus = (status) => {
-    if (!status || !(status.discCount > 1)) {
+    if (!status || !status.supported || !(status.discCount > 1)) {
       group.visible = false;
       return;
     }

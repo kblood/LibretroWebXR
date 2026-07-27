@@ -48,17 +48,26 @@ export class DiscControlBridge extends EventTarget {
     const wasEjected = this.ejected;
     if (!wasEjected) this.setEjected(true);
 
-    if (capabilities.explicit) {
-      const accepted = this.module._libretrowebxr_set_disc_index(index);
-      if (accepted === 0) throw new Error(`Core rejected disc index ${index}`);
-    } else {
-      const forward = (index - this.index + this.discCount) % this.discCount;
-      const backward = (this.index - index + this.discCount) % this.discCount;
-      if (backward < forward && typeof this.module._cmd_disk_prev === 'function') {
-        for (let i = 0; i < backward; i++) this.module._cmd_disk_prev();
+    try {
+      if (capabilities.explicit) {
+        const accepted = this.module._libretrowebxr_set_disc_index(index);
+        if (accepted === 0) throw new Error(`Core rejected disc index ${index}`);
       } else {
-        for (let i = 0; i < forward; i++) this.module._cmd_disk_next();
+        const forward = (index - this.index + this.discCount) % this.discCount;
+        const backward = (this.index - index + this.discCount) % this.discCount;
+        if (backward < forward && typeof this.module._cmd_disk_prev === 'function') {
+          for (let i = 0; i < backward; i++) this.module._cmd_disk_prev();
+        } else {
+          for (let i = 0; i < forward; i++) this.module._cmd_disk_next();
+        }
       }
+    } catch (e) {
+      // A rejected explicit index (or a mid-sequence failure) must not leave
+      // the tray physically open — without this, every later call keeps
+      // treating it as already-ejected and never re-inserts (Codex review
+      // finding, P2 on commit 8552959).
+      if (!wasEjected) this.setEjected(false);
+      throw e;
     }
     this.index = index;
     if (!wasEjected) this.setEjected(false);

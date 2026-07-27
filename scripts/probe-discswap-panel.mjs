@@ -117,7 +117,7 @@ const result = await page.evaluate(async () => {
 
   // Next (wraps forward): index 0 -> 1.
   let lastSetDiscArg = null;
-  window.__client.setDisc = async (i) => { lastSetDiscArg = i; currentIndex = i; return { index: i, discCount: DISC_COUNT, ejected: false }; };
+  window.__client.setDisc = async (i) => { lastSetDiscArg = i; currentIndex = i; return { index: i, discCount: DISC_COUNT, ejected: false, supported: true }; };
   await window.__discSwap.step(1);
   assert('Next calls setDisc(1) from index 0', lastSetDiscArg === 1);
   assert('panel relabels after Next', readLabel() !== label1over3);

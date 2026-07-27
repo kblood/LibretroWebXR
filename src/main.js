@@ -4796,6 +4796,13 @@ function buildMenuAndControlsPanel() {
   discSwapPanel.position.set(0, 0.45, -3.6);
   scene.addObject(discSwapPanel);
   discSwapPanel.userData.buttons.forEach((b) => menuMgr.addItem(b.mesh, b.onActivate));
+  // buildCartridgeWorld awaits room/collection setup before this runs, so a
+  // `?session=` auto-join's already-completed multi-disc boot (or a persisted
+  // 'tv' state applied while this function was still awaiting) can finish
+  // BEFORE discSwapPanel exists — every other refreshDiscPanel() call site
+  // would silently no-op against a null panel. Query once now to cover that
+  // ordering (Codex review finding, P2 on commit 8552959).
+  refreshDiscPanel();
   // Test/probe hook (mirrors window.__client, __rom, etc.) — a real multi-disc
   // boot needs a bootable multi-track PSX image, so headless probes instead
   // drive this directly against window.__client (the same live object
@@ -6186,7 +6193,7 @@ async function refreshDiscPanel() {
 async function stepDisc(delta) {
   let status = null;
   try { status = (await client.discStatus?.()) || null; } catch (_) { status = null; }
-  if (!status || !(status.discCount > 1)) return;
+  if (!status || !status.supported || !(status.discCount > 1)) return;
   const next = (status.index + delta + status.discCount) % status.discCount;
   try {
     const updated = await client.setDisc(next);

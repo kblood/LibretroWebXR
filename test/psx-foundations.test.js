@@ -150,6 +150,22 @@ test('disc bridge ejects, selects, inserts, and rejects invalid indices', () => 
   assert.deepEqual(discEntriesFromBundle({ entryPath: 'set.m3u', dependencies: ['set.m3u', 'one.cue', 'one.bin', 'two.chd'] }), ['one.cue', 'two.chd']);
 });
 
+test('disc bridge re-inserts the tray when the core rejects an explicit index', () => {
+  // Codex review finding (P2 on commit 8552959): setDisc() used to leave the
+  // tray physically ejected when the explicit-index write was rejected,
+  // since setEjected(false) sat AFTER the rejection throw with nothing to
+  // catch it. Every later setDisc() then kept treating the tray as already
+  // open, silently skipping the eject/insert sequence real hardware needs.
+  const bridge = new DiscControlBridge({
+    _libretrowebxr_set_disc_index: () => 0, // core always rejects
+    _libretrowebxr_set_eject_state: () => {},
+  }, { discCount: 2 });
+  assert.equal(bridge.ejected, false);
+  assert.throws(() => bridge.setDisc(1), /Core rejected disc index 1/);
+  assert.equal(bridge.ejected, false, 'tray must be re-closed after the rejection, not left open');
+  assert.equal(bridge.index, 0, 'index must not advance on a rejected swap');
+});
+
 test('save-state metadata records compatibility boundaries', () => {
   const state = prepareSaveStatePayload({ data: new Uint8Array(7), core: 'mednafen_psx_hw', file: 'game.cue', contentId: 'sha256:x', coreBuildHash: 'build-a' });
   assert.equal(state.byteLength, 7);
