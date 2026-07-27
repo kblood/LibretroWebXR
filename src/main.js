@@ -36,6 +36,7 @@ import { createMemoryCard } from './MemoryCard.js';
 import { saveState, loadState, listStates, checkSaveStateCompatibility } from './SaveState.js';
 import { createDebugHud } from './DebugHud.js';
 import { createNowPlayingPanel } from './NowPlayingPanel.js';
+import { createDiscSwapPanel } from './DiscSwapPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
@@ -1842,6 +1843,7 @@ function computeRouting() {
 }
 let debugHud = null;
 let nowPlayingPanel = null; // world-space "Now Playing + Input" panel near the TV
+let discSwapPanel = null;   // world-space multi-disc Prev/Next control, below nowPlayingPanel
 let editor = null;       // Phase E.1 in-VR room editor (set in buildCartridgeWorld)
 let currentRoom = null;  // the parsed room descriptor we serialize back on export
 let roomPosters = [];    // Phase E.2: { prop, object } for each poster, for live env edits
@@ -4783,6 +4785,23 @@ function buildMenuAndControlsPanel() {
   addConsoleControls(CONSOLE_ID, consoleObjs.get(CONSOLE_ID));
   addTvControls(PRIMARY_TV_ID, scene.getTV(PRIMARY_TV_ID));
 
+  // Multi-disc (M3U) Prev/Next control — hidden until a multi-disc game boots
+  // (see refreshDiscPanel/stepDisc below, called from loadCartridge/
+  // rebootPrimaryConsole/the romInput handler, the same call sites that update
+  // nowPlayingPanel). Positioned just below nowPlayingPanel, under the TV.
+  discSwapPanel = createDiscSwapPanel({
+    onPrev: () => stepDisc(-1),
+    onNext: () => stepDisc(1),
+  });
+  discSwapPanel.position.set(0, 0.45, -3.6);
+  scene.addObject(discSwapPanel);
+  discSwapPanel.userData.buttons.forEach((b) => menuMgr.addItem(b.mesh, b.onActivate));
+  // Test/probe hook (mirrors window.__client, __rom, etc.) — a real multi-disc
+  // boot needs a bootable multi-track PSX image, so headless probes instead
+  // drive this directly against window.__client (the same live object
+  // refreshDiscPanel/stepDisc read via the closured `client` reference).
+  window.__discSwap = { panel: () => discSwapPanel, refresh: refreshDiscPanel, step: stepDisc };
+
   scene.addTickCallback(() => menuMgr.tick());
 
   // C64 keyboard: per-frame tick (ages tap flashes) + controller hover raycast.
@@ -5570,6 +5589,7 @@ async function loadCartridge(meta, { echo = true } = {}) {
       coreLabel: CORES[meta.core]?.label || meta.core,
       title:     meta.title,
     });
+    refreshDiscPanel();
     // M0.5: tell the shared room which game is now on the TV. Suppressed when
     // this load is reflecting a remote peer's state (echo:false) so it can't
     // bounce a stale value back over a newer overwrite.
@@ -5609,6 +5629,7 @@ async function loadCartridge(meta, { echo = true } = {}) {
     placeholder.start();
     scene.setScreenSource(placeholderCanvas);
     nowPlayingPanel?.userData.setNowPlaying?.({});
+    discSwapPanel?.userData.setStatus(null);
   }
 }
 window.__loadCartridge = loadCartridge; // debug hook: boot a game via RomResolver
@@ -5952,6 +5973,7 @@ async function rebootPrimaryConsole(meta, gun, mouse = null) {
     coreLabel: CORES[meta.core]?.label || meta.core,
     title: meta.title,
   });
+  refreshDiscPanel();
   // We are (still) the host of whatever was playing — keep the TV broadcast on the
   // new canvas alive for any peers watching our stream.
   if (net?.isHost?.()) net?.startVideoBroadcast?.();
@@ -6142,6 +6164,39 @@ function handleMemoryCardInserted(card) {
     card.userData.pulse(0xcc2222);
   });
   return true;
+}
+
+// --- Disc-swap panel (multi-disc M3U content) -----------------------------
+//
+// Called at every PRIMARY-console boot success site that already updates
+// nowPlayingPanel (loadCartridge, rebootPrimaryConsole, the romInput file-
+// picker handler) — NOT from the client's 'ready' event, because by the time
+// wireClientEvents(next.client) runs on a reboot/swap path, the fresh
+// client's own 'ready' has usually already fired (its start() dispatches
+// 'ready' synchronously right before the awaited promise resolves), so a
+// listener attached afterward would miss it. discStatus() is always safe to
+// call — RuntimeEmulatorClient forwards it to whichever delegate is active,
+// resolving to undefined for a main-thread (non-disc-control) core.
+async function refreshDiscPanel() {
+  let status = null;
+  try { status = (await client.discStatus?.()) || null; } catch (_) { status = null; }
+  discSwapPanel?.userData.setStatus(status);
+}
+
+async function stepDisc(delta) {
+  let status = null;
+  try { status = (await client.discStatus?.()) || null; } catch (_) { status = null; }
+  if (!status || !(status.discCount > 1)) return;
+  const next = (status.index + delta + status.discCount) % status.discCount;
+  try {
+    const updated = await client.setDisc(next);
+    discSwapPanel?.userData.setStatus(updated);
+    logger?.event?.('disc-swap', { index: updated.index, discCount: updated.discCount });
+    setStatus(`Disc ${updated.index + 1}/${updated.discCount}`);
+  } catch (e) {
+    console.warn('[main] disc swap failed:', e);
+    setStatus(`disc swap failed: ${e.message || e}`);
+  }
 }
 
 // --- Client event wiring -------------------------------------------------
@@ -6382,6 +6437,7 @@ romInput.addEventListener('change', async (e) => {
       coreLabel: coreInfo.label,
       title,
     });
+    refreshDiscPanel();
 
     // Cache the content (content-addressed) so the shelf cartridge can
     // re-boot without the original File(s). On success the cart resolves via

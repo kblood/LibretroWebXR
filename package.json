@@ -38,6 +38,7 @@
     "probe-local-rom": "node scripts/probe-local-rom.mjs",
     "probe-local-rom-persist": "node scripts/probe-local-rom-persist.mjs",
     "probe-bundle-persist": "node scripts/probe-bundle-persist.mjs",
+    "probe-discswap-panel": "node scripts/probe-discswap-panel.mjs",
     "probe-media": "node scripts/probe-media.mjs",
     "test:psx-foundations": "node --test test/psx-foundations.test.js",
     "test:runtime": "node --test test/runtime.test.js",
