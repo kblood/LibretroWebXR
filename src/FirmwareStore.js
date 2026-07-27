@@ -64,6 +64,7 @@ export async function validatePsxFirmware(source, suppliedName = source?.name ||
 // better name to pick, and this matches the same North-America default
 // getPreferred() already falls back to when no region hint matches.
 const UNRECOGNIZED_MOUNT_NAME = 'scph5501.bin';
+const KNOWN_MOUNT_NAMES = new Set(PSX_FIRMWARE.map((firmware) => firmware.name));
 
 /** The filename a validated BIOS should be mounted under for the core to actually find it. */
 export function mountNameFor(validation) {
@@ -79,8 +80,17 @@ export function mountNameFor(validation) {
 // benefits immediately rather than only after a real migration step. A
 // record predating even displayName (pre-f2f30c9) falls back to its own name
 // for display, since that field didn't exist yet either.
+//
+// A record from BEFORE `recognized` existed at all has no such field
+// (`undefined`, not `false`) — but the pre-f2f30c9 `import()` only ever
+// accepted an EXACT MD5 match, so every one of those legacy records is
+// necessarily a genuine scph5500/5501/5502.bin. Checking `record.name`
+// against the known canonical names (not just the `recognized` flag) is
+// what tells those apart from a real f2f30c9-era unrecognized dump — missing
+// this check corrupted legacy Japan/Europe BIOS records by renaming them to
+// the North-America alias (Codex review finding, P1 on commit e664df0).
 export function healUnrecognizedMountName(record) {
-  if (record.recognized || record.name === UNRECOGNIZED_MOUNT_NAME) return record;
+  if (record.recognized || KNOWN_MOUNT_NAMES.has(record.name)) return record;
   return { ...record, name: UNRECOGNIZED_MOUNT_NAME, displayName: record.displayName || record.suppliedName || record.name };
 }
 

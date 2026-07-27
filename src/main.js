@@ -6177,6 +6177,10 @@ async function addLocalRomToShelf(meta) {
   return cart;
 }
 
+// Container/pointer formats that name a disc image without BEING the actual
+// track data — see the romInput primary-file selection comment below.
+const ENTRY_EXTS = new Set(['cue', 'chd', 'm3u']);
+
 // Real byte-level PS1-vs-PS2 disambiguation for a picked .cue/.chd (C2,
 // 2026-07-27 review followup) — src/DiscIdentity.js was tested but dead code
 // until this. Returns null for any other extension, or when a .cue's
@@ -6212,11 +6216,20 @@ romInput.addEventListener('change', async (e) => {
   romInput.value = '';
 
   const isMultiFile = files.length > 1;
-  // A multi-file pick (CUE+BIN, M3U+discs) may not put the entry file first —
-  // find whichever selected file resolves to a core that actually declares
-  // multiFile support, and detect off that one.
+  // A multi-file pick (CUE+BIN, M3U+discs) may not put the entry file first.
+  // Prefer a real container/pointer extension (cue/chd/m3u) over asking which
+  // core declares multiFile support: AMBIGUOUS_EXT_DEFAULT's un-overridden
+  // guess for .cue is `play`, which doesn't itself declare multiFile — so the
+  // old multiFile-flag-based find() always missed the .cue entry on an
+  // unoverridden pick and silently fell back to files[0], breaking whenever
+  // the FileList didn't happen to put the .cue first (Codex review finding,
+  // P1 on commit e664df0). ENTRY_EXTS is checked first; the multiFile-flag
+  // find() stays as a fallback for any future multi-file core keyed off a
+  // non-disc-image entry extension.
   const primary = isMultiFile
-    ? (files.find((f) => detectCore(f.name, coreOverride)?.multiFile) || files[0])
+    ? (files.find((f) => ENTRY_EXTS.has(extOf(f.name)))
+      || files.find((f) => detectCore(f.name, coreOverride)?.multiFile)
+      || files[0])
     : files[0];
   // .cue and .chd are ambiguous between PS1 (mednafen_psx_hw) and PS2 (play) —
   // AMBIGUOUS_EXT_DEFAULT in systems.js always guesses `play` absent an
@@ -6240,8 +6253,13 @@ romInput.addEventListener('change', async (e) => {
     return;
   }
 
-  // Derive system and a display title from the filename.
-  const system = systemForFile(primary.name, coreOverride);
+  // Derive system and a display title from the filename. effectiveOverride
+  // (not the original coreOverride) so a sniffed PS1 .cue's system matches
+  // the core it actually resolved to above — otherwise a real PS1 disc would
+  // boot mednafen_psx_hw but persist/route as system 'ps2' anyway, sending
+  // its input/peripheral wiring (e.g. GunCon vs GunCon2) down the wrong path
+  // (Codex review finding, P1 on commit e664df0).
+  const system = systemForFile(primary.name, effectiveOverride);
   const title = primary.name.replace(/\.[^.]+$/, ''); // strip extension
 
   // Build a normalised meta object identical in shape to what handleCartridgeInserted expects.

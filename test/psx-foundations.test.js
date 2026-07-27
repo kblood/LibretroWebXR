@@ -100,6 +100,17 @@ test('BIOS import: legacy unrecognized records self-heal to the probed mount nam
   assert.equal(healUnrecognizedMountName(recognized), recognized);
   const alreadyHealed = { name: 'scph5501.bin', recognized: false, displayName: 'x.bin' };
   assert.equal(healUnrecognizedMountName(alreadyHealed), alreadyHealed);
+
+  // Codex review finding (P1 on commit e664df0): a record from BEFORE the
+  // `recognized` field existed at all has it as `undefined`, not `false` —
+  // but the pre-f2f30c9 import() only ever accepted an exact MD5 match, so
+  // EVERY such legacy record is a genuine canonical BIOS. Checking only
+  // `record.recognized` (falsy for `undefined`) wrongly renamed real Japan/
+  // Europe BIOS records to the North-America alias, corrupting them.
+  const legacyCanonicalJapan = { name: 'scph5500.bin', region: 'Japan' };
+  assert.equal(healUnrecognizedMountName(legacyCanonicalJapan), legacyCanonicalJapan);
+  const legacyCanonicalEurope = { name: 'scph5502.bin', region: 'Europe' };
+  assert.equal(healUnrecognizedMountName(legacyCanonicalEurope), legacyCanonicalEurope);
 });
 
 test('disc bridge ejects, selects, inserts, and rejects invalid indices', () => {
