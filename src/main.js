@@ -5329,7 +5329,9 @@ async function buildStartOptions(coreInfo, meta = {}, content = null) {
 // reference — deliberately more permissive than ContentBundle.js's
 // normalizeContentPath (allows `..`); see resolvePs2DiscCue's call site.
 function normalizeCueTrackPath(input) {
-  const raw = String(input || '').replace(/\\/g, '/').trim();
+  // No .trim() here: a quoted FILE reference's leading/trailing spaces
+  // (e.g. FILE " track.bin" BINARY) are part of the literal filename.
+  const raw = String(input || '').replace(/\\/g, '/');
   if (!raw) return '';
   if (raw.includes('\0')) throw new Error('Cue track paths cannot contain NUL characters');
   if (/^[a-z][a-z\d+.-]*:/i.test(raw) || raw.startsWith('//') || raw.startsWith('/')) {
