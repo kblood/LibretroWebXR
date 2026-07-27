@@ -121,9 +121,20 @@ function tryCopyFrom(srcDir) {
     // another machine/session's un-patched build would otherwise silently
     // overwrite, leaving SYSTEMS.psx.lightgun.broken=false pointed at a core
     // that can't actually register a shot again.
-    if (isProtected(core)) {
+    // Only honor the protection if the on-disk build is actually complete
+    // (both .js and .wasm — the two files checkCustomCoresPresent() hard-
+    // requires below). A PATCHED entry pointing at a partial/tampered build
+    // (e.g. .wasm present but .js missing) must NOT block a supplied source
+    // from repairing it — that would silently ship (or hard-fail on) a core
+    // that can't even boot, which is worse than losing the light-gun patch.
+    const hasCompleteBuild = existsSync(join(DEST, `${core}_libretro.js`)) &&
+      existsSync(join(DEST, `${core}_libretro.wasm`));
+    if (isProtected(core) && hasCompleteBuild) {
       console.warn(`  ⚠ keeping PATCHED ${core} (light-gun build) — not overwriting with a different custom-core build. Use --refresh-patched to override.`);
       continue;
+    }
+    if (isProtected(core) && !hasCompleteBuild) {
+      console.warn(`  ⚠ PATCHED ${core} is listed but its local build is incomplete (missing .js or .wasm) — repairing from source instead of protecting it.`);
     }
     for (const ext of ['js', 'wasm', ...CUSTOM_CORE_EXTRA_EXTS]) {
       const name = `${core}_libretro.${ext}`;
