@@ -75,7 +75,18 @@ const CORES = [
 // systems are registered and visible in the app but their core files 404 —
 // this script had no idea they existed. See the hard-error check below.
 const CUSTOM_CORES = ['play', 'mednafen_psx_jit', 'mupen64plus_next'];
-const CUSTOM_CORE_EXTRA_EXTS = ['worker.js', 'build.json']; // best-effort, no warning if absent
+// All three are pthread/Emscripten builds and each actually ships a
+// `.worker.js` (verified on disk 2026-07-27 — every one of
+// play/mednafen_psx_jit/mupen64plus_next has one in public/cores/), so it's
+// treated as REQUIRED alongside .js/.wasm below, not best-effort: a core
+// missing its pthread pool worker file fails to boot (PTHREAD_POOL_SIZE>0
+// needs it to spin up worker threads), which is exactly the kind of
+// "registered but silently broken" gap the 2026-07-24 review below was
+// about. `.build.json` stays best-effort — it's sha256/pin metadata with a
+// documented fallback (RuntimeEmulatorClient.resolveCoreBuildHash), not
+// something the core needs to boot.
+const CUSTOM_CORE_REQUIRED_EXTS = ['js', 'wasm', 'worker.js'];
+const CUSTOM_CORE_EXTRA_EXTS = ['build.json']; // best-effort, no warning if absent
 
 // Candidate local source dirs, in priority order. No hardcoded sibling-
 // checkout path here on purpose (2026-07-24 review finding: this used to
@@ -122,26 +133,27 @@ function tryCopyFrom(srcDir) {
     // overwrite, leaving SYSTEMS.psx.lightgun.broken=false pointed at a core
     // that can't actually register a shot again.
     // Only honor the protection if the on-disk build is actually complete
-    // (both .js and .wasm — the two files checkCustomCoresPresent() hard-
+    // (.js, .wasm AND .worker.js — the files checkCustomCoresPresent() hard-
     // requires below). A PATCHED entry pointing at a partial/tampered build
-    // (e.g. .wasm present but .js missing) must NOT block a supplied source
-    // from repairing it — that would silently ship (or hard-fail on) a core
-    // that can't even boot, which is worse than losing the light-gun patch.
-    const hasCompleteBuild = existsSync(join(DEST, `${core}_libretro.js`)) &&
-      existsSync(join(DEST, `${core}_libretro.wasm`));
+    // (e.g. .wasm present but .js or .worker.js missing) must NOT block a
+    // supplied source from repairing it — that would silently ship (or
+    // hard-fail on) a core that can't even boot, which is worse than losing
+    // the light-gun patch.
+    const hasCompleteBuild = CUSTOM_CORE_REQUIRED_EXTS.every(
+      (ext) => existsSync(join(DEST, `${core}_libretro.${ext}`)));
     if (isProtected(core) && hasCompleteBuild) {
       console.warn(`  ⚠ keeping PATCHED ${core} (light-gun build) — not overwriting with a different custom-core build. Use --refresh-patched to override.`);
       continue;
     }
     if (isProtected(core) && !hasCompleteBuild) {
-      console.warn(`  ⚠ PATCHED ${core} is listed but its local build is incomplete (missing .js or .wasm) — repairing from source instead of protecting it.`);
+      console.warn(`  ⚠ PATCHED ${core} is listed but its local build is incomplete (missing .js/.wasm/.worker.js) — repairing from source instead of protecting it.`);
     }
-    for (const ext of ['js', 'wasm', ...CUSTOM_CORE_EXTRA_EXTS]) {
+    for (const ext of [...CUSTOM_CORE_REQUIRED_EXTS, ...CUSTOM_CORE_EXTRA_EXTS]) {
       const name = `${core}_libretro.${ext}`;
       if (have.has(name)) {
         copyFileSync(join(srcDir, name), join(DEST, name));
         copied++;
-      } else if (ext === 'js' || ext === 'wasm') {
+      } else if (CUSTOM_CORE_REQUIRED_EXTS.includes(ext)) {
         console.warn(`  ! missing in source (custom-built core — see the CUSTOM_CORES comment above): ${name}`);
       }
     }
@@ -159,9 +171,9 @@ function tryCopyFrom(srcDir) {
 function checkCustomCoresPresent() {
   const missing = [];
   for (const core of CUSTOM_CORES) {
-    const hasJs = existsSync(join(DEST, `${core}_libretro.js`));
-    const hasWasm = existsSync(join(DEST, `${core}_libretro.wasm`));
-    if (!hasJs || !hasWasm) missing.push(core);
+    const complete = CUSTOM_CORE_REQUIRED_EXTS.every(
+      (ext) => existsSync(join(DEST, `${core}_libretro.${ext}`)));
+    if (!complete) missing.push(core);
   }
   if (!missing.length) return;
   console.error(`

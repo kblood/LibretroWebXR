@@ -104,12 +104,27 @@ patch's own `Makefile.emscripten` hunk (adding `_rwebinput_set_lightgun,
 _rwebinput_clear_lightgun` to `EXPORTED_FUNCTIONS`) no longer applies
 cleanly once `retroarch-worker-module.patch` has already rewritten that
 exact line — instead of a third patch file, insert those two export names
-into the already-patched `EXPORTED_FUNCTIONS` line directly (e.g. `sed -i
-'s/_lr_play_backend_invalidate_all/_lr_play_backend_invalidate_all,
-_rwebinput_set_lightgun,_rwebinput_clear_lightgun/'
-Makefile.emscripten` — `_lr_play_backend_invalidate_all` is the last symbol
+into the already-patched `EXPORTED_FUNCTIONS` line directly. **Guard the
+insert so a second build.sh run against an already-patched Makefile doesn't
+duplicate the symbols** (the same idempotency the two `git apply --check` /
+`--reverse --check` patch blocks already give the other two patches):
+
+```sh
+if ! grep -q '_rwebinput_set_lightgun' Makefile.emscripten; then
+  grep -q '_lr_play_backend_invalidate_all' Makefile.emscripten || {
+    echo "expected worker-module patch marker not found; insertion anchor changed" >&2; exit 1; }
+  sed -i 's/_lr_play_backend_invalidate_all/_lr_play_backend_invalidate_all,_rwebinput_set_lightgun,_rwebinput_clear_lightgun/' \
+    Makefile.emscripten
+  grep -q '_rwebinput_set_lightgun' Makefile.emscripten || {
+    echo "failed to insert rwebinput lightgun exports" >&2; exit 1; }
+fi
+```
+
+`_lr_play_backend_invalidate_all` is the last symbol
 `retroarch-worker-module.patch` itself adds, so it's a stable insertion
-point). Verify the export made it into the link command
+point **as long as that patch's own content doesn't change** — the explicit
+`grep` check before the `sed` fails loudly instead of silently no-op'ing if
+the anchor ever moves. Verify the export made it into the link command
 (`grep _rwebinput_set_lightgun` in the `emcc ... -o mednafen_psx_jit_libretro.js`
 invocation, or in the built `.js` glue afterward) before trusting the
 artifact.
@@ -133,7 +148,11 @@ crosshair; after firing at the on-screen calibration target, the settled
 frame shows the screen has genuinely advanced to "Is the gun sight aligned
 correctly? / Retry: Re-aim and shoot again. / End: Press A or B" with a red
 calibration dot now inside the crosshair — the game's own state machine
-reacted to the shot, not just a changed pixel count. `npm test` also passed
+reacted to the shot, not just a changed pixel count. (The actual PNGs are
+`tmp/psx-guncon-baseline.png` / `tmp/psx-guncon-trigger-down.png` /
+`tmp/psx-guncon-trigger-up.png`, written fresh by each `probe:psx-guncon`
+run — `tmp/` is gitignored, so they aren't committed here; re-run the probe
+to regenerate them.) `npm test` also passed
 in full afterward (every suite, 0 failures) — no regressions from the
 `broken: false` flip.
 

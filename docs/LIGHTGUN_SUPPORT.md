@@ -295,12 +295,14 @@ The patched cores in `public/cores/` are **local builds** and are gitignored.
 stock (no-lightgun) cores and silently break gun games in production.
 
 **Now guarded.** A local marker `public/cores/PATCHED.json` lists the patched cores
-(`nestopia` / `snes9x` / `genesis_plus_gx`); `scripts/fetch-cores.mjs` reads it and
-**skips** those cores when a build is present here (prints `⚠ keeping PATCHED …`), so
-deploy preserves them. The marker is gitignored with the cores, so a fresh checkout
-(no marker, no build) just fetches stock — nothing to protect. To intentionally pull a
-gun core back to stock: `node scripts/fetch-cores.mjs --refresh-patched` (or drop its
-entry from `PATCHED.json`).
+(`nestopia` / `snes9x` / `genesis_plus_gx`, plus the custom-built `mednafen_psx_jit`
+PSX core as of 2026-07-27 — see docs/PSX_CORE_BUILD.md's "Light-gun (GunCon) support"
+section); `scripts/fetch-cores.mjs` reads it and **skips** those cores when a complete
+build is present here (prints `⚠ keeping PATCHED …`), so deploy preserves them. The
+marker is gitignored with the cores, so a fresh checkout (no marker, no build) just
+fetches stock — nothing to protect. To intentionally pull a gun core back to stock:
+`node scripts/fetch-cores.mjs --refresh-patched` (or drop its entry from
+`PATCHED.json`).
 
 To rebuild the patched cores from scratch (e.g. on a new machine): apply
 `docs/patches/rwebinput-lightgun.diff` and relink via the recipe above — the warm WSL2
