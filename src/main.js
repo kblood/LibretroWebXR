@@ -5899,6 +5899,11 @@ async function rebootPrimaryConsole(meta, gun, mouse = null) {
   // bootFreshRuntime a null buffer instead of the reconstructed bundle.
   const content = coreInfo.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, coreInfo, meta) : buf;
   const coreOptions = dev ? { ...(core.coreOptions || {}), ...dev.coreOptions } : core.coreOptions;
+  // Flush the OLD runtime's SaveRAM before buildStartOptions reads the persisted
+  // copy back out of saveRamStore below — otherwise a write made since the last
+  // 30s flush would be rolled back by the stale record it's about to restore
+  // (P2, Codex review of 02542e6).
+  await flushCurrentSaveRam();
   // BIOS/restored-SaveRAM resolution, same as every other boot path (buildStartOptions
   // is a no-op past the coreOptions/execution fields for non-worker cores).
   const startOptions = await buildStartOptions(coreInfo, { file: meta.file, title: meta.title }, content);
@@ -5926,7 +5931,11 @@ async function rebootPrimaryConsole(meta, gun, mouse = null) {
   // Mirror loadCartridge's post-boot bookkeeping so the rest of the app agrees on
   // what's now running on the primary (and that the gun device is connected).
   currentCore = coreName;
-  currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system };
+  // contentId (mirrors loadCartridge's bookkeeping) is what flushCurrentSaveRam()
+  // keys writes on — omitting it silently stopped ALL memory-card persistence
+  // after a gun/mouse arm-reboot, including the pagehide flush (P1, Codex review
+  // of 02542e6).
+  currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system, contentId: content?.contentId ?? null };
   _lastLoadedMeta = meta;
   _lightgunArmedConsole = !!gun;
   _twoGunPorts = (gun && gun.guns?.length > 1) ? gun.guns.map((x) => x.port) : [];
