@@ -2763,6 +2763,52 @@ async function buildCartridgeWorld() {
       sources: meta.rom.sources || [meta.rom.source],
     };
   };
+  /**
+   * Multi-file sibling of __pickLocalRom above, for headless verification of a
+   * worker-execution core's CUE+BIN-style bundle WITH light-gun wiring. The
+   * real desktop `#rom-input` change handler (below) accepts multi-file
+   * selections but never computes gun/mouse/four-score config for them — it
+   * only threads `{ file }` through buildStartOptions (see that handler) —
+   * so there was previously no in-app way to boot a multi-track disc with its
+   * light gun connected at boot (the device only attaches at boot; see
+   * docs/LIGHTGUN_SUPPORT.md). Added for the PSX GunCon probe
+   * (scripts/probe-psx-guncon.js); mirrors __pickLocalRom's gun-wiring branch
+   * verbatim, adapted for a File[] array (ContentBundle.fromFiles) instead of
+   * one in-hand ArrayBuffer. opts: { core, system, lightgun, twoGun }.
+   */
+  window.__pickLocalRomMultiFile = async (files, opts = {}) => {
+    const primary = files.find((f) => detectCore(f.name, coreOverride)?.multiFile) || files[0];
+    const coreInfo = (opts.core && CORES[opts.core]) ? { name: opts.core, ...CORES[opts.core] } : detectCore(primary.name, coreOverride);
+    if (!coreInfo) throw new Error(`no core for "${primary.name}"`);
+    if (!coreInfo.multiFile) throw new Error(`${coreInfo.label} doesn't accept a multi-file selection`);
+    const system = opts.system || systemForFile(primary.name, coreOverride);
+    const title = primary.name.replace(/\.[^.]+$/, '');
+    const meta = {
+      file: primary.name, core: coreInfo.name, system: system || 'unknown', title, rom: { source: 'pick' },
+      ...(opts.lightgun ? { lightgun: true } : {}), ...(opts.twoGun ? { twoGun: true } : {}),
+    };
+    const twoGun = _twoGunActiveFor(meta);
+    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system, { twoGun }) : null;
+    const bootCore = (gun && CORES[gun.core]) ? { ...CORES[gun.core], name: gun.core } : coreInfo;
+    const inputDevices = window.__forceInputDevices || gun?.inputDevices;
+    const coreOptions = window.__forceCoreOptions
+      ? { ...(bootCore.coreOptions || {}), ...window.__forceCoreOptions }
+      : (gun ? { ...(bootCore.coreOptions || {}), ...gun.coreOptions } : bootCore.coreOptions);
+    const remapName = window.__forceRemapName || gun?.remapName || bootCore.remapName;
+    logLightgunBoot('pickLocalRomMultiFile', meta, gun, { forcedInputDevices: !!window.__forceInputDevices });
+    const { ContentBundle } = await import('./ContentBundle.js');
+    const content = await ContentBundle.fromFiles(files, { entryExtensions: bootCore.exts });
+    const startOptions = await buildStartOptions(bootCore, { file: meta.file, coreOptions, inputDevices, remapName, systemFiles: bootCore.systemFiles }, content);
+    await bootOnPrimary(meta, bootCore, content, startOptions);
+    rackMgr.get(CONSOLE_ID)?.noteLoaded(bootCore.name, { system: meta.system, title });
+    currentCore = bootCore.name;
+    currentMeta = { core: bootCore.name, file: meta.file, title, system: meta.system, contentId: content?.contentId ?? null };
+    gameInput?.setSystem(meta.system);
+    _lastLoadedMeta = { ...meta };
+    _lightgunArmedConsole = !!gun;
+    _twoGunPorts = (gun && gun.guns?.length > 1) ? gun.guns.map((x) => x.port) : [];
+    return { system: meta.system, core: bootCore.name, gun: !!gun, inputDevices, remapName };
+  };
   window.__add = {
     // Basic spawners (used by headless probes + the in-VR Add-mode buttons).
     shelf:    (col) => addProp('shelf',    col ? { collection: col } : {}),
@@ -5293,7 +5339,11 @@ async function buildStartOptions(coreInfo, meta = {}, content = null) {
     coreUrl: coreInfo.url,
     coreName: coreInfo.name,
     moduleStyle: coreInfo.style,
-    contentExt: extOf(meta.file),
+    // meta.contentExt lets a caller override the extension EmulatorClient sees
+    // (used by the PS2 .cue resolution below: the resolved bytes are the
+    // primary disc track, not the .cue itself, so the VFS/bridge path must
+    // look like the already-working .iso case, not .cue).
+    contentExt: meta.contentExt ?? extOf(meta.file),
     coreOptions: meta.coreOptions ?? coreInfo.coreOptions,
     inputDevices: meta.inputDevices,
     remapName: meta.remapName ?? coreInfo.remapName,
@@ -5302,6 +5352,11 @@ async function buildStartOptions(coreInfo, meta = {}, content = null) {
     requiresThreads: coreInfo.requiresThreads,
     coreBuildHash: coreInfo.buildHash,
   };
+  // Explicit override for Play!'s (PS2) discImageDevice bridge — set when a
+  // .cue was resolved to its primary track's bytes upstream (see
+  // resolvePs2DiscCue). Omitted (undefined) for every other boot, preserving
+  // EmulatorClient's own extension-based auto-detect (DISC_IMAGE_EXTS).
+  if (meta.discImage !== undefined) options.discImage = meta.discImage;
   if (coreInfo.execution !== 'worker') return options;
 
   if (coreInfo.firmwareProfile) {
@@ -5316,6 +5371,44 @@ async function buildStartOptions(coreInfo, meta = {}, content = null) {
   return options;
 }
 
+// PS2 (`play`) is a main-thread core (no `execution: 'worker'`), so it never
+// goes through wrapWorkerContent above — it gets raw ArrayBuffer bytes handed
+// straight to EmulatorClient.start(). Play!'s Emscripten build routes every
+// optical-disc-image open through a JS discImageDevice bridge with ONE global
+// slot (see EmulatorClient.js's DISC_IMAGE_EXTS comment) — handing it a raw
+// .cue would make Play!'s OWN cue-sheet parser open a SECOND stream (for the
+// referenced .bin) that collides with the first on that same slot. Real PS2
+// discs are single-track DVD-ROM/ISO9660+UDF images though (unlike PSX, which
+// genuinely needs multi-track CD-DA — handled entirely by mednafen's own
+// native CD-ROM emulation, a different core/path), so a cue sheet's PRIMARY
+// (first) FILE line is always the one and only track Play! actually needs.
+// Resolve it ourselves: parse the cue with the same FILE-line parser
+// ContentBundle.js already exposes (parseCueReferences — also relied on by
+// wrapWorkerContent's fetchCompanion above for PSX), fetch just that track
+// the same way we fetched the .cue itself, and hand ITS bytes to the bridge
+// as if it were an .iso. Play! never sees a .cue file at all, so there is
+// nothing left to collide — no bridge/C++ changes, no hardlink alias needed.
+// Only usable for a fetchable ('url') entry — a 'pick'/'local' .cue has no
+// server URL for the track to live alongside; out of scope here (PS2 has no
+// pick/local multi-file flow yet, only the collection/cartridge-insert path).
+async function resolvePs2DiscCue(meta, cueBuf) {
+  const { parseCueReferences } = await import('./ContentBundle.js');
+  const text = new TextDecoder('utf-8').decode(new Uint8Array(cueBuf));
+  const [track] = parseCueReferences(text);
+  if (!track) throw new Error(`"${meta.file}" has no FILE reference — not a usable cue sheet`);
+  const entryUrl = romUrlFor(meta);
+  if (!entryUrl || !entryUrl.endsWith(meta.file)) {
+    throw new Error(`cannot resolve "${track}" alongside "${meta.file}" (no fetchable URL for this entry)`);
+  }
+  const rootUrl = entryUrl.slice(0, entryUrl.length - meta.file.length);
+  const dir = meta.file.includes('/') ? meta.file.slice(0, meta.file.lastIndexOf('/') + 1) : '';
+  const trackPath = dir + track;
+  const url = rootUrl + trackPath.split('/').map(encodeURIComponent).join('/');
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url} → ${res.status}`);
+  return { buf: await res.arrayBuffer(), track, trackPath };
+}
+
 async function loadCartridge(meta, { echo = true } = {}) {
   setStatus(`loading ${meta.title}…`);
   // Boot telemetry (diagnoses headset boot failures): how the ROM resolves +
@@ -5328,7 +5421,7 @@ async function loadCartridge(meta, { echo = true } = {}) {
   try {
     // RomResolver (Phase R.2) turns the entry into bytes from url / local
     // folder / picker / OPFS cache, per its rom.source (default: url).
-    const buf = await resolveRom(meta);
+    let buf = await resolveRom(meta);
     // Light-gun wiring: when this load is gun-enabled (the game is flagged, or a
     // gun has been armed for this session), boot the gun's (patched) core with the
     // peripheral assigned to its port — the device only connects at boot, so it
@@ -5359,6 +5452,23 @@ async function loadCartridge(meta, { echo = true } = {}) {
     const mouse = wantMouse ? mouseLoadConfig(meta.system, { twoMouse }) : null;
     const inputDevices = gun?.inputDevices ?? mouse?.inputDevices ?? fourScore?.inputDevices;
     const remapName = gun?.remapName ?? mouse?.remapName ?? fourScore?.remapName ?? core.remapName;
+    // PS2 (`play`) .cue resolution — see resolvePs2DiscCue's doc comment above.
+    // Runs before the rom-resolved log below so that log (and every downstream
+    // consumer of `buf`) reflects the real resolved disc track, not the tiny
+    // cue-sheet text.
+    let discImageOverride;
+    if (coreName === 'play' && extOf(meta.file) === 'cue') {
+      const resolved = await resolvePs2DiscCue(meta, buf);
+      buf = resolved.buf;
+      discImageOverride = true;
+      const detail = { cue: meta.file, track: resolved.track, trackPath: resolved.trackPath, bytes: buf.byteLength };
+      logger?.event?.('ps2-cue-resolved', detail);
+      // Test/probe hook (mirrors window.__client, __insertCartridge, etc.) —
+      // lets scripts/probe-ps2-cue-support.mjs assert the real cue-resolution
+      // path actually ran, not just that the game happened to boot some other
+      // way. Harmless in normal use (nothing reads it outside tests).
+      window.__lastPs2CueResolve = detail;
+    }
     logger?.event?.('rom-resolved', { file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url, lightgun: !!gun, twoGun: !!(gun && gun.guns?.length > 1), mouse: !!mouse, twoMouse: !!(mouse && mouse.mice?.length > 1), fourScore: !!fourScore });
     logLightgunBoot('loadCartridge', meta, gun);
     if (mouse) logger?.event?.('mouse-boot', { where: 'loadCartridge', system: meta.system, inputDevices: mouse.inputDevices, mice: mouse.mice, remapName: mouse.remapName });
@@ -5368,7 +5478,10 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // did this, so the real cartridge-insert path never gave a worker core its
     // BIOS or a chance to restore native SaveRAM.
     const content = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, core, meta) : buf;
-    const startOptions = await buildStartOptions({ ...core, name: coreName }, { file: meta.file, coreOptions, inputDevices, remapName, systemFiles: core.systemFiles }, content);
+    const startOptions = await buildStartOptions({ ...core, name: coreName }, {
+      file: meta.file, coreOptions, inputDevices, remapName, systemFiles: core.systemFiles,
+      discImage: discImageOverride, contentExt: discImageOverride ? 'iso' : undefined,
+    }, content);
     await bootOnPrimary(meta, { name: coreName, url: core.url, style: core.style }, content, startOptions);
     rackMgr.get(CONSOLE_ID)?.noteLoaded(coreName, { system: meta.system, title: meta.title });
     currentCore = coreName;

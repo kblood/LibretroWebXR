@@ -52,6 +52,7 @@
     "probe:n64-scene-render": "node scripts/probe-n64-scene-render.mjs",
     "probe:n64-mario64": "node scripts/probe-n64-mario64.mjs",
     "probe:ps2-timecrisis2": "node scripts/probe-ps2-timecrisis2.mjs",
+    "probe:ps2-cue-support": "node scripts/probe-ps2-cue-support.mjs",
     "probe:psx-timecrisis": "node scripts/probe-psx-timecrisis.js",
     "measure:n64-fps": "node scripts/measure-n64-fps.js"
   },

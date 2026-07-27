@@ -28,11 +28,17 @@ const ROM_VFS_DIR = '/rom';
 // wraps a single CreateImageStream() in CChdCdImageStream — libchdr's chd_open
 // then does its own random-access hunk reads through that one stream, which the
 // bridge already supports via its offset-aware read()). `.cue` is deliberately
-// excluded: it parses into TWO CreateImageStream() calls (cue text + referenced
-// .bin), both hitting the same global Module.discImageDevice singleton with no
-// way to tell them apart — genuinely unsupported until this app's loader gains a
-// multi-file-per-ROM concept. `.elf` homebrew boots via the normal MEMFS path,
-// not this bridge, so it's excluded too.
+// excluded HERE: fed to Play! directly, it parses into TWO CreateImageStream()
+// calls (cue text + referenced .bin), both hitting the same global
+// Module.discImageDevice singleton with no way to tell them apart — that's
+// still true at THIS layer. A real `.cue` IS supported end-to-end though: this
+// class never sees one — main.js's loadCartridge resolves it upstream (parses
+// the cue with ContentBundle.js's parseCueReferences, fetches just the primary
+// data track's bytes) and calls start() with an explicit `opts.discImage: true`
+// override (see the `_discImage` assignment below) plus `contentExt: 'iso'`, so
+// the VFS path/bridge see exactly the shape of an already-working single-file
+// disc image. `.elf` homebrew boots via the normal MEMFS path, not this
+// bridge, so it's excluded too.
 const DISC_IMAGE_EXTS = new Set(['iso', 'cso', 'isz', 'chd']);
 // Some cores identify content by its file *extension*, not by sniffing the
 // bytes — e.g. PUAE (Amiga) rejects a disk image named `.bin` with
