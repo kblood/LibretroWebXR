@@ -6,7 +6,7 @@ if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const { ContentBundle, ContentBundleError, normalizeContentPath, parseCueReferences } = await import('../src/ContentBundle.js');
 const { CORES, coreForFile } = await import('../src/systems.js');
-const { md5Hex } = await import('../src/FirmwareStore.js');
+const { md5Hex, validatePsxFirmware, PSX_FIRMWARE } = await import('../src/FirmwareStore.js');
 const { DiscControlBridge, discEntriesFromBundle } = await import('../src/DiscControl.js');
 const { checkSaveStateCompatibility, prepareSaveStatePayload } = await import('../src/SaveState.js');
 
@@ -46,6 +46,26 @@ test('ContentBundle reports traversal and missing tracks before runtime', async 
 test('MD5 implementation matches RFC vectors', () => {
   assert.equal(md5Hex(new TextEncoder().encode('')), 'd41d8cd98f00b204e9800998ecf8427e');
   assert.equal(md5Hex(new TextEncoder().encode('abc')), '900150983cd24fb0d6963f7d28e17f72');
+});
+
+test('BIOS import: unrecognized-but-plausible dump imports with a warning, wrong size is rejected', async () => {
+  // Real BIOS bytes are copyrighted and can't be shipped in this repo's test
+  // suite, so the "recognized" match path can't be exercised with a genuine
+  // scph MD5 here — this covers the two paths that matter for the
+  // import-with-warning fix: a right-size-but-unmatched dump (imports with a
+  // warning, region unknown) and a wrong-size file (rejected outright, since
+  // there's no basis for treating it as any kind of BIOS).
+  assert.equal(PSX_FIRMWARE.length > 0, true);
+
+  const plausible = await validatePsxFirmware(new Blob([new Uint8Array(524288).fill(0x42)]), 'my-dump.bin');
+  assert.equal(plausible.valid, true);
+  assert.equal(plausible.recognized, false);
+  assert.equal(plausible.region, null);
+  assert.match(plausible.message, /importing anyway/);
+
+  const wrongSize = await validatePsxFirmware(new Blob([new Uint8Array(100)]), 'not-a-bios.bin');
+  assert.equal(wrongSize.valid, false);
+  assert.match(wrongSize.message, /Not a PlayStation BIOS/);
 });
 
 test('disc bridge ejects, selects, inserts, and rejects invalid indices', () => {

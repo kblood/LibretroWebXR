@@ -608,3 +608,57 @@ scene's own `(8,8,16)` background), which is correct in both regimes.
 audio, frame pump, save/EEPROM API, and now real face color all verified
 through the real cartridge-insert path. PSX remains the one core with an
 open rendering gap.**
+
+## Status update (2026-07-27): PSX GunCon, PS2 `.cue`, and Phase C's C3 (BIOS import) all closed; C5 done
+
+Since the fifth pass above, all three cores' "plays real commercial games"
+bar was independently re-verified (see memory `real-commercial-game-verification.md`
+— out of scope for this doc's tracking, a different, narrower claim than
+Phase C). Remaining Phase C items have since progressed:
+
+- **C5 (PS2 `.cue` support) — DONE.** Backslash paths, URL-suffix-match
+  fragility, and secondary-console swaps all fixed; see memory
+  `ps2-cue-secondary-console-fixed.md`. Commits `02babf1`/`d8101bc`/`ec89e16`.
+- **PSX GunCon — DONE** (a separate item from this doc's original Phase
+  list, added when GunCon support was implemented after this doc's fifth
+  pass). Root cause: the core build never applied the `rwebinput`
+  light-gun patch every other gun-capable core here needs. Fixed by
+  rebuilding `psx-wasm-jit-libretro` with the patch applied; see memory
+  `psx-guncon-app-wired-core-gap.md`. Commits `1a1856c`..`cc662d1`.
+  `SYSTEMS.psx.lightgun.broken` is now `false`.
+- **C3 (BIOS import fix) — DONE.** `FirmwareStore.import()` used to hard-reject
+  any file whose MD5 didn't match one of the 3 canonical SCPH-5500/5501/5502
+  dumps — most real-world BIOS dumps (other revisions/regions, patched
+  images) failed to import at all. Now: any 512KB file imports successfully
+  (a genuine PS1 BIOS is always exactly 512KB across every known revision),
+  recognized dumps get their known region, unrecognized ones import with an
+  explicit "region unknown" warning instead of being rejected. Only a
+  wrong-size file is still rejected outright (no basis for treating it as
+  any kind of BIOS). `FirmwareStore.getPreferred()` was already
+  region-aware in its own logic but nothing ever passed it a real region —
+  `buildStartOptions()` now derives a best-effort region hint from the
+  cartridge title/filename's "(Region)" bracket tag (the No-Intro/Redump
+  convention this project's own titles already use) and passes it through.
+  Deliberately did NOT expand `PSX_FIRMWARE`'s known-MD5 list with
+  additional hashes sourced from memory/web search — cross-checking found a
+  real, documented case of a well-known emulation database (libretro-database)
+  having a WRONG MD5 on record for a canonical BIOS filename (confused with
+  a debug/dev BIOS variant); shipping an unverified hash risks silently
+  misidentifying a user's real BIOS, which the import-with-warning fix makes
+  unnecessary anyway (an unmatched-but-plausible dump now works regardless).
+  `src/FirmwareStore.js`, `src/main.js` (`buildStartOptions`,
+  `firmwareInput` handler). Test coverage added in
+  `test/psx-foundations.test.js`. `npm test` clean, `probe:psx-testdisc` and
+  `probe:psx-guncon` re-verified clean (neither probe imports a BIOS
+  explicitly, both rely on the core's bundled OpenBIOS fallback — confirmed
+  the `getPreferred(profile, region)` signature change doesn't affect that
+  path since there are no stored records either way).
+- **PSX Lightrec JIT + GL renderer — investigated, NOT fixed.** See memory
+  `psx-lightrec-gl-investigation-2026-07-27.md` for concrete leads (a
+  Lightrec `lightrec_get_map()` memory-region-registration timing issue; a
+  `rhi_lib_gl.c`-vs-`glsm.c` GL-context-shim divergence under Emscripten) —
+  a deeper instrumented-debugging pass is in progress as of this update.
+- **Still open:** C1 (streaming content), C2 (DiscIdentity wiring), C4
+  (multi-file shelf persistence), C6 (delete `DiscControl.js` duplication +
+  real disc-swap UI). See memory `psx-phase-c-n64-phase-d-goal.md` for the
+  standing goal tracking all of this.

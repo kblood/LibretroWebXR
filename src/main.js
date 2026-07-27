@@ -5270,6 +5270,22 @@ async function wrapWorkerContent(filename, source, coreInfo, meta = null) {
   return ContentBundle.fromNamedSources([{ path: filename, source }], { entryExtensions: coreInfo.exts });
 }
 
+// Best-effort region hint from a cartridge's title/filename, using the
+// standard No-Intro/Redump "(Region)" bracket convention this project's own
+// authored + real-game titles already follow (e.g. "Time Crisis II (Japan)
+// (With GunCon2)"). Not real disc inspection (that would be DiscIdentity.js
+// parsing SYSTEM.CNF's serial prefix — SLUS/SLES/SLPS — which isn't wired
+// into any boot path yet), but it's enough to make FirmwareStore.getPreferred
+// actually region-aware instead of ignoring region entirely, and costs
+// nothing when a title has no region tag (falls back to null, same as today).
+function regionHintFromMeta(meta) {
+  const text = `${meta?.title || ''} ${meta?.file || ''}`;
+  if (/\((?:usa|us|na)\)/i.test(text)) return 'North America';
+  if (/\(europe\)/i.test(text)) return 'Europe';
+  if (/\(japan\)/i.test(text)) return 'Japan';
+  return null;
+}
+
 /**
  * Build the options object for client.start() / ConsoleRuntime.load(), given a
  * resolved core + boot meta + already-prepared content. `meta` carries the
@@ -5314,7 +5330,8 @@ async function buildStartOptions(coreInfo, meta = {}, content = null) {
   if (coreInfo.execution !== 'worker') return options;
 
   if (coreInfo.firmwareProfile) {
-    const record = await firmwareStore.getPreferred(coreInfo.firmwareProfile).catch(() => null);
+    const region = regionHintFromMeta(meta);
+    const record = await firmwareStore.getPreferred(coreInfo.firmwareProfile, region).catch(() => null);
     if (record) options.firmware = { name: record.name, data: record.data };
     else setStatus(`${coreInfo.label} needs a BIOS — use "Import BIOS" first, then pick the game again`);
   }
@@ -6285,16 +6302,14 @@ romInput.addEventListener('change', async (e) => {
 });
 
 // BIOS import (currently PSX-only — see FirmwareStore.js). Purely local:
-// validated against known SCPH-550x MD5s and stored in IndexedDB, never
-// uploaded. An unrecognized file is REJECTED outright (FirmwareStore.import()
-// throws FirmwareValidationError — see FirmwareStore.js's import(), ~:48) —
-// only the 3 canonical SCPH-5500/5501/5502 MD5s in PSX_FIRMWARE are accepted,
-// so most real-world BIOS dumps (other revisions/regions, patched images)
-// currently fail import; the catch block below just surfaces that rejection
-// on the status line. (2026-07-24 review finding: this comment previously,
-// incorrectly, claimed unrecognized files still import with a warning — see
-// docs/research/psx-ps2-n64-review-2026-07-24.md Phase C for the actual
-// import-with-warning + missing-MD5s fix, not done here.)
+// validated and stored in IndexedDB, never uploaded. Only the 3 canonical
+// SCPH-5500/5501/5502 MD5s in PSX_FIRMWARE are RECOGNIZED (region known,
+// used to prefer a matching-region BIOS at boot — see regionHintFromMeta
+// above), but any other 512KB file (other revisions/regions, patched images
+// — most real-world BIOS dumps) now imports too, just unrecognized (region
+// unknown) — Phase C's "import-with-warning" fix
+// (docs/research/psx-ps2-n64-review-2026-07-24.md). Only a wrong-size file
+// (not a PS1 BIOS at all) is rejected outright.
 if (firmwareInput) {
   firmwareInput.addEventListener('change', async (e) => {
     const file = e.target.files?.[0];
@@ -6302,10 +6317,12 @@ if (firmwareInput) {
     if (!file) return;
     try {
       const record = await firmwareStore.import(file, { profile: 'psx' });
-      setStatus(`imported BIOS "${record.name}" (${record.region})`);
+      setStatus(record.recognized
+        ? `imported BIOS "${record.name}" (${record.region})`
+        : `imported BIOS "${record.name}" (unrecognized — region unknown, may not match every game's region)`);
     } catch (err) {
       const validation = err?.validation;
-      setStatus(validation ? `BIOS not recognized: ${validation.message}` : `BIOS import failed: ${String(err?.message || err)}`);
+      setStatus(validation ? `BIOS import rejected: ${validation.message}` : `BIOS import failed: ${String(err?.message || err)}`);
     }
   });
 }

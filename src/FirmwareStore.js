@@ -19,14 +19,21 @@ export class FirmwareValidationError extends Error {
   }
 }
 
+// A real retail PS1 BIOS is always exactly 512KB across every known
+// SCPH/DTL revision and region — used below to distinguish "a plausible but
+// unrecognized BIOS dump" (importable, with a warning) from "not a PS1 BIOS
+// at all" (rejected outright; nothing meaningful could be mounted).
+const PSX_FIRMWARE_SIZE = 524288;
+
 export async function validatePsxFirmware(source, suppliedName = source?.name || '') {
   const data = await readBytes(source);
   const md5 = md5Hex(data);
   const match = PSX_FIRMWARE.find((firmware) => firmware.md5 === md5) || null;
   const expectedByName = PSX_FIRMWARE.find((firmware) => firmware.name === suppliedName.toLowerCase()) || null;
+  const plausibleSize = data.byteLength === PSX_FIRMWARE_SIZE;
   return {
     profile: 'psx',
-    valid: !!match,
+    valid: !!match || plausibleSize,
     recognized: !!match,
     suppliedName,
     canonicalName: match?.name || null,
@@ -34,10 +41,12 @@ export async function validatePsxFirmware(source, suppliedName = source?.name ||
     size: data.byteLength,
     md5,
     filenameMatches: !!match && suppliedName.toLowerCase() === match.name,
-    sizeMatches: match ? data.byteLength === match.size : expectedByName ? data.byteLength === expectedByName.size : data.byteLength === 524288,
+    sizeMatches: match ? data.byteLength === match.size : expectedByName ? data.byteLength === expectedByName.size : plausibleSize,
     message: match
       ? (suppliedName.toLowerCase() === match.name ? `Recognized ${match.region} PlayStation BIOS` : `Recognized ${match.region} BIOS; it will be mounted as ${match.name}`)
-      : `Unrecognized PlayStation BIOS (${data.byteLength} bytes, MD5 ${md5})`,
+      : plausibleSize
+        ? `Unrecognized PlayStation BIOS (${data.byteLength} bytes, MD5 ${md5}) — importing anyway; region is unknown, so a region-specific game may not boot correctly`
+        : `Not a PlayStation BIOS: expected ${PSX_FIRMWARE_SIZE} bytes, got ${data.byteLength}`,
   };
 }
 
@@ -47,12 +56,19 @@ export class FirmwareStore {
     const validation = await validatePsxFirmware(source);
     if (!validation.valid) throw new FirmwareValidationError(validation.message, validation);
     const data = await readBytes(source);
+    // A recognized BIOS is keyed by its canonical name (scph5500.bin etc.,
+    // shared across re-imports of the same dump). An unrecognized-but-
+    // plausible one has no canonical name to key by, so fall back to its
+    // MD5 — still stable across re-imports of the same exact file, but
+    // distinct from every other unrecognized dump instead of colliding.
+    const key = validation.canonicalName || `unrecognized-${validation.md5}`;
     const record = {
-      key: `${profile}:${validation.canonicalName}`,
+      key: `${profile}:${key}`,
       profile,
-      name: validation.canonicalName,
+      name: validation.canonicalName || validation.suppliedName || key,
       suppliedName: validation.suppliedName,
       region: validation.region,
+      recognized: validation.recognized,
       size: validation.size,
       md5: validation.md5,
       importedAt: Date.now(),
