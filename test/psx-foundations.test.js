@@ -6,7 +6,7 @@ if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const { ContentBundle, ContentBundleError, normalizeContentPath, parseCueReferences } = await import('../src/ContentBundle.js');
 const { CORES, coreForFile } = await import('../src/systems.js');
-const { md5Hex, validatePsxFirmware, PSX_FIRMWARE } = await import('../src/FirmwareStore.js');
+const { md5Hex, validatePsxFirmware, mountNameFor, PSX_FIRMWARE } = await import('../src/FirmwareStore.js');
 const { DiscControlBridge, discEntriesFromBundle } = await import('../src/DiscControl.js');
 const { checkSaveStateCompatibility, prepareSaveStatePayload } = await import('../src/SaveState.js');
 
@@ -66,6 +66,14 @@ test('BIOS import: unrecognized-but-plausible dump imports with a warning, wrong
   const wrongSize = await validatePsxFirmware(new Blob([new Uint8Array(100)]), 'not-a-bios.bin');
   assert.equal(wrongSize.valid, false);
   assert.match(wrongSize.message, /Not a PlayStation BIOS/);
+
+  // Codex review finding (P1 on commit f2f30c9): mounting an unrecognized
+  // dump under the USER'S filename means the core (which only probes a
+  // fixed alias set — scph5500.bin/scph5501.bin/etc.) never finds it, so
+  // import silently succeeds but has zero effect. mountNameFor must always
+  // return one of the core's known-probed aliases, never the raw supplied name.
+  assert.equal(mountNameFor(plausible), 'scph5501.bin');
+  assert.notEqual(mountNameFor(plausible), plausible.suppliedName);
 });
 
 test('disc bridge ejects, selects, inserts, and rejects invalid indices', () => {

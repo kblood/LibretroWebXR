@@ -50,6 +50,26 @@ export async function validatePsxFirmware(source, suppliedName = source?.name ||
   };
 }
 
+// Beetle PSX HW (Mednafen's PSX core) only PROBES a fixed set of filenames
+// in the system directory when looking for a usable BIOS — it does not scan
+// for "any 512KB file". A recognized dump's canonicalName (scph5500.bin
+// etc., from PSX_FIRMWARE above) is already one of these, so it was always
+// found. An unrecognized-but-plausible dump has no canonical name — mounting
+// it under the user's own original filename (Codex review finding, P1 on
+// commit f2f30c9) means the core never discovers it at all: import silently
+// "succeeds" but the core still falls back to its bundled OpenBIOS, exactly
+// the failure mode import-with-warning was meant to avoid. Mount every
+// unrecognized-but-plausible dump under this fixed, known-probed alias
+// instead — its actual identity/region is unknown anyway, so there's no
+// better name to pick, and this matches the same North-America default
+// getPreferred() already falls back to when no region hint matches.
+const UNRECOGNIZED_MOUNT_NAME = 'scph5501.bin';
+
+/** The filename a validated BIOS should be mounted under for the core to actually find it. */
+export function mountNameFor(validation) {
+  return validation.canonicalName || UNRECOGNIZED_MOUNT_NAME;
+}
+
 export class FirmwareStore {
   async import(source, { profile = 'psx' } = {}) {
     if (profile !== 'psx') throw new FirmwareValidationError(`Unsupported firmware profile: ${profile}`, { profile, valid: false });
@@ -65,7 +85,11 @@ export class FirmwareStore {
     const record = {
       key: `${profile}:${key}`,
       profile,
-      name: validation.canonicalName || validation.suppliedName || key,
+      // The MOUNT filename (what the core actually looks for) — see
+      // mountNameFor's comment. `displayName` below keeps the user's real
+      // filename for UI purposes without conflating the two.
+      name: mountNameFor(validation),
+      displayName: validation.suppliedName || validation.canonicalName || UNRECOGNIZED_MOUNT_NAME,
       suppliedName: validation.suppliedName,
       region: validation.region,
       recognized: validation.recognized,
@@ -93,9 +117,10 @@ export class FirmwareStore {
     return records[0] || null;
   }
 
-  async remove(profile, name) {
+  /** Remove a previously-imported record by its `key` (as returned by `import()`/`list()`). */
+  async remove(key) {
     const conn = await openDb();
-    return transactionPromise(conn, 'readwrite', (store) => store.delete(`${profile}:${name.toLowerCase()}`));
+    return transactionPromise(conn, 'readwrite', (store) => store.delete(key));
   }
 }
 

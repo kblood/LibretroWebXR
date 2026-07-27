@@ -1221,7 +1221,7 @@ async function spawnConsole(system, opts = {}) {
   // resolved, same as the primary console's boot paths — a spawned rack
   // console previously got neither.
   const spawnContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, spawnCoreInfo, meta) : buf;
-  const spawnStart = await buildStartOptions(spawnCoreInfo, { file: meta.file }, spawnContent);
+  const spawnStart = await buildStartOptions(spawnCoreInfo, { file: meta.file, title: meta.title }, spawnContent);
   await runtime.load(spawnContent, spawnCoreInfo, {
     system: meta.system, title: meta.title,
     firmware: spawnStart.firmware, restoredSaves: spawnStart.restoredSaves,
@@ -2736,7 +2736,7 @@ async function buildCartridgeWorld() {
     // core mismatch — see handleCartridgeInserted), this hook already holds the
     // bytes in memory, so there's nothing to lose by swapping live instead.
     const content = bootCore.execution === 'worker' ? await wrapWorkerContent(name, buf, bootCore, meta) : buf;
-    const startOptions = await buildStartOptions(bootCore, { file: name, coreOptions, inputDevices, remapName, systemFiles: bootCore.systemFiles }, content);
+    const startOptions = await buildStartOptions(bootCore, { file: name, title, coreOptions, inputDevices, remapName, systemFiles: bootCore.systemFiles }, content);
     await bootOnPrimary(meta, bootCore, content, startOptions);
     rackMgr.get(CONSOLE_ID)?.noteLoaded(bootCore.name, { system: meta.system, title });
     currentCore = bootCore.name;
@@ -5280,9 +5280,20 @@ async function wrapWorkerContent(filename, source, coreInfo, meta = null) {
 // nothing when a title has no region tag (falls back to null, same as today).
 function regionHintFromMeta(meta) {
   const text = `${meta?.title || ''} ${meta?.file || ''}`;
-  if (/\((?:usa|us|na)\)/i.test(text)) return 'North America';
-  if (/\(europe\)/i.test(text)) return 'Europe';
-  if (/\(japan\)/i.test(text)) return 'Japan';
+  // Redump/No-Intro also lists MULTIPLE regions in one tag for a
+  // multi-region release, e.g. "(USA, Europe)" or "(Japan, USA)" — match
+  // per comma-delimited token inside each parenthesized group instead of
+  // requiring the whole group to be a single region name (Codex review
+  // finding, P2 on commit f2f30c9: the old whole-tag-only regex missed
+  // these entirely). First matching token wins.
+  const groups = text.match(/\(([^)]+)\)/g) || [];
+  for (const group of groups) {
+    for (const token of group.slice(1, -1).split(',').map((t) => t.trim().toLowerCase())) {
+      if (token === 'usa' || token === 'us' || token === 'na') return 'North America';
+      if (token === 'europe' || token === 'eu') return 'Europe';
+      if (token === 'japan' || token === 'jp') return 'Japan';
+    }
+  }
   return null;
 }
 
@@ -5486,7 +5497,7 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // BIOS or a chance to restore native SaveRAM.
     const content = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, core, meta) : buf;
     const startOptions = await buildStartOptions({ ...core, name: coreName }, {
-      file: meta.file, coreOptions, inputDevices, remapName, systemFiles: core.systemFiles,
+      file: meta.file, title: meta.title, coreOptions, inputDevices, remapName, systemFiles: core.systemFiles,
       discImage: discImageOverride, contentExt: discImageOverride ? 'iso' : undefined,
     }, content);
     await bootOnPrimary(meta, { name: coreName, url: core.url, style: core.style }, content, startOptions);
@@ -5635,7 +5646,7 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
     // B1 (2026-07-25 review): worker-execution content wrapping + BIOS/restored-
     // SaveRAM resolution, same as every other boot path.
     const intoContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, intoCoreInfo, meta) : buf;
-    const intoStart = await buildStartOptions(intoCoreInfo, { file: meta.file, contentExt: intoContentExt }, intoContent);
+    const intoStart = await buildStartOptions(intoCoreInfo, { file: meta.file, title: meta.title, contentExt: intoContentExt }, intoContent);
     await runtime.load(intoContent, intoCoreInfo, {
       system: meta.system, title: meta.title,
       firmware: intoStart.firmware, restoredSaves: intoStart.restoredSaves,
@@ -5709,7 +5720,7 @@ async function swapConsoleCore(consoleId, meta) {
   // B1 (2026-07-25 review): worker-execution content wrapping + BIOS/restored-
   // SaveRAM resolution, same as every other boot path.
   const swapContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, swapCoreInfo, meta) : buf;
-  const swapStart = await buildStartOptions(swapCoreInfo, { file: meta.file, contentExt: swapContentExt }, swapContent);
+  const swapStart = await buildStartOptions(swapCoreInfo, { file: meta.file, title: meta.title, contentExt: swapContentExt }, swapContent);
   await bootFreshRuntime(consoleId, meta, {
     core: swapCoreInfo, romBuffer: swapContent, contentExt: swapContentExt,
     inputDevices: fourScore?.inputDevices,
@@ -6245,7 +6256,7 @@ romInput.addEventListener('change', async (e) => {
     // that boots the disc (the worker mounts it once, at launch); SaveRAM is
     // restored keyed off the content hash, not the filename, so re-picking the
     // identical disc always finds it (see flushCurrentSaveRam below).
-    const startOptions = await buildStartOptions(coreInfo, { file: meta.file }, content);
+    const startOptions = await buildStartOptions(coreInfo, { file: meta.file, title }, content);
     logger?.event?.('rom-picked', { file: meta.file, bytes: buffer?.byteLength ?? 0, core: coreInfo.name, coreUrl: coreInfo.url, opfs: opfsSupported(), multiFile: isMultiFile });
     await bootOnPrimary(meta, coreInfo, content, startOptions);
     rackMgr.get(CONSOLE_ID)?.noteLoaded(coreInfo.name, { system: meta.system, title });
