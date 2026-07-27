@@ -46,7 +46,12 @@ let paused = false;
 // (src/DiscControl.js) rather than hand-duplicated here — this worker just
 // supplies the live core module and disc count (C6, 2026-07-27 review
 // followup; this duplication was flagged back in the 2026-07-24 review).
-let discBridge = null;
+// Starts bound to no module (Codex review finding on 3a90d3f: a 'disc-status'/
+// 'set-disc' RPC can arrive before hydrateLaunch() runs — WorkerEmulatorClient
+// doesn't wait for 'ready' first — so this must default to the same
+// safe "unsupported" status the old always-present `disc` object gave,
+// not null.
+let discBridge = new DiscControlBridge(null, { discCount: 1 });
 const metrics = { framesProduced: 0, framesSkipped: 0, inputs: 0, audioBatches: 0, errors: 0 };
 // Tracks each seated light-gun port's synthetic-trigger edge state (mirrors
 // EmulatorClient.js's `_gunDown`/`_webgunSet` bookkeeping) so forwardLightgun
@@ -226,11 +231,10 @@ function detectCapabilities() {
   return {
     saveState: !!(moduleInstance?.FS && moduleInstance?._cmd_save_state && moduleInstance?._cmd_load_state),
     saveRam: !!moduleInstance?.FS,
-    // Every current call site runs after hydrateLaunch() has constructed
-    // discBridge (start() calls hydrateLaunch before this; 'load-content'
-    // does too); the `?.` is a defensive match for this file's existing
-    // moduleInstance?.-style guards, not a reachable null case today.
-    discControl: discBridge?.capabilities().supported ?? false,
+    // discBridge always exists (starts bound to no module; see its
+    // declaration) so this reports "unsupported" rather than throwing
+    // whenever this runs before any core has loaded.
+    discControl: discBridge.capabilities().supported,
     jit: !!globalThis.__libretroWebXRJit,
     audioBridge: true,
     frameBridge: typeof canvas?.transferToImageBitmap === 'function',
@@ -529,7 +533,7 @@ function stop() {
   jit?.clear();
   moduleInstance?._cmd_unload_core?.();
   moduleInstance = null;
-  discBridge = null;
+  discBridge = new DiscControlBridge(null, { discCount: 1 });
   canvas = null;
   for (const k of Object.keys(gunDownByPort)) delete gunDownByPort[k];
 }
