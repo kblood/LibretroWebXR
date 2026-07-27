@@ -747,13 +747,11 @@ export function extOf(filename) {
  *
  * `mednafen_psx_hw` (PSX) and `play` (PS2) both claim .cue/.chd — see
  * AMBIGUOUS_EXT_DEFAULT above for the name-only default this function falls
- * back to. src/DiscIdentity.js's identifyPlayStationDisc() (tested:
- * tmp/verify-disc-identity.mjs, verified against a real commercial PS2 disc)
- * COULD do real byte-level disambiguation but is currently dead code — no
- * caller in main.js or anywhere else in src/ invokes it (2026-07-24 review
- * finding; was previously, incorrectly, documented here as already wired
- * in). An ambiguous .cue/.chd today always needs an explicit `override` to
- * reach `mednafen_psx_hw`.
+ * back to when there's no `override`. src/main.js's romInput handler wires
+ * src/DiscIdentity.js's identifyPlayStationDisc() in ahead of this (C2,
+ * 2026-07-27 review followup) to sniff a real disc's SYSTEM.CNF and pass the
+ * result as `override` — this function itself stays name-only/synchronous,
+ * with no disc-content awareness of its own.
  */
 export function coreForFile(filename, override) {
   if (override && CORES[override]) return coreInfo(override);
@@ -763,6 +761,41 @@ export function coreForFile(filename, override) {
     if (info.exts.includes(ext)) return coreInfo(name);
   }
   return null;
+}
+
+// Container/pointer formats that name a disc/multi-file bundle without BEING
+// the actual track/companion data themselves.
+const ENTRY_EXTS = new Set(['cue', 'chd', 'm3u']);
+
+/**
+ * Pick the entry file out of a multi-file selection (CUE+BIN, M3U+several
+ * discs) — the one whose name should drive core detection, not a companion
+ * track/data file. A `<input multiple>` FileList's order reflects the OS
+ * picker/drag-drop, not any semantic priority, so this can't just take
+ * files[0]. Ranked, each a fallback for when the one above doesn't match:
+ *   1. .m3u — a multi-disc playlist naming several CUE/CHD member discs is
+ *      always the true entry point, never one of its own members (Codex
+ *      review finding, P1 on commit 9565c74 — an ENTRY_EXTS-only check
+ *      treated m3u/cue/chd as equally rankable, so an M3U sorting after one
+ *      of its member CHDs picked the CHD instead, which can't multi-file
+ *      boot on its own).
+ *   2. any other container/pointer extension (cue/chd) — covers a plain
+ *      CUE+BIN pick with no M3U.
+ *   3. a core's own `multiFile` flag — kept as a fallback for a future
+ *      multi-file core keyed off some other, non-disc-image entry
+ *      extension; NOT relied on for cue/chd/m3u themselves, since the
+ *      un-overridden default core for .cue is `play`, which doesn't itself
+ *      declare `multiFile` (only `mednafen_psx_hw` does) — relying on this
+ *      flag alone silently missed the .cue entry on every un-overridden pick
+ *      (Codex review finding, P1 on commit e664df0).
+ *   4. files[0] — last resort; single-file selections never reach this
+ *      function at all (callers only use it when files.length > 1).
+ */
+export function pickPrimaryFile(files, override) {
+  return files.find((f) => extOf(f.name) === 'm3u')
+    || files.find((f) => ENTRY_EXTS.has(extOf(f.name)))
+    || files.find((f) => coreForFile(f.name, override)?.multiFile)
+    || files[0];
 }
 
 /** Canonical system id for a file, via its core's owning system. */

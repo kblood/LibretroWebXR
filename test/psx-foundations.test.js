@@ -5,21 +5,45 @@ import { webcrypto } from 'node:crypto';
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const { ContentBundle, ContentBundleError, normalizeContentPath, parseCueReferences } = await import('../src/ContentBundle.js');
-const { CORES, coreForFile } = await import('../src/systems.js');
+const { CORES, coreForFile, pickPrimaryFile } = await import('../src/systems.js');
 const { md5Hex, validatePsxFirmware, mountNameFor, healUnrecognizedMountName, PSX_FIRMWARE } = await import('../src/FirmwareStore.js');
 const { DiscControlBridge, discEntriesFromBundle } = await import('../src/DiscControl.js');
 const { checkSaveStateCompatibility, prepareSaveStatePayload } = await import('../src/SaveState.js');
 
 test('PSX registry is reachable by explicit override; bare .bin still defaults to Atari', () => {
-  // .cue is ALSO a PS2 (`play`) extension — coreForFile can only go by filename,
-  // so it defaults to `play` (see systems.js's AMBIGUOUS_EXT_DEFAULT comment).
-  // src/DiscIdentity.js could do real byte-level disambiguation but is dead
-  // code today — nothing in main.js calls it (2026-07-24 review finding).
-  // An explicit override always wins regardless of that gap.
+  // .cue is ALSO a PS2 (`play`) extension — coreForFile itself can only go by
+  // filename, so it defaults to `play` (see systems.js's AMBIGUOUS_EXT_DEFAULT
+  // comment) absent an override. src/main.js's romInput handler wires real
+  // disc-content sniffing (src/DiscIdentity.js) in ahead of this to supply
+  // that override for a real PS1 disc (C2, 2026-07-27) — coreForFile itself
+  // stays name-only. An explicit override always wins regardless.
   assert.equal(coreForFile('Game.cue').name, 'play');
   assert.equal(coreForFile('Game.cue', 'mednafen_psx_hw').name, 'mednafen_psx_hw');
   assert.equal(coreForFile('Game.bin').name, 'stella2014');
   assert.equal(CORES.mednafen_psx_hw.multiFile, true);
+});
+
+test('pickPrimaryFile: ranks M3U over CUE/CHD over multiFile-flag, regardless of FileList order', () => {
+  const f = (name) => ({ name });
+
+  // Plain CUE+BIN, either order — the .cue is the entry point.
+  assert.equal(pickPrimaryFile([f('game.cue'), f('game.bin')]).name, 'game.cue');
+  assert.equal(pickPrimaryFile([f('game.bin'), f('game.cue')]).name, 'game.cue');
+
+  // Codex review finding, P1 on commit e664df0: the un-overridden default
+  // core for .cue (`play`) doesn't declare multiFile itself, so a naive
+  // multiFile-flag lookup misses the .cue entirely regardless of order.
+  assert.equal(pickPrimaryFile([f('a.bin'), f('b.cue')], undefined).name, 'b.cue');
+
+  // Codex review finding, P1 on commit 9565c74: an M3U-based multi-disc
+  // bundle must pick the M3U itself, even when a member CHD sorts first.
+  assert.equal(pickPrimaryFile([f('disc1.chd'), f('disc2.chd'), f('game.m3u')]).name, 'game.m3u');
+  assert.equal(pickPrimaryFile([f('game.m3u'), f('disc1.chd'), f('disc2.chd')]).name, 'game.m3u');
+
+  // No entry extension and no multiFile-flagged core present — falls back to
+  // the first file (single-file selections never reach this function at all;
+  // this only covers an unresolvable multi-file edge case).
+  assert.equal(pickPrimaryFile([f('a.nes'), f('b.txt')]).name, 'a.nes');
 });
 
 test('ContentBundle preserves cue names, validates companions, and hashes stably', async () => {

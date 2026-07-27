@@ -39,7 +39,7 @@ import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, libretroGunPortFor, twoGunPortsForSystem, isMouseCapable, mouseLoadConfig, isTwoMouseCapable, libretroMousePortFor, twoMousePortsForSystem, fourScoreLoadConfig, extOf } from './systems.js';
+import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, libretroGunPortFor, twoGunPortsForSystem, isMouseCapable, mouseLoadConfig, isTwoMouseCapable, libretroMousePortFor, twoMousePortsForSystem, fourScoreLoadConfig, extOf, pickPrimaryFile } from './systems.js';
 import { Patchbay } from './Patchbay.js';
 import { RackMgr } from './RackMgr.js';
 import { ConsoleRuntime } from './ConsoleRuntime.js';
@@ -6177,10 +6177,6 @@ async function addLocalRomToShelf(meta) {
   return cart;
 }
 
-// Container/pointer formats that name a disc image without BEING the actual
-// track data — see the romInput primary-file selection comment below.
-const ENTRY_EXTS = new Set(['cue', 'chd', 'm3u']);
-
 // Real byte-level PS1-vs-PS2 disambiguation for a picked .cue/.chd (C2,
 // 2026-07-27 review followup) — src/DiscIdentity.js was tested but dead code
 // until this. Returns null for any other extension, or when a .cue's
@@ -6216,21 +6212,10 @@ romInput.addEventListener('change', async (e) => {
   romInput.value = '';
 
   const isMultiFile = files.length > 1;
-  // A multi-file pick (CUE+BIN, M3U+discs) may not put the entry file first.
-  // Prefer a real container/pointer extension (cue/chd/m3u) over asking which
-  // core declares multiFile support: AMBIGUOUS_EXT_DEFAULT's un-overridden
-  // guess for .cue is `play`, which doesn't itself declare multiFile — so the
-  // old multiFile-flag-based find() always missed the .cue entry on an
-  // unoverridden pick and silently fell back to files[0], breaking whenever
-  // the FileList didn't happen to put the .cue first (Codex review finding,
-  // P1 on commit e664df0). ENTRY_EXTS is checked first; the multiFile-flag
-  // find() stays as a fallback for any future multi-file core keyed off a
-  // non-disc-image entry extension.
-  const primary = isMultiFile
-    ? (files.find((f) => ENTRY_EXTS.has(extOf(f.name)))
-      || files.find((f) => detectCore(f.name, coreOverride)?.multiFile)
-      || files[0])
-    : files[0];
+  // A multi-file pick (CUE+BIN, M3U+discs) may not put the entry file first —
+  // see pickPrimaryFile's doc comment in systems.js for the ranking (and the
+  // two Codex-review rounds, e664df0 and 9565c74, that shaped it).
+  const primary = isMultiFile ? pickPrimaryFile(files, coreOverride) : files[0];
   // .cue and .chd are ambiguous between PS1 (mednafen_psx_hw) and PS2 (play) —
   // AMBIGUOUS_EXT_DEFAULT in systems.js always guesses `play` absent an
   // explicit override. Try real byte-level disambiguation first (C2, 2026-07-27
