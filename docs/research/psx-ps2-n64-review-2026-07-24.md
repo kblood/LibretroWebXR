@@ -718,3 +718,54 @@ the ones that feel risky:
   Lightrec JIT + GL renderer still investigated-not-fixed (separate
   background investigation in progress, see memory
   `psx-lightrec-gl-investigation-2026-07-27.md`).
+
+## Status update (2026-07-27, third pass): C6's dedup half done; C4 (multi-file shelf persistence) done
+
+- **C6 "delete `DiscControl.js` duplication" — DONE (commits `3a90d3f`,
+  `714b747`).** `EmulatorWorkerRuntime.js` (the worker-execution PSX boot
+  path) had hand-duplicated `DiscControl.js`'s capability-detection +
+  eject/select/insert logic instead of importing `DiscControlBridge`; now
+  imports it directly. Review found a real P2 (the bridge started `null`
+  before `hydrateLaunch()` ran, and `WorkerEmulatorClient` doesn't wait for a
+  `'ready'` signal before sending disc RPCs, so an early `disc-status` call
+  would throw instead of reporting "unsupported"); fixed by defaulting the
+  bridge to an instance bound to no module rather than `null`. **Still open:**
+  the actual disc-swap UI — `main.js`/the VR scene has zero disc-swap
+  references today; the worker client already exposes `setDisc`/
+  `setDiscEjected`/`discStatus`, so this is pure new UI work, no backend gap.
+- **C4 (multi-file shelf persistence) — DONE (commits `1d103bc`, `ff4917c`,
+  `02542e6`, `efe3ef5`).** Multi-file (bundle) worker-execution content
+  (real PSX CUE+BIN picks) now persists to OPFS keyed by its own
+  `contentId` (`RomResolver.js`'s `cacheBundle`/`hasBundleCached`/
+  `restoreBundleFiles`, walking real nested OPFS directories for paths like
+  `Disc/game.cue`) and survives a reload as a real re-insertable shelf
+  cartridge, same as single-file ROMs already did (`LocalRomLibrary.js`
+  entries can now key on `bundle.contentId` alongside the original `sha1`).
+  `resolve()` short-circuits to `null` for a bundle meta so the existing
+  `wrapWorkerContent()` call sites reconstruct it unchanged — a design that
+  also fixed a broader pre-existing gap where ANY worker-mode pick (single-
+  or multi-file) was never OPFS-cached at all. Went through 4 Codex review
+  rounds, each finding a real regression in the one call site the original
+  design missed — `rebootPrimaryConsole()` (the gun/mouse live arm-reboot
+  path), which built its own stripped `{name,url,style}` core object
+  instead of spreading the full `CORES` entry like every other boot site:
+  missing the bundle-reconstruction wrap (`ff4917c`); silently defaulting to
+  main-thread execution for PSX/N64, previously masked by the path's own
+  reload fallback (`02542e6`); and, once real worker execution was actually
+  exercised there, two genuine SaveRAM bugs — `currentMeta` dropping
+  `contentId` (silently disabling all future memory-card persistence) and
+  the outgoing runtime's SaveRAM never being flushed before the persisted
+  copy was read back, letting a recent write be rolled back by the reboot
+  itself (`efe3ef5`). A 4th round flagged a further, genuinely pre-existing
+  limitation (the worker's SaveRAM flush can only read whatever RetroArch's
+  own 10s internal autosave last wrote, not force a fresh one) — judged out
+  of scope here since it equally affects the already-shipped periodic/
+  `pagehide` flushes and is no worse than the old reload-fallback's own
+  `pagehide`-triggered flush; left as a known limitation, not fixed.
+  Extended `scripts/test-localromlibrary.mjs` (64/64) and
+  `scripts/test-romresolver.mjs` (135/135); new
+  `scripts/probe-bundle-persist.mjs` real-browser OPFS probe (12/12).
+- **Still open:** C1 (streaming content), C6's disc-swap UI half. PSX
+  Lightrec JIT + GL renderer still investigated-not-fixed. See memory
+  `psx-phase-c-n64-phase-d-goal.md` for the standing goal tracking all of
+  this.
