@@ -817,7 +817,46 @@ the ones that feel risky:
   this commit were identified"). Pushed.
 - **C6 is now fully done** (dedup half + UI half), modulo the documented
   MP-forwarding gap.
-- **Still open:** C1 (streaming content architecture — a design change, not
-  a small fix). PSX Lightrec JIT + GL renderer still investigated-not-fixed.
+
+## Status update (2026-07-27, fifth pass): C1 done — PSX Phase C is now 100% complete
+
+- **C1 (streaming content) — DONE (commits `2199d97`, `89970b9`).** A real
+  CD/DVD track (a PSX .bin redump) can be 600MB+; before this, loading one
+  meant reading its full bytes three times on the main thread before a frame
+  ever rendered — `ContentBundle.computeContentId()` SHA-256'd every byte
+  just to mint an identity string, then `WorkerEmulatorClient.
+  prepareLaunchPayload()` read the bytes again and duplicated them into a
+  fresh ArrayBuffer to transfer into the worker. Fix: `computeContentId()`
+  now only full-byte-hashes files at/under 8MB (every existing single-file
+  ROM, every `.cue`/`.m3u`); above that it hashes size + a 64KB prefix + 64KB
+  suffix sample instead — a deliberate, narrow tradeoff scoped only to large
+  tracks. `prepareLaunchPayload()` now passes Blob/File sources straight
+  through to the worker via `postMessage` (structured-clone hands over a
+  reference to the same backing storage, never materializing a large track
+  on the main thread) instead of reading+copying into a transferable
+  ArrayBuffer; the worker's `hydrateLaunch()`/`writeRelative()` (the one
+  place that actually needs real bytes) is now async and reads a Blob's
+  bytes itself, right before mounting it into the emulated filesystem.
+  `wrapWorkerContent()`'s network-fetch companion path now hands back
+  `res.blob()` instead of a materialized `Uint8Array` too.
+  Codex review of `2199d97` found a real P1: an earlier draft tagged EVERY
+  manifest record (`full:`/`sampled:`), not just the new sampled branch —
+  silently changing the contentId for every already-persisted SMALL file
+  too, breaking every existing SaveRAM/save-state/shelf-cache lookup keyed
+  on it, directly contradicting the commit's own claim. Fixed in `89970b9`:
+  small files produce the byte-for-byte exact pre-C1 manifest record again;
+  added a regression test hand-computing the original manifest hash
+  independently. Codex review of `89970b9` came back clean.
+  Verified: `node --test` 25/25 (13/13 on the fixup); full `npm test`
+  unchanged throughout. Real-browser probes against the exact worker boot
+  path this touches: `probe-bundle-persist.mjs` 12/12,
+  `probe-worker-cartridge-insert.mjs` 12/12 (PSX + N64), and — the actual
+  target scenario — `probe-psx-timecrisis.js` against a real, user-owned
+  663MB 34-file PSX CUE+BIN redump: 30/30, both the desktop file-picker
+  upload path and the URL-fetched cartridge-insert path, confirmed still
+  rendering and animating real title-screen/cutscene content. Pushed.
+- **PSX Phase C (C1-C6) is now 100% complete.** Only PSX Lightrec JIT + GL
+  renderer (investigated, not yet fixed) and N64 Phase D (owned by a
+  different concurrent session) remain from this review's original backlog.
   See memory `psx-phase-c-n64-phase-d-goal.md` for the standing goal
   tracking all of this.
