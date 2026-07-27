@@ -769,3 +769,55 @@ the ones that feel risky:
   Lightrec JIT + GL renderer still investigated-not-fixed. See memory
   `psx-phase-c-n64-phase-d-goal.md` for the standing goal tracking all of
   this.
+
+## Status update (2026-07-27, fourth pass): C6 fully done (disc-swap UI half shipped)
+
+- **C6 "build the real disc-swap UI" — DONE (commits `8552959`,
+  `1a90210`).** New `src/DiscSwapPanel.js`: a small HUD-style status+Prev/
+  Next panel reusing `MenuMgr`'s existing hover/click convention (modeled on
+  the `mpPanel` Multiplayer sub-panel, the closest existing precedent for "a
+  live-relabelled status button + a couple of action buttons"). Wired into
+  `main.js` via `refreshDiscPanel()`/`stepDisc()`, called at every boot-
+  success site that already updates `nowPlayingPanel` — deliberately not
+  via the client's `'ready'` event, since that event fires synchronously
+  inside `start()` before a reboot/swap path's listener can attach (the
+  same gotcha `nowPlayingPanel` already works around by calling its updater
+  directly at each boot-success site). No bootable multi-disc PSX test
+  asset was built for this; verified instead via
+  `scripts/probe-discswap-panel.mjs`, a headless Puppeteer probe driving
+  `window.__discSwap` against a monkey-patched `window.__client` — judged
+  proportional, since this is a presentational layer on top of already-
+  tested plumbing (`DiscControlBridge` / worker `setDisc`/`setDiscEjected`/
+  `discStatus` all have their own coverage already).
+  Codex review of `8552959` found 4 issues, fixed in `1a90210`:
+  (1) `DiscControlBridge.setDisc()` left the tray physically ejected
+  forever after a rejected explicit-index write (`setEjected(false)` sat
+  after the rejection throw with nothing to catch it) — wrapped the
+  core-switch step in try/catch, added a regression test;
+  (2) the panel could show/attempt Prev-Next on a core reporting
+  `discCount > 1` (from the M3U's own file listing) while exposing no
+  disc-control export at all — both `DiscSwapPanel.setStatus` and
+  `stepDisc` now also gate on `status.supported`;
+  (3) the panel wasn't populated if the console had already finished
+  booting before `buildMenuAndControlsPanel()` wired it up — added an
+  explicit `refreshDiscPanel()` call right after panel creation.
+  **Deliberately NOT fixed** — (4) P1: disc swaps aren't forwarded to guest
+  peers the way gun/mouse/kbd input is; a guest's local client is paused
+  and shows the host's broadcasted video, so a guest-side `setDisc()` has
+  zero visible effect for them today. Correctly fixing this needs a new
+  bidirectional wire protocol (guest requests → host applies + broadcasts
+  → peers sync), not safely verifiable without a live 2-peer session —
+  documented as a known limitation, same judgment call as C4's SaveRAM
+  flush-timing finding. `node --test test/psx-foundations.test.js`: 10/10.
+  Full `npm test`: 64/64, 51/51, 11/11 unchanged. Probe: 12/12 (its
+  `setDisc` mock needed a `supported: true` field added once the new guard
+  landed — a probe-mock gap, not a real bug, since the real
+  `DiscControlBridge.status()` always includes `supported`). Codex review
+  of `1a90210` came back clean ("No actionable regressions introduced by
+  this commit were identified"). Pushed.
+- **C6 is now fully done** (dedup half + UI half), modulo the documented
+  MP-forwarding gap.
+- **Still open:** C1 (streaming content architecture — a design change, not
+  a small fix). PSX Lightrec JIT + GL renderer still investigated-not-fixed.
+  See memory `psx-phase-c-n64-phase-d-goal.md` for the standing goal
+  tracking all of this.
