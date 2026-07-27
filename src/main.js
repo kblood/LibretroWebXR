@@ -5346,21 +5346,37 @@ async function buildStartOptions(coreInfo, meta = {}, content = null) {
 // server URL for the track to live alongside; out of scope here (PS2 has no
 // pick/local multi-file flow yet, only the collection/cartridge-insert path).
 async function resolvePs2DiscCue(meta, cueBuf) {
-  const { parseCueReferences } = await import('./ContentBundle.js');
+  const { parseCueReferences, normalizeContentPath } = await import('./ContentBundle.js');
   const text = new TextDecoder('utf-8').decode(new Uint8Array(cueBuf));
-  const [track] = parseCueReferences(text);
-  if (!track) throw new Error(`"${meta.file}" has no FILE reference — not a usable cue sheet`);
+  const [rawTrack] = parseCueReferences(text);
+  if (!rawTrack) throw new Error(`"${meta.file}" has no FILE reference — not a usable cue sheet`);
+  // Windows-authored CUE sheets commonly use backslash separators
+  // (`FILE "folder\\track.bin" BINARY`) — normalize the same way
+  // ContentBundle.js's own multi-file bundling does (normalizeContentPath),
+  // so this doesn't end up concatenating a literal backslash into a URL
+  // (which fetch()/encodeURIComponent would otherwise turn into a broken
+  // "%5C" path segment on a real web-server deployment).
+  const track = normalizeContentPath(rawTrack);
   const entryUrl = romUrlFor(meta);
-  if (!entryUrl || !entryUrl.endsWith(meta.file)) {
-    throw new Error(`cannot resolve "${track}" alongside "${meta.file}" (no fetchable URL for this entry)`);
-  }
-  const rootUrl = entryUrl.slice(0, entryUrl.length - meta.file.length);
-  const dir = meta.file.includes('/') ? meta.file.slice(0, meta.file.lastIndexOf('/') + 1) : '';
-  const trackPath = dir + track;
-  const url = rootUrl + trackPath.split('/').map(encodeURIComponent).join('/');
+  if (!entryUrl) throw new Error(`cannot resolve "${track}" — no fetchable URL for this entry`);
+  // Resolve the referenced track relative to the CUE's OWN url, not by
+  // string-matching a literal meta.file suffix — that broke for any
+  // fetchable entry whose rom.url doesn't literally end in meta.file (a
+  // signed URL, a CDN endpoint with a query string, etc.), even though
+  // resolveRom successfully fetched the CUE through that exact URL moments
+  // earlier. `new URL(relative, base)` resolves against entryUrl's own
+  // directory the same way a browser resolves a relative link, regardless
+  // of what meta.file looks like — but the URL constructor's `base` argument
+  // must itself be an ABSOLUTE URL (romUrlFor's common case is a bare
+  // relative path like "roms/local/ps2/game.cue", which the constructor
+  // rejects outright with "Invalid URL" — unlike an <a href>, it does NOT
+  // implicitly fall back to document.baseURI), so resolve entryUrl against
+  // document.baseURI first to get something the constructor will accept.
+  const absoluteEntryUrl = new URL(entryUrl, document.baseURI).href;
+  const url = new URL(track.split('/').map(encodeURIComponent).join('/'), absoluteEntryUrl).href;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${url} → ${res.status}`);
-  return { buf: await res.arrayBuffer(), track, trackPath };
+  return { buf: await res.arrayBuffer(), track, trackPath: track };
 }
 
 async function loadCartridge(meta, { echo = true } = {}) {
@@ -5558,19 +5574,35 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
     return;
   }
   try {
-    const buf = await resolveRom(meta);
+    let buf = await resolveRom(meta);
     const core = CORES[meta.core];
     if (!core) throw new Error(`no core registered as "${meta.core}"`);
-    logger?.event?.('rom-resolved', { consoleId, file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url });
     // CORES entries carry no `name`; ConsoleRuntime.load wants { name, url, style }.
     const intoCoreInfo = { ...core, name: meta.core };
+    // PS2 (`play`) .cue resolution — same real-disc-on-a-secondary-console gap
+    // this fixes as the primary loadCartridge path; see resolvePs2DiscCue's
+    // doc comment above. Without this, a .cue dropped on a secondary console
+    // silently handed Play! a tiny cue-sheet text buffer instead of real disc
+    // bytes (Play! never even round-trips the extension, so it wasn't an
+    // error — just dead-quiet garbage content).
+    let intoContentExt;
+    if (meta.core === 'play' && extOf(meta.file) === 'cue') {
+      const resolved = await resolvePs2DiscCue(meta, buf);
+      buf = resolved.buf;
+      intoContentExt = 'iso';
+      const detail = { consoleId, cue: meta.file, track: resolved.track, trackPath: resolved.trackPath, bytes: buf.byteLength };
+      logger?.event?.('ps2-cue-resolved', detail);
+      window.__lastPs2CueResolve = detail;
+    }
+    logger?.event?.('rom-resolved', { consoleId, file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url });
     // B1 (2026-07-25 review): worker-execution content wrapping + BIOS/restored-
     // SaveRAM resolution, same as every other boot path.
     const intoContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, intoCoreInfo, meta) : buf;
-    const intoStart = await buildStartOptions(intoCoreInfo, { file: meta.file }, intoContent);
+    const intoStart = await buildStartOptions(intoCoreInfo, { file: meta.file, contentExt: intoContentExt }, intoContent);
     await runtime.load(intoContent, intoCoreInfo, {
       system: meta.system, title: meta.title,
       firmware: intoStart.firmware, restoredSaves: intoStart.restoredSaves,
+      contentExt: intoContentExt,
     });
     // Repaint via the patch graph (idempotent) so this console's TV samples its
     // canvas and no other TV is touched — the fix for "game showed on both screens".
@@ -5618,17 +5650,31 @@ function tvForConsole(consoleId) {
 async function swapConsoleCore(consoleId, meta) {
   const core = CORES[meta.core];
   if (!core) throw new Error(`no core registered as "${meta.core}"`);
-  const buf = await resolveRom(meta);
+  let buf = await resolveRom(meta);
   // NES Four Score on a secondary console: same fceumm-only P3/P4 gamepad wiring
   // as the primary path. null (no-op) for nestopia / non-NES boots.
   const fourScore = fourScoreLoadConfig(meta.system, meta.core);
   const swapCoreInfo = { ...core, name: meta.core };
+  // PS2 (`play`) .cue resolution — same real-disc-on-a-secondary-console gap
+  // this fixes as the primary loadCartridge path; see resolvePs2DiscCue's
+  // doc comment above (a core-swap onto `play` is the OTHER way a secondary
+  // console can end up with a .cue, alongside loadCartridgeIntoConsole's
+  // same-core path).
+  let swapContentExt;
+  if (meta.core === 'play' && extOf(meta.file) === 'cue') {
+    const resolved = await resolvePs2DiscCue(meta, buf);
+    buf = resolved.buf;
+    swapContentExt = 'iso';
+    const detail = { consoleId, cue: meta.file, track: resolved.track, trackPath: resolved.trackPath, bytes: buf.byteLength };
+    logger?.event?.('ps2-cue-resolved', detail);
+    window.__lastPs2CueResolve = detail;
+  }
   // B1 (2026-07-25 review): worker-execution content wrapping + BIOS/restored-
   // SaveRAM resolution, same as every other boot path.
   const swapContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, swapCoreInfo, meta) : buf;
-  const swapStart = await buildStartOptions(swapCoreInfo, { file: meta.file }, swapContent);
+  const swapStart = await buildStartOptions(swapCoreInfo, { file: meta.file, contentExt: swapContentExt }, swapContent);
   await bootFreshRuntime(consoleId, meta, {
-    core: swapCoreInfo, romBuffer: swapContent,
+    core: swapCoreInfo, romBuffer: swapContent, contentExt: swapContentExt,
     inputDevices: fourScore?.inputDevices,
     remapName: fourScore?.remapName ?? core.remapName,
     firmware: swapStart.firmware, restoredSaves: swapStart.restoredSaves,
@@ -5659,7 +5705,11 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
   const next = new ConsoleRuntime({ id: consoleId, audio: audioRouter });
   if (tvGroup) audioRouter.expect(consoleId, tvGroup);
   await next.load(romBuffer, core, {
-    system: meta.system, title: meta.title, contentExt: extOf(meta.file),
+    // bootOpts.contentExt lets a caller override the VFS/bridge extension
+    // (used by the PS2 .cue resolution in swapConsoleCore: the resolved
+    // bytes are the primary disc track, not the .cue itself — same reasoning
+    // as buildStartOptions's own contentExt override for the primary path).
+    system: meta.system, title: meta.title, contentExt: bootOpts.contentExt ?? extOf(meta.file),
     coreOptions: bootOpts.coreOptions, inputDevices: bootOpts.inputDevices, remapName: bootOpts.remapName,
     systemFiles: bootOpts.systemFiles, execution: bootOpts.execution ?? core.execution,
     requiresThreads: bootOpts.requiresThreads ?? core.requiresThreads,

@@ -337,7 +337,59 @@ try {
 
   await captureNamed('probe-ps2-cue-support-06-after-gun.png', 0);
 
-  // --- Step 5: the actual regression assertions ---
+  // --- Step 5: SECONDARY-console .cue resolution (the real gap Codex found
+  //     in the first version of this fix — resolvePs2DiscCue was only wired
+  //     into the PRIMARY console's loadCartridge; a .cue dropped on a
+  //     secondary console went through loadCartridgeIntoConsole/
+  //     swapConsoleCore instead, which silently handed Play! raw cue-sheet
+  //     text with no resolution at all). Spawn a cheap secondary console on
+  //     a different core, then insert the SAME real .cue targeted at it via
+  //     meta.consoleId — since its current core differs from 'play', this
+  //     exercises swapConsoleCore specifically. ---
+  const spawnRes = await withTimeout(page.evaluate(async () => {
+    try { const id = await window.__rack.spawn('nes'); return { ok: true, id }; }
+    catch (e) { return { ok: false, reason: String(e?.message || e) }; }
+  }), 30000, 'rack.spawn');
+  ok('spawned a secondary console (window.__rack.spawn) to target for the .cue insert',
+     spawnRes.ok && !!spawnRes.v?.id, spawnRes.ok ? JSON.stringify(spawnRes.v) : `TIMED OUT (${spawnRes.label})`);
+  const secondaryId = spawnRes.ok ? spawnRes.v.id : null;
+
+  if (secondaryId) {
+    const secondaryInsert = await withTimeout(page.evaluate(async (meta, consoleId) => {
+      try { await window.__insertCartridge({ ...meta, consoleId }); return { ok: true }; }
+      catch (e) { return { ok: false, reason: String(e?.message || e) }; }
+    }, META, secondaryId), 120000, 'insertCartridge-secondary');
+    ok('[SECONDARY-CONSOLE SIGNAL] real cartridge-insert path targeting a SECONDARY console (meta.consoleId, exercises swapConsoleCore since its prior core != play) resolves without throwing for the REAL .cue',
+       secondaryInsert.ok && secondaryInsert.v?.ok, secondaryInsert.ok ? (secondaryInsert.v?.reason || '') : `TIMED OUT (${secondaryInsert.label})`);
+
+    const secondaryCueResolveOk = await page.waitForFunction(
+      (id) => window.__lastPs2CueResolve?.consoleId === id,
+      { timeout: 60000 }, secondaryId,
+    ).then(() => true).catch(() => false);
+    const secondaryCueResolve = await page.evaluate(() => window.__lastPs2CueResolve || null);
+    ok('[SECONDARY-CONSOLE SIGNAL] .cue resolution ran again for the secondary console specifically (window.__lastPs2CueResolve.consoleId matches), not silently skipped',
+       secondaryCueResolveOk, JSON.stringify(secondaryCueResolve));
+    ok('[SECONDARY-CONSOLE SIGNAL] resolved the same real primary data track (not raw cue-sheet text)',
+       (secondaryCueResolve?.bytes ?? 0) > 100_000_000 && secondaryCueResolve?.track === 'Time Crisis II (Japan) (With GunCon2).bin',
+       `track=${secondaryCueResolve?.track} bytes=${secondaryCueResolve?.bytes}`);
+
+    // NOTE: NOT asserting `live` here — RackMgr.applyBudget()'s maxLive cap
+    // can legitimately leave a just-swapped, unfocused secondary console
+    // paused (budget/focus scheduling, unrelated to whether the swap itself
+    // succeeded) — see RackMgr.js's planLive. The swap succeeding is already
+    // proven above (cue resolved for THIS consoleId with the real track's
+    // byte count); this only additionally confirms the runtime's core
+    // actually flipped to 'play'.
+    const secondaryReady = await page.waitForFunction(
+      (id) => (window.__rack?.live() || []).some((r) => r.id === id && r.core === 'play'),
+      { timeout: 60000 }, secondaryId,
+    ).then(() => true).catch(() => false);
+    const liveState = await page.evaluate(() => window.__rack.live());
+    ok('[SECONDARY-CONSOLE SIGNAL] secondary console runtime ended up running the play core (swapConsoleCore actually swapped it)',
+       secondaryReady, JSON.stringify(liveState));
+  }
+
+  // --- Step 6: the actual regression assertions ---
   ok('NO pageerror during boot/input/arm/fire', pageErrors.length === 0, JSON.stringify(pageErrors));
   const relevantConsoleErrors = consoleErrors.filter((m) =>
     !/^\[core\]/.test(m) && !/^Failed to load resource/.test(m));
