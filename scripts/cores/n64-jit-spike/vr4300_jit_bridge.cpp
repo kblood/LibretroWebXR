@@ -234,6 +234,7 @@ struct ShadowEntry
 	bool active = false;
 	uint32_t startPc = 0;
 	uint32_t wordCount = 0;
+	uint32_t words[64] = {};
 	int64_t regs[32] = {};
 	int64_t hi = 0;
 	int64_t lo = 0;
@@ -315,6 +316,22 @@ void CompareAndReport(struct r4300_core *r4300, const ShadowEntry &entry)
 
 	if(mismatch) g_shadowMismatched++;
 	else g_shadowMatched++;
+
+	if(mismatch)
+	{
+		/* Dump the exact raw instruction words this block was decoded from,
+		 * so a mismatch can be root-caused against the real opcode encoding
+		 * instead of just the address - added specifically to investigate
+		 * the first real mismatches this harness ever found (n64-systemtest
+		 * ROM, see docs/research/n64-jit-nj1-spike.md). */
+		char line[512];
+		int offset = std::snprintf(line, sizeof(line), "[info] N64_JIT_SHADOW mismatch-words: block_pc=%08" PRIx32 " words=", entry.startPc);
+		for(uint32_t i = 0; i < entry.wordCount && offset < (int)sizeof(line) - 12; i++)
+		{
+			offset += std::snprintf(line + offset, sizeof(line) - offset, "%08" PRIx32 " ", entry.words[i]);
+		}
+		std::fprintf(stderr, "%s\n", line);
+	}
 
 	/* A running summary line on every checked block (not just mismatches)
 	 * so a short-lived probe run still leaves a final tally in whatever
@@ -402,6 +419,15 @@ void vr4300_jit_shadow_on_decode(struct r4300_core *r4300, uint32_t func)
 	entry.active = true;
 	entry.startPc = func;
 	entry.wordCount = slot->word_count;
+	{
+		/* Re-read the same words ScanBlock() just decoded (only for mismatch
+		 * diagnostics - safe to re-read here since this runs immediately
+		 * after decode, before the real interpreter has retired anything in
+		 * this range). */
+		uint32_t *mem = fast_mem_access(r4300, func);
+		const uint32_t n = entry.wordCount < 64 ? entry.wordCount : 64;
+		if(mem) for(uint32_t i = 0; i < n; i++) entry.words[i] = mem[i];
+	}
 	std::memcpy(entry.regs, state.regs, sizeof(entry.regs));
 	entry.hi = state.hi;
 	entry.lo = state.lo;
