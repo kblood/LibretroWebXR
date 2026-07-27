@@ -67,7 +67,7 @@ import {
   makePeerPropId, serializePropState, parsePropEntries, diffPropSync,
 } from './net/PropSync.js';
 import { loadCollection, parseCollection } from './Collection.js';
-import { resolve as resolveRom, cacheRom, pickLibraryDirectory, fileSystemAccessSupported, resolutionPlan, opfsSupported, isLocalRomMeta } from './RomResolver.js';
+import { resolve as resolveRom, cacheRom, pickLibraryDirectory, fileSystemAccessSupported, resolutionPlan, opfsSupported, isLocalRomMeta, romUrlFor } from './RomResolver.js';
 import {
   pickImagesDirectory, hasImagesDirectory, listImages, entryObjectUrl,
   fileSystemAccessSupported as imgFolderSupported,
@@ -1220,7 +1220,7 @@ async function spawnConsole(system, opts = {}) {
   // (stable contentId for SaveRAM keying) and their BIOS/restored-SaveRAM
   // resolved, same as the primary console's boot paths — a spawned rack
   // console previously got neither.
-  const spawnContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, spawnCoreInfo) : buf;
+  const spawnContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, spawnCoreInfo, meta) : buf;
   const spawnStart = await buildStartOptions(spawnCoreInfo, { file: meta.file }, spawnContent);
   await runtime.load(spawnContent, spawnCoreInfo, {
     system: meta.system, title: meta.title,
@@ -2735,7 +2735,7 @@ async function buildCartridgeWorld() {
     // throw. Unlike the real cartridge-insert path (which reloads the page on a
     // core mismatch — see handleCartridgeInserted), this hook already holds the
     // bytes in memory, so there's nothing to lose by swapping live instead.
-    const content = bootCore.execution === 'worker' ? await wrapWorkerContent(name, buf, bootCore) : buf;
+    const content = bootCore.execution === 'worker' ? await wrapWorkerContent(name, buf, bootCore, meta) : buf;
     const startOptions = await buildStartOptions(bootCore, { file: name, coreOptions, inputDevices, remapName, systemFiles: bootCore.systemFiles }, content);
     await bootOnPrimary(meta, bootCore, content, startOptions);
     rackMgr.get(CONSOLE_ID)?.noteLoaded(bootCore.name, { system: meta.system, title });
@@ -5236,8 +5236,37 @@ async function disarmMouseAndReload() {
 // Wrap raw ROM bytes for a worker-execution core into a ContentBundle (needed
 // for a stable contentId — SaveRAM/save-state keying — even for a lone single
 // file). Main-thread cores keep using the raw ArrayBuffer/File directly.
-async function wrapWorkerContent(filename, source, coreInfo) {
+//
+// A `.cue`/`.m3u` entry's companion files (CD-audio/data BIN tracks, or a
+// multi-disc list) are NOT inside `source` — only the entry's own bytes are
+// (whatever resolveRom() already fetched for `meta.file`). Historically this
+// meant a real multi-track CUE+BIN disc could only be booted through the
+// desktop file-picker's separate multi-file branch (`ContentBundle.fromFiles`
+// on the romInput 'change' handler, which already has every File selected up
+// front) — the collection/cartridge-insert path (this function) had no way to
+// find or fetch the companions, so it 404'd or threw MISSING_COMPANIONS.
+// When `meta` is supplied AND resolves to a fetchable URL (the 'url' ROM
+// source — the only one this can help; a 'pick'/'local' entry has no server
+// URL for a companion to live at and still needs the file-picker's multi-file
+// branch), resolve+fetch the cue/m3u's companions over the network via
+// ContentBundle.fromEntryFetch, producing the EXACT SAME bundle shape
+// fromFiles does. Falls back to the single-named-file wrap (prior behavior)
+// for every other case.
+async function wrapWorkerContent(filename, source, coreInfo, meta = null) {
   const { ContentBundle } = await import('./ContentBundle.js');
+  const ext = extOf(filename).toLowerCase();
+  if ((ext === 'cue' || ext === 'm3u') && meta && !isLocalRomMeta(meta)) {
+    const entryUrl = romUrlFor(meta);
+    if (entryUrl && entryUrl.endsWith(filename)) {
+      const rootUrl = entryUrl.slice(0, entryUrl.length - filename.length);
+      return ContentBundle.fromEntryFetch(filename, source, async (path) => {
+        const url = rootUrl + path.split('/').map(encodeURIComponent).join('/');
+        const res = await fetch(url);
+        if (!res.ok) return null; // let fromNamedSources report a real MISSING_COMPANIONS
+        return new Uint8Array(await res.arrayBuffer());
+      }, { entryExtensions: coreInfo.exts });
+    }
+  }
   return ContentBundle.fromNamedSources([{ path: filename, source }], { entryExtensions: coreInfo.exts });
 }
 
@@ -5338,7 +5367,7 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // BIOS/restored-SaveRAM resolved — previously only the desktop file-picker
     // did this, so the real cartridge-insert path never gave a worker core its
     // BIOS or a chance to restore native SaveRAM.
-    const content = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, core) : buf;
+    const content = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, core, meta) : buf;
     const startOptions = await buildStartOptions({ ...core, name: coreName }, { file: meta.file, coreOptions, inputDevices, remapName, systemFiles: core.systemFiles }, content);
     await bootOnPrimary(meta, { name: coreName, url: core.url, style: core.style }, content, startOptions);
     rackMgr.get(CONSOLE_ID)?.noteLoaded(coreName, { system: meta.system, title: meta.title });
@@ -5470,7 +5499,7 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
     const intoCoreInfo = { ...core, name: meta.core };
     // B1 (2026-07-25 review): worker-execution content wrapping + BIOS/restored-
     // SaveRAM resolution, same as every other boot path.
-    const intoContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, intoCoreInfo) : buf;
+    const intoContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, intoCoreInfo, meta) : buf;
     const intoStart = await buildStartOptions(intoCoreInfo, { file: meta.file }, intoContent);
     await runtime.load(intoContent, intoCoreInfo, {
       system: meta.system, title: meta.title,
@@ -5529,7 +5558,7 @@ async function swapConsoleCore(consoleId, meta) {
   const swapCoreInfo = { ...core, name: meta.core };
   // B1 (2026-07-25 review): worker-execution content wrapping + BIOS/restored-
   // SaveRAM resolution, same as every other boot path.
-  const swapContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, swapCoreInfo) : buf;
+  const swapContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, swapCoreInfo, meta) : buf;
   const swapStart = await buildStartOptions(swapCoreInfo, { file: meta.file }, swapContent);
   await bootFreshRuntime(consoleId, meta, {
     core: swapCoreInfo, romBuffer: swapContent,

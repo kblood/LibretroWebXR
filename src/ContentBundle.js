@@ -50,6 +50,53 @@ export class ContentBundle {
     const displayName = leaf.replace(/\.[^.]+$/, '') || leaf;
     return new ContentBundle({ entryPath: selectedEntry, files, contentId, displayName, dependencies });
   }
+
+  /**
+   * Build a ContentBundle for an entry whose companion files are NOT already
+   * in hand — only the entry's own bytes are (e.g. a collection/cartridge-
+   * insert boot that fetched a lone `.cue`/`.m3u` by URL, unlike the desktop
+   * multi-file picker's `fromFiles`, which already has every File selected up
+   * front). Recursively parses cue/m3u FILE references (the same
+   * parseCueReferences/parseM3uReferences validateDependencies below uses),
+   * resolving each reference relative to its parent with the identical rule
+   * `validateDependencies` applies, and fetches it lazily via the injected
+   * `fetchCompanion(path)` callback — kept as a callback rather than a
+   * hardcoded `fetch()` call so this stays Node-testable and reusable by any
+   * future multi-track worker core (PS2) with its own URL-resolution rule.
+   * `fetchCompanion` should resolve to a source `readBytes()` can consume, or
+   * null/undefined for "not found" — a genuinely missing companion is still
+   * surfaced as the normal MISSING_COMPANIONS error, via fromNamedSources'
+   * own validateDependencies below, not thrown here. The resulting bundle is
+   * built through `fromNamedSources`, so it has EXACTLY the same shape
+   * (files Map, entryPath, dependencies, contentId) as `fromFiles` produces.
+   */
+  static async fromEntryFetch(entryPath, entrySource, fetchCompanion, options = {}) {
+    const path = normalizeContentPath(entryPath);
+    const files = new Map([[path, entrySource]]);
+    const queue = [path];
+    while (queue.length) {
+      const current = queue.shift();
+      const ext = extensionOf(current);
+      if (ext !== 'cue' && ext !== 'm3u') continue;
+      const text = await readText(files.get(current));
+      const refs = ext === 'cue' ? parseCueReferences(text) : parseM3uReferences(text);
+      for (const ref of refs) {
+        let resolved;
+        try { resolved = resolveRelative(current, ref); }
+        catch (error) {
+          if (error instanceof ContentBundleError) throw error;
+          throw new ContentBundleError(`Unsafe reference in ${current}: ${ref}`, 'UNSAFE_REFERENCE', { entry: current, reference: ref });
+        }
+        if (files.has(resolved)) continue;
+        const source = await fetchCompanion(resolved);
+        if (source == null) continue; // let fromNamedSources' validateDependencies report it missing
+        files.set(resolved, source);
+        queue.push(resolved);
+      }
+    }
+    const named = [...files].map(([p, source]) => ({ path: p, source }));
+    return ContentBundle.fromNamedSources(named, { entryPath: path, ...options });
+  }
 }
 
 export function normalizeContentPath(input) {

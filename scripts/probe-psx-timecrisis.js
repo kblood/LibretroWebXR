@@ -392,6 +392,84 @@ try {
   ok('NO console error across the whole upload/boot/render run', relevantConsoleErrors.length === 0, JSON.stringify(relevantConsoleErrors));
 
   console.log(`\nScreenshots saved (real canvas.toDataURL() bytes, not a viewport capture): ${shots.map((_, i) => resolve(SHOT_DIR, `psx-timecrisis-t${i + 1}.png`)).join(', ')}`);
+
+  // --- Step 2 (2026-07-27): the REAL cartridge-insert / collection-entry
+  // path — window.__insertCartridge -> handleCartridgeInserted ->
+  // loadCartridge -> resolveRom (a plain URL fetch of ONLY the .cue's own
+  // bytes) -> wrapWorkerContent(). Before this session's fix, wrapWorkerContent
+  // wrapped exactly the one named file it was handed, so ContentBundle's
+  // validateDependencies() could never find this disc's 33 companion .bin
+  // tracks and this insert would throw MISSING_COMPANIONS — the real gap
+  // Step 1 above (the file-picker's separate multi-file ContentBundle.fromFiles
+  // branch) could not exercise. wrapWorkerContent now recognizes a .cue/.m3u
+  // entry sourced from a fetchable URL and resolves+fetches its companions
+  // itself (ContentBundle.fromEntryFetch, src/ContentBundle.js), producing the
+  // exact same bundle shape fromFiles does. meta below mirrors the real
+  // public/roms/local/local.collection.json "Time Crisis" entry exactly (no
+  // rom.source override -> RomResolver defaults to ['url']). A fresh page load
+  // is used so this exercises the FIRST-insert boot path (currentCore is
+  // still null), not a same-core hot-swap.
+  info('Step 2: fresh page load, then window.__insertCartridge with the SAME disc — sourced entirely via URL fetch (.cue + all 33 companion .bin tracks), NOT the file-picker');
+  const page2 = await browser.newPage();
+  page2.setDefaultTimeout(120000);
+  const pageErrors2 = [];
+  const consoleErrors2 = [];
+  page2.on('pageerror', (e) => pageErrors2.push(e.message));
+  page2.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors2.push(message.text());
+  });
+
+  await page2.goto(BASE, { waitUntil: 'load' });
+  const ready2 = await page2.waitForFunction(
+    () => !!window.__client && typeof window.__insertCartridge === 'function',
+    { timeout: 30000 },
+  ).then(() => true).catch(() => false);
+  ok('[cartridge-insert] fresh app instance booted with window.__insertCartridge ready', ready2);
+
+  if (ready2) {
+    const insertMeta = { file: 'local/ps1/Time Crisis.cue', core: 'mednafen_psx_hw', system: 'psx', title: 'Time Crisis' };
+    const insertResult = await page2.evaluate(async (meta) => {
+      try { await window.__insertCartridge(meta); return { ok: true }; }
+      catch (e) { return { ok: false, reason: String(e?.message || e) }; }
+    }, insertMeta);
+    ok('[cartridge-insert] window.__insertCartridge resolves without throwing for the URL-fetched multi-track disc (the real gap this fix closes)',
+       insertResult.ok, insertResult.reason || '');
+
+    const insertBooted = await page2.waitForFunction(
+      () => window.__client?.mode === 'worker' && window.__client?.ready === true,
+      { timeout: 100000 },
+    ).then(() => true).catch(() => false);
+    const insertFinalState = await page2.evaluate(() => ({
+      mode: window.__client?.mode ?? null,
+      ready: !!window.__client?.ready,
+      status: document.querySelector('#status')?.textContent ?? null,
+    }));
+    ok('[cartridge-insert] real cartridge-insert path booted the URL-fetched disc into worker mode and ready',
+       insertBooted, `finalState=${JSON.stringify(insertFinalState)}`);
+
+    if (insertBooted) {
+      await sleep(25000); // give it time to reach the same title-screen-ish state Step 1 observed
+      const insertShot = await captureCanvas(page2);
+      ok('[cartridge-insert] canvas snapshot captured', !!insertShot);
+      if (insertShot) {
+        saveShot(insertShot.dataUrl, 'psx-timecrisis-cartridge-insert.png');
+        info(`cartridge-insert snapshot: distinctColorBuckets=${insertShot.distinctColorBuckets}, ` +
+          `saturatedRed=${insertShot.saturatedRed}/${insertShot.total}, nearWhite=${insertShot.nearWhite}/${insertShot.total}, ` +
+          `nearBlack=${insertShot.nearBlack}/${insertShot.total}`);
+      }
+      ok('[REAL-CONTENT SIGNAL via cartridge-insert] canvas shows real, non-blank rendered content (saturated-red or near-white region, matching Step 1\'s file-picker signal)',
+         !!insertShot && (insertShot.saturatedRed > insertShot.total * 0.002 || insertShot.nearWhite > insertShot.total * 0.002),
+         insertShot ? `saturatedRed=${insertShot.saturatedRed}/${insertShot.total}, nearWhite=${insertShot.nearWhite}/${insertShot.total}` : 'no shot');
+    }
+
+  }
+
+  ok('[cartridge-insert] NO pageerror across the insert/boot/render run', pageErrors2.length === 0, JSON.stringify(pageErrors2));
+  const relevantConsoleErrors2 = consoleErrors2.filter((m) =>
+    !/^\[core\]/.test(m) && !/^\[worker-core\]/.test(m) && !/^Failed to load resource/.test(m));
+  ok('[cartridge-insert] NO console error across the insert/boot/render run', relevantConsoleErrors2.length === 0, JSON.stringify(relevantConsoleErrors2));
+
+  await page2.close().catch(() => {});
 } catch (e) {
   console.error('ERROR', e);
   results.push(false);
