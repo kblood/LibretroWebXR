@@ -662,3 +662,59 @@ Phase C). Remaining Phase C items have since progressed:
   (multi-file shelf persistence), C6 (delete `DiscControl.js` duplication +
   real disc-swap UI). See memory `psx-phase-c-n64-phase-d-goal.md` for the
   standing goal tracking all of this.
+
+## Status update (2026-07-27, second pass): C2 (DiscIdentity wiring) done; C3's BIOS mount-name bug found+fixed
+
+C3's "DONE" above was written before a Codex review pass found a real P1 in
+it (mounting an unrecognized-but-plausible BIOS under the user's own
+filename, which Beetle PSX HW never probes for — the import silently
+"succeeded" but had zero effect). Both that and C2 went through several
+rounds of `codex exec review` before landing clean — noted in full since it's
+a good illustration of why every commit here goes through review, not just
+the ones that feel risky:
+
+- **C3 mount-name bug — FIXED (commit `26d2ad4`).** `mountNameFor()` /
+  `UNRECOGNIZED_MOUNT_NAME` now always mount an unrecognized-but-plausible
+  dump under a filename the core actually probes for (`scph5501.bin`),
+  keeping the user's real filename in a separate `displayName` field for the
+  UI. Also fixed 3 P2s from the same review round (title metadata never
+  reaching the region-hint parser; combined "(USA, Europe)"-style region tags
+  not recognized; `FirmwareStore.remove()`'s signature broken by the new
+  keying scheme).
+- **C3 migration + UI gaps — FIXED (commit `e664df0`).** The mount-name fix
+  itself had 2 more P2s: already-persisted broken records (from the brief
+  `f2f30c9`-only window) were never migrated, and the import-status message
+  displayed the mount alias instead of the user's real filename.
+  `FirmwareStore.list()` now self-heals legacy records at read time
+  (`healUnrecognizedMountName()`), no DB version bump needed.
+- **C2 (DiscIdentity wiring) — DONE (commit `e664df0`, hardened in
+  `9565c74`/`7f0b27b`).** `src/DiscIdentity.js`'s `identifyPlayStationDisc()`
+  was tested but genuinely dead code (2026-07-24 finding) — now wired into
+  the `romInput` file-picker path via a new `pickPlayStationCore()`: a picked
+  `.cue`'s referenced data track (or a `.chd` directly) gets sniffed for
+  SYSTEM.CNF's BOOT/BOOT2 line before core selection, so a real PS1 disc now
+  correctly boots `mednafen_psx_hw` without an explicit `?core=` override. A
+  `.chd`'s compressed container never parses as raw ISO9660, so it naturally
+  (and correctly) falls back to the old static default with a clear status
+  message instead of a silent guess. Also promoted `DiscIdentity.js`'s test
+  coverage from a gitignored `tmp/` scratch script into the real suite
+  (`test/disc-identity.test.js`) — it had zero committed tests before this.
+  - This wiring's own review turned up 3 more P1s, all in the surrounding
+    `romInput` multi-file-selection logic rather than in the sniffing itself:
+    the primary-file selector relied on a core's `multiFile` flag, but
+    `play` (the un-overridden default for `.cue`) never declared it, so the
+    selector silently missed the `.cue` entry whenever a FileList didn't
+    happen to put it first (`9565c74`); the derived `system` still used the
+    un-sniffed override, so a correctly-detected PS1 disc would boot the
+    right core but route as system `ps2` anyway, sending its peripheral
+    wiring down the wrong path (`9565c74`); and an M3U-based multi-disc
+    bundle picked whichever member CHD sorted first instead of the M3U
+    itself (`7f0b27b`). That selection logic was extracted into a pure,
+    directly-unit-tested `pickPrimaryFile()` in `systems.js` after the third
+    round, specifically so the next ordering edge case gets caught by a test
+    instead of a fourth review round.
+- **Still open:** C1 (streaming content), C4 (multi-file shelf persistence),
+  C6 (delete `DiscControl.js` duplication + real disc-swap UI). PSX
+  Lightrec JIT + GL renderer still investigated-not-fixed (separate
+  background investigation in progress, see memory
+  `psx-lightrec-gl-investigation-2026-07-27.md`).
