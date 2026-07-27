@@ -860,3 +860,81 @@ the ones that feel risky:
   different concurrent session) remain from this review's original backlog.
   See memory `psx-phase-c-n64-phase-d-goal.md` for the standing goal
   tracking all of this.
+
+## Status update (2026-07-27, sixth pass): N64 Phase D — two real bugs found and fixed in vendored Play!-CodeGen
+
+Continued the N64 shadow-differential harness (see `n64-jit-nj1-spike.md`)
+against a harder ROM than the original smoke test: `n64-systemtest.z64`.
+Rebuilt the core with `N64_JIT_SHADOW_CHECK=1` and ran it through the real
+worker/RetroArch boot path for 20s. Real, non-synthetic result on the first
+run: **`checked=9 matched=6 mismatched=3`** — the harness's first-ever
+mismatches, with full raw instruction-word dumps for each (a new diagnostic
+added to `vr4300_jit_bridge.cpp`'s `CompareAndReport()` specifically to make
+this root-causable instead of just an address).
+
+**Finding 1 — real bug, found and fixed.** Two of the three mismatched
+blocks (`a4000618`, `a400066c`) were both terminated by `BGEZAL` (MIPS
+REGIMM `rt=0x11`), and both diverged only in the predicted exit `pc`: the
+JIT-shadow prediction landed on the not-taken/fallthrough address even
+though `BGEZAL`'s condition (`r0 >= 0`) is architecturally always true.
+
+Root cause, confirmed by reading the actual vendored library source (not
+guessed): this project's tier-1 adapter (`vr4300_play_backend.cpp`) lowers
+`BGEZ`/`BGEZAL`/`BGEZL`/`BGEZALL` via `Jitter::CJitter::Cmp64(CONDITION_GE)`
+— correct IR usage. But **Play!-CodeGen's own vendored Wasm backend has no
+`CONDITION_GE` case in two separate places**, both falling through to
+`default: assert(false)` — a silent no-op in the release/NDEBUG build this
+project ships (`assert` compiles out, it does not abort):
+- `Jitter_CodeGen_Wasm_64.cpp`'s `Emit_Cmp64_MemAnyAny` (the actual Wasm
+  bytecode lowering for a runtime 64-bit compare) — missing `CONDITION_GE`
+  and `CONDITION_AE`.
+- `Jitter_Optimize.cpp`'s `FoldConstant64Operation` (the compile-time
+  constant-folding pass, which runs *before* codegen) — same two cases
+  missing. This is the one that actually fired for `BGEZAL $r0,...`: since
+  `rs=r0` is always a compile-time-constant zero and the adapter also
+  pushes a literal `0` as the other operand (`useRt0=true`), the comparison
+  becomes two constants, hits this optimizer path, silently defaults
+  `result=false`, and rewrites the condition to a hardcoded `false` — this
+  is what actually produced the observed bug for this specific test.
+  (The codegen-only fix was tried and applied first, rebuilt, and verified
+  to make *zero* difference to the shadow-check output — proof the real bug
+  was here, not in codegen, before moving on to patch this too.)
+
+Both gaps patched locally in the WSL2-side vendored checkout
+(`~/play-build/Play-/deps/CodeGen`, upstream `github.com/jpd002/Play-`),
+adding the missing `CONDITION_GE`/`CONDITION_AE` cases mirroring the
+existing `CONDITION_GT`/`CONDITION_AB` pattern in each file. **Not yet
+upstreamed or committed to this project's own repo** — the fix lives only
+in the WSL2 build tree and must be reapplied (or a proper pinned fork made,
+matching the `psx-wasm-jit-libretro`/`ps2-play-libretro` pattern) before any
+future N64 JIT rebuild. After rebuilding with both fixes, the same probe
+against the same ROM showed both `BGEZAL` blocks now `match`:
+**`checked=9 matched=8 mismatched=1`**.
+
+**Finding 2 — not a bug, a shadow-harness limitation.** The remaining
+mismatch (`block_pc=a4000408`) is a tight decrement loop (`ADDIU r2,r0,0x100`
+/ `ADDIU r2,r2,-1` / `BNE r2,r0,<loop>` / delay nop) whose backward branch
+target lands *inside* the block's own already-scanned span. The shadow
+harness predicts a block's outcome with exactly one synthetic run of the
+compiled IR at decode time, then compares once the real interpreter's PC
+exits `[startPc, blockEnd)` — which is correct for blocks that leave their
+own span on the first pass, but not for a self-referencing loop: the real
+interpreter genuinely re-enters and loops for real (256 times here) before
+exiting, while the shadow only ever modeled one pass. This is a limitation
+of the *observational harness*, not evidence of a codegen bug — the
+compiled IR itself (verified by hand-decoding the raw words against
+`EmitBranchAndDelay`) computes the single-pass semantics correctly. It does
+not, on its own, say anything about whether the real `ci_table`-wired
+re-entry model (which would treat the loop-back target as a fresh
+`LookupOrCompile()` at a smaller block) behaves correctly — that's a
+separate, not-yet-tested question.
+
+**Where this leaves Phase D:** a real, previously-undiscovered, and now-fixed
+correctness bug was found in a third-party dependency shared by every
+Play!-CodeGen consumer in this project (PS2 EE, PSX Lightrec, N64) —
+significant validation of why the shadow-check-before-`ci_table` caution in
+the original plan was correct. This is genuine progress, but Phase D's exit
+gate (broad differential coverage — interrupt-firing, more ROMs, longer
+sessions — clean enough to justify wiring `ci_table`) is not met by one
+20-second boot-window sample against one ROM. `ci_table` wiring has still
+not been attempted. See memory `n64-jit-nj1-spike.md` for the same finding.
