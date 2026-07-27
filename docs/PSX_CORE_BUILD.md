@@ -110,12 +110,17 @@ duplicate the symbols** (the same idempotency the two `git apply --check` /
 `--reverse --check` patch blocks already give the other two patches):
 
 ```sh
-if ! grep -q '_rwebinput_set_lightgun' Makefile.emscripten; then
+# Check BOTH exported symbols, not just one -- a Makefile that somehow has
+# _rwebinput_set_lightgun but not _rwebinput_clear_lightgun (e.g. hand-
+# edited) must still fall through and get a full, correct insert rather
+# than being treated as already-done.
+if ! grep -q '_rwebinput_set_lightgun' Makefile.emscripten || \
+   ! grep -q '_rwebinput_clear_lightgun' Makefile.emscripten; then
   grep -q '_lr_play_backend_invalidate_all' Makefile.emscripten || {
     echo "expected worker-module patch marker not found; insertion anchor changed" >&2; exit 1; }
   sed -i 's/_lr_play_backend_invalidate_all/_lr_play_backend_invalidate_all,_rwebinput_set_lightgun,_rwebinput_clear_lightgun/' \
     Makefile.emscripten
-  grep -q '_rwebinput_set_lightgun' Makefile.emscripten || {
+  grep -q '_rwebinput_set_lightgun' Makefile.emscripten && grep -q '_rwebinput_clear_lightgun' Makefile.emscripten || {
     echo "failed to insert rwebinput lightgun exports" >&2; exit 1; }
 fi
 ```
