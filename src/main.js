@@ -2763,52 +2763,6 @@ async function buildCartridgeWorld() {
       sources: meta.rom.sources || [meta.rom.source],
     };
   };
-  /**
-   * Multi-file sibling of __pickLocalRom above, for headless verification of a
-   * worker-execution core's CUE+BIN-style bundle WITH light-gun wiring. The
-   * real desktop `#rom-input` change handler (below) accepts multi-file
-   * selections but never computes gun/mouse/four-score config for them — it
-   * only threads `{ file }` through buildStartOptions (see that handler) —
-   * so there was previously no in-app way to boot a multi-track disc with its
-   * light gun connected at boot (the device only attaches at boot; see
-   * docs/LIGHTGUN_SUPPORT.md). Added for the PSX GunCon probe
-   * (scripts/probe-psx-guncon.js); mirrors __pickLocalRom's gun-wiring branch
-   * verbatim, adapted for a File[] array (ContentBundle.fromFiles) instead of
-   * one in-hand ArrayBuffer. opts: { core, system, lightgun, twoGun }.
-   */
-  window.__pickLocalRomMultiFile = async (files, opts = {}) => {
-    const primary = files.find((f) => detectCore(f.name, coreOverride)?.multiFile) || files[0];
-    const coreInfo = (opts.core && CORES[opts.core]) ? { name: opts.core, ...CORES[opts.core] } : detectCore(primary.name, coreOverride);
-    if (!coreInfo) throw new Error(`no core for "${primary.name}"`);
-    if (!coreInfo.multiFile) throw new Error(`${coreInfo.label} doesn't accept a multi-file selection`);
-    const system = opts.system || systemForFile(primary.name, coreOverride);
-    const title = primary.name.replace(/\.[^.]+$/, '');
-    const meta = {
-      file: primary.name, core: coreInfo.name, system: system || 'unknown', title, rom: { source: 'pick' },
-      ...(opts.lightgun ? { lightgun: true } : {}), ...(opts.twoGun ? { twoGun: true } : {}),
-    };
-    const twoGun = _twoGunActiveFor(meta);
-    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system, { twoGun }) : null;
-    const bootCore = (gun && CORES[gun.core]) ? { ...CORES[gun.core], name: gun.core } : coreInfo;
-    const inputDevices = window.__forceInputDevices || gun?.inputDevices;
-    const coreOptions = window.__forceCoreOptions
-      ? { ...(bootCore.coreOptions || {}), ...window.__forceCoreOptions }
-      : (gun ? { ...(bootCore.coreOptions || {}), ...gun.coreOptions } : bootCore.coreOptions);
-    const remapName = window.__forceRemapName || gun?.remapName || bootCore.remapName;
-    logLightgunBoot('pickLocalRomMultiFile', meta, gun, { forcedInputDevices: !!window.__forceInputDevices });
-    const { ContentBundle } = await import('./ContentBundle.js');
-    const content = await ContentBundle.fromFiles(files, { entryExtensions: bootCore.exts });
-    const startOptions = await buildStartOptions(bootCore, { file: meta.file, coreOptions, inputDevices, remapName, systemFiles: bootCore.systemFiles }, content);
-    await bootOnPrimary(meta, bootCore, content, startOptions);
-    rackMgr.get(CONSOLE_ID)?.noteLoaded(bootCore.name, { system: meta.system, title });
-    currentCore = bootCore.name;
-    currentMeta = { core: bootCore.name, file: meta.file, title, system: meta.system, contentId: content?.contentId ?? null };
-    gameInput?.setSystem(meta.system);
-    _lastLoadedMeta = { ...meta };
-    _lightgunArmedConsole = !!gun;
-    _twoGunPorts = (gun && gun.guns?.length > 1) ? gun.guns.map((x) => x.port) : [];
-    return { system: meta.system, core: bootCore.name, gun: !!gun, inputDevices, remapName };
-  };
   window.__add = {
     // Basic spawners (used by headless probes + the in-VR Add-mode buttons).
     shelf:    (col) => addProp('shelf',    col ? { collection: col } : {}),

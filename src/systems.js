@@ -131,10 +131,22 @@ export const CORES = {
   // core is real and headless-verified but not yet reachable from the real
   // in-VR cartridge-insert path (2026-07-24 review, P0-2), so it's hidden
   // from the default shelf/manifest UI until Phase B lands.
+  // remapName 'Beetle PSX' — the RA library_name THIS build actually reports.
+  // Verified against the compiled artifact, not guessed: the wasm's retro_get_
+  // system_info->library_name string is the null-terminated literal
+  // `"Beetle PSX"` (no " HW" suffix) — grepped as `Beetle PSX\x00` in
+  // mednafen_psx_jit_libretro.wasm — even though this app's own `label` above
+  // says "Beetle PSX HW" and upstream beetle-psx-libretro's HAVE_HW build sets
+  // MEDNAFEN_CORE_NAME to "Beetle PSX HW". Confirms this build was NOT
+  // compiled with HAVE_HW defined for that macro (independently corroborated
+  // by RetroArchConfig.js's core-options comment: this artifact's option keys
+  // are prefixed `beetle_psx_`, not `beetle_psx_hw_` — see CORE OPTIONS note
+  // on the psx system entry below). Needed for the GunCon port-device
+  // override to connect at boot, same mechanism as every other gun here.
   mednafen_psx_hw:   { url: 'cores/mednafen_psx_jit_libretro.js',    exts: ['chd','cue','m3u','ccd','pbp','exe'], label: 'PlayStation (Beetle PSX + Wasm JIT)', style: 'module', license: 'GPLv2', weight: 3,
     execution: 'worker', requiresThreads: true, contentIo: 'transfer-memfs', multiFile: true,
     companionExtensions: ['bin','img','iso','sub','sbi'], firmwareProfile: 'psx',
-    buildHash: 'beetle-d6caed07-codegen-a5009f7d-jit-dev', experimental: true },
+    buildHash: 'beetle-d6caed07-codegen-a5009f7d-jit-dev', experimental: true, remapName: 'Beetle PSX' },
   // Nintendo 64, via mupen64plus-libretro-nx (GLideN64, GLES3/WebGL2) — see
   // docs/N64_CORE_BUILD.md for the recipe. Phase N0 (interpreter baseline,
   // no dynarec) per docs/research/n64-wasm-jit-plan.md: new_dynarec is
@@ -299,7 +311,63 @@ export const SYSTEMS = {
   // this flag keeps them out of normal users' hands until Phase B lands, while
   // staying reachable for testing via the query param. Remove this flag (not
   // the mechanism — it's generic and cheap to keep) once Phase B ships.
-  psx:       { label: 'PlayStation',        defaultCore: 'mednafen_psx_hw',  cores: ['mednafen_psx_hw'],              exts: ['chd','cue','m3u','ccd','pbp','exe'], aliases: ['psx','ps1','playstation','sony playstation'], thumbnailRepo: 'Sony_-_PlayStation', medium: 'floppy', experimental: true },
+  // GunCon (Beetle PSX HW / mednafen_psx_hw). Device 260 = SUBCLASS(LIGHTGUN,0) —
+  // VERIFIED FROM SOURCE (not guessed), matching this repo's pinned build
+  // (public/cores/mednafen_psx_jit_libretro.build.json pins
+  // BEETLE_PSX_COMMIT=d6caed07fcba47c211ff23c4fa1b20b894830ff2): fetched
+  // beetle-psx-libretro's input.c at that exact commit
+  // (github.com/libretro/beetle-psx-libretro/blob/d6caed07.../input.c) and
+  // read `#define RETRO_DEVICE_PS_GUNCON RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_
+  // LIGHTGUN, 0)` directly out of the retro_controller_description table (id
+  // 260, same as SNES Super Scope / SMS Light Phaser). Reads the standard
+  // RETRO_DEVICE_LIGHTGUN SCREEN_X/Y/TRIGGER/RELOAD path every other gun here
+  // uses (input.c's Update_Guncon calls input_state_cb(port, RETRO_DEVICE_
+  // LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_*)) — same code path the patched
+  // rwebinput (docs/patches/rwebinput-lightgun.diff) feeds for NES/SNES/MD/SMS.
+  // Port 0 (player 1) — Guncon is a single-player peripheral that plugs into
+  // controller port 1, matching PS2 GunCon2's port convention above.
+  //
+  // CORE OPTIONS: gun_input_mode default is already "lightgun" (input.c: `int
+  // gun_input_mode = SETTING_GUN_INPUT_LIGHTGUN;`) and gun_cursor defaults to
+  // "cross" (libretro_core_options.h) — unlike nestopia/genesis_plus_gx, this
+  // core does NOT need a read-mode override to leave its touchscreen default.
+  // Set explicitly anyway (belt-and-suspenders against a future core rebuild
+  // changing defaults) using BOTH option-key prefixes, mirroring
+  // RetroArchConfig.js's existing beetle_psx_/beetle_psx_hw_ dance: upstream's
+  // BEETLE_OPT() macro is `"beetle_psx_hw_" #x` in HAVE_HW builds and
+  // `"beetle_psx_" #x` otherwise, and grepping the ACTUAL compiled wasm
+  // (mednafen_psx_jit_libretro.wasm) shows only the un-prefixed
+  // `beetle_psx_gun_input_mode` / `beetle_psx_gun_cursor` / `beetle_psx_
+  // crosshair_color_p1` strings — this build was NOT compiled with HAVE_HW for
+  // that macro (see CORES.mednafen_psx_hw's remapName comment for the
+  // corroborating library_name finding). The `_hw_`-prefixed keys are set too
+  // so nothing breaks if a future rebuild flips that.
+  //
+  // CONFIRMED NOT reaching the core end-to-end (2026-07-27, scripts/probe-
+  // psx-guncon.js's gating "GUNCON END-TO-END SIGNAL" check): the app-side
+  // wiring (this entry -> loadCartridge's lightgun branch -> coreOptions/
+  // inputDevices/remapName threaded through to the worker -> sendLightgun ->
+  // EmulatorWorkerRuntime's forwardLightgun -> real mousemove/mousedown/
+  // mouseup dispatched on the worker's OffscreenCanvas) is verified working
+  // — the worker's own metrics confirm every dispatched call actually ran.
+  // But against the real Time Crisis "Guncon Calibration" screen (aim+shoot
+  // at a fixed on-screen target), firing directly at the target repeatedly
+  // produced a byte-identical frame before and after — the shot never
+  // registers with the game. mednafen_psx_hw is a bespoke from-scratch build
+  // (docs/PSX_CORE_BUILD.md), not built through the same WSL2 pipeline that
+  // relinked nestopia/snes9x/genesis_plus_gx against a PATCHED rwebinput
+  // (docs/patches/rwebinput-lightgun.diff) — stock rwebinput has NO
+  // RETRO_DEVICE_LIGHTGUN case at all (see that diff's own comment) — so the
+  // leading theory is this core's RetroArch frontend was never linked
+  // against the patch, and always reads gun position as 0,0. Confirming and
+  // fixing that requires rebuilding the core (out of scope for this app-side
+  // change) — tracked as a follow-up. See scripts/probe-psx-guncon.js for
+  // the check and docs/research (or memory) for the full writeup.
+  psx:       { label: 'PlayStation',        defaultCore: 'mednafen_psx_hw',  cores: ['mednafen_psx_hw'],              exts: ['chd','cue','m3u','ccd','pbp','exe'], aliases: ['psx','ps1','playstation','sony playstation'], thumbnailRepo: 'Sony_-_PlayStation', medium: 'floppy', experimental: true,
+    lightgun: { label: 'GunCon', core: 'mednafen_psx_hw', device: 260, port: 0, coreOptions: {
+      beetle_psx_gun_input_mode: 'lightgun', beetle_psx_hw_gun_input_mode: 'lightgun',
+      beetle_psx_gun_cursor: 'cross', beetle_psx_hw_gun_cursor: 'cross',
+    } } },
   n64:       { label: 'Nintendo 64',        defaultCore: 'mupen64plus_next', cores: ['mupen64plus_next'],             exts: ['n64','z64','v64'], aliases: ['n64','nintendo 64'], thumbnailRepo: 'Nintendo_-_Nintendo_64', medium: 'cartridge', experimental: true },
 };
 

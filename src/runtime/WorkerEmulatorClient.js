@@ -64,6 +64,16 @@ export class WorkerEmulatorClient extends EventTarget {
       ...prepared.payload,
       arguments: opts.arguments || null,
       frameIntervalMs: opts.frameIntervalMs || 16,
+      // Per-launch core options / controller-port device overrides / remap
+      // name — the SAME three fields EmulatorClient.start() has honoured for
+      // every main-thread gun/mouse peripheral (PS2 GunCon2, SNES Super
+      // Scope/Justifier, NES Zapper, Genesis Menacer, SMS Light Phaser) since
+      // before this core existed. Worker-executed cores (PSX, N64) never had
+      // this plumbing — see EmulatorWorkerRuntime.js's writeConfig(), the
+      // first thing here to actually consume them (added for PSX GunCon).
+      coreOptions: (opts.coreOptions && Object.keys(opts.coreOptions).length) ? opts.coreOptions : null,
+      inputDevices: (opts.inputDevices && Object.keys(opts.inputDevices).length) ? opts.inputDevices : null,
+      remapName: opts.remapName || null,
     }, prepared.transfer);
     this.capabilities = result?.capabilities || {};
     this.ready = true;
@@ -112,6 +122,20 @@ export class WorkerEmulatorClient extends EventTarget {
   sendInput(eventType, code, key, keyCode, location) {
     if (!this.worker) return;
     this.worker.postMessage(requestMessage(0, 'input', { eventType, code, key, keyCode, location }));
+  }
+
+  // Aim + fire a worker-hosted core's light gun (GunCon, and any future
+  // worker-execution gun). Mirrors EmulatorClient.sendLightgun's contract
+  // exactly — (u, v) normalised canvas coords in [0,1] (origin top-left),
+  // `trigger` the held trigger state, `port` the optional libretro gun port —
+  // so RuntimeEmulatorClient's callers (LightGunMgr, the desktop de-risk
+  // hooks) don't need to know which execution topology is running. Fire-
+  // and-forget (id 0, no response awaited), same as sendInput above; the
+  // worker's own forwardLightgun tracks trigger edge-state per-port so
+  // repeated calls with the same `trigger` don't re-fire mousedown.
+  sendLightgun(u, v, trigger, port) {
+    if (!this.worker) return;
+    this.worker.postMessage(requestMessage(0, 'lightgun', { u, v, trigger: !!trigger, port: port ?? null }));
   }
 
   async stop() {

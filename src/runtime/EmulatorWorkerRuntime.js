@@ -20,6 +20,14 @@ const STATE_DIR = '/home/web_user/retroarch/userdata/states';
 const SYSTEM_DIR = '/home/web_user/retroarch/userdata/system';
 const SAVE_DIR = '/home/web_user/retroarch/userdata/saves';
 const RA_CFG_PATH = '/home/web_user/retroarch/userdata/retroarch.cfg';
+// Per-core input remap directory — mirrors EmulatorClient.js's REMAP_DIR
+// (RETROARCH_CFG_DIR + '/config/remaps'). RetroArch only honours a
+// controller-port device override (input_libretro_device_pN, e.g. GunCon on
+// port 1) from this per-core <LibraryName>/<LibraryName>.rmp file at boot —
+// the main cfg's value is ignored (verified during the original light-gun
+// bring-up, see docs/LIGHTGUN_SUPPORT.md). Worker-executed cores (PSX, N64)
+// never had this plumbing before — see writeConfig() below.
+const REMAP_DIR = '/home/web_user/retroarch/userdata/config/remaps';
 
 let canvas = null;
 let moduleInstance = null;
@@ -35,6 +43,13 @@ let saveStem = 'rom';
 let paused = false;
 let disc = { index: 0, ejected: false, discCount: 1 };
 const metrics = { framesProduced: 0, framesSkipped: 0, inputs: 0, audioBatches: 0, errors: 0 };
+// Tracks each seated light-gun port's synthetic-trigger edge state (mirrors
+// EmulatorClient.js's `_gunDown`/`_webgunSet` bookkeeping) so forwardLightgun
+// emits clean mousedown/mouseup edges instead of re-firing every call — RA
+// latches a gun-mouse button until the matching up event. Keyed by `port`
+// (or the string 'default' when no port is given, i.e. a single-gun boot);
+// value is `false` (up) or the DOM button index currently held down.
+const gunDownByPort = {};
 
 class WorkerEventTarget {
   constructor() { this.listeners = new Map(); }
@@ -184,7 +199,7 @@ async function start(payload) {
   if (typeof imported.default !== 'function') throw new Error('worker core has no default module factory');
   moduleInstance = await imported.default(baseModule);
   jit.attachModule(moduleInstance);
-  writeConfig();
+  writeConfig(payload);
   hydrateLaunch(payload);
 
   if (payload.entrypoint === 'retroarch') {
@@ -213,13 +228,70 @@ function detectCapabilities() {
   };
 }
 
-function writeConfig() {
+// payload: the same 'start' request payload start() receives — carries the
+// optional per-launch coreOptions / inputDevices / remapName fields
+// WorkerEmulatorClient.js now forwards from RuntimeEmulatorClient.start()'s
+// opts (added for PSX GunCon; see systems.js SYSTEMS.psx.lightgun and
+// CORES.mednafen_psx_hw.remapName). Static baseline is unchanged for every
+// core that doesn't pass these — this is purely additive.
+function writeConfig(payload = {}) {
   if (!moduleInstance?.FS) return;
+
+  // Core options: this worker's static PSX-required baseline (cpu_dynarec /
+  // renderer — see RetroArchConfig.js's long comment on why those values are
+  // load-bearing) plus any per-launch overrides appended after (e.g. GunCon's
+  // gun_input_mode/gun_cursor). New keys only; nothing here collides with the
+  // static baseline's keys.
+  let coreOptionsBody = RETROARCH_CORE_OPTIONS;
+  if (payload.coreOptions) {
+    coreOptionsBody += Object.entries(payload.coreOptions)
+      .map(([k, v]) => `${k} = "${v}"`).join('\n') + '\n';
+  }
+
+  // Main cfg: static keybinds/base config, plus — when a controller-port
+  // device override is requested (a light gun on some port) — the SAME
+  // remap + gun-mouse-bind wiring EmulatorClient.js's _writeRetroArchConfig
+  // writes for every main-thread gun (PS2 GunCon2, SNES Super Scope/
+  // Justifier, NES Zapper, Genesis Menacer, SMS Light Phaser). Mirrored
+  // line-for-line from that function; see its comments for the "why" of each
+  // line (RETRO_DEVICE_MASK/LIGHTGUN/POINTER classification, why the remap
+  // FILE — not the main cfg's input_libretro_device_pN — is what actually
+  // connects the device at boot).
+  let cfg = RETROARCH_CFG;
+  if (payload.inputDevices) {
+    const RETRO_DEVICE_MASK = 0xff, RETRO_DEVICE_MOUSE = 2, RETRO_DEVICE_LIGHTGUN = 4, RETRO_DEVICE_POINTER = 6;
+    const validPorts = Object.entries(payload.inputDevices)
+      .filter(([player]) => Number.isInteger(Number(player)) && Number(player) >= 1);
+    cfg += `input_remap_binds_enable = "true"\n`;
+    cfg += `input_remapping_directory = "${REMAP_DIR}"\n`;
+    for (const [player, dev] of validPorts) {
+      const p = Number(player);
+      cfg += `input_libretro_device_p${p} = "${dev}"\n`;
+      const base = Number(dev) & RETRO_DEVICE_MASK;
+      if (base === RETRO_DEVICE_LIGHTGUN || base === RETRO_DEVICE_POINTER) {
+        cfg += `input_player${p}_mouse_index = "0"\n`;
+        cfg += `input_player${p}_gun_trigger_mbtn = "1"\n`;
+        cfg += `input_player${p}_gun_offscreen_shot_mbtn = "2"\n`;
+      } else if (base === RETRO_DEVICE_MOUSE) {
+        cfg += `input_player${p}_mouse_index = "0"\n`;
+      }
+    }
+    if (payload.remapName && validPorts.length) {
+      const rmp = validPorts.map(([p, dev]) => `input_libretro_device_p${Number(p)} = "${dev}"`).join('\n') + '\n';
+      const dir = `${REMAP_DIR}/${payload.remapName}`;
+      try { moduleInstance.FS.mkdirTree(dir); } catch (_) {}
+      try { moduleInstance.FS.writeFile(`${dir}/${payload.remapName}.rmp`, rmp); }
+      catch (e) { postMessage(eventMessage('log', { level: 'error', text: `[EmulatorWorkerRuntime] failed to write remap: ${e?.message || e}` })); }
+    } else {
+      postMessage(eventMessage('log', { level: 'error', text: '[EmulatorWorkerRuntime] inputDevices set without remapName — port device will not connect at boot' }));
+    }
+  }
+
   const targets = [
-    ['/home/web_user/retroarch/userdata', RA_CFG_PATH, RETROARCH_CFG],
-    ['/home/web_user/retroarch/userdata', RETROARCH_CORE_OPTIONS_PATH, RETROARCH_CORE_OPTIONS],
-    ['/home/web_user/.config/retroarch', '/home/web_user/.config/retroarch/retroarch.cfg', RETROARCH_CFG],
-    ['/home/web_user', '/home/web_user/.retroarch.cfg', RETROARCH_CFG],
+    ['/home/web_user/retroarch/userdata', RA_CFG_PATH, cfg],
+    ['/home/web_user/retroarch/userdata', RETROARCH_CORE_OPTIONS_PATH, coreOptionsBody],
+    ['/home/web_user/.config/retroarch', '/home/web_user/.config/retroarch/retroarch.cfg', cfg],
+    ['/home/web_user', '/home/web_user/.retroarch.cfg', cfg],
   ];
   for (const [dir, path, contents] of targets) {
     try { moduleInstance.FS.mkdirTree(dir); } catch (_) {}
@@ -321,6 +393,91 @@ function forwardInput(payload) {
   });
 }
 
+// A duck-typed event object for `inputTarget` (the custom WorkerEventTarget
+// shim, NOT a real DOM EventTarget — see installWorkerDomShim/documentShim
+// above) — same shape forwardInput() already builds inline for keyboard.
+function duckEvent(type, props) {
+  return {
+    type, ...props, bubbles: true, cancelable: true, defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() {},
+  };
+}
+
+// A REAL Event instance for `canvas` (a genuine OffscreenCanvas — spec'd as
+// `interface OffscreenCanvas : EventTarget`, so its native dispatchEvent()
+// requires an actual Event, unlike the duck-typed shim above). Worker global
+// scope has no MouseEvent/UIEvent constructor (those are Window-only per the
+// HTML spec's [Exposed=Window] on those interfaces) — only the base `Event`
+// is available — so gun-relevant fields (clientX/Y, button/buttons) are
+// added afterward via defineProperty, the same technique EmulatorClient.js's
+// sendMouse() already uses for movementX/Y (real MouseEvent there leaves
+// those read-only from its constructor dict).
+function realEvent(type, props) {
+  const ev = new Event(type, { bubbles: true, cancelable: true });
+  for (const [k, v] of Object.entries(props)) {
+    try { Object.defineProperty(ev, k, { value: v, configurable: true }); } catch (_) {}
+  }
+  return ev;
+}
+
+// Aim + fire a worker-hosted core's light gun (added for PSX GunCon; see
+// systems.js SYSTEMS.psx.lightgun). Mirrors EmulatorClient.sendLightgun's
+// single-gun DOM path: (u, v) are normalised canvas coords in [0,1] (origin
+// top-left; outside that range = an off-screen/reload shot), `trigger` is the
+// held trigger state. RetroArch's patched rwebinput
+// (docs/patches/rwebinput-lightgun.diff) reads a game-port light gun's
+// absolute aim from the canvas-relative mouse pointer and its
+// trigger/reload buttons from the left/right mouse buttons — see that
+// file's comment — so this synthesises the same mousemove/mousedown/mouseup
+// sequence EmulatorClient dispatches on the main thread, just via this
+// worker's own canvas/DOM shim (see writeConfig()'s doc comment for why the
+// port-device wiring itself needed separate plumbing; this is the matching
+// input-side half).
+//
+// Verified (per rwebinput_input.c at the pinned RetroArch commit,
+// RETROARCH_COMMIT in mednafen_psx_jit_libretro.build.json) that RetroArch's
+// keydown/keyup/mousedown/mouseup/mousemove callbacks all register on the
+// "#canvas" target, which Emscripten's compiled findEventTarget() resolves
+// DIRECTLY to `Module["canvas"]` (not via any "#document" alias) — so this
+// dispatches on the real `canvas` object, which is a genuine EventTarget.
+// ALSO dispatches the duck-typed equivalent on `inputTarget` (the document
+// shim), matching forwardInput()'s existing keyboard precedent, as a
+// harmless defensive fallback in case a differently-built core's frontend
+// resolves its listener target differently — dispatchEvent() on a target
+// with no matching listener is a no-op either way.
+function forwardLightgun(payload) {
+  if (!canvas) return;
+  metrics.inputs++;
+  const { u, v, trigger, port } = payload || {};
+  const offscreen = u < 0 || u > 1 || v < 0 || v > 1;
+  const key = port ?? 'default';
+  const rect = canvas.getBoundingClientRect();
+  const clientX = rect.left + u * rect.width;
+  const clientY = rect.top + v * rect.height;
+  const moveProps = { clientX, clientY };
+  try { canvas.dispatchEvent(realEvent('mousemove', moveProps)); } catch (_) {}
+  try { inputTarget?.dispatchEvent(duckEvent('mousemove', moveProps)); } catch (_) {}
+
+  const wasDown = gunDownByPort[key] ?? false;
+  if (trigger && wasDown === false) {
+    // Off-screen shots use the right button (offscreen_shot_mbtn = 2); an
+    // on-screen shot uses the left/trigger button (button 0 / buttons bit 1)
+    // — same convention EmulatorClient.sendLightgun uses.
+    const button = offscreen ? 2 : 0;
+    const buttons = offscreen ? 2 : 1;
+    const downProps = { clientX, clientY, button, buttons };
+    try { canvas.dispatchEvent(realEvent('mousedown', downProps)); } catch (_) {}
+    try { inputTarget?.dispatchEvent(duckEvent('mousedown', downProps)); } catch (_) {}
+    gunDownByPort[key] = button;
+  } else if (!trigger && wasDown !== false) {
+    const upProps = { clientX, clientY, button: wasDown, buttons: 0 };
+    try { canvas.dispatchEvent(realEvent('mouseup', upProps)); } catch (_) {}
+    try { inputTarget?.dispatchEvent(duckEvent('mouseup', upProps)); } catch (_) {}
+    gunDownByPort[key] = false;
+  }
+}
+
 async function serializeState() {
   if (!detectCapabilities().saveState) throw new Error('core has no save-state support');
   try { moduleInstance.FS.unlink(statePath); } catch (_) {}
@@ -364,6 +521,7 @@ function stop() {
   moduleInstance?._cmd_unload_core?.();
   moduleInstance = null;
   canvas = null;
+  for (const k of Object.keys(gunDownByPort)) delete gunDownByPort[k];
 }
 
 async function handle(method, payload) {
@@ -378,6 +536,7 @@ async function handle(method, payload) {
     case 'disc-status': return discStatus();
     case 'read-save-ram': return readSaveRam(payload.slot || 1);
     case 'input': forwardInput(payload); return null;
+    case 'lightgun': forwardLightgun(payload); return null;
     case 'serialize-state': return serializeState();
     case 'unserialize-state': await unserializeState(payload.data); return null;
     case 'stop': stop(); return null;
