@@ -1,5 +1,11 @@
 // Adapts either purpose-built libretrowebxr exports or RetroArch's existing
-// disk hotkey commands to one explicit eject/select/insert API.
+// disk hotkey commands to one explicit eject/select/insert API. Used by
+// src/runtime/EmulatorWorkerRuntime.js (the worker-execution boot path,
+// e.g. PSX) — that file used to hand-duplicate this exact capability
+// detection + eject/select sequencing inline instead of importing this
+// class (C6, 2026-07-27 review followup). Nothing on the main-thread
+// execution path currently drives it (no in-VR disc-swap UI yet — see
+// task tracking for that remaining gap).
 
 export class DiscControlBridge extends EventTarget {
   constructor(module, { discCount = 1, initialIndex = 0 } = {}) {

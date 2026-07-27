@@ -3,6 +3,7 @@ import {
   RETROARCH_CORE_OPTIONS,
   RETROARCH_CORE_OPTIONS_PATH,
 } from '../RetroArchConfig.js';
+import { DiscControlBridge } from '../DiscControl.js';
 import { JitRuntimeBridge } from './JitRuntimeBridge.js';
 import { locateCoreAsset } from './assetUrls.js';
 import { classifyCoreLog } from './coreLog.js';
@@ -41,7 +42,11 @@ let entryPath = `${CONTENT_DIR}/rom.bin`;
 let statePath = `${STATE_DIR}/rom.state`;
 let saveStem = 'rom';
 let paused = false;
-let disc = { index: 0, ejected: false, discCount: 1 };
+// Eject/select/insert control, shared with the main-thread execution path
+// (src/DiscControl.js) rather than hand-duplicated here — this worker just
+// supplies the live core module and disc count (C6, 2026-07-27 review
+// followup; this duplication was flagged back in the 2026-07-24 review).
+let discBridge = null;
 const metrics = { framesProduced: 0, framesSkipped: 0, inputs: 0, audioBatches: 0, errors: 0 };
 // Tracks each seated light-gun port's synthetic-trigger edge state (mirrors
 // EmulatorClient.js's `_gunDown`/`_webgunSet` bookkeeping) so forwardLightgun
@@ -221,7 +226,11 @@ function detectCapabilities() {
   return {
     saveState: !!(moduleInstance?.FS && moduleInstance?._cmd_save_state && moduleInstance?._cmd_load_state),
     saveRam: !!moduleInstance?.FS,
-    discControl: discCapabilities().supported,
+    // Every current call site runs after hydrateLaunch() has constructed
+    // discBridge (start() calls hydrateLaunch before this; 'load-content'
+    // does too); the `?.` is a defensive match for this file's existing
+    // moduleInstance?.-style guards, not a reachable null case today.
+    discControl: discBridge?.capabilities().supported ?? false,
     jit: !!globalThis.__libretroWebXRJit,
     audioBridge: true,
     frameBridge: typeof canvas?.transferToImageBitmap === 'function',
@@ -314,7 +323,7 @@ function hydrateLaunch(payload) {
   for (const record of payload.restoredSaves || []) {
     moduleInstance.FS.writeFile(saveRamPath(record.slot || 1), new Uint8Array(record.data));
   }
-  disc = { index: 0, ejected: false, discCount: Math.max(1, payload.discCount || 1) };
+  discBridge = new DiscControlBridge(moduleInstance, { discCount: Math.max(1, payload.discCount || 1) });
 }
 
 // How long to wait for a FRAME_ACK before assuming it's never coming and
@@ -520,6 +529,7 @@ function stop() {
   jit?.clear();
   moduleInstance?._cmd_unload_core?.();
   moduleInstance = null;
+  discBridge = null;
   canvas = null;
   for (const k of Object.keys(gunDownByPort)) delete gunDownByPort[k];
 }
@@ -531,9 +541,9 @@ async function handle(method, payload) {
     case 'reset': moduleInstance?._cmd_reset?.(); return null;
     case 'pause': setPaused(true); return null;
     case 'resume': setPaused(false); return null;
-    case 'set-disc': return setDisc(payload.index);
-    case 'set-disc-ejected': return setDiscEjected(payload.ejected);
-    case 'disc-status': return discStatus();
+    case 'set-disc': return discBridge.setDisc(payload.index);
+    case 'set-disc-ejected': return discBridge.setEjected(payload.ejected);
+    case 'disc-status': return discBridge.status();
     case 'read-save-ram': return readSaveRam(payload.slot || 1);
     case 'input': forwardInput(payload); return null;
     case 'lightgun': forwardLightgun(payload); return null;
@@ -596,46 +606,6 @@ function setPaused(next) {
     else throw new Error('core has no resume command');
   }
   paused = next;
-}
-
-function discCapabilities() {
-  const explicit = typeof moduleInstance?._libretrowebxr_set_disc_index === 'function' && typeof moduleInstance?._libretrowebxr_set_eject_state === 'function';
-  const sequential = typeof moduleInstance?._cmd_disk_next === 'function' && typeof moduleInstance?._cmd_disk_eject_toggle === 'function';
-  return { supported: explicit || sequential, explicit, sequential };
-}
-
-function discStatus() { return { ...disc, ...discCapabilities() }; }
-
-function setDiscEjected(nextValue) {
-  const next = !!nextValue;
-  if (disc.ejected === next) return discStatus();
-  if (typeof moduleInstance?._libretrowebxr_set_eject_state === 'function') moduleInstance._libretrowebxr_set_eject_state(next ? 1 : 0);
-  else if (typeof moduleInstance?._cmd_disk_eject_toggle === 'function') moduleInstance._cmd_disk_eject_toggle();
-  else throw new Error('core has no disc eject control');
-  disc.ejected = next;
-  return discStatus();
-}
-
-function setDisc(index) {
-  if (!Number.isInteger(index) || index < 0 || index >= disc.discCount) throw new RangeError(`disc index ${index} is outside 0..${disc.discCount - 1}`);
-  const capabilities = discCapabilities();
-  if (!capabilities.supported) throw new Error('core has no disc control');
-  const wasEjected = disc.ejected;
-  if (!wasEjected) setDiscEjected(true);
-  if (capabilities.explicit) {
-    if (moduleInstance._libretrowebxr_set_disc_index(index) === 0) throw new Error(`core rejected disc index ${index}`);
-  } else {
-    const forward = (index - disc.index + disc.discCount) % disc.discCount;
-    const backward = (disc.index - index + disc.discCount) % disc.discCount;
-    if (backward < forward && typeof moduleInstance._cmd_disk_prev === 'function') {
-      for (let i = 0; i < backward; i++) moduleInstance._cmd_disk_prev();
-    } else {
-      for (let i = 0; i < forward; i++) moduleInstance._cmd_disk_next();
-    }
-  }
-  disc.index = index;
-  if (!wasEjected) setDiscEjected(false);
-  return discStatus();
 }
 
 self.addEventListener('message', async (event) => {
