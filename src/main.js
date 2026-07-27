@@ -6177,6 +6177,34 @@ async function addLocalRomToShelf(meta) {
   return cart;
 }
 
+// Real byte-level PS1-vs-PS2 disambiguation for a picked .cue/.chd (C2,
+// 2026-07-27 review followup) — src/DiscIdentity.js was tested but dead code
+// until this. Returns null for any other extension, or when a .cue's
+// referenced data track isn't among the picked files (falls through to the
+// existing static default silently — the pick will fail for other reasons
+// regardless). A .cue file's OWN bytes are just an ASCII pointer, not disc
+// data, so this reads its first referenced track instead.
+async function sniffPsxPs2Core(primaryFile, files) {
+  const ext = extOf(primaryFile.name);
+  if (ext !== 'cue' && ext !== 'chd') return null;
+  let dataFile = primaryFile;
+  if (ext === 'cue') {
+    const { parseCueReferences } = await import('./ContentBundle.js');
+    const [ref] = parseCueReferences(await primaryFile.text());
+    if (!ref) return null;
+    const wanted = ref.toLowerCase();
+    dataFile = files.find((f) => f.name.toLowerCase() === wanted);
+    if (!dataFile) return null;
+  }
+  try {
+    const { readerForBlob, pickPlayStationCore } = await import('./DiscIdentity.js');
+    return await pickPlayStationCore(readerForBlob(dataFile));
+  } catch (e) {
+    console.warn('[main] disc-identity sniff failed:', e);
+    return null;
+  }
+}
+
 romInput.addEventListener('change', async (e) => {
   const files = Array.from(e.target.files || []);
   if (!files.length) return;
@@ -6190,7 +6218,22 @@ romInput.addEventListener('change', async (e) => {
   const primary = isMultiFile
     ? (files.find((f) => detectCore(f.name, coreOverride)?.multiFile) || files[0])
     : files[0];
-  const coreInfo = detectCore(primary.name, coreOverride);
+  // .cue and .chd are ambiguous between PS1 (mednafen_psx_hw) and PS2 (play) —
+  // AMBIGUOUS_EXT_DEFAULT in systems.js always guesses `play` absent an
+  // explicit override. Try real byte-level disambiguation first (C2, 2026-07-27
+  // review followup): a .chd's compressed container never has a readable
+  // SYSTEM.CNF, so sniffing one naturally (and correctly) comes back
+  // "can't classify" — same fallback as before, just now an informed one.
+  let effectiveOverride = coreOverride;
+  if (!coreOverride) {
+    const sniff = await sniffPsxPs2Core(primary, files);
+    if (sniff) {
+      logger?.event?.('disc-identity', { file: primary.name, core: sniff.core, certain: sniff.certain, reason: sniff.reason });
+      if (sniff.certain) effectiveOverride = sniff.core;
+      else setStatus(`couldn't identify "${primary.name}" as PS1 or PS2 (${sniff.reason}) — assuming PS2; add ?core=mednafen_psx_hw to force PS1`);
+    }
+  }
+  const coreInfo = detectCore(primary.name, effectiveOverride);
   if (!coreInfo) { setStatus(`no core known for "${primary.name}" — check the extension`); return; }
   if (isMultiFile && !coreInfo.multiFile) {
     setStatus(`${coreInfo.label} doesn't accept a multi-file selection — pick one file`);
@@ -6329,8 +6372,8 @@ if (firmwareInput) {
     try {
       const record = await firmwareStore.import(file, { profile: 'psx' });
       setStatus(record.recognized
-        ? `imported BIOS "${record.name}" (${record.region})`
-        : `imported BIOS "${record.name}" (unrecognized — region unknown, may not match every game's region)`);
+        ? `imported BIOS "${record.displayName}" (${record.region})`
+        : `imported BIOS "${record.displayName}" (unrecognized — region unknown, may not match every game's region)`);
     } catch (err) {
       const validation = err?.validation;
       setStatus(validation ? `BIOS import rejected: ${validation.message}` : `BIOS import failed: ${String(err?.message || err)}`);

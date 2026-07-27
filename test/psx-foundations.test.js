@@ -6,7 +6,7 @@ if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const { ContentBundle, ContentBundleError, normalizeContentPath, parseCueReferences } = await import('../src/ContentBundle.js');
 const { CORES, coreForFile } = await import('../src/systems.js');
-const { md5Hex, validatePsxFirmware, mountNameFor, PSX_FIRMWARE } = await import('../src/FirmwareStore.js');
+const { md5Hex, validatePsxFirmware, mountNameFor, healUnrecognizedMountName, PSX_FIRMWARE } = await import('../src/FirmwareStore.js');
 const { DiscControlBridge, discEntriesFromBundle } = await import('../src/DiscControl.js');
 const { checkSaveStateCompatibility, prepareSaveStatePayload } = await import('../src/SaveState.js');
 
@@ -74,6 +74,32 @@ test('BIOS import: unrecognized-but-plausible dump imports with a warning, wrong
   // return one of the core's known-probed aliases, never the raw supplied name.
   assert.equal(mountNameFor(plausible), 'scph5501.bin');
   assert.notEqual(mountNameFor(plausible), plausible.suppliedName);
+});
+
+test('BIOS import: legacy unrecognized records self-heal to the probed mount name on read', () => {
+  // Codex review finding (P2 on commit 26d2ad4): a record written during the
+  // brief f2f30c9-only window has `name` set to the user's raw uploaded
+  // filename (the exact bug mountNameFor/UNRECOGNIZED_MOUNT_NAME fixed for
+  // NEW imports) — list()/getPreferred() must self-heal it on read, not just
+  // fix imports going forward.
+  const legacy = { name: 'my-dump.bin', recognized: false, suppliedName: 'my-dump.bin' };
+  const healed = healUnrecognizedMountName(legacy);
+  assert.equal(healed.name, 'scph5501.bin');
+  assert.equal(healed.displayName, 'my-dump.bin');
+
+  // A record predating even `displayName` (before f2f30c9) has neither field
+  // — falls back to its own (still-wrong) name for display, since that's the
+  // only filename information such a record has.
+  const preF2f30c9 = { name: 'old-dump.bin', recognized: false };
+  const healedOld = healUnrecognizedMountName(preF2f30c9);
+  assert.equal(healedOld.name, 'scph5501.bin');
+  assert.equal(healedOld.displayName, 'old-dump.bin');
+
+  // A recognized record, or one already mounted under the alias, is untouched.
+  const recognized = { name: 'scph5500.bin', recognized: true, displayName: 'my dump.BIN' };
+  assert.equal(healUnrecognizedMountName(recognized), recognized);
+  const alreadyHealed = { name: 'scph5501.bin', recognized: false, displayName: 'x.bin' };
+  assert.equal(healUnrecognizedMountName(alreadyHealed), alreadyHealed);
 });
 
 test('disc bridge ejects, selects, inserts, and rejects invalid indices', () => {

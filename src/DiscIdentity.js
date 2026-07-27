@@ -156,6 +156,25 @@ export async function identifyPlayStationDisc(ctx) {
   return { console: null, confidence: 'none', reason: 'SYSTEM.CNF found but has neither a BOOT nor a BOOT2 line', bootLine: bootText.trim().slice(0, 200) };
 }
 
+/**
+ * Pick which PlayStation-family core a .cue/.chd should boot as, using real
+ * disc-content sniffing (identifyPlayStationDisc above) instead of the
+ * static per-extension guess in systems.js's AMBIGUOUS_EXT_DEFAULT.
+ * ctx: same shape identifyPlayStationDisc takes (readerForBlob/readerForBytes).
+ * Returns { core: 'mednafen_psx_hw'|'play', certain, reason } — `core` is
+ * always a usable guess (falling back to the SAME default
+ * AMBIGUOUS_EXT_DEFAULT.cue/chd already uses when the disc can't be
+ * classified — e.g. a .chd, whose compressed container isn't a raw ISO9660
+ * image and so never has a readable BOOT/BOOT2 line); `certain` tells the
+ * caller whether that guess came from an actual SYSTEM.CNF read.
+ */
+export async function pickPlayStationCore(ctx) {
+  const verdict = await identifyPlayStationDisc(ctx);
+  if (verdict.console === 'ps1') return { core: 'mednafen_psx_hw', certain: true, reason: verdict.reason };
+  if (verdict.console === 'ps2') return { core: 'play', certain: true, reason: verdict.reason };
+  return { core: 'play', certain: false, reason: verdict.reason };
+}
+
 /** Adapter for an in-browser File/Blob — reads only the byte ranges actually needed. */
 export function readerForBlob(blob) {
   return {

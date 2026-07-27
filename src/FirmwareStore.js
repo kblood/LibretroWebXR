@@ -70,6 +70,20 @@ export function mountNameFor(validation) {
   return validation.canonicalName || UNRECOGNIZED_MOUNT_NAME;
 }
 
+// Self-heals records written by the brief window (commit f2f30c9, same
+// review cycle) where an unrecognized-but-plausible dump was stored under
+// the user's own uploaded filename instead of UNRECOGNIZED_MOUNT_NAME —
+// exactly the bug mountNameFor's comment above describes, just already
+// persisted in IndexedDB (Codex review finding, P2 on commit 26d2ad4). Read
+// time, not a DB version bump: cheaper, and every list()/getPreferred() call
+// benefits immediately rather than only after a real migration step. A
+// record predating even displayName (pre-f2f30c9) falls back to its own name
+// for display, since that field didn't exist yet either.
+export function healUnrecognizedMountName(record) {
+  if (record.recognized || record.name === UNRECOGNIZED_MOUNT_NAME) return record;
+  return { ...record, name: UNRECOGNIZED_MOUNT_NAME, displayName: record.displayName || record.suppliedName || record.name };
+}
+
 export class FirmwareStore {
   async import(source, { profile = 'psx' } = {}) {
     if (profile !== 'psx') throw new FirmwareValidationError(`Unsupported firmware profile: ${profile}`, { profile, valid: false });
@@ -104,7 +118,10 @@ export class FirmwareStore {
 
   async list(profile = 'psx') {
     const records = await all();
-    return records.filter((record) => record.profile === profile).sort((a, b) => b.importedAt - a.importedAt);
+    return records
+      .filter((record) => record.profile === profile)
+      .map(healUnrecognizedMountName)
+      .sort((a, b) => b.importedAt - a.importedAt);
   }
 
   async getPreferred(profile = 'psx', region = null) {
