@@ -214,6 +214,14 @@ try {
     window.__client.addEventListener('metrics', (e) => window.__psxMetrics.push({ t: performance.now(), ...e.detail }));
   });
 
+  // SYSTEMS.psx.lightgun carries `broken: true` (this probe is exactly why —
+  // see its comment in systems.js): lightgunLoadConfig returns null for it
+  // by default so real players are never auto-armed into a gun that
+  // provably can't register a shot yet. This probe explicitly opts back in
+  // via the allowBroken test hook so it keeps exercising the real app-side
+  // wiring end-to-end while that gate is up.
+  await page.evaluate(() => { window.__allowBrokenLightgun = true; });
+
   // --- Step 1: boot the real disc through the REAL cartridge-insert path
   //     (window.__insertCartridge -> handleCartridgeInserted -> loadCartridge),
   //     with lightgun:true so loadCartridge's existing gun-wiring branch

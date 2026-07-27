@@ -2711,7 +2711,7 @@ async function buildCartridgeWorld() {
     // gun's core with the peripheral on its port. __force* are de-risk/test hooks
     // that override the registry-derived config.
     const twoGun = _twoGunActiveFor(meta);
-    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system, { twoGun }) : null;
+    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system, { twoGun, allowBroken: window.__allowBrokenLightgun }) : null;
     // The gun core can differ from the cart's detected core (e.g. SMS detects as
     // picodrive but its Light Phaser is provided by genesis_plus_gx) — boot the
     // gun core in that case, mirroring loadCartridge. Falls back to coreInfo.
@@ -5385,7 +5385,7 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // gun devices (Justifier 516/772 on ports 1+2) so each VR gun drives its own
     // per-port aim slot; otherwise a single gun on one port (proven path).
     const twoGun = _twoGunActiveFor(meta);
-    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system, { twoGun }) : null;
+    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system, { twoGun, allowBroken: window.__allowBrokenLightgun }) : null;
     const coreName = gun?.core || meta.core;
     const core = CORES[coreName];
     if (!core) throw new Error(`no core registered as "${coreName}"`);

@@ -363,8 +363,18 @@ export const SYSTEMS = {
   // fixing that requires rebuilding the core (out of scope for this app-side
   // change) — tracked as a follow-up. See scripts/probe-psx-guncon.js for
   // the check and docs/research (or memory) for the full writeup.
+  //
+  // `broken: true` below keeps this descriptor registered (so the app-side
+  // wiring stays exercised/testable and ready to "just work" the moment a
+  // relinked core artifact lands) WITHOUT offering a nonfunctional gun to
+  // real players — isLightgunCapable/lightgunForSystem/lightgunLoadConfig
+  // all gate on it (see their comments in this file), so PSX behaves as
+  // gun-less for every real caller (auto-arm on load, the in-VR gun-arm
+  // reboot flow) until it's removed. Only scripts/probe-psx-guncon.js
+  // bypasses the gate (lightgunLoadConfig's `allowBroken` opt), on purpose,
+  // to keep proving the wiring itself still works.
   psx:       { label: 'PlayStation',        defaultCore: 'mednafen_psx_hw',  cores: ['mednafen_psx_hw'],              exts: ['chd','cue','m3u','ccd','pbp','exe'], aliases: ['psx','ps1','playstation','sony playstation'], thumbnailRepo: 'Sony_-_PlayStation', medium: 'floppy', experimental: true,
-    lightgun: { label: 'GunCon', core: 'mednafen_psx_hw', device: 260, port: 0, coreOptions: {
+    lightgun: { label: 'GunCon', core: 'mednafen_psx_hw', device: 260, port: 0, broken: true, coreOptions: {
       beetle_psx_gun_input_mode: 'lightgun', beetle_psx_hw_gun_input_mode: 'lightgun',
       beetle_psx_gun_cursor: 'cross', beetle_psx_hw_gun_cursor: 'cross',
     } } },
@@ -428,12 +438,21 @@ export function isKeyboardCapable(systemId) {
  * See docs/LIGHTGUN_SUPPORT.md for how these were derived. Pure registry lookup.
  */
 export function lightgunForSystem(systemId) {
-  return SYSTEMS[systemId]?.lightgun ?? null;
+  const lg = SYSTEMS[systemId]?.lightgun;
+  return (lg && !lg.broken) ? lg : null;
 }
 
-/** True if a system has a light-gun peripheral wired up. */
+/**
+ * True if a system has a WORKING light-gun peripheral wired up. A descriptor
+ * flagged `broken: true` (see SYSTEMS.psx.lightgun's comment — app-side
+ * wiring confirmed correct, but the bundled core doesn't consume the input,
+ * confirmed by scripts/probe-psx-guncon.js) reports false here so real users
+ * are never offered/auto-armed into a gun that provably can't register a
+ * shot — same gate lightgunLoadConfig enforces below.
+ */
 export function isLightgunCapable(systemId) {
-  return !!SYSTEMS[systemId]?.lightgun;
+  const lg = SYSTEMS[systemId]?.lightgun;
+  return !!lg && !lg.broken;
 }
 
 /**
@@ -480,11 +499,18 @@ export function twoGunPortsForSystem(systemId) {
  * inputDevices ({ p1: dev1, p2: dev2 }), and `guns` lists each gun's
  * { device, port } so the caller can map gun A→portX, gun B→portY. The patched
  * multiport rwebinput feeds each port its own aim point (webgun_set per port).
+ *
+ * `opts.allowBroken` bypasses the `broken:true` gate (see SYSTEMS.psx.
+ * lightgun's comment) — for probes/de-risk tooling ONLY (scripts/probe-psx-
+ * guncon.js sets it explicitly) that need to exercise the exact app-side
+ * wiring a real boot would use even though the core can't consume the input
+ * yet. Every real caller (loadCartridge, the in-VR gun-arm reboot path)
+ * omits it, so a broken gun is never silently offered to a real user.
  */
 export function lightgunLoadConfig(systemId, opts = {}) {
   if (opts.twoGun) {
     const tg = SYSTEMS[systemId]?.lightgun2;
-    if (!tg) return null;
+    if (!tg || (tg.broken && !opts.allowBroken)) return null;
     const remapName = CORES[tg.core]?.remapName ?? null;
     const inputDevices = {};
     const guns = [];
@@ -496,7 +522,7 @@ export function lightgunLoadConfig(systemId, opts = {}) {
     return { core: tg.core, inputDevices, coreOptions: tg.coreOptions || {}, remapName, guns };
   }
   const lg = SYSTEMS[systemId]?.lightgun;
-  if (!lg) return null;
+  if (!lg || (lg.broken && !opts.allowBroken)) return null;
   const remapName = CORES[lg.core]?.remapName ?? null;
   return {
     core: lg.core,
