@@ -105,6 +105,24 @@ test('ContentBundle still hashes every byte for files at/under the streaming thr
   assert.notEqual(a.contentId, b.contentId);
 });
 
+test('ContentBundle contentId for a small file matches the exact pre-C1 manifest format (no silent identity break)', async () => {
+  // Codex review finding on 2199d97: an earlier draft of the streaming-hash
+  // change tagged EVERY file's manifest record with `full:`/`sampled:`,
+  // which would have silently changed the contentId for every already-
+  // persisted small ROM (not just large tracks), breaking every existing
+  // SaveRAM/save-state/shelf-cache lookup keyed on it. This test hand-
+  // computes the ORIGINAL (pre-C1) manifest hash independently and asserts
+  // computeContentId still produces exactly that value for a file under the
+  // streaming threshold — the one property that must never regress again.
+  const bytes = new Uint8Array([9, 8, 7, 6, 5]);
+  const fileDigest = Buffer.from(await crypto.subtle.digest('SHA-256', bytes)).toString('hex');
+  const manifest = new TextEncoder().encode(`entry\0game.bin\0game.bin\0${bytes.byteLength}\0${fileDigest}`);
+  const expected = `sha256:${Buffer.from(await crypto.subtle.digest('SHA-256', manifest)).toString('hex')}`;
+
+  const bundle = await ContentBundle.fromNamedSources([{ path: 'game.bin', source: new Blob([bytes]) }]);
+  assert.equal(bundle.contentId, expected);
+});
+
 test('MD5 implementation matches RFC vectors', () => {
   assert.equal(md5Hex(new TextEncoder().encode('')), 'd41d8cd98f00b204e9800998ecf8427e');
   assert.equal(md5Hex(new TextEncoder().encode('abc')), '900150983cd24fb0d6963f7d28e17f72');

@@ -247,9 +247,15 @@ async function readSourceSlice(source, start, end) {
 async function hashFileForIdentity(path, source) {
   const knownSize = sourceByteLength(source);
   if (knownSize === null || knownSize <= STREAM_HASH_THRESHOLD) {
+    // Exact legacy manifest-record format — unchanged, byte-for-byte, so
+    // every already-persisted contentId for a small file survives this
+    // change untouched (Codex review finding on 2199d97: an earlier draft
+    // added a `full:` tag here too, which would have silently changed the
+    // contentId — and broken every existing SaveRAM/save-state/shelf-cache
+    // lookup — for every small file, not just large tracks).
     const bytes = await readBytes(source);
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-    return `${path}\0${bytes.byteLength}\0full:${toHex(digest)}`;
+    return `${path}\0${bytes.byteLength}\0${toHex(digest)}`;
   }
   const sample = Math.min(STREAM_HASH_SAMPLE, Math.floor(knownSize / 2));
   const prefix = await readSourceSlice(source, 0, sample);
