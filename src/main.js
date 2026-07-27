@@ -5885,12 +5885,19 @@ async function rebootPrimaryConsole(meta, gun, mouse = null) {
   const core = CORES[coreName];
   if (!core) throw new Error(`no core registered as "${coreName}"`);
   const buf = await resolveRom(meta);
+  // Reconstruct a worker-mode ContentBundle (e.g. persisted PSX bin/cue) the
+  // same way every other boot path does — resolveRom() short-circuits to null
+  // for a bundle meta (see RomResolver.js's isBundleMeta comment), so without
+  // this a gun/mouse arm-reboot of persisted multi-file content would hand
+  // bootFreshRuntime a null buffer instead of the reconstructed bundle (P1,
+  // Codex review of 1d103bc).
+  const content = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, core, meta) : buf;
   const coreOptions = dev ? { ...(core.coreOptions || {}), ...dev.coreOptions } : core.coreOptions;
   logLightgunBoot('arm-reboot', meta, gun, { live: true });
   if (mouse) logger?.event?.('mouse-boot', { where: 'arm-reboot', system: meta.system, inputDevices: mouse.inputDevices, mice: mouse.mice, remapName: mouse.remapName, live: true });
   const next = await bootFreshRuntime(CONSOLE_ID, meta, {
     core: { name: coreName, url: core.url, style: core.style },
-    romBuffer: buf,
+    romBuffer: content,
     coreOptions,
     inputDevices: dev?.inputDevices,
     remapName: dev?.remapName ?? core.remapName,
