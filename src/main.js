@@ -5884,24 +5884,37 @@ async function rebootPrimaryConsole(meta, gun, mouse = null) {
   const coreName = dev?.core || meta.core;
   const core = CORES[coreName];
   if (!core) throw new Error(`no core registered as "${coreName}"`);
+  // CORES entries carry no `name` (same as swapConsoleCore/loadCartridgeIntoConsole);
+  // spread (not the old {name,url,style} pick) so `.execution`/`.requiresThreads`/
+  // `.firmwareProfile` survive into buildStartOptions/bootFreshRuntime/ConsoleRuntime.load
+  // below — a stripped core silently defaulted to main-thread execution here, which
+  // "worked" only because the reload fallback below masked it (P1, Codex review of
+  // 1d103bc/ff4917c).
+  const coreInfo = { ...core, name: coreName };
   const buf = await resolveRom(meta);
   // Reconstruct a worker-mode ContentBundle (e.g. persisted PSX bin/cue) the
   // same way every other boot path does — resolveRom() short-circuits to null
   // for a bundle meta (see RomResolver.js's isBundleMeta comment), so without
   // this a gun/mouse arm-reboot of persisted multi-file content would hand
-  // bootFreshRuntime a null buffer instead of the reconstructed bundle (P1,
-  // Codex review of 1d103bc).
-  const content = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, core, meta) : buf;
+  // bootFreshRuntime a null buffer instead of the reconstructed bundle.
+  const content = coreInfo.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, coreInfo, meta) : buf;
   const coreOptions = dev ? { ...(core.coreOptions || {}), ...dev.coreOptions } : core.coreOptions;
+  // BIOS/restored-SaveRAM resolution, same as every other boot path (buildStartOptions
+  // is a no-op past the coreOptions/execution fields for non-worker cores).
+  const startOptions = await buildStartOptions(coreInfo, { file: meta.file, title: meta.title }, content);
   logLightgunBoot('arm-reboot', meta, gun, { live: true });
   if (mouse) logger?.event?.('mouse-boot', { where: 'arm-reboot', system: meta.system, inputDevices: mouse.inputDevices, mice: mouse.mice, remapName: mouse.remapName, live: true });
   const next = await bootFreshRuntime(CONSOLE_ID, meta, {
-    core: { name: coreName, url: core.url, style: core.style },
+    core: coreInfo,
     romBuffer: content,
     coreOptions,
     inputDevices: dev?.inputDevices,
     remapName: dev?.remapName ?? core.remapName,
     systemFiles: core.systemFiles,
+    execution: startOptions.execution,
+    requiresThreads: startOptions.requiresThreads,
+    firmware: startOptions.firmware,
+    restoredSaves: startOptions.restoredSaves,
   });
   // Re-point the singleton-bound consumers (keyboard / desktop pad / reset / save
   // states / host-video pause-resume) at the new runtime's client, and wire its
