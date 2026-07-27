@@ -114,6 +114,17 @@ function tryCopyFrom(srcDir) {
     }
   }
   for (const core of CUSTOM_CORES) {
+    // Same PATCHED.json protection as the buildbot-core loop above: a custom
+    // core (currently only mednafen_psx_jit) can ALSO carry a local rwebinput
+    // light-gun rebuild (docs/PSX_CORE_BUILD.md's "Light-gun (GunCon) support"
+    // section, fixed 2026-07-27) that a --from/$LIBRETRO_CORES_DIR copy from
+    // another machine/session's un-patched build would otherwise silently
+    // overwrite, leaving SYSTEMS.psx.lightgun.broken=false pointed at a core
+    // that can't actually register a shot again.
+    if (isProtected(core)) {
+      console.warn(`  ⚠ keeping PATCHED ${core} (light-gun build) — not overwriting with a different custom-core build. Use --refresh-patched to override.`);
+      continue;
+    }
     for (const ext of ['js', 'wasm', ...CUSTOM_CORE_EXTRA_EXTS]) {
       const name = `${core}_libretro.${ext}`;
       if (have.has(name)) {
