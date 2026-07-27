@@ -2,10 +2,18 @@
 // loaded via the in-app file picker) so their shelf cartridges reappear after
 // a page reload without requiring a re-pick.
 //
-// Each entry is the minimal meta needed to re-mint a cart and resolve the bytes
-// from OPFS (content-addressed by sha1, written by cacheRom in RomResolver.js):
+// Two entry shapes, both content-addressed and resolvable from OPFS alone
+// (no original File objects needed):
 //
-//   { file, system, core, title, sha1, sources: ['opfs', 'pick'] }
+//   single-file: { file, system, core, title, sha1, sources: ['opfs', 'pick'] }
+//     bytes cached by cacheRom (RomResolver.js), keyed by sha1.
+//
+//   multi-file (C4, 2026-07-27 — CUE+BIN, M3U+discs):
+//     { file, system, core, title,
+//       bundle: { contentId, entryPath, files: [path, ...] },
+//       sources: ['opfs', 'pick'] }
+//     companion files cached by cacheBundle (RomResolver.js), keyed by
+//     contentId (a ContentBundle's own stable sha256 over every file).
 //
 // Pure serialize/parse (no THREE, no DOM — unit-tested in Node) + a thin
 // localStorage I/O pair. Mirrors the pattern in src/RackPersistence.js.
@@ -17,20 +25,44 @@ const SCHEMA = 'libretrowebxr/localroms@1';
 
 // --- Pure list helpers (no browser globals) ---------------------------------
 
+function isBundleDescriptor(bundle) {
+  return !!(bundle && typeof bundle.contentId === 'string' && bundle.contentId
+    && Array.isArray(bundle.files) && bundle.files.length);
+}
+
 /**
- * Add or update an entry in the list. Deduplication is by sha1 — if an entry
- * with the same sha1 already exists it is replaced in place (same index),
- * otherwise the new entry is appended. The input list is NOT mutated; a new
+ * Add or update an entry in the list. A `meta.bundle` descriptor (see file
+ * header) mints/updates a multi-file entry, deduplicated by `contentId`;
+ * otherwise `meta.sha1` mints/updates a single-file entry, deduplicated by
+ * sha1 — same as before C4. Entries with neither are not persisted (they
+ * can't be re-resolved after reload). The input list is NOT mutated; a new
  * array is returned.
  *
- * Only entries that carry a sha1 (OPFS-backed) may be persisted — callers
- * should not pass sha1-less entries (they can't be re-resolved after reload).
- *
  * @param {Array} list   current list (may be [])
- * @param {object} meta  cart meta: { file, system, core, title, sha1, ... }
+ * @param {object} meta  cart meta: { file, system, core, title, sha1|bundle, ... }
  * @returns {Array} new list
  */
 export function addEntry(list, meta) {
+  if (isBundleDescriptor(meta?.bundle)) {
+    const entry = {
+      file:    String(meta.file    || ''),
+      system:  String(meta.system  || 'unknown'),
+      core:    String(meta.core    || ''),
+      title:   String(meta.title   || meta.file || ''),
+      bundle:  {
+        contentId: String(meta.bundle.contentId),
+        entryPath: String(meta.bundle.entryPath || ''),
+        files:     meta.bundle.files.map(String),
+      },
+      sources: ['opfs', 'pick'],
+    };
+    const idx = list.findIndex((e) => e.bundle?.contentId === entry.bundle.contentId);
+    if (idx === -1) return [...list, entry];
+    const next = [...list];
+    next[idx] = entry;
+    return next;
+  }
+
   if (!meta || typeof meta.sha1 !== 'string' || !meta.sha1) return list;
   const sha1 = meta.sha1.toLowerCase();
   const entry = {
@@ -49,17 +81,18 @@ export function addEntry(list, meta) {
 }
 
 /**
- * Remove the entry with the given sha1 from the list. Returns a new array.
- * A no-op (returns the same list) if the sha1 is not present.
+ * Remove the entry with the given identity (a single-file sha1, or a
+ * multi-file entry's bundle.contentId) from the list. Returns a new array.
+ * A no-op (returns the same list) if the identity is not present.
  *
  * @param {Array}  list
- * @param {string} sha1
+ * @param {string} identity
  * @returns {Array}
  */
-export function removeEntry(list, sha1) {
-  if (!sha1) return list;
-  const lc = sha1.toLowerCase();
-  return list.filter((e) => e.sha1 !== lc);
+export function removeEntry(list, identity) {
+  if (!identity) return list;
+  const lc = String(identity).toLowerCase();
+  return list.filter((e) => e.sha1 !== lc && e.bundle?.contentId !== identity);
 }
 
 /**
@@ -70,14 +103,23 @@ export function removeEntry(list, sha1) {
 export function serialize(list) {
   return {
     schema: SCHEMA,
-    roms: (list || []).map((e) => ({
-      file:    e.file,
-      system:  e.system,
-      core:    e.core,
-      title:   e.title,
-      sha1:    e.sha1,
-      sources: e.sources || ['opfs', 'pick'],
-    })),
+    roms: (list || []).map((e) => (e.bundle
+      ? {
+          file:    e.file,
+          system:  e.system,
+          core:    e.core,
+          title:   e.title,
+          bundle:  { contentId: e.bundle.contentId, entryPath: e.bundle.entryPath, files: e.bundle.files },
+          sources: e.sources || ['opfs', 'pick'],
+        }
+      : {
+          file:    e.file,
+          system:  e.system,
+          core:    e.core,
+          title:   e.title,
+          sha1:    e.sha1,
+          sources: e.sources || ['opfs', 'pick'],
+        })),
   };
 }
 
@@ -95,16 +137,28 @@ export function parse(raw) {
     if (typeof raw.schema !== 'string' || !raw.schema.startsWith('libretrowebxr/localroms')) return [];
     if (!Array.isArray(raw.roms)) return [];
     return raw.roms
-      .filter((e) => e && typeof e.sha1 === 'string' && e.sha1
-                       && typeof e.file === 'string' && e.file)
-      .map((e) => ({
-        file:    String(e.file),
-        system:  typeof e.system === 'string' ? e.system : 'unknown',
-        core:    typeof e.core   === 'string' ? e.core   : '',
-        title:   typeof e.title  === 'string' ? e.title  : e.file,
-        sha1:    String(e.sha1).toLowerCase(),
-        sources: Array.isArray(e.sources) ? e.sources : ['opfs', 'pick'],
-      }));
+      .filter((e) => e && typeof e.file === 'string' && e.file
+                       && ((typeof e.sha1 === 'string' && e.sha1) || isBundleDescriptor(e.bundle)))
+      .map((e) => {
+        const base = {
+          file:    String(e.file),
+          system:  typeof e.system === 'string' ? e.system : 'unknown',
+          core:    typeof e.core   === 'string' ? e.core   : '',
+          title:   typeof e.title  === 'string' ? e.title  : e.file,
+          sources: Array.isArray(e.sources) ? e.sources : ['opfs', 'pick'],
+        };
+        if (isBundleDescriptor(e.bundle)) {
+          return {
+            ...base,
+            bundle: {
+              contentId: String(e.bundle.contentId),
+              entryPath: String(e.bundle.entryPath || ''),
+              files:     e.bundle.files.map(String),
+            },
+          };
+        }
+        return { ...base, sha1: String(e.sha1).toLowerCase() };
+      });
   } catch {
     return [];
   }
@@ -115,15 +169,18 @@ export function parse(raw) {
  * (and handleCartridgeInserted) expect.
  *
  * @param {object} entry  a parsed library entry
- * @returns {object}  { file, system, core, title, rom: { sha1, sources } }
+ * @returns {object}  { file, system, core, title, rom: { sha1|bundle, sources } }
  */
 export function toCartMeta(entry) {
+  const rom = entry.bundle
+    ? { bundle: entry.bundle, sources: entry.sources || ['opfs', 'pick'] }
+    : { sha1: entry.sha1, sources: entry.sources || ['opfs', 'pick'] };
   return {
     file:   entry.file,
     system: entry.system,
     core:   entry.core,
     title:  entry.title,
-    rom:    { sha1: entry.sha1, sources: entry.sources || ['opfs', 'pick'] },
+    rom,
   };
 }
 

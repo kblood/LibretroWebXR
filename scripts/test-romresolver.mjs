@@ -13,6 +13,7 @@ import {
   resolve,
   isLocalRomMeta,
   isUnresolvableHere,
+  isBundleMeta,
   verifyRomIntegrity,
   sha1Hex,
 } from '../src/RomResolver.js';
@@ -380,6 +381,50 @@ console.log('--- isUnresolvableHere ---');
   // Sanity: doesn't throw on a bare/null-ish meta.
   ok('null meta does not throw', !(await isUnresolvableHere(null)));
   ok('empty meta does not throw', !(await isUnresolvableHere({})));
+}
+
+// ---------------------------------------------------------------------------
+// isBundleMeta / resolve() / isUnresolvableHere — multi-file content bundles
+// (C4, 2026-07-27). cacheBundle/hasBundleCached/restoreBundleFiles themselves
+// touch OPFS directly and can't run in Node (same limitation isUnresolvableHere's
+// own comment above notes for the single-file case) — headless-browser probes
+// cover the actual read/write. What IS Node-testable: the pure classifier and
+// the two call sites (resolve(), isUnresolvableHere()) that branch on it.
+// ---------------------------------------------------------------------------
+
+console.log('--- isBundleMeta ---');
+{
+  const bundleMeta = { file: 'game.cue', rom: { bundle: { contentId: 'sha256:deadbeef', entryPath: 'game.cue', files: ['game.cue', 'game.bin'] }, sources: ['opfs', 'pick'] } };
+  ok('a real bundle descriptor is recognized', isBundleMeta(bundleMeta));
+  ok('missing contentId is not a bundle', !isBundleMeta({ rom: { bundle: { entryPath: 'x', files: ['x'] } } }));
+  ok('empty files is not a bundle', !isBundleMeta({ rom: { bundle: { contentId: 'sha256:x', files: [] } } }));
+  ok('a single-file (sha1) meta is not a bundle', !isBundleMeta({ rom: { sha1: 'abc' } }));
+  ok('no rom block is not a bundle', !isBundleMeta({}));
+  ok('null meta is not a bundle', !isBundleMeta(null));
+}
+
+console.log('--- resolve() short-circuits for a bundle meta ---');
+{
+  // A bundle meta must return null (not throw, not try fromPick/fromUrl) —
+  // the caller (src/main.js's worker-execution boot paths) always follows
+  // resolve() with wrapWorkerContent, which does the real reconstruction via
+  // restoreBundleFiles instead.
+  const bundleMeta = { file: 'game.cue', rom: { bundle: { contentId: 'sha256:deadbeef', entryPath: 'game.cue', files: ['game.cue', 'game.bin'] }, sources: ['opfs', 'pick'] } };
+  try {
+    const result = await resolve(bundleMeta, { fetchImpl: okFetch });
+    ok('resolve(bundle meta) returns null', result === null);
+  } catch (e) {
+    fail++; console.error(`FAIL  resolve(bundle meta) threw: ${e.message}`);
+  }
+}
+
+console.log('--- isUnresolvableHere: bundle meta ---');
+{
+  // Local-only + a bundle descriptor, but Node has no OPFS → every companion
+  // file lookup misses → unresolvable here (mirrors the single-file case
+  // right above).
+  const bundleMeta = { file: 'game.cue', rom: { bundle: { contentId: 'sha256:deadbeef', entryPath: 'game.cue', files: ['game.cue', 'game.bin'] }, sources: ['opfs', 'pick'] } };
+  ok('bundle meta with no OPFS in this env → unresolvable', await isUnresolvableHere(bundleMeta));
 }
 
 // ---------------------------------------------------------------------------

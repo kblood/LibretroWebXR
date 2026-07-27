@@ -210,6 +210,82 @@ console.log('--- toCartMeta ---');
 }
 
 // ---------------------------------------------------------------------------
+// addEntry / removeEntry — multi-file bundle entries (C4, 2026-07-27)
+// A CUE+BIN/M3U pick has no single sha1 to key on — it's identified by its
+// ContentBundle's own contentId instead, alongside its companion file list.
+// ---------------------------------------------------------------------------
+
+console.log('--- addEntry: multi-file bundle mints/dedupes by contentId ---');
+{
+  const bundleMeta = {
+    file: 'game.cue', system: 'psx', core: 'mednafen_psx_hw', title: 'Game',
+    bundle: { contentId: 'sha256:deadbeef', entryPath: 'game.cue', files: ['game.cue', 'game.bin'] },
+  };
+  let list = addEntry([], bundleMeta);
+  ok('bundle entry added', list.length === 1);
+  ok('bundle entry has no sha1', list[0].sha1 === undefined);
+  eq('bundle descriptor preserved', list[0].bundle, { contentId: 'sha256:deadbeef', entryPath: 'game.cue', files: ['game.cue', 'game.bin'] });
+  eq('bundle entry sources', list[0].sources, ['opfs', 'pick']);
+
+  // Same contentId updates in place (e.g. re-picking the identical disc).
+  list = addEntry(list, { ...bundleMeta, title: 'Game (updated)' });
+  ok('same contentId does not duplicate', list.length === 1);
+  eq('bundle entry updated in place', list[0].title, 'Game (updated)');
+
+  // Coexists with single-file (sha1) entries in the same list.
+  const sha1Meta = { file: 'other.sfc', system: 'snes', core: 'snes9x', title: 'Other', sha1: 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' };
+  list = addEntry(list, sha1Meta);
+  ok('bundle + sha1 entries coexist', list.length === 2);
+
+  // A malformed bundle descriptor (no contentId, or empty files) is not a
+  // valid bundle — falls through to the sha1 path, which also rejects it.
+  ok('bundle with no contentId not added', addEntry(list, { file: 'x.cue', bundle: { entryPath: 'x.cue', files: ['x.cue'] } }) === list);
+  ok('bundle with empty files not added', addEntry(list, { file: 'x.cue', bundle: { contentId: 'sha256:x', files: [] } }) === list);
+
+  console.log('--- removeEntry: matches a bundle contentId too ---');
+  const afterBundleRemoval = removeEntry(list, 'sha256:deadbeef');
+  ok('bundle entry removed by contentId', afterBundleRemoval.length === 1);
+  ok('sha1 entry survives', afterBundleRemoval[0].sha1 === sha1Meta.sha1.toLowerCase());
+  ok('removing an absent contentId is a no-op', removeEntry(list, 'sha256:not-present').length === 2);
+}
+
+console.log('--- serialize/parse round-trip: bundle entries ---');
+{
+  const bundleMeta = {
+    file: 'game.cue', system: 'psx', core: 'mednafen_psx_hw', title: 'Game',
+    bundle: { contentId: 'sha256:deadbeef', entryPath: 'game.cue', files: ['game.cue', 'game.bin'] },
+  };
+  const list = addEntry([], bundleMeta);
+  const parsed = parse(JSON.parse(JSON.stringify(serialize(list))));
+  ok('round-trip length', parsed.length === 1);
+  eq('round-trip bundle descriptor', parsed[0].bundle, bundleMeta.bundle);
+  eq('round-trip sources', parsed[0].sources, ['opfs', 'pick']);
+
+  // A bundle descriptor missing contentId or with empty files is dropped by
+  // parse(), same as addEntry's rejection above — corrupt storage shouldn't
+  // resurrect an unresolvable entry.
+  const corruptBundle = {
+    schema: 'libretrowebxr/localroms@1',
+    roms: [{ file: 'x.cue', bundle: { contentId: 'sha256:x', files: [] } }],
+  };
+  eq('parse drops empty-files bundle', parse(corruptBundle), []);
+}
+
+console.log('--- toCartMeta: bundle entry ---');
+{
+  const entry = {
+    file: 'game.cue', system: 'psx', core: 'mednafen_psx_hw', title: 'Game',
+    bundle: { contentId: 'sha256:deadbeef', entryPath: 'game.cue', files: ['game.cue', 'game.bin'] },
+    sources: ['opfs', 'pick'],
+  };
+  const meta = toCartMeta(entry);
+  eq('meta.file', meta.file, 'game.cue');
+  eq('meta.rom.bundle', meta.rom.bundle, entry.bundle);
+  eq('meta.rom.sources', meta.rom.sources, ['opfs', 'pick']);
+  ok('no rom.sha1 on a bundle meta', !('sha1' in meta.rom));
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

@@ -67,7 +67,7 @@ import {
   makePeerPropId, serializePropState, parsePropEntries, diffPropSync,
 } from './net/PropSync.js';
 import { loadCollection, parseCollection } from './Collection.js';
-import { resolve as resolveRom, cacheRom, pickLibraryDirectory, fileSystemAccessSupported, resolutionPlan, opfsSupported, isLocalRomMeta, romUrlFor } from './RomResolver.js';
+import { resolve as resolveRom, cacheRom, cacheBundle, isBundleMeta, hasBundleCached, restoreBundleFiles, pickLibraryDirectory, fileSystemAccessSupported, resolutionPlan, opfsSupported, isLocalRomMeta, romUrlFor } from './RomResolver.js';
 import {
   pickImagesDirectory, hasImagesDirectory, listImages, entryObjectUrl,
   fileSystemAccessSupported as imgFolderSupported,
@@ -1366,10 +1366,14 @@ async function restoreLocalRoms() {
   const pruned = [];
   let anyPruned = false;
   for (const entry of list) {
-    // Verify the OPFS bytes still exist before re-minting the cart.
+    // Verify the OPFS bytes still exist before re-minting the cart (a bundle
+    // entry — C4, 2026-07-27 — needs EVERY companion file present, not just
+    // one key).
     let hasBytes = false;
     try {
-      if (typeof navigator !== 'undefined' && navigator.storage?.getDirectory) {
+      if (entry.bundle) {
+        hasBytes = await hasBundleCached(entry.bundle.contentId, entry.bundle.files);
+      } else if (typeof navigator !== 'undefined' && navigator.storage?.getDirectory) {
         const root = await navigator.storage.getDirectory();
         const key = `sha1-${entry.sha1}`;
         await root.getFileHandle(key); // throws if missing
@@ -1379,7 +1383,7 @@ async function restoreLocalRoms() {
       hasBytes = false;
     }
     if (!hasBytes) {
-      logger?.event?.('local-rom-restore-evicted', { file: entry.file, sha1: entry.sha1 });
+      logger?.event?.('local-rom-restore-evicted', { file: entry.file, sha1: entry.sha1, contentId: entry.bundle?.contentId });
       anyPruned = true;
       continue; // skip — bytes gone, don't show a dead cart
     }
@@ -1397,11 +1401,15 @@ async function restoreLocalRoms() {
 }
 
 // Append/update a local-ROM entry in localStorage. Called after a successful
-// cacheRom so only OPFS-backed (sha1) entries are persisted.
+// cacheRom/cacheBundle so only OPFS-backed entries are persisted (a
+// `rom.bundle` meta — C4, 2026-07-27 — mints a multi-file entry; otherwise a
+// single-file entry, same as before C4).
 function persistLocalRom(meta) {
   try {
     const list = loadLocalRoms();
-    const next = lrlAddEntry(list, { ...meta, sha1: meta.rom?.sha1 });
+    const next = meta.rom?.bundle
+      ? lrlAddEntry(list, { ...meta, bundle: meta.rom.bundle })
+      : lrlAddEntry(list, { ...meta, sha1: meta.rom?.sha1 });
     saveLocalRoms(next);
   } catch (e) {
     console.warn('[main] persistLocalRom failed:', e);
@@ -2658,7 +2666,11 @@ async function buildCartridgeWorld() {
   // Usage: window.__insertCartridge({file, core, system, title, consoleId?})
   window.__insertCartridge = (meta, opts = {}) => handleCartridgeInserted(meta, opts);
   // Headless hook: exercise the ROM resolver (OPFS cache round-trip etc.).
-  window.__rom = { resolve: resolveRom, cacheRom };
+  // cacheBundle/hasBundleCached/restoreBundleFiles touch OPFS directly and
+  // can't be exercised in Node (see scripts/test-romresolver.mjs's comment on
+  // isUnresolvableHere) — exposed here so a headless probe can verify the
+  // real read/write round-trip (C4, 2026-07-27).
+  window.__rom = { resolve: resolveRom, cacheRom, cacheBundle, hasBundleCached, restoreBundleFiles, isBundleMeta };
   // Headless hook: inspect the persisted local-ROM library.
   // Returns the current list as parsed from localStorage.
   window.__localRoms = () => loadLocalRoms();
@@ -5245,15 +5257,29 @@ async function disarmMouseAndReload() {
 // on the romInput 'change' handler, which already has every File selected up
 // front) — the collection/cartridge-insert path (this function) had no way to
 // find or fetch the companions, so it 404'd or threw MISSING_COMPANIONS.
-// When `meta` is supplied AND resolves to a fetchable URL (the 'url' ROM
-// source — the only one this can help; a 'pick'/'local' entry has no server
-// URL for a companion to live at and still needs the file-picker's multi-file
-// branch), resolve+fetch the cue/m3u's companions over the network via
+// A `meta.rom.bundle` descriptor (C4, 2026-07-27) is the other way a
+// multi-file re-load reaches this: a shelf cartridge minted for a CUE+BIN/
+// M3U pick has every companion file cached in OPFS (see cacheBundle in
+// RomResolver.js), keyed by contentId — reconstruct the identical
+// ContentBundle straight from those cached files instead, bypassing
+// resolveRom entirely (it already returned null for a bundle meta; see its
+// own comment). Otherwise, when `meta` is supplied AND resolves to a
+// fetchable URL (the 'url' ROM source — the only one this can help; a
+// 'pick'/'local' entry with no bundle has no server URL for a companion to
+// live at and no cached bundle either, so it stays limited to whatever the
+// file-picker's multi-file branch already had in hand at first pick),
+// resolve+fetch the cue/m3u's companions over the network via
 // ContentBundle.fromEntryFetch, producing the EXACT SAME bundle shape
 // fromFiles does. Falls back to the single-named-file wrap (prior behavior)
 // for every other case.
 async function wrapWorkerContent(filename, source, coreInfo, meta = null) {
   const { ContentBundle } = await import('./ContentBundle.js');
+  if (isBundleMeta(meta)) {
+    const { contentId, entryPath, files } = meta.rom.bundle;
+    const named = await restoreBundleFiles(contentId, files);
+    if (!named) throw new Error(`cached multi-file content for "${entryPath}" is no longer available — re-insert it via the file picker`);
+    return ContentBundle.fromNamedSources(named, { entryPath, entryExtensions: coreInfo.exts });
+  }
   const ext = extOf(filename).toLowerCase();
   if ((ext === 'cue' || ext === 'm3u') && meta && !isLocalRomMeta(meta)) {
     const entryUrl = romUrlFor(meta);
@@ -6248,13 +6274,14 @@ romInput.addEventListener('change', async (e) => {
   const title = primary.name.replace(/\.[^.]+$/, ''); // strip extension
 
   // Build a normalised meta object identical in shape to what handleCartridgeInserted expects.
-  // The first boot uses the ArrayBuffer in hand (the File is gone after this
-  // event); meta.rom is finalised below once we've cached the bytes so the
-  // shelf cartridge can be RE-booted later from the OPFS cache (sha1) instead
-  // of a dead `roms/<file>` url fetch (the cause of the "ROM not installed"
-  // report when re-inserting a picked cart). Multi-file bundles skip OPFS
-  // caching + the shelf entirely for now (single-ArrayBuffer-shaped, below) —
-  // they still boot, but won't survive a reload as a re-insertable cartridge.
+  // The first boot uses the ArrayBuffer/ContentBundle in hand (the File(s)
+  // are gone after this event); meta.rom is finalised below once we've cached
+  // the content so the shelf cartridge can be RE-booted later from the OPFS
+  // cache instead of a dead `roms/<file>` url fetch (the cause of the "ROM
+  // not installed" report when re-inserting a picked cart) — single-file via
+  // cacheRom (sha1), any worker-execution ContentBundle (single .chd/.exe OR
+  // a real multi-file CUE+BIN/M3U set) via cacheBundle (contentId; C4,
+  // 2026-07-27).
   const meta = {
     file: primary.name,
     core: coreInfo.name,
@@ -6327,11 +6354,9 @@ romInput.addEventListener('change', async (e) => {
       title,
     });
 
-    // Cache the bytes (content-addressed) so the shelf cartridge can re-boot
-    // without the original File. On success the cart resolves via OPFS (sha1);
-    // pick stays as a last-resort fallback if OPFS is unavailable. Only
-    // possible for the single-file, main-thread path — a multi-file bundle or
-    // a worker-mode File has no single `buffer` to hash here (see above).
+    // Cache the content (content-addressed) so the shelf cartridge can
+    // re-boot without the original File(s). On success the cart resolves via
+    // OPFS; pick stays as a last-resort fallback if OPFS is unavailable.
     if (buffer) try {
       const sha1 = await cacheRom(buffer);
       meta.rom = sha1 ? { sha1, sources: ['opfs', 'pick'] } : { source: 'pick' };
@@ -6344,6 +6369,20 @@ romInput.addEventListener('change', async (e) => {
       }
     } catch (e) {
       console.warn('[main] cacheRom failed:', e);
+    } else if (content && coreInfo.execution === 'worker') try {
+      // Any worker-execution ContentBundle — a lone .chd/.exe or a real
+      // multi-file CUE+BIN/M3U set — caches the same way, keyed by its own
+      // stable contentId (C4, 2026-07-27; previously skipped entirely).
+      const ok = await cacheBundle(content.contentId, content.files);
+      meta.rom = ok
+        ? { bundle: { contentId: content.contentId, entryPath: content.entryPath, files: [...content.files.keys()] }, sources: ['opfs', 'pick'] }
+        : { source: 'pick' };
+      if (ok) {
+        persistLocalRom(meta);
+        requestPersistentStorage();
+      }
+    } catch (e) {
+      console.warn('[main] cacheBundle failed:', e);
     }
 
     // Goal B: place a grabbable cartridge on a shelf so it exists in the room.

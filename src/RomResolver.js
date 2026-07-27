@@ -298,10 +298,121 @@ export async function verifyRomIntegrity(buf, meta) {
  */
 export async function isUnresolvableHere(meta) {
   if (!isLocalRomMeta(meta)) return false;
+  if (isBundleMeta(meta)) return !(await hasBundleCached(meta.rom.bundle.contentId, meta.rom.bundle.files));
   const key = cacheKey(meta);
   if (!key) return true; // local-only with no declared sha1 → can never be OPFS-verified
   const cached = await opfsGet(key);
   return !cached;
+}
+
+// --- OPFS cache: multi-file content bundles (CUE+BIN, M3U+discs) -----------
+//
+// A worker-execution core's multi-file pick (C4, 2026-07-27) can't be
+// content-addressed by a single sha1 the way a lone ROM file can — it needs
+// every companion file, by relative path, kept together. Each bundle gets its
+// own namespaced OPFS directory keyed by its ContentBundle.contentId (already
+// a stable sha256 over every file's path+size+hash — see ContentBundle.js),
+// with the same relative-path layout `entryPath`/`files` describe, so a shelf
+// cartridge minted for it can re-resolve every companion after reload without
+// re-picking. This intentionally does NOT flow through `resolve()` (which is
+// shaped around returning one ArrayBuffer) — see `isBundleMeta` and
+// src/main.js's `wrapWorkerContent`, which reconstructs a ContentBundle
+// directly from these files instead.
+
+/** True when meta.rom carries a multi-file bundle description (see cacheBundle). */
+export function isBundleMeta(meta) {
+  const b = meta?.rom?.bundle;
+  return !!(b && typeof b.contentId === 'string' && b.contentId && Array.isArray(b.files) && b.files.length);
+}
+
+function bundleDirName(contentId) {
+  // contentId is `sha256:<hex>` — strip characters OPFS directory names may
+  // reject (only hex digits and `:` `-` show up here, but sanitize broadly
+  // rather than special-case the current format).
+  return `bundle-${String(contentId).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+}
+
+// A content path may itself contain '/' (e.g. 'Disc/Game.cue' — see
+// ContentBundle.js's normalizeContentPath, which allows subdirectories),
+// so walk/create each segment as a real OPFS subdirectory rather than
+// flattening the path into one file name.
+async function opfsDirHandleForPath(rootDirHandle, path, { create = false } = {}) {
+  const parts = String(path).split('/');
+  const fileName = parts.pop();
+  let dir = rootDirHandle;
+  for (const part of parts) dir = await dir.getDirectoryHandle(part, { create });
+  return { dir, fileName };
+}
+
+/**
+ * Stash every companion file of a multi-file content bundle into a namespaced
+ * OPFS directory keyed by its contentId. `files` is a Map<path, source> (or
+ * any iterable of [path, source] pairs) where `source` is anything
+ * FileSystemWritableFileStream.write() accepts directly — File, Blob,
+ * ArrayBuffer, or a TypedArray — written as-is with no decode/re-encode step,
+ * so this stays cheap even for large CD-audio tracks. Returns true on
+ * success, false if OPFS is unavailable or the write failed (the caller
+ * should then keep `pick` as the only fallback source, same as a single-file
+ * ROM when `cacheRom` can't cache it).
+ */
+export async function cacheBundle(contentId, files) {
+  if (!opfsSupported() || !contentId) return false;
+  try {
+    const root = await navigator.storage.getDirectory();
+    const bundleDir = await root.getDirectoryHandle(bundleDirName(contentId), { create: true });
+    for (const [path, source] of files) {
+      const { dir, fileName } = await opfsDirHandleForPath(bundleDir, path, { create: true });
+      const fh = await dir.getFileHandle(fileName, { create: true });
+      const w = await fh.createWritable();
+      await w.write(source);
+      await w.close();
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function opfsGetBundleFile(contentId, path) {
+  if (!opfsSupported()) return null;
+  try {
+    const root = await navigator.storage.getDirectory();
+    const bundleDir = await root.getDirectoryHandle(bundleDirName(contentId));
+    const { dir, fileName } = await opfsDirHandleForPath(bundleDir, path);
+    const fh = await dir.getFileHandle(fileName);
+    return await fh.getFile();
+  } catch {
+    return null; // not cached (or partially evicted)
+  }
+}
+
+/**
+ * True when every companion file of a cached bundle is still present in OPFS
+ * (none evicted). Safe to call speculatively — never prompts or touches the
+ * network.
+ */
+export async function hasBundleCached(contentId, paths) {
+  if (!opfsSupported()) return false;
+  for (const path of paths) {
+    if (!(await opfsGetBundleFile(contentId, path))) return false;
+  }
+  return true;
+}
+
+/**
+ * Reconstruct a cached bundle's companion files as `{path, source}` pairs —
+ * exactly the named-sources shape `ContentBundle.fromNamedSources` wants.
+ * Returns null (not a partial list) if ANY file is missing, so a partially
+ * evicted bundle is treated as fully gone rather than silently truncated.
+ */
+export async function restoreBundleFiles(contentId, paths) {
+  const named = [];
+  for (const path of paths) {
+    const file = await opfsGetBundleFile(contentId, path);
+    if (!file) return null;
+    named.push({ path, source: file });
+  }
+  return named;
 }
 
 // --- Per-source fetchers ----------------------------------------------------
@@ -361,6 +472,14 @@ function fromPick(meta) {
  * @returns {Promise<ArrayBuffer>}
  */
 export async function resolve(meta, opts = {}) {
+  // Multi-file content bundles aren't single-ArrayBuffer-shaped — they're
+  // resolved by src/main.js's wrapWorkerContent (via restoreBundleFiles)
+  // instead, which every worker-execution boot path already calls right
+  // after this. Returning null (not throwing) lets every one of those call
+  // sites' existing `core.execution === 'worker' ? wrapWorkerContent(...) :
+  // buf` line flow through unchanged.
+  if (isBundleMeta(meta)) return null;
+
   const key = cacheKey(meta);
 
   // Content-addressed OPFS fast path (never stale — keyed by sha1).
