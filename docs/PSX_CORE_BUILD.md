@@ -36,17 +36,106 @@ faster interpreter.
 
 ## Getting the artifacts
 
+`core-build/build.sh` (in the `kblood/psx-wasm-jit-libretro` repo) resolves
+its own repo root as `core-build/../../../..` and reads sibling files like
+`fetch-jit-deps.sh` / `integration/` relative to that — i.e. the script
+expects to be run as if the whole `psx-wasm-jit-libretro` repo's contents
+were laid out at `<some-root>/scripts/cores/psx/`, matching this project's
+own `scripts/cores/psx/` (which currently only tracks `test-content/` in
+git — the rest is deliberately not vendored here, see "Why this core is
+different" above). A **plain top-level clone next to this repo will NOT
+work** — `core-build/build.sh` will fail looking for
+`<repo_root>/scripts/cores/psx/fetch-jit-deps.sh` four directories up from
+`core-build/`, which won't exist. Lay it out correctly:
+
 ```sh
-git clone https://github.com/kblood/psx-wasm-jit-libretro.git
-cd psx-wasm-jit-libretro
-bash core-build/build.sh   # from WSL; see that repo's README for prerequisites
-cp core-build/dist/mednafen_psx_jit_libretro.{js,wasm,worker.js,build.json} \
+# From WSL. Anywhere works as <root>, as long as the clone's contents end up
+# at <root>/scripts/cores/psx/ (this repo's own scripts/cores/psx/test-content/
+# is safe to leave in place / overlay — the clone ships an identical copy).
+mkdir -p <root>/scripts/cores/psx
+git clone https://github.com/kblood/psx-wasm-jit-libretro.git /tmp/psx-clone
+cp -a /tmp/psx-clone/. <root>/scripts/cores/psx/
+rm -rf <root>/scripts/cores/psx/.git
+cd <root>
+bash scripts/cores/psx/core-build/build.sh   # see that repo's README for prerequisites
+cp scripts/cores/psx/core-build/dist/mednafen_psx_jit_libretro.{js,wasm,worker.js,build.json} \
    <this-repo>/public/cores/
 ```
 
 `public/cores/` is gitignored here — same convention as every other core
 (`play_libretro.*`, etc.): build once, place on disk, never commit the
 binary.
+
+### Light-gun (GunCon) support — REQUIRED, easy to lose on a rebuild
+
+**Fixed 2026-07-27.** `core-build/build.sh`, as published, applies exactly
+two patches to its fetched RetroArch tree (`retroarch-worker-module.patch`,
+`retroarch-rwebaudio.patch`) plus one to Beetle PSX
+(`beetle-jit-build-fixes.patch`) — **it never applied the rwebinput
+light-gun patch every other gun-capable core in this project needs**
+(`docs/LIGHTGUN_SUPPORT.md`). Confirmed by fetching this build's pinned
+RetroArch commit (`45246ce85eec8fb36d11c3bf551b9b81d3a426a1`) and reading
+`input/drivers/rwebinput_input.c` directly: it has **no `RETRO_DEVICE_
+LIGHTGUN` case at all**, so a game-port light gun always read `0,0`/no-
+trigger no matter what this app's worker sent — exactly explaining why the
+app-side GunCon wiring was fully verified working (`scripts/probe-psx-
+guncon.js`'s dispatch/metrics checks) while the in-game shot never
+registered.
+
+If you rebuild this core from a fresh `kblood/psx-wasm-jit-libretro` clone,
+you must (re)apply the same two patches this repo already carries for the
+other gun cores, **in this order** (the multiport patch's hunks assume the
+base patch's `RETRO_DEVICE_LIGHTGUN` case already exists and fail to apply
+without it):
+
+1. `docs/patches/rwebinput-lightgun.diff` — adds the base single-gun
+   `RETRO_DEVICE_LIGHTGUN` case to `input/drivers/rwebinput_input.c`.
+2. `docs/patches/rwebinput-lightgun-multiport.diff` — extends it to a
+   per-port pointer + the exported setter
+   `rwebinput_set_lightgun(port,x,y,buttons)` (`Module._rwebinput_set_
+   lightgun` from JS) that `src/EmulatorClient.js`'s `sendLightgun()` /
+   `src/runtime/EmulatorWorkerRuntime.js`'s `forwardLightgun()` call.
+
+Apply both with `git apply` against the fetched `RetroArch` checkout
+(`core-build/.work/wsl/RetroArch`) **after** `retroarch-worker-module.patch`
+and `retroarch-rwebaudio.patch` have already been applied, and **before**
+the final `emmake make ... all` link step. One wrinkle: the multiport
+patch's own `Makefile.emscripten` hunk (adding `_rwebinput_set_lightgun,
+_rwebinput_clear_lightgun` to `EXPORTED_FUNCTIONS`) no longer applies
+cleanly once `retroarch-worker-module.patch` has already rewritten that
+exact line — instead of a third patch file, insert those two export names
+into the already-patched `EXPORTED_FUNCTIONS` line directly (e.g. `sed -i
+'s/_lr_play_backend_invalidate_all/_lr_play_backend_invalidate_all,
+_rwebinput_set_lightgun,_rwebinput_clear_lightgun/'
+Makefile.emscripten` — `_lr_play_backend_invalidate_all` is the last symbol
+`retroarch-worker-module.patch` itself adds, so it's a stable insertion
+point). Verify the export made it into the link command
+(`grep _rwebinput_set_lightgun` in the `emcc ... -o mednafen_psx_jit_libretro.js`
+invocation, or in the built `.js` glue afterward) before trusting the
+artifact.
+
+Both idempotent guard patterns already used for the other two RetroArch
+patches (`git apply --check` / `--reverse --check` before applying, so a
+second run of `build.sh` against an already-patched checkout doesn't error)
+apply the same way here — see `core-build/build.sh`'s existing
+`retroarch-worker-module.patch` / `retroarch-rwebaudio.patch` blocks for the
+exact shape to copy.
+
+**Verified end-to-end (2026-07-27):** rebuilt the core with both patches
+applied plus the `sed` export insert, deployed to `public/cores/`, flipped
+`SYSTEMS.psx.lightgun.broken` to `false` in `src/systems.js`, and re-ran
+`npm run probe:psx-guncon` — **13/13** (was 12/13; the one prior failure was
+exactly the `[GUNCON END-TO-END SIGNAL]` check). Confirmed with real
+screenshots, not just the probe's pixel-diff assertion: the pre-shot
+baseline shows Time Crisis's "Guncon Calibration" screen reading "Check the
+GunCon connection, and point the gun at the screen." with an empty
+crosshair; after firing at the on-screen calibration target, the settled
+frame shows the screen has genuinely advanced to "Is the gun sight aligned
+correctly? / Retry: Re-aim and shoot again. / End: Press A or B" with a red
+calibration dot now inside the crosshair — the game's own state machine
+reacted to the shot, not just a changed pixel count. `npm test` also passed
+in full afterward (every suite, 0 failures) — no regressions from the
+`broken: false` flip.
 
 Pinned inputs at the time this integration was built (see that repo's own
 `manifest.env`/`dist/*.build.json` for the current, authoritative pins —

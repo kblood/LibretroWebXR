@@ -343,38 +343,32 @@ export const SYSTEMS = {
   // corroborating library_name finding). The `_hw_`-prefixed keys are set too
   // so nothing breaks if a future rebuild flips that.
   //
-  // CONFIRMED NOT reaching the core end-to-end (2026-07-27, scripts/probe-
-  // psx-guncon.js's gating "GUNCON END-TO-END SIGNAL" check): the app-side
-  // wiring (this entry -> loadCartridge's lightgun branch -> coreOptions/
-  // inputDevices/remapName threaded through to the worker -> sendLightgun ->
-  // EmulatorWorkerRuntime's forwardLightgun -> real mousemove/mousedown/
-  // mouseup dispatched on the worker's OffscreenCanvas) is verified working
-  // — the worker's own metrics confirm every dispatched call actually ran.
-  // But against the real Time Crisis "Guncon Calibration" screen (aim+shoot
-  // at a fixed on-screen target), firing directly at the target repeatedly
-  // produced a byte-identical frame before and after — the shot never
-  // registers with the game. mednafen_psx_hw is a bespoke from-scratch build
-  // (docs/PSX_CORE_BUILD.md), not built through the same WSL2 pipeline that
-  // relinked nestopia/snes9x/genesis_plus_gx against a PATCHED rwebinput
-  // (docs/patches/rwebinput-lightgun.diff) — stock rwebinput has NO
-  // RETRO_DEVICE_LIGHTGUN case at all (see that diff's own comment) — so the
-  // leading theory is this core's RetroArch frontend was never linked
-  // against the patch, and always reads gun position as 0,0. Confirming and
-  // fixing that requires rebuilding the core (out of scope for this app-side
-  // change) — tracked as a follow-up. See scripts/probe-psx-guncon.js for
-  // the check and docs/research (or memory) for the full writeup.
-  //
-  // `broken: true` below keeps this descriptor registered (so the app-side
-  // wiring stays exercised/testable and ready to "just work" the moment a
-  // relinked core artifact lands) WITHOUT offering a nonfunctional gun to
-  // real players — isLightgunCapable/lightgunForSystem/lightgunLoadConfig
-  // all gate on it (see their comments in this file), so PSX behaves as
-  // gun-less for every real caller (auto-arm on load, the in-VR gun-arm
-  // reboot flow) until it's removed. Only scripts/probe-psx-guncon.js
-  // bypasses the gate (lightgunLoadConfig's `allowBroken` opt), on purpose,
-  // to keep proving the wiring itself still works.
+  // FIXED 2026-07-27 (scripts/probe-psx-guncon.js's gating "GUNCON END-TO-END
+  // SIGNAL" check is now 13/13, was 12/13). Root cause, confirmed by reading
+  // the source rather than guessing: mednafen_psx_hw is a bespoke
+  // from-scratch build (docs/PSX_CORE_BUILD.md) whose build tooling
+  // (kblood/psx-wasm-jit-libretro's core-build/build.sh) applied its own
+  // RetroArch/Beetle patches (worker-module, rwebaudio, beetle-jit-build-
+  // fixes) but never applied the rwebinput light-gun patch every OTHER gun
+  // core here needs — confirmed by fetching the pinned RetroArch commit
+  // (45246ce85e) and finding its rwebinput_input.c has NO RETRO_DEVICE_
+  // LIGHTGUN case at all, so a game-port light gun always read 0,0/no-trigger
+  // regardless of what the app sent. Fixed by applying, in order,
+  // docs/patches/rwebinput-lightgun.diff (adds the base single-gun case —
+  // required first, since the multiport patch's hunks assume it already
+  // exists) then docs/patches/rwebinput-lightgun-multiport.diff (adds the
+  // per-port rwebinput_set_lightgun(port,x,y,buttons) export this app's
+  // worker runtime calls), with Makefile.emscripten's EXPORTED_FUNCTIONS
+  // patched via a targeted `sed` insert (the multiport diff's own Makefile
+  // hunk no longer applies cleanly once retroarch-worker-module.patch has
+  // already rewritten that exact line) — see docs/PSX_CORE_BUILD.md's
+  // "Light-gun (GunCon) support" section for the full recipe, now saved so a
+  // future rebuild doesn't lose it. Verified end-to-end against the real
+  // Time Crisis "Guncon Calibration" screen: shooting the on-screen target
+  // now advances the game's own state machine (screenshots in
+  // docs/PSX_CORE_BUILD.md), not just a pixel-diff metric.
   psx:       { label: 'PlayStation',        defaultCore: 'mednafen_psx_hw',  cores: ['mednafen_psx_hw'],              exts: ['chd','cue','m3u','ccd','pbp','exe'], aliases: ['psx','ps1','playstation','sony playstation'], thumbnailRepo: 'Sony_-_PlayStation', medium: 'floppy', experimental: true,
-    lightgun: { label: 'GunCon', core: 'mednafen_psx_hw', device: 260, port: 0, broken: true, coreOptions: {
+    lightgun: { label: 'GunCon', core: 'mednafen_psx_hw', device: 260, port: 0, broken: false, coreOptions: {
       beetle_psx_gun_input_mode: 'lightgun', beetle_psx_hw_gun_input_mode: 'lightgun',
       beetle_psx_gun_cursor: 'cross', beetle_psx_hw_gun_cursor: 'cross',
     } } },
