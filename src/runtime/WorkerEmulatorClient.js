@@ -219,21 +219,32 @@ export class WorkerEmulatorClient extends EventTarget {
   }
 }
 
+// Blob/File sources are structured-clone-transferable as-is — postMessage
+// hands the worker a reference to the same backing storage rather than
+// copying bytes, so a large disc track never gets read or duplicated on the
+// main thread at all (C1, 2026-07-27 review followup). Only sources that are
+// ALREADY fully-materialized in memory (a raw ArrayBuffer/TypedArray, e.g.
+// small synthetic/authored ROMs) still go through the old read+slice+
+// transfer path, since there's no backing-storage reference to hand off for
+// those — they're already sitting in memory either way.
+async function toWorkerFileRecord(path, source, transfer) {
+  if (source instanceof Blob) return { path, data: source };
+  const data = (await readBytes(source)).slice();
+  transfer.push(data.buffer);
+  return { path, data: data.buffer };
+}
+
 async function prepareLaunchPayload(content, opts) {
   const transfer = [];
   let contentPayload;
   if (content?.files instanceof Map && content.entryPath) {
     const files = [];
     for (const [path, source] of content.files) {
-      const data = (await readBytes(source)).slice();
-      files.push({ path, data: data.buffer });
-      transfer.push(data.buffer);
+      files.push(await toWorkerFileRecord(path, source, transfer));
     }
     contentPayload = { entryPath: content.entryPath, files };
   } else {
-    const data = (await readBytes(content)).slice();
-    contentPayload = { entryPath: 'rom.bin', files: [{ path: 'rom.bin', data: data.buffer }] };
-    transfer.push(data.buffer);
+    contentPayload = { entryPath: 'rom.bin', files: [await toWorkerFileRecord('rom.bin', content, transfer)] };
   }
 
   const firmware = await prepareRecords(opts.firmware, transfer, true);

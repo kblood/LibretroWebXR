@@ -213,13 +213,59 @@ export async function readBytes(source) {
   throw new ContentBundleError('Unsupported content source', 'UNSUPPORTED_SOURCE');
 }
 
+// Real CD/DVD tracks (a PSX .bin can be 600MB+) are too large to read in
+// full just to mint an identity string — above this size, computeContentId
+// hashes size+sampled prefix/suffix instead of the whole file (C1,
+// 2026-07-27 review followup). Every ROM/cue/m3u file that actually exists
+// below this line still gets the old exact full-byte hash, unchanged.
+const STREAM_HASH_THRESHOLD = 8 * 1024 * 1024;
+const STREAM_HASH_SAMPLE = 65536;
+
+function sourceByteLength(source) {
+  if (source instanceof Blob) return source.size;
+  if (source instanceof ArrayBuffer) return source.byteLength;
+  if (ArrayBuffer.isView(source)) return source.byteLength;
+  return null;
+}
+
+async function readSourceSlice(source, start, end) {
+  if (source instanceof Blob) return new Uint8Array(await source.slice(start, end).arrayBuffer());
+  if (source instanceof ArrayBuffer) return new Uint8Array(source.slice(start, end));
+  if (ArrayBuffer.isView(source)) return new Uint8Array(source.buffer, source.byteOffset + start, end - start);
+  throw new ContentBundleError('Unsupported content source', 'UNSUPPORTED_SOURCE');
+}
+
+// Below STREAM_HASH_THRESHOLD: exact full-byte hash (identical to the old
+// unconditional behavior — every existing small ROM/cue/m3u contentId is
+// unaffected). Above it: size + a 64KB prefix + 64KB suffix sample, so a
+// 600MB disc track never gets fully read just to be identified. This is a
+// deliberate, narrow collision-resistance tradeoff (two same-size files
+// with identical prefix/suffix but differing interior bytes would collide)
+// scoped only to large tracks, where full-byte hashing was the actual cost
+// problem; it does NOT apply to the vast majority of already-persisted
+// content (anything under 8MB keeps its old, byte-exact contentId).
+async function hashFileForIdentity(path, source) {
+  const knownSize = sourceByteLength(source);
+  if (knownSize === null || knownSize <= STREAM_HASH_THRESHOLD) {
+    const bytes = await readBytes(source);
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    return `${path}\0${bytes.byteLength}\0full:${toHex(digest)}`;
+  }
+  const sample = Math.min(STREAM_HASH_SAMPLE, Math.floor(knownSize / 2));
+  const prefix = await readSourceSlice(source, 0, sample);
+  const suffix = await readSourceSlice(source, knownSize - sample, knownSize);
+  const combined = new Uint8Array(prefix.byteLength + suffix.byteLength);
+  combined.set(prefix, 0);
+  combined.set(suffix, prefix.byteLength);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', combined));
+  return `${path}\0${knownSize}\0sampled:${toHex(digest)}`;
+}
+
 async function computeContentId(entryPath, files) {
   if (!globalThis.crypto?.subtle) throw new ContentBundleError('Web Crypto is required to identify content', 'CRYPTO_UNAVAILABLE');
   const records = [];
   for (const path of [...files.keys()].sort((a, b) => a.localeCompare(b))) {
-    const bytes = await readBytes(files.get(path));
-    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-    records.push(`${path}\0${bytes.byteLength}\0${toHex(digest)}`);
+    records.push(await hashFileForIdentity(path, files.get(path)));
   }
   const manifest = new TextEncoder().encode(`entry\0${entryPath}\0${records.join('\n')}`);
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', manifest));

@@ -210,7 +210,7 @@ async function start(payload) {
   moduleInstance = await imported.default(baseModule);
   jit.attachModule(moduleInstance);
   writeConfig(payload);
-  hydrateLaunch(payload);
+  await hydrateLaunch(payload);
 
   if (payload.entrypoint === 'retroarch') {
     try { moduleInstance.callMain(payload.arguments || ['-c', RA_CFG_PATH, entryPath]); }
@@ -312,7 +312,7 @@ function writeConfig(payload = {}) {
   }
 }
 
-function hydrateLaunch(payload) {
+async function hydrateLaunch(payload) {
   if (!moduleInstance?.FS) throw new Error('worker core did not expose Emscripten FS');
   const content = payload.content;
   if (!content?.entryPath || !Array.isArray(content.files)) throw new Error('worker launch is missing a content bundle');
@@ -320,12 +320,12 @@ function hydrateLaunch(payload) {
   saveStem = basenameWithoutExtension(content.entryPath);
   statePath = `${STATE_DIR}/${saveStem}.state`;
   mkdir(CONTENT_DIR);
-  for (const file of content.files) writeRelative(CONTENT_DIR, file.path, file.data);
+  for (const file of content.files) await writeRelative(CONTENT_DIR, file.path, file.data);
   mkdir(SYSTEM_DIR);
-  for (const record of payload.firmware || []) writeRelative(SYSTEM_DIR, record.name, record.data);
+  for (const record of payload.firmware || []) await writeRelative(SYSTEM_DIR, record.name, record.data);
   mkdir(SAVE_DIR);
   for (const record of payload.restoredSaves || []) {
-    moduleInstance.FS.writeFile(saveRamPath(record.slot || 1), new Uint8Array(record.data));
+    moduleInstance.FS.writeFile(saveRamPath(record.slot || 1), await bytesOf(record.data));
   }
   discBridge = new DiscControlBridge(moduleInstance, { discCount: Math.max(1, payload.discCount || 1) });
 }
@@ -541,7 +541,7 @@ function stop() {
 async function handle(method, payload) {
   switch (method) {
     case 'start': return start(payload);
-    case 'load-content': hydrateLaunch(payload); moduleInstance?._cmd_reset?.(); return { capabilities: detectCapabilities() };
+    case 'load-content': await hydrateLaunch(payload); moduleInstance?._cmd_reset?.(); return { capabilities: detectCapabilities() };
     case 'reset': moduleInstance?._cmd_reset?.(); return null;
     case 'pause': setPaused(true); return null;
     case 'resume': setPaused(false); return null;
@@ -560,12 +560,22 @@ async function handle(method, payload) {
 
 function mkdir(path) { try { moduleInstance.FS.mkdirTree(path); } catch (_) {} }
 
-function writeRelative(root, relative, buffer) {
+// `data` arrives as either an ArrayBuffer (small/already-materialized
+// sources) or a Blob/File (large disc tracks passed through untouched by
+// WorkerEmulatorClient's prepareLaunchPayload, C1 2026-07-27 review
+// followup) — this is the one place in the worker that actually needs the
+// bytes, so it's also the one place that reads a Blob's contents.
+async function bytesOf(data) {
+  if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
+  return new Uint8Array(data);
+}
+
+async function writeRelative(root, relative, data) {
   const clean = safeRelativePath(relative);
   const target = `${root}/${clean}`;
   const slash = target.lastIndexOf('/');
   mkdir(target.slice(0, slash));
-  moduleInstance.FS.writeFile(target, new Uint8Array(buffer));
+  moduleInstance.FS.writeFile(target, await bytesOf(data));
 }
 
 function safeRelativePath(path) {

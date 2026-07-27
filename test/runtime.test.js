@@ -179,7 +179,15 @@ test('worker client transfers multi-file content, firmware, and SaveRAM in one l
     assert.equal(launch.message.payload.firmware[0].name, 'scph5501.bin');
     assert.equal(launch.message.payload.restoredSaves[0].slot, 1);
     assert.equal(launch.message.payload.discCount, 1);
-    assert.equal(launch.transfer.length, 4);
+    // Blob-shaped content files are handed to the worker as-is (structured
+    // clone hands over a reference to the same backing storage, not a copy)
+    // rather than read+sliced+transferred — the exact original Blob instance
+    // survives untouched (C1, 2026-07-27 review followup). Only the already-
+    // materialized Uint8Array file, plus firmware and restoredSaves (also
+    // already-materialized), still go through the copy+transfer path — 3
+    // transferred buffers, not 4 (the cue file no longer being one of them).
+    assert.equal(launch.message.payload.content.files[0].data, content.files.get('Disc/Game.cue'));
+    assert.equal(launch.transfer.length, 3);
     assert.equal(client.canSerialize(), true);
   } finally {
     globalThis.OffscreenCanvas = previousOffscreen;

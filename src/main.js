@@ -5315,7 +5315,12 @@ async function wrapWorkerContent(filename, source, coreInfo, meta = null) {
         const url = rootUrl + path.split('/').map(encodeURIComponent).join('/');
         const res = await fetch(url);
         if (!res.ok) return null; // let fromNamedSources report a real MISSING_COMPANIONS
-        return new Uint8Array(await res.arrayBuffer());
+        // A Blob (not a materialized Uint8Array) so a large network-fetched
+        // disc track stays lazily-backed all the way through to the worker's
+        // own FS.writeFile read (C1, 2026-07-27 review followup) — only
+        // computeContentId's own sampled-hash reads a small slice of it up
+        // front; everything else defers the real read.
+        return res.blob();
       }, { entryExtensions: coreInfo.exts });
     }
   }

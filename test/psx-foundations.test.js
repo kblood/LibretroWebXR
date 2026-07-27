@@ -67,6 +67,44 @@ test('ContentBundle reports traversal and missing tracks before runtime', async 
   );
 });
 
+test('ContentBundle samples large files instead of hashing every byte (C1, 2026-07-27)', async () => {
+  // A real CD track can be 600MB+; computeContentId must not read a file's
+  // full bytes above the 8MB streaming threshold. Two same-size files whose
+  // sampled 64KB prefix+suffix match are DELIBERATELY treated as identical
+  // content even when their interior differs — that's the whole point (never
+  // read the middle of a large track), not a bug.
+  const SIZE = 9 * 1024 * 1024; // above the streaming threshold
+  const makeDisc = (interiorFill) => {
+    const bytes = new Uint8Array(SIZE); // zero-filled prefix/suffix by default
+    bytes.fill(interiorFill, 200000, SIZE - 200000);
+    return new Blob([bytes]);
+  };
+  const a = await ContentBundle.fromNamedSources([{ path: 'game.bin', source: makeDisc(0x11) }]);
+  const b = await ContentBundle.fromNamedSources([{ path: 'game.bin', source: makeDisc(0x22) }]);
+  assert.equal(a.contentId, b.contentId);
+
+  // Changing a byte inside the sampled region (not just the untouched
+  // interior) must still change the identity — sampling is deterministic and
+  // content-sensitive, not a no-op.
+  const sampledDiff = new Uint8Array(SIZE);
+  sampledDiff[0] = 0xff;
+  const c = await ContentBundle.fromNamedSources([{ path: 'game.bin', source: new Blob([sampledDiff]) }]);
+  assert.notEqual(a.contentId, c.contentId);
+});
+
+test('ContentBundle still hashes every byte for files at/under the streaming threshold', async () => {
+  // Below the threshold (every existing single-file ROM, every .cue/.m3u),
+  // an interior-only byte difference MUST still change the contentId — the
+  // sampled-hash tradeoff above is scoped to large tracks only, not applied
+  // universally.
+  const base = new Uint8Array(1024).fill(1);
+  const a = await ContentBundle.fromNamedSources([{ path: 'game.bin', source: new Blob([base]) }]);
+  const interiorDiff = new Uint8Array(1024).fill(1);
+  interiorDiff[512] = 2;
+  const b = await ContentBundle.fromNamedSources([{ path: 'game.bin', source: new Blob([interiorDiff]) }]);
+  assert.notEqual(a.contentId, b.contentId);
+});
+
 test('MD5 implementation matches RFC vectors', () => {
   assert.equal(md5Hex(new TextEncoder().encode('')), 'd41d8cd98f00b204e9800998ecf8427e');
   assert.equal(md5Hex(new TextEncoder().encode('abc')), '900150983cd24fb0d6963f7d28e17f72');
