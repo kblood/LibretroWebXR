@@ -5325,6 +5325,19 @@ async function buildStartOptions(coreInfo, meta = {}, content = null) {
   return options;
 }
 
+// Backslash-normalizing, NUL/absolute-path-rejecting version of a CUE FILE
+// reference — deliberately more permissive than ContentBundle.js's
+// normalizeContentPath (allows `..`); see resolvePs2DiscCue's call site.
+function normalizeCueTrackPath(input) {
+  const raw = String(input || '').replace(/\\/g, '/').trim();
+  if (!raw) return '';
+  if (raw.includes('\0')) throw new Error('Cue track paths cannot contain NUL characters');
+  if (/^[a-z][a-z\d+.-]*:/i.test(raw) || raw.startsWith('//') || raw.startsWith('/')) {
+    throw new Error(`Absolute paths and URLs are not allowed in a cue FILE reference: ${raw}`);
+  }
+  return raw;
+}
+
 // PS2 (`play`) is a main-thread core (no `execution: 'worker'`), so it never
 // goes through wrapWorkerContent above — it gets raw ArrayBuffer bytes handed
 // straight to EmulatorClient.start(). Play!'s Emscripten build routes every
@@ -5346,17 +5359,22 @@ async function buildStartOptions(coreInfo, meta = {}, content = null) {
 // server URL for the track to live alongside; out of scope here (PS2 has no
 // pick/local multi-file flow yet, only the collection/cartridge-insert path).
 async function resolvePs2DiscCue(meta, cueBuf) {
-  const { parseCueReferences, normalizeContentPath } = await import('./ContentBundle.js');
+  const { parseCueReferences } = await import('./ContentBundle.js');
   const text = new TextDecoder('utf-8').decode(new Uint8Array(cueBuf));
   const [rawTrack] = parseCueReferences(text);
   if (!rawTrack) throw new Error(`"${meta.file}" has no FILE reference — not a usable cue sheet`);
   // Windows-authored CUE sheets commonly use backslash separators
-  // (`FILE "folder\\track.bin" BINARY`) — normalize the same way
-  // ContentBundle.js's own multi-file bundling does (normalizeContentPath),
-  // so this doesn't end up concatenating a literal backslash into a URL
-  // (which fetch()/encodeURIComponent would otherwise turn into a broken
-  // "%5C" path segment on a real web-server deployment).
-  const track = normalizeContentPath(rawTrack);
+  // (`FILE "folder\\track.bin" BINARY`) — normalize those so this doesn't
+  // end up concatenating a literal backslash into a URL (which
+  // fetch()/encodeURIComponent would otherwise turn into a broken "%5C"
+  // path segment on a real web-server deployment). Deliberately NOT using
+  // ContentBundle.js's normalizeContentPath here — it rejects `..` segments
+  // (a bundle-extraction safety rule), but a CUE sheet legitimately placing
+  // its track in a sibling/parent directory (`FILE "..\\disc.bin" BINARY`)
+  // is common and safe here: the track is resolved via new URL() below
+  // (same-origin relative resolution, can't escape the origin), not
+  // extracted from a zip/bundle by path.
+  const track = normalizeCueTrackPath(rawTrack);
   const entryUrl = romUrlFor(meta);
   if (!entryUrl) throw new Error(`cannot resolve "${track}" — no fetchable URL for this entry`);
   // Resolve the referenced track relative to the CUE's OWN url, not by
