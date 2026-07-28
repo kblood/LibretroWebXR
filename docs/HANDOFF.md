@@ -1,11 +1,14 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated
-2026-07-25 (branch-topology + PSX/PS2/N64 status refreshed after a
-2026-07-24 review found the sections below had gone stale — see
-`docs/research/psx-ps2-n64-review-2026-07-24.md`). **Branch topology matters
-right now — read this before trusting `git log` on whatever branch happens
-to be checked out:**
+2026-07-28 (N64 Phase D update: a real, confirmed bug found+fixed in the
+vendored Play!-CodeGen JIT library shared by PS2/PSX/N64 — see the Phase
+NJ1/D entry under "PSX / PS2 / N64 core status" below and
+`docs/research/psx-ps2-n64-review-2026-07-24.md`'s 2026-07-27 sixth-pass
+update for the full writeup). Branch-topology + PSX/PS2/N64 status was
+previously refreshed 2026-07-25 after a 2026-07-24 review found the sections
+below had gone stale. **Branch topology matters right now — read this
+before trusting `git log` on whatever branch happens to be checked out:**
 - **`main`** (pushed, code @ `7d9e0c9`) was fast-forwarded to include
   **everything** that used to live only on `n64-jit-plan`: the full PS2
   (Play!) core, the **PSX (Beetle PSX HW + Lightrec + Wasm-JIT) worker
@@ -290,33 +293,57 @@ see `src/systems.js`'s `experimental` flag.
     software-rendered Chrome (the worst case)** — real/Quest hardware is
     expected faster but **Quest 3 fps itself is still unmeasured**, same
     open gap as every other headset-validation item in this doc.
-  - **Phase NJ1 (JIT spike) — real progress, deliberately not live.** A
-    from-scratch VR4300→Jitter tier-1 IR-lowering adapter (integer ALU/
-    shifts/branches only; loads/stores/FPU/MULT-DIV/COP0 fall back to the
-    interpreter) is validated standalone (128/128 synthetic checks) AND is
-    now linked into the **full real core binary** via gated, opt-in
-    `WITH_N64_JIT`/`N64_JIT` Makefile flags (default off — every normal
-    build of this core is byte-for-byte unaffected). That full binary
-    **boots correctly with zero regressions** against the shipping
+  - **Phase NJ1/D (JIT spike + differential verification) — real progress,
+    deliberately not live; a real third-party codegen bug found+fixed along
+    the way.** A from-scratch VR4300→Jitter tier-1 IR-lowering adapter
+    (integer ALU/shifts/branches only; loads/stores/FPU/MULT-DIV/COP0 fall
+    back to the interpreter) is validated standalone (128/128 synthetic
+    checks) AND is linked into the **full real core binary** via gated,
+    opt-in `WITH_N64_JIT`/`N64_JIT` Makefile flags (default off — every
+    normal build of this core is byte-for-byte unaffected). That full
+    binary **boots correctly with zero regressions** against the shipping
     interpreter baseline. A purely-observational shadow-differential
-    harness (also gated, also dead-by-default) was then built to compare
-    the JIT's predicted block output against the real interpreter's actual
-    output on every real boot — result: **`checked=19 matched=19
-    mismatched=0`**, i.e. every tier-1-eligible block the smoke ROM's boot
-    sequence actually hit produced bit-identical register/PC state to the
-    interpreter. Bringing this up caught a real, previously-latent bug
+    harness (also gated, also dead-by-default) compares the JIT's
+    predicted block output against the real interpreter's actual output on
+    every real boot. First run, against the original smoke ROM: **`checked=19
+    matched=19 mismatched=0`**. **2026-07-27: re-ran the same harness
+    against a harder ROM (n64-systemtest.z64)** and got the harness's
+    first-ever real mismatches (`checked=9 matched=6 mismatched=3`).
+    Root-caused (not guessed — traced through the actual vendored source)
+    to a genuine bug in **Play!-CodeGen** (`github.com/jpd002/Play-`, the
+    same vendored JIT library PS2 EE and PSX Lightrec also use): both its
+    Wasm codegen (`Jitter_CodeGen_Wasm_64.cpp`) and its compile-time
+    constant-folding pass (`Jitter_Optimize.cpp`) are missing a
+    `CONDITION_GE`/`CONDITION_AE` case, silently no-op'd by `assert(false)`
+    (a no-op in the release build this project ships) instead of crashing
+    — this caused `BGEZAL` (`r0 >= 0`, always true) to be mis-evaluated as
+    not-taken. Patched both (mirroring the existing `CONDITION_GT`/
+    `CONDITION_AB` cases in each), rebuilt, reran: **`checked=9 matched=8
+    mismatched=1`** — the one remaining mismatch is a known, separate
+    limitation of the shadow-check harness itself (a tight self-loop whose
+    backward branch lands inside its own already-scanned span — the harness
+    only predicts one pass per decode, so it can't validly check a block
+    that loops back into itself), not a codegen bug. **The fix lives only
+    in the WSL2-side vendored checkout, not this repo** — it must be
+    reapplied for any future N64 JIT rebuild, or properly forked/pinned
+    like `psx-wasm-jit-libretro`/`ps2-play-libretro` (optional follow-up).
+    Full writeup: `docs/research/n64-jit-nj1-spike.md`,
+    `docs/research/psx-ps2-n64-review-2026-07-24.md`'s 2026-07-27
+    sixth-pass update. Earlier in this same investigation, bringing the
+    harness up at all caught a real, previously-latent bug
     (`Module.codeGenImportTable` uninitialized — the first time this
     project's JIT codegen path has ever executed *live* in any core,
     PS2/PSX included, since they never hit the zero-registered-externs
     case this does). **Still explicitly NOT done, on purpose:** the JIT is
     NOT wired into the real dispatch table (`ci_table`) — nothing in the
-    live core calls any of this compiled code yet. The blocker is a COP0/
-    interrupt-accounting design (worked out and now implemented, but only
+    live core calls any of this compiled code yet. Beyond the COP0/
+    interrupt-accounting design (worked out and implemented, but still only
     compile-verified, not behavior-verified against a real interrupt-firing
-    ROM) — wiring in before that's proven would risk a real regression to
-    the currently-shipping, currently-correct interpreter core, which this
-    project's own standards treat as not an acceptable trade for
-    unverified progress. Full blow-by-blow: `docs/research/n64-jit-nj1-spike.md`.
+    ROM), the differential coverage itself is still just two short
+    boot-window samples against two ROMs — wiring in before broader
+    coverage exists would risk a real regression to the currently-shipping,
+    currently-correct interpreter core, which this project's own standards
+    treat as not an acceptable trade for unverified progress.
 - **Net effect on the old "Phase C… BIOS-needing systems (PSX/N64)" line:**
   both are no longer a feasibility question — both have real, working,
   headless-verified cores, and both are merged to `main`. What's left before
