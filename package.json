@@ -58,7 +58,8 @@
     "probe:ps2-cue-support": "node scripts/probe-ps2-cue-support.mjs",
     "probe:psx-timecrisis": "node scripts/probe-psx-timecrisis.js",
     "probe:psx-guncon": "node scripts/probe-psx-guncon.js",
-    "measure:n64-fps": "node scripts/measure-n64-fps.js"
+    "measure:n64-fps": "node scripts/measure-n64-fps.js",
+    "probe:psx-realbios": "node scripts/probe-psx-realbios.js"
   },
   "devDependencies": {
     "jsnes": "^2.1.0",
