@@ -161,6 +161,55 @@ to regenerate them.) `npm test` also passed
 in full afterward (every suite, 0 failures) — no regressions from the
 `broken: false` flip.
 
+**⚠ That 13/13 was against an artifact that was reverted hours later
+(2026-07-27), restored 2026-07-29.** The run above exercised the **12:17**
+build. At **12:36 the same day** `public/cores/` was overwritten from an
+**09:44 pre-gun-work backup**, so the core that then shipped carried
+**neither** gun patch (`grep -c rwebinput_set_lightgun public/cores/
+mednafen_psx_jit_libretro.js` → `0`) — most likely collateral damage from
+rolling back a Lightrec/GL experiment, since the two builds pin identical
+upstream commits. `public/cores/` is gitignored, so the revert left no trace
+in `git status`, while `SYSTEMS.psx.lightgun.broken` stayed `false` and this
+page still claimed a pass. On **2026-07-29** the 12:17 build was restored
+from the WSL build dir (`scripts/cores/psx/core-build/dist`); the shipped
+`.js` glue now greps `1` for both `rwebinput_set_lightgun` and
+`rwebinput_clear_lightgun`, `public/cores/PATCHED.json` records
+`mednafen_psx_jit: ["base","multiport"]`, and
+`scripts/test-patched-cores.mjs` (in `npm test`) re-checks that against the
+artifact. **End-to-end re-verification: DONE — `probe:psx-guncon` re-run
+against the restored artifact, 14/14** (single gun, real Time Crisis `.cue`,
+booted through the real cartridge-insert path; screenshots regenerated on
+2026-07-29). The 2026-07-27 result above is therefore re-confirmed on the
+shipped build, not merely inherited from the 12:17 one. Scope: that is the
+SINGLE-gun path — two-gun co-op is a separate result with its own limits, see
+`docs/LIGHTGUN_SUPPORT.md`, "PSX two-gun GunCon co-op". Post-mortem and the
+two checks that catch this class of failure: `docs/LIGHTGUN_SUPPORT.md`,
+"The PSX clobber".
+
+**⚠ The probe's gating assertion was replaced on 2026-07-29 — the old one was
+not a discriminator.** Every result above was gated on `[GUNCON END-TO-END
+SIGNAL]`, which compared the settled post-shot frame against the boot-time
+baseline captured ~25s earlier and passed on *any* non-zero difference. Run as
+a negative control — a scratch checkout with `SYSTEMS.psx.lightgun.broken`
+flipped back to `true`, so **no GunCon is ever seated** (worker telemetry
+`gun:{multiport:null,devices:null}`) — that assertion **passed at
+`maxDiff=407`, larger than the 287 a genuine hit produces**, purely from
+elapsed time on a screen that drifts. So *that assertion alone* never proved a
+shot reached Beetle PSX, and no claim should be sourced to it. It is now
+`[GUNCON AIM DISCRIMINATION]`: the identical trigger sequence is fired twice,
+off-screen then on-target, each arm measured against its **own** pre-shot frame
+over the same timing budget, and the on-target arm must move the screen while
+the off-screen control stays exactly flat. Validated in **both** directions:
+working core → off-screen `0` / on-target `287`, **PASS 14/14**; no-gun
+negative control → off-screen `412` / on-target `343`, **FAIL 12/14**. The
+independent, still-valid evidence for the single-gun path is unchanged and does
+not rest on any pixel-diff assertion: the shipped glue exports
+`rwebinput_set_lightgun` (grep/sha256 above), the worker recorded the input
+calls it was asked to make (`maxInputs=10`), and the 2026-07-27 screenshots
+show the calibration screen genuinely advancing to "Is the gun sight aligned
+correctly?" after the shot. (The on-target arm's pre-shot frame is now
+`tmp/psx-guncon-pre-shot.png`; the trigger-down/-up PNGs keep their names.)
+
 Pinned inputs at the time this integration was built (see that repo's own
 `manifest.env`/`dist/*.build.json` for the current, authoritative pins —
 these will drift as the upstream repo evolves):

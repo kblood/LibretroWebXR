@@ -21,6 +21,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { existsSync, mkdirSync, copyFileSync, readdirSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -104,14 +105,91 @@ function candidateDirs() {
   return dirs.filter(Boolean);
 }
 
+const sha256File = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
+
+// Does `manifestPath` (a candidate .build.json from a source dir) actually
+// describe the build sitting in DEST right now? A .build.json is a sha256
+// manifest of a SPECIFIC set of binaries; handing a protected core a manifest
+// from someone else's build would misreport its hashes, which is precisely the
+// manifest/binary mismatch this protection exists to prevent (and would poison
+// RuntimeEmulatorClient.resolveCoreBuildHash's save-state build pinning with a
+// confident-but-wrong id — strictly worse than its 'unversioned' fallback).
+// Verify every required artifact, not just the .wasm the frontend reads, so a
+// partially-matching manifest can't sneak through.
+function manifestDescribesLocalBuild(manifestPath, core) {
+  let manifest;
+  try { manifest = JSON.parse(readFileSync(manifestPath, 'utf8')); }
+  catch (e) { return { ok: false, reason: `unreadable/invalid JSON (${e.message})` }; }
+  const artifacts = manifest?.artifacts;
+  if (!artifacts || typeof artifacts !== 'object') {
+    return { ok: false, reason: 'no `artifacts` map to verify against' };
+  }
+  for (const ext of CUSTOM_CORE_REQUIRED_EXTS) {
+    const name = `${core}_libretro.${ext}`;
+    const local = join(DEST, name);
+    if (!existsSync(local)) return { ok: false, reason: `local ${name} is missing` };
+    const claimed = String(artifacts[name]?.sha256 || '').toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(claimed)) {
+      return { ok: false, reason: `manifest records no sha256 for ${name}` };
+    }
+    const actual = sha256File(local);
+    if (actual !== claimed) {
+      return { ok: false, reason: `sha256 mismatch on ${name} (manifest ${claimed.slice(0, 12)}…, local ${actual.slice(0, 12)}…) — it describes a different build` };
+    }
+  }
+  return { ok: true };
+}
+
+// A protected core keeps its own .js/.wasm/.worker.js — but protection must not
+// also freeze it out of acquiring a best-effort EXTRA file it simply doesn't
+// have yet (today: .build.json, which `play` is missing). Copy only files
+// ABSENT from DEST (never overwrite a protected core's existing metadata), and
+// only when the manifest verifiably describes the protected binaries.
+function copyMissingExtrasForProtected(srcDir, have, core) {
+  let copied = 0;
+  for (const ext of CUSTOM_CORE_EXTRA_EXTS) {
+    const name = `${core}_libretro.${ext}`;
+    if (existsSync(join(DEST, name))) continue; // present already — never overwrite
+    if (!have.has(name)) continue;              // source hasn't got one either
+    const verdict = manifestDescribesLocalBuild(join(srcDir, name), core);
+    if (!verdict.ok) {
+      console.warn(`  ⚠ NOT copying ${name} for PATCHED ${core}: ${verdict.reason}. Leaving it absent (resolveCoreBuildHash falls back to 'unversioned') rather than pinning save states to a manifest that doesn't match the binaries on disk. Regenerate the manifest from this build, or use --refresh-patched to take the source build wholesale.`);
+      continue;
+    }
+    copyFileSync(join(srcDir, name), join(DEST, name));
+    copied++;
+    console.log(`  + ${name} — PATCHED ${core} was missing this metadata; source manifest's sha256s verified against the local build, so it's safe to adopt.`);
+  }
+  return copied;
+}
+
+// Returns { copied, protectedSkips }. `protectedSkips` matters as much as
+// `copied` for deciding whether a source dir was USABLE: a dir whose every core
+// is deliberately skipped by PATCHED.json protection copied 0 files but was a
+// perfectly good source, and must not be reported as "no local core source".
+//
+// CRITICAL: `protectedSkips` must only count skips where THIS SOURCE DIR really
+// held a build we declined to take. isProtected() is a statement about DEST
+// alone (PATCHED.json + DEST/<core>_libretro.wasm), so counting every protected
+// core made *any* existing directory — including an empty one, or a typo'd path
+// that happens to exist — report a nonzero "usable" score. That is a DEST-derived
+// number masquerading as a fact about the source: the candidate loop below would
+// break on the first such dir, never try $LIBRETRO_CORES_DIR, never print
+// instructions(), and silently ship whatever stale/missing buildbot cores
+// (stella2014, mgba, virtualxt — none of which checkCustomCoresPresent() covers)
+// were already on disk. So gate every increment on srcHasBuild().
+const srcHasBuild = (have, core) => have.has(`${core}_libretro.wasm`);
+
 function tryCopyFrom(srcDir) {
-  if (!existsSync(srcDir)) return 0;
+  if (!existsSync(srcDir)) return { copied: 0, protectedSkips: 0 };
   const have = new Set(readdirSync(srcDir));
   mkdirSync(DEST, { recursive: true });
   let copied = 0;
+  let protectedSkips = 0;
   for (const core of CORES) {
     if (isProtected(core)) {
       console.warn(`  ⚠ keeping PATCHED ${core} (light-gun build) — not overwriting with stock. Use --refresh-patched to override.`);
+      if (srcHasBuild(have, core)) protectedSkips++;
       continue;
     }
     for (const ext of ['js', 'wasm']) {
@@ -143,6 +221,13 @@ function tryCopyFrom(srcDir) {
       (ext) => existsSync(join(DEST, `${core}_libretro.${ext}`)));
     if (isProtected(core) && hasCompleteBuild) {
       console.warn(`  ⚠ keeping PATCHED ${core} (light-gun build) — not overwriting with a different custom-core build. Use --refresh-patched to override.`);
+      // Same rule as the buildbot loop above: only a skip of a build this
+      // source ACTUALLY offered says anything about the source dir.
+      if (srcHasBuild(have, core)) protectedSkips++;
+      // Protection covers the BINARIES, not metadata the core doesn't have
+      // yet: still let it pick up a missing (and verified-matching) extra
+      // like .build.json. See copyMissingExtrasForProtected.
+      copied += copyMissingExtrasForProtected(srcDir, have, core);
       continue;
     }
     if (isProtected(core) && !hasCompleteBuild) {
@@ -158,7 +243,7 @@ function tryCopyFrom(srcDir) {
       }
     }
   }
-  return copied;
+  return { copied, protectedSkips };
 }
 
 // Hard-error if a custom core's .js/.wasm are missing from DEST once every
@@ -216,13 +301,28 @@ non-commercial. Never commit them to git.
 `);
 }
 
-let total = 0;
+// A source dir counts as FOUND if it either copied something or was fully
+// honoured-but-skipped by PATCHED.json protection. Counting only copies made
+// `--from <dir of already-protected cores>` print the "No local core source
+// found … download the ~760 MB RetroArch.7z" instructions over a perfectly
+// good source, and fall through to the next candidate — a false negative that
+// only became reachable once every core in a source dir could be protected.
+// The converse false POSITIVE is worse and is guarded in tryCopyFrom: a
+// protected skip only counts when the source dir itself held that core's build
+// (srcHasBuild), so an empty or typo'd `--from` dir still scores 0 and still
+// falls through to the next candidate / instructions().
+let found = false;
 for (const dir of candidateDirs()) {
   console.log(`Trying core source: ${dir}`);
-  const n = tryCopyFrom(dir);
-  if (n > 0) { total = n; console.log(`Copied ${n} files into ${DEST}`); break; }
+  const { copied, protectedSkips } = tryCopyFrom(dir);
+  if (copied > 0 || protectedSkips > 0) {
+    found = true;
+    console.log(`Copied ${copied} files into ${DEST}${
+      protectedSkips ? ` (${protectedSkips} PATCHED core(s) deliberately kept as-is)` : ''}`);
+    break;
+  }
 }
-if (total === 0) instructions();
+if (!found) instructions();
 // Always check the END STATE of public/cores/ for the custom cores, even
 // when nothing was copied this run (e.g. no --from/$LIBRETRO_CORES_DIR given
 // but a prior run already populated DEST) — this is what actually stops
