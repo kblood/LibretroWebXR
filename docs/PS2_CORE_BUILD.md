@@ -556,6 +556,25 @@ correctly, not just the earlier synthetic solid-color self-test. Diagnostic
 scripts: `tmp/diag-ps2-realgame.mjs` (boot + first render),
 `tmp/diag-ps2-realgame-play.mjs` (boot + input navigation into gameplay).
 
+> ⚠ **Evidence caveat (2026-07-29 probe audit).** The *rendering* half above
+> stands. The *navigation* half — "input advanced past the memory-card prompt
+> into the cutscene" — currently has **no automated guard**:
+> `probe:ps2-timecrisis2` scored an identical 18/18 with `sendInput()` fully
+> severed, and the broken run matched its own cutscene-palette bucket 2.7×
+> more strongly than the healthy one (28146 vs 10544). Commit `2e1e8f6`, the
+> hardening that added that assertion specifically to distinguish a real
+> advance from a coincidental palette match, was itself green with input dead.
+> Measured during the audit: with zero input the TV churns ~8–12k of 56050
+> pixels every 2 s, so **pixel comparison cannot carry this claim on this
+> title at all** — Time Crisis II never quiesces.
+>
+> The original observation was a human reading `diag-ps2-realgame-play.mjs`
+> screenshots, which is real but unreproducible (those `tmp/` scripts aren't
+> in the repo). The probe now asserts only what it can prove: that input
+> traverses app → worker → the core's input entry point, via a
+> `metrics.inputs` counter and `defaultPrevented`, with a no-input control arm.
+> Treat "plays through the menus" as **observed once, not regression-guarded**.
+
 **GunCon2 driving real menu logic, confirmed once (not yet reliable)**:
 booting with `inputDevices`/`remapName` from `lightgunLoadConfig('ps2', {})`
 (the same helper the real app uses, not hand-rolled) wires the GunCon2 in at

@@ -287,6 +287,17 @@ been masked by the earlier black-screen failure the whole time:
   Confirmed fixed via `npm run probe:n64-core`: zero error-level console
   logs, zero worker errors, non-blank video, frames presented — clean pass.
 
+  > ⚠ **The "non-blank video" half of that confirmation was worthless**
+  > (2026-07-29 audit). With a *completely different ROM* substituted, the
+  > probe produced byte-identical evidence — `frames.presented 6,
+  > video.lit 5`, all five samples `[8,8,16]`. That sum is 32, two units over
+  > the `> 30` gate, i.e. a visually black frame. It also stayed green with
+  > the core hung 2.5 s after boot. The buffer-mapping fixes are still
+  > believed correct, but cite the **rewritten** probe's numbers instead:
+  > `captures 70, nonUniform 0, longestStaticRun 3, distinct 59, fps 31.2`,
+  > which go red on a wrong ROM (`nonUniform 67`) and on a hang
+  > (`longestStaticRun 49, distinct 17`).
+
 ## GLideN64 fill-mode LLE-triangle color fix (2026-07-26)
 
 Once `games/n64-scene` was rendering at all, a further real bug surfaced

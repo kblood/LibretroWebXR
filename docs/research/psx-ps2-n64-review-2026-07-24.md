@@ -609,6 +609,19 @@ audio, frame pump, save/EEPROM API, and now real face color all verified
 through the real cartridge-insert path. PSX remains the one core with an
 open rendering gap.**
 
+> ⚠ **Correction (2026-07-29 audit): "geometry, rotation" were never
+> verified.** The two motion assertions behind them were a bare `!==`
+> between a pixel count at *t* and *t+3.5 s*, which any single pixel of
+> jitter satisfies. With the scene shredded into ten displaced bands and
+> **no cube anywhere on screen**, `probe:n64-scene-render` scored 18/18
+> green — twice — still reporting "cube silhouette AREA changes (rotation
+> is real)". What was actually shown is "the frame pump is not frozen".
+> The **face-colour** row of the table above is genuine and reproduced
+> under audit (flat-black control red at `brightCount 0/65000`), so the
+> fill-mode fix (`cb060b9`) stands. The rewritten probe adds a
+> `marginChanged` control arm (`0/0` healthy vs `19756/19409` shredded)
+> that does discriminate geometry.
+
 ## Status update (2026-07-27): PSX GunCon, PS2 `.cue`, and Phase C's C3 (BIOS import) all closed; C5 done
 
 Since the fifth pass above, all three cores' "plays real commercial games"

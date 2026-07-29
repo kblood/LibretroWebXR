@@ -599,7 +599,15 @@ Quest) was de-risked before committing to the UI.
   placement so spawned consoles/TVs/posters land against a wall instead of
   through it, a grabbable controller-cord plug, movable consoles/TVs, and a
   hide-walls toggle. All 7 items landed (`3f7b73e`, `9857c9f`,
-  `9240235` end-to-end headless probe).
+  `9240235` end-to-end headless probe). ⚠ **The "headless probe" in
+  `9240235` had no assertions** — `probe-feedback.mjs` computed `ok` /
+  `insideRoom` / `atWall` booleans and threw them away, exiting 0
+  regardless; with 3 of the 7 capabilities removed it printed
+  `ok: false, atWall: false` and still exited 0 (2026-07-29 audit). The
+  seven features are genuinely correct — the rewritten probe passes 7/7 and
+  goes red on three separate breaks — but nothing was machine-checked
+  between 2026-06-30 and the audit, so any regression in that window would
+  have gone unnoticed.
 - **Status:** full patchable rack shipped + headless-verified; **real-headset
   validation of the rack UX is still open** (controller cords + cross-core
   swap in particular need hands-on confirmation). See `rack-epic-status` /

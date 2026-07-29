@@ -105,9 +105,10 @@ before expecting them live. Highlights, newest first:
   / `docs/research/n64-jit-nj1-spike.md`. Short version: **PS2 is merged to
   `main`** and ships a real homebrew light-gun game (LWX GunCon Range); **PSX
   and N64 are real, working, headless-verified worker cores sitting on the
-  unmerged `n64-jit-plan` branch**; PSX ships with a genuine Wasm-JIT
-  (`psxJitCompiledBlocks: 95` on a real boot) via the same Play--CodeGen
-  `Jitter_CodeGen_Wasm` backend PS2 pioneered; N64 ships interpreter-only for
+  unmerged `n64-jit-plan` branch**; PSX links the same Play--CodeGen
+  `Jitter_CodeGen_Wasm` backend PS2 pioneered, but the old
+  "`psxJitCompiledBlocks: 95` on a real boot" evidence has been retired —
+  see the PSX entry below; N64 ships interpreter-only for
   now (~50-58 fps headless-software-rendered) with a JIT spike
   (`n64-jit-plan`'s own namesake) that's real, linked, and boot-verified but
   **deliberately not yet wired live** (shadow-differential harness shows
@@ -303,10 +304,17 @@ see `src/systems.js`'s `experimental` flag.
   backend the PS2 core already proved (published separately as
   [`kblood/psx-wasm-jit-libretro`](https://github.com/kblood/psx-wasm-jit-libretro),
   since it's independently useful — this repo only vendors the integration
-  side, see `docs/PSX_CORE_BUILD.md`). **This is a genuine guest-code JIT,
-  not a faster interpreter**, and it's real: `npm run probe:psx-core`
-  passed 2026-07-21 with `psxJitCompiledBlocks: 95` on a real CC0 PS-X EXE
-  smoke test, non-blank rendered frames, forwarded audio, zero errors.
+  side, see `docs/PSX_CORE_BUILD.md`). The JIT backend is **linked and
+  built**, but ⚠ **do not repeat the old "genuine guest-code JIT, proven by
+  `psxJitCompiledBlocks: 95`" claim** — it does not hold. Two independent
+  findings retired it: (a) the 2026-07-21 `probe:psx-core` pass never ran the
+  smoke executable at all (no BIOS ships, so OpenBIOS ran its own shell demo
+  — the frames and the JIT counters were that demo; full writeup in
+  `docs/PSX_CORE_BUILD.md`), and (b) the 2026-07-29 probe audit found that
+  probe's JIT assertion is env-gated behind `PSX_REQUIRE_JIT`, which is set
+  nowhere in the repo, so every run since has reported `jit: null` and
+  asserted nothing. Real-BIOS runs still show `jit.compiled=0`.
+  **Open question, not a shipped capability.**
   `src/FirmwareStore.js` (user-imported BIOS, IndexedDB, never shipped) and
   `src/SaveRamStore.js` (native memory-card saves) back it; a new
   worker-execution facade (`src/RuntimeEmulatorClient.js` + `src/runtime/`)
