@@ -547,6 +547,58 @@ the *next* gated two-gun device; `probe:psx-twogun` itself no longer uses it (ab
 with no registered `lightgun2` carrying `broken: true` any more, the gated behaviour is
 covered by the temporary `__gatedtest` fixture in `scripts/test-systems.mjs`.
 
+### Gun-probe evidence status — audited against negative controls (2026-07-29)
+
+The repo-wide probe audit (see `DEBUGGING.md`, "Probes must be validated against a
+negative control") re-tested the gun probes by **breaking the feature in a scratch
+checkout and running the unmodified probe against it**. A green check is not evidence
+until it has been seen going red.
+
+| Probe | Verdict | Break that made it red |
+|---|---|---|
+| `probe:psx-guncon` | **SOUND** | worker `writeConfig()` forced `inputDevices: null` — no GunCon ever seats on a libretro port, while boot, registry gate and metrics all stay green. Control **14/14** (`off=0`, `on=287`); broken **13/14 twice** (`off=458 on=218`, `off=458 on=213`), telemetry `devices: null` vs `{1:260}`, aim-sweep collapsed to `max=0`. |
+| `probe:psx-twogun` | **SOUND** | two independent breaks, both **18/23** — see below. |
+| `probe:lightgun` (NES) | **NOT FALSIFIED** | never negative-controlled. |
+| `probe:ps2-guncon` | **NOT FALSIFIED** | never negative-controlled. |
+
+This was a *different* break from the one already on record for `probe:psx-guncon`
+(which flipped `SYSTEMS.psx.lightgun.broken` back to `true` and trips the registry
+assertion). This one leaves the registry assertion **green** and isolates the browser
+half — the half that had to be shown capable of failing. Note what stayed green in the
+broken run: `framesProduced=1431`, `errors=0`, `maxInputs=10 >= 10`. The metrics
+assertions confirm `forwardLightgun` ran while the core saw nothing — exactly the
+false-confidence case the headline assertion has to catch, and it caught it.
+
+**Do not relax `offMax === 0` to a threshold.** The strict clause, not the `*4 + 10`
+margin, is what rejected the `458 vs 218` no-gun run.
+
+`probe:psx-twogun`'s two breaks show the gating families are **complementary, and the
+23/23 tally is the evidence unit — not any single row**:
+
+| Break | Result | What went red |
+|---|---|---|
+| Port collapse (`webgunSet(port,…)` → `webgunSet(0,…)`) | 18/23 | All three ISOLATION rows, **numbers exactly inverted** (gun 2 `maxDiff=287`, gun 1 `0`); only one crosshair on screen (`A=[224,248,128]`, bare background, `dist=0`). SEATING and ROUTING stayed green — they are structural reads that cannot see this break. |
+| Re-gated (`systems.js` `broken: false` → `true`) | 18/23 | Registry assertion, SEATING (`inputDevices={1:260}` — one gun only), both port-discriminating RENDERING checks. **ISOLATION stayed green** (`0/287`): an unseated port-1 gun also produces no game reaction, so ISOLATION alone cannot detect "second gun never connected". SEATING is what catches that. |
+
+Because this probe sets **no** `__allowBrokenLightgun`, it genuinely regression-guards
+its own un-gating — unlike the pre-2026-07-29 single-gun probe.
+
+**Bonus finding on a flagged sub-risk.** The two `[RENDERING]` cell checks
+(`dArrive[cellB] > 0`, `dVacate[cellA] > 0`) are bare frame-to-frame diffs over 1.2 s and
+would normally be suspect. Both negative controls independently measured **exactly 0** in
+the cells where nothing moved — direct in-run proof that the Time Crisis calibration
+screen is pixel-static, so those diffs are not satisfiable by animation or elapsed-time
+drift *here*. **If this probe is ever repointed at a different disc or a non-static
+screen, convert them to the within-run relative form before quoting the result.** The
+per-port cursor-**colour** check carries the claim on its own and went red in both breaks.
+
+**Still uncleared.** `probe:lightgun` (NES) and `probe:ps2-guncon` gate only on
+`consoleArmed === true` plus "the call does not throw". That is app-side seating and JS
+liveness — **neither proves gun state reaches the core**, and neither has been run against
+a negative control. Cite them as "the gun call chain doesn't crash", not as "the Zapper /
+GunCon2 works". Making `sendLightgun` a no-op is the obvious break to try; if those probes
+stay green under it, they need the `probe:psx-guncon` two-arm treatment.
+
 ### SNES Konami Justifier two-gun co-op — VERIFIED ON THE REAL CORE (2026-06-21)
 
 Topology finding (read from `snes9x/libretro/libretro.cpp` + `controls.cpp`): although

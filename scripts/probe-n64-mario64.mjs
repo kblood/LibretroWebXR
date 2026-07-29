@@ -301,22 +301,73 @@ try {
      lateShots.length > 0 && lateShots.every((s) => s && s.saturatedRed > s.total * 0.02 && s.skyBlue > s.total * 0.02),
      `late (>=12s) saturatedRed/skyBlue fractions: ${lateShots.map((s) => s && s.total ? `${(s.saturatedRed / s.total).toFixed(3)}/${(s.skyBlue / s.total).toFixed(3)}` : 'n/a').join(', ')}`);
 
-  // Motion: content is animating (camera pans / logo assembly / attract
-  // demo), not a single frozen frame — same whole-canvas signature-diff
-  // technique as probe-n64-scene-render.mjs, but here asserted across the
-  // WHOLE sequence of consecutive pairs (any one stall is not fatal — real
-  // cinematics can hold on a static logo card for a beat — but the run as a
-  // whole must show movement somewhere).
-  let anyMotion = false;
+  // Coarse whole-run motion, reported as INFO only. This USED to be an
+  // assertion ("content is animating somewhere across the run", any
+  // consecutive signatureDiff > 3). A 2026-07-29 negative-control audit
+  // proved it was worthless as evidence: with the presentation path
+  // deliberately frozen at 14s (FrameBridge._present() stops calling
+  // drawImage, everything else stays healthy) the canvas was byte-identical
+  // for the whole last 12s of the run — the very window the title-screen
+  // claim is about — and that assertion still PASSED, because the boot-era
+  // transitions (black -> logo -> black -> title, diffs 23.78/23.39/55.04)
+  // alone satisfy "somewhere across the run". A whole-run "any motion"
+  // gate can never fail once a game has booted at all, so it is not a check.
   const diffs = [];
-  for (let i = 1; i < shots.length; i++) {
-    const d = signatureDiff(shots[i - 1]?.signature, shots[i]?.signature);
-    diffs.push(d);
-    if (d > 3) anyMotion = true;
+  for (let i = 1; i < shots.length; i++) diffs.push(signatureDiff(shots[i - 1]?.signature, shots[i]?.signature));
+  info(`consecutive whole-canvas signature diffs (informational, NOT asserted — see above): ${diffs.map((d) => d.toFixed(2)).join(', ')}`);
+
+  // [LIVENESS] Within-run relative liveness burst — the real replacement for
+  // the assertion above. Instead of one absolute before/after diff spanning
+  // seconds (which silently measures boot progression, state drift and
+  // elapsed time alongside any actual animation), take a burst of closely
+  // spaced captures INSIDE the title-screen window the claim is about, and
+  // measure each capture against its OWN immediately-prior capture.
+  //
+  // The discriminator is exact, not a drift threshold: a stalled presentation
+  // path reproduces the previous frame bit-for-bit, so changedPixels is
+  // EXACTLY 0 for every pair. A live title screen (idle sparkle effects, the
+  // "PRESS START" prompt fading, the face's idle animation) cannot produce a
+  // byte-identical canvas 300ms later. Over ~300ms nothing else in the run
+  // is changing — same screen, same game state — so a nonzero delta can only
+  // come from the emulator still pushing new frames.
+  const LIVENESS_SAMPLES = 8;
+  const LIVENESS_GAP_MS = 300;
+  const deltas = [];
+  await page.evaluate(() => { delete window.__probePrevPixels; });
+  for (let i = 0; i < LIVENESS_SAMPLES; i++) {
+    const d = await page.evaluate(async () => {
+      const canvas = document.getElementById('canvas');
+      if (!canvas) return null;
+      const dataUrl = canvas.toDataURL('image/png');
+      const img = await new Promise((res, rej) => {
+        const im = new Image();
+        im.onload = () => res(im);
+        im.onerror = () => rej(new Error('liveness snapshot failed to decode'));
+        im.src = dataUrl;
+      });
+      const off = document.createElement('canvas');
+      off.width = img.width; off.height = img.height;
+      const octx = off.getContext('2d');
+      octx.drawImage(img, 0, 0);
+      const { data } = octx.getImageData(0, 0, img.width, img.height);
+      const prev = window.__probePrevPixels;
+      let changed = 0;
+      if (prev && prev.length === data.length) {
+        for (let p = 0; p < data.length; p += 4) {
+          if (data[p] !== prev[p] || data[p + 1] !== prev[p + 1] || data[p + 2] !== prev[p + 2]) changed++;
+        }
+      }
+      window.__probePrevPixels = new Uint8ClampedArray(data);
+      return { changed, total: (data.length / 4) | 0, hadPrev: !!prev };
+    });
+    if (d?.hadPrev) deltas.push(d.changed);
+    if (i < LIVENESS_SAMPLES - 1) await sleep(LIVENESS_GAP_MS);
   }
-  info(`consecutive whole-canvas signature diffs: ${diffs.map((d) => d.toFixed(2)).join(', ')}`);
-  ok('content is animating somewhere across the run (frame pump is not frozen on a single static frame)',
-     anyMotion, `diffs=${diffs.map((d) => d.toFixed(2)).join(',')}`);
+  const liveDeltas = deltas.filter((d) => d > 0).length;
+  info(`[LIVENESS] changed-pixel counts vs immediately-prior capture, ${LIVENESS_GAP_MS}ms apart: ${deltas.join(', ')}`);
+  ok('[LIVENESS] the title-screen window is LIVE, not a frozen last frame (each capture differs from its own immediately-prior capture ~300ms earlier)',
+     deltas.length >= 4 && liveDeltas >= Math.ceil(deltas.length / 2),
+     `nonzero pairs ${liveDeltas}/${deltas.length}, counts=[${deltas.join(',')}]`);
 
   // --- Frame-health metrics (same baseline sanity layer as probe-n64-scene-render.mjs) ---
   const metricsLog = await page.evaluate(() => window.__n64Metrics || []);

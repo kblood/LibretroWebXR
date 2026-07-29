@@ -349,30 +349,121 @@ try {
   // scripts/probe-ps2-timecrisis2.mjs's press() helper). This is NOT a
   // GunCon substitute (Time Crisis's actual gameplay input is analog gun
   // position, which sendInput cannot provide) — real gameplay/aiming is not
-  // exercised. But the state ADVANCE itself (title screen -> intro cutscene)
-  // IS asserted below: a real menu transition produces a signature diff far
-  // above the ~0-3 noise floor seen between idle attract-mode frames.
+  // exercised.
+  //
+  // ===================================================================
+  // [Negative-control audit, 2026-07-29] WHY THE OLD CUTSCENE ASSERTION
+  // WAS DELETED — do not reinstate it in any before/after-diff form.
+  //
+  // Until this date the gating assertion here was:
+  //   '[CUTSCENE-ADVANCE SIGNAL] digital Start/Cross input genuinely
+  //    advances disc state (title screen -> intro cutscene)'
+  //   cond: (inputDiff1 > 10 || inputDiff2 > 10)
+  // i.e. an ABSOLUTE whole-canvas signature diff across the ~10s window
+  // that happens to contain the presses, with NO control arm. It was
+  // added by 6977c9a ("promote the Start/Cross input-advance observation
+  // ... to a real assertion ... confirming genuine state advancement").
+  //
+  // It was run against a scratch checkout in which
+  // RuntimeEmulatorClient.sendInput() was replaced by a no-op, so NO
+  // input reached the worker or the core at all (confirmed by the core's
+  // own telemetry: metrics.inputs = 0 for the whole run, vs 20 on the
+  // unbroken repo). Result: the probe scored 30/30, and that assertion
+  // passed at inputDiff1=54.41, inputDiff2=43.03 — statistically
+  // indistinguishable from the unbroken run's 55.57 / 46.39.
+  //
+  // The reason is visible in this probe's own INFO output: the idle
+  // attract-mode diffs it prints a few lines above are 56.41, 107.77,
+  // 41.72, 28.90 — the comment claiming a "~0-3 noise floor" was simply
+  // wrong for this disc. Time Crisis's attract demo animates continuously,
+  // so ANY two frames ~10s apart differ by far more than 10 whether or not
+  // a button was ever pressed. The old check measured elapsed wall-clock
+  // time, not input.
+  //
+  // What replaces it is a WITHIN-RUN RELATIVE comparison: two arms on the
+  // same screen moments apart, identical in length and structure,
+  // differing ONLY in whether input is sent, each measured against its own
+  // immediately-prior sample. The gate is on the core's own input counter
+  // (which is 0/nonzero, not a noisy analog quantity); the pixel diffs are
+  // reported as INFO only, since — as the numbers above prove — they
+  // cannot distinguish an input effect from attract-mode animation.
+  //
+  // NOTE ON SCOPE, deliberately narrower than the old text: this proves
+  // the events genuinely traverse app -> worker -> the core module's input
+  // entry point. It does NOT prove the emulated game changed state
+  // ("title screen -> intro cutscene"). Nothing in this probe measures
+  // that, and no absolute frame diff can, because the screen is never
+  // still. Proving state advance would need a two-instance differential
+  // (same disc, same wall-clock, input to one instance only, compare the
+  // two canvases) — not attempted here.
+  // ===================================================================
   async function press(code, key) {
     await page.evaluate((code, key) => window.__client.sendInput('keydown', code, key), code, key);
     await sleep(120);
     await page.evaluate((code, key) => window.__client.sendInput('keyup', code, key), code, key);
     await sleep(700);
   }
+  const STARTS = 4, CROSSES = 6, PRESS_MS = 120 + 700;
+  const ARM_PART1_MS = STARTS * PRESS_MS + 500;
+  const ARM_PART2_MS = CROSSES * PRESS_MS + 1500;
+  const EXPECTED_EVENTS = (STARTS + CROSSES) * 2; // one keydown + one keyup each
+
+  // Read the core's own metrics.inputs counter (EmulatorWorkerRuntime.js's
+  // forwardInput(), incremented inside the worker as each event is handed to
+  // the core module) — but only from a metrics sample emitted AFTER this call,
+  // so a stale pre-window sample can never be mistaken for a fresh one.
+  async function freshInputCount() {
+    const mark = await page.evaluate(() => performance.now());
+    const handle = await page.waitForFunction((t) => {
+      const arr = window.__psxMetrics || [];
+      const last = arr[arr.length - 1];
+      return (last && last.t > t) ? { inputs: last.inputs ?? 0 } : null;
+    }, { timeout: 20000, polling: 250 }, mark).catch(() => null);
+    if (!handle) return null;
+    const v = await handle.jsonValue().catch(() => null);
+    return v && typeof v.inputs === 'number' ? v.inputs : null;
+  }
+
+  // --- ARM A (CONTROL): an idle window of exactly the same length and shape
+  //     as the input arm below, on the same screen, with NO input sent. ---
+  const idleShotA = await captureCanvas(page);
+  const inputsBeforeIdle = await freshInputCount();
+  await sleep(ARM_PART1_MS);
+  const idleShotB = await captureCanvas(page);
+  await sleep(ARM_PART2_MS);
+  const idleShotC = await captureCanvas(page);
+  const inputsAfterIdle = await freshInputCount();
+  const idleDiff1 = signatureDiff(idleShotA?.signature, idleShotB?.signature);
+  const idleDiff2 = signatureDiff(idleShotB?.signature, idleShotC?.signature);
+
+  // --- ARM B (TEST): identical window, identical captures, one variable
+  //     changed — the same Start/Cross events are actually sent. ---
   const preInputShot = await captureCanvas(page);
-  for (let i = 0; i < 4; i++) await press('Enter', 'Enter');
+  for (let i = 0; i < STARTS; i++) await press('Enter', 'Enter');
   await sleep(500);
   const afterStartShot = await captureCanvas(page);
-  for (let i = 0; i < 6; i++) await press('KeyH', 'h');
+  for (let i = 0; i < CROSSES; i++) await press('KeyH', 'h');
   await sleep(1500);
   const afterCrossShot = await captureCanvas(page);
+  const inputsAfterPresses = await freshInputCount();
   if (afterCrossShot) saveShot(afterCrossShot.dataUrl, 'psx-timecrisis-after-input.png');
+
+  const idleCounterDelta = (inputsBeforeIdle === null || inputsAfterIdle === null)
+    ? null : inputsAfterIdle - inputsBeforeIdle;
+  const inputCounterDelta = (inputsAfterIdle === null || inputsAfterPresses === null)
+    ? null : inputsAfterPresses - inputsAfterIdle;
+
   const inputDiff1 = signatureDiff(preInputShot?.signature, afterStartShot?.signature);
   const inputDiff2 = signatureDiff(afterStartShot?.signature, afterCrossShot?.signature);
-  info(`digital-pad Start/Cross press observation (NOT a GunCon substitute — real gameplay/aiming not exercised): ` +
-    `signature diff pre->afterStart=${inputDiff1.toFixed(2)}, afterStart->afterCross=${inputDiff2.toFixed(2)}`);
-  ok('[CUTSCENE-ADVANCE SIGNAL] digital Start/Cross input genuinely advances disc state (title screen -> intro cutscene), not a frozen/ignored input',
-     (inputDiff1 > 10 || inputDiff2 > 10),
-     `diffs pre->afterStart=${inputDiff1.toFixed(2)}, afterStart->afterCross=${inputDiff2.toFixed(2)} (idle attract-mode noise floor is ~0-3)`);
+  info(`whole-canvas pixel diffs, control arm (NO input) vs test arm (input sent), same window length: ` +
+    `idle=${idleDiff1.toFixed(2)}/${idleDiff2.toFixed(2)} vs input=${inputDiff1.toFixed(2)}/${inputDiff2.toFixed(2)} ` +
+    `— INFORMATIONAL ONLY: attract-mode animation alone moves these by 25-108, so they cannot ` +
+    `evidence an input effect (see the negative-control note above)`);
+  info(`core-side metrics.inputs counter: before-idle=${inputsBeforeIdle}, after-idle=${inputsAfterIdle}, ` +
+    `after-presses=${inputsAfterPresses}`);
+  ok('[INPUT-DELIVERY SIGNAL] digital Start/Cross events genuinely traverse the real app -> worker -> core input path: the core-side metrics.inputs counter rises by every event sent in the input arm, while staying EXACTLY 0 across an equal-length idle arm on the same screen moments earlier (does NOT claim the game advanced state — see note above)',
+     idleCounterDelta === 0 && inputCounterDelta !== null && inputCounterDelta >= EXPECTED_EVENTS,
+     `idle-arm counter delta=${idleCounterDelta} (must be exactly 0), input-arm counter delta=${inputCounterDelta} (must be >= ${EXPECTED_EVENTS})`);
 
   // --- Frame-health metrics (same baseline sanity layer as the N64 real-content probe) ---
   const metricsLog = await page.evaluate(() => window.__psxMetrics || []);

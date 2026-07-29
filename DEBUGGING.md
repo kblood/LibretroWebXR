@@ -180,3 +180,105 @@ Architecture:
 When a new class of bug appears, prefer adding a one-line probe in
 `scripts/debug.js`'s `page.evaluate` block over leaving devtools breadcrumbs
 in the source. The probe pays for itself the next time the bug recurs in CI.
+
+## Probes must be validated against a negative control
+
+**The standard: a check is not evidence until you have seen it go RED when the
+thing it tests is broken.** A green probe proves nothing on its own — it proves
+something only once someone has broken the feature and watched the probe fail.
+Until then it is a print statement with an exit code.
+
+Two checks in this repo were found on 2026-07-29 passing while proving nothing,
+and both were being quoted as proof a feature worked:
+
+1. **`probe:psx-guncon`'s old `[GUNCON END-TO-END SIGNAL]`** compared a post-shot
+   frame against the **boot baseline** and gated on `maxDiff > 0`. Run with **no
+   gun connected at all** it passed at `maxDiff=407` — *larger* than the `287` a
+   genuine run produces. The difference came from elapsed time and a different
+   on-screen message, not from the shot.
+2. **Both gun probes set `window.__allowBrokenLightgun`**, so they produced
+   identical results whether the registry gate was up or down — they could not
+   regression-guard the very flag they were cited to justify.
+
+An absolute before/after diff silently measures elapsed time, animation and
+state drift alongside the effect. On an animated screen it measures nothing else:
+`probe:psx-timecrisis` printed idle attract-mode diffs of **56.41 / 107.77 /
+41.72 / 28.90** next to a comment claiming a "noise floor of ~0-3", against a
+gate of `> 10`.
+
+### The fix shape that works: a within-run relative comparison
+
+Two arms **at the same instant on the same screen**, differing only in the single
+variable under test, each measured **against its own immediately-prior frame**.
+The control arm must be **exactly 0** — not "small", not "below a threshold".
+
+- `probe:psx-guncon`'s replacement: an off-screen control shot vs an on-target
+  shot. Passes **0 / 287** on a working core; fails **411 / 345** when the gun
+  never seats. The `offMax === 0` clause is what does the work — do not relax it.
+- `probe:psx-twogun`'s ISOLATION check always had this shape (same shot, same
+  point, differing only in `port`) and was never in doubt.
+
+Corollaries from the sweep:
+
+- Prefer a **counter the code under test increments** (`metrics.inputs`,
+  `nextAudioTime`, a spy's exact argument) over pixels; only sample it *after*
+  the call so a stale reading can't pass.
+- A **state-toggle** feature must be asserted on the *transition set* across the
+  toggle, paired with a restate-the-same-value control arm that moves exactly 0.
+- `window.__thing?.doIt()` on the object under test converts "feature absent"
+  into "feature works". Grep for `window.__[a-zA-Z]*?\.` and treat every hit as
+  a suspect.
+- A script that prints JSON and always exits 0 is not a check. If a computed
+  boolean isn't wired to the exit code, it will be read as a pass anyway.
+- `video.lit > 0` (5 sample points, `r+g+b > 30`) is **discredited** as rendering
+  evidence: the N64 scene's own background `(8,8,16)` sums to 32, and a healthy
+  PSX run reads the same flat colour at all five points.
+
+### Building a negative control safely
+
+`public/cores/` is gitignored and expensive to regenerate — never break the
+feature in the real tree. Make a scratch checkout, junction the heavy dirs:
+
+```powershell
+robocopy C:\LLM\LibretroWebXR C:\LLM\_scratch /E /XD node_modules public .git tmp dist
+cmd /c mklink /J C:\LLM\_scratch\node_modules C:\LLM\LibretroWebXR\node_modules
+cmd /c mklink /J C:\LLM\_scratch\public       C:\LLM\LibretroWebXR\public
+```
+
+Then break the feature **in the scratch copy only**, and run the *unmodified*
+probe against it. Pick a break that leaves the app booting and every unrelated
+assertion green — a break that only trips a boot or metrics assertion has not
+tested the headline claim. Tear down with the reparse point, never a recursive
+delete:
+
+```powershell
+foreach ($l in 'node_modules','public') {
+  $p = "C:\LLM\_scratch\$l"
+  if ((Get-Item $p -Force -EA 0).LinkType -eq 'Junction') { cmd /c rmdir $p }
+}
+Remove-Item C:\LLM\_scratch -Recurse -Force   # only after both junctions are gone
+```
+
+Afterwards verify the real tree: `public/cores/` should hold **52 files /
+122,547,567 bytes**, and `node scripts/test-patched-cores.mjs` should report
+**40 passed, 0 failed**.
+
+### Two harness hazards that void a run entirely
+
+- **Foreign dev server.** Probes spawn `npx vite --strictPort` and then
+  `waitForServer()` accepts *any* HTTP 200 on the port. If a stale or concurrent
+  server already holds it, the spawn dies and the probe grades **someone else's
+  checkout** while reporting a clean pass. This was observed producing false
+  greens in three separate audits. Add a pre-flight that refuses to run when the
+  port is taken, and fetch a source sentinel (e.g. `curl /src/main.js | grep
+  <break marker>`) before believing a negative control.
+- **Leaked vite.** `vite.kill()` does not reach through `shell: true` on Windows;
+  the node child survives and holds the port for the next run. Kill by
+  port→PID via `netstat` + `taskkill /PID /T /F` in a `finally`. **Never** kill by
+  image name — `taskkill /IM node.exe` takes down the agent harness itself.
+
+**Probe flakiness is real.** One probe returned 11/23 with the core never
+starting, then ran clean on an identical re-run; another flaked 1 run in 3 on a
+palette threshold. Leave a few seconds between runs and **re-run before believing
+any red result**. Never report a flake as a finding — and never *lower* a
+threshold that has been demonstrated to go red.

@@ -50,6 +50,24 @@
 //      regression check used.
 //   5. No pageerror / no console error across the whole run.
 //
+// AUDIT 2026-07-29 — what this probe does and does NOT establish.
+// It was audited by breaking the capability it claimed to prove: with
+// EmulatorClient.sendInput() made a no-op (presses accepted and resolved
+// app-side, nothing dispatched to the core) the probe still passed 18/18. The
+// old "[CUTSCENE-ADVANCE SIGNAL]" was an absolute one-frame palette test with
+// no no-input arm and could not tell input-driven advance from a title that
+// boots into the same state on its own. Pixel evidence cannot carry that claim
+// on this title at all: the TV rect churns ~8-12k of 56050 pixels every 2s with
+// zero input and never quiesces, so input-caused motion is unmeasurable here.
+// The causal claim is now carried by [INPUT-REACHES-CORE], a two-arm same-
+// instant comparison that is red under that same negative control; the palette
+// checks are renamed to [FRAME-SHAPE, NOT CAUSAL] / [LIVENESS, NOT CAUSAL] and
+// state only what they establish. A green run means: the game boots through the
+// real cartridge-insert path and renders plausible content, synthetic RetroPad
+// keys are delivered to and consumed by this core's input driver, and the
+// GunCon2 seats and fires without throwing. It does NOT mean "the game visibly
+// advanced because of the synthetic input" — nothing in this probe shows that.
+//
 // Usage:
 //   npm run probe:ps2-timecrisis2
 //   node scripts/probe-ps2-timecrisis2.mjs
@@ -130,8 +148,9 @@ async function waitForServer(url, tries = 80) {
 // scoped to the same TV-screen rect probe-ps2-guncon-regression.mjs measured
 // for this scene's fixed default-camera 1024x768 view (excludes room/bezel/UI
 // chrome). Returns whole-frame AND TV-rect-scoped named-color pixel counts.
+const TV_RECT = { x: 365, y: 390, w: 295, h: 190 };
+
 async function analyzeShot(page, dataUrl) {
-  const TV_RECT = { x: 365, y: 390, w: 295, h: 190 };
   return page.evaluate((dataUrl, rect) => new Promise((res) => {
     const img = new Image();
     img.onload = () => {
@@ -187,6 +206,48 @@ async function analyzeShot(page, dataUrl) {
     img.onerror = () => res(null);
     img.src = dataUrl;
   }), dataUrl, TV_RECT);
+}
+
+// Count TV-rect pixels that MOVED between two captures.
+//
+// This exists only to be used as a WITHIN-RUN RELATIVE measurement: two equal-
+// length windows captured back-to-back on the same screen, each measured
+// against its own immediately-prior frame, differing only in which keys were
+// dispatched. An absolute before/after diff (or an absolute palette bucket)
+// silently measures elapsed time, boot animation and state drift alongside the
+// effect — that is exactly the failure mode this probe was audited for on
+// 2026-07-29, so never compare a frame to the boot baseline here.
+async function diffShots(page, aUrl, bUrl, rect = TV_RECT) {
+  return page.evaluate((aUrl, bUrl, rect) => new Promise((res) => {
+    const load = (src) => new Promise((ok2, no2) => {
+      const i = new Image();
+      i.onload = () => ok2(i);
+      i.onerror = () => no2(new Error('image decode failed'));
+      i.src = src;
+    });
+    Promise.all([load(aUrl), load(bUrl)]).then(([ia, ib]) => {
+      // As in analyzeShot: a throw inside this async continuation would leave
+      // the Promise forever pending and surface as an opaque CDP timeout.
+      try {
+        const grab = (img) => {
+          const c = document.createElement('canvas');
+          c.width = rect.w; c.height = rect.h;
+          const x = c.getContext('2d');
+          x.drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
+          return x.getImageData(0, 0, rect.w, rect.h).data;
+        };
+        const da = grab(ia), db = grab(ib);
+        let changed = 0, total = 0;
+        for (let i = 0; i < da.length; i += 4) {
+          total++;
+          if (Math.abs(da[i] - db[i]) > 16
+           || Math.abs(da[i + 1] - db[i + 1]) > 16
+           || Math.abs(da[i + 2] - db[i + 2]) > 16) changed++;
+        }
+        res({ changed, total });
+      } catch (e) { res({ error: String(e && e.message || e) }); }
+    }).catch((e) => res({ error: String(e && e.message || e) }));
+  }), aUrl, bUrl, rect);
 }
 
 let browser;
@@ -267,7 +328,15 @@ try {
     info(`${name}: analyzeShot() ${analyzeRes.ok ? 'OK' : 'TIMED OUT'} in ${((Date.now() - a0) / 1000).toFixed(1)}s`);
     const stats = analyzeRes.ok ? analyzeRes.v : null;
     info(`${name}: ${stats ? JSON.stringify(stats) : 'analysis failed/timed out'}`);
-    return { name, stats, timedOutAt: analyzeRes.ok ? null : 'analyzeShot' };
+    return { name, stats, dataUrl, timedOutAt: analyzeRes.ok ? null : 'analyzeShot' };
+  }
+
+  // Bare capture (no palette analysis) for the frame-to-frame windows below.
+  async function grab(name) {
+    const shotRes = await withTimeout(page.screenshot(), 30000, 'page.screenshot');
+    if (!shotRes.ok) return null;
+    saveShot(shotRes.v, name);
+    return 'data:image/png;base64,' + shotRes.v.toString('base64');
   }
 
   // --- Step 2: capture the boot-settle sequence (no input yet) ---
@@ -279,9 +348,6 @@ try {
      [shot1, shot2].some((s) => s.stats && s.stats.tvNonBlack > 0 && s.stats.tvNonBlack < s.stats.tvTotal * 0.995),
      [shot1, shot2].map((s) => `${s.name}: tvNonBlack=${s.stats?.tvNonBlack}/${s.stats?.tvTotal}`).join('; '));
 
-  // --- Step 3: try to advance past the memory-card prompt via the REAL
-  // client.sendInput() path (same primitive GameInputMgr uses), mirroring the
-  // prior confirmation's proven Start/Cross navigation ---
   async function press(code, key) {
     const down = await withTimeout(page.evaluate((code, key) => window.__client.sendInput('keydown', code, key), code, key), 15000, 'sendInput-down');
     await sleep(120);
@@ -290,6 +356,116 @@ try {
     return down.ok && up.ok;
   }
   let allPressesOk = true;
+
+  // --- Step 2b: [TV-RECT-AIM] is TV_RECT still pointed at the live screen? ----
+  //
+  // TV_RECT is a hardcoded rect for the fixed default-camera 1024x768 pose. A
+  // camera/layout change would silently retarget every pixel measurement in
+  // this probe onto static room geometry, and the palette buckets below would
+  // go on reporting numbers for the wrong pixels. Guard it relatively: over the
+  // SAME interval, the TV rect must move far more than an equal-area rect of
+  // room chrome. If TV_RECT ever drifts off the screen this goes red.
+  const ROOM_RECT = { x: 40, y: 40, w: TV_RECT.w, h: TV_RECT.h };
+  const tvPixels = TV_RECT.w * TV_RECT.h;
+  const aimA = await grab('probe-ps2-timecrisis2-aim-a.png');
+  await sleep(1500);
+  const aimB = await grab('probe-ps2-timecrisis2-aim-b.png');
+  let aimTv = null, aimRoom = null;
+  if (aimA && aimB) {
+    const t = await withTimeout(diffShots(page, aimA, aimB, TV_RECT), 30000, 'diffShots-tv');
+    const r = await withTimeout(diffShots(page, aimA, aimB, ROOM_RECT), 30000, 'diffShots-room');
+    aimTv = t.ok && typeof t.v?.changed === 'number' ? t.v.changed : null;
+    aimRoom = r.ok && typeof r.v?.changed === 'number' ? r.v.changed : null;
+  }
+  ok('[TV-RECT-AIM] the hardcoded TV_RECT is still aimed at the live emulator screen '
+     + '(over one interval it moves far more than an equal-area rect of static room chrome)',
+     aimTv !== null && aimRoom !== null && aimTv >= Math.max(aimRoom * 4, tvPixels * 0.01),
+     `tvChanged=${aimTv} roomChanged=${aimRoom} of ${tvPixels}`);
+
+  // --- Step 2c: [INPUT-REACHES-CORE] two-arm, one-variable, same instant -----
+  //
+  // AUDIT 2026-07-29. The check that used to carry this claim
+  // ("[CUTSCENE-ADVANCE SIGNAL] the FINAL post-input capture ... shows the
+  // cutscene/menu palette") named the synthetic input as the cause but only
+  // ever asked "does the last frame fall in a palette bucket". It was run
+  // against a negative control in which EmulatorClient.sendInput() was made a
+  // no-op — every synthetic press still accepted and resolved app-side, nothing
+  // dispatched to the core — and it passed IDENTICALLY, 18/18, satisfying its
+  // bucket (nightSky=28146) more strongly than the working run (10544). Same
+  // class of defect as probe:psx-guncon's old boot-baseline maxDiff check.
+  //
+  // Pixel evidence cannot carry this claim on this title at all: measured with
+  // zero input for 135s straight, the TV rect churns a steady ~8-12k of 56050
+  // pixels every 2s (scripts/_measure-quiesce.mjs during the audit) and never
+  // quiesces, so any input-caused motion is buried in the attract loop. An
+  // earlier rewrite that compared a Start/Cross window against an identically
+  // timed unbound-key window measured control=[36486,5242,8382] vs
+  // input=[13718,13670,8634] — pure noise. It was NOT shipped.
+  //
+  // What IS measurable, and is a genuine two-arm relative comparison:
+  //   ARM A (path under test) — call the real window.__client.sendInput(), the
+  //     same primitive GameInputMgr/Keyboard/DesktopGamepad use, and observe the
+  //     event from a bubble-phase listener on the core's own canvas. The
+  //     listener is added AFTER the core registered its own, so it runs second
+  //     and can read defaultPrevented: emscripten's HTML5 keyboard shim calls
+  //     preventDefault() exactly when the core's registered callback consumed
+  //     the key. Firing at all proves the event was delivered to THIS console's
+  //     canvas; defaultPrevented proves the core's input handler actually ran.
+  //   ARM B (control) — at the same instant, an identical KeyboardEvent
+  //     dispatched to a sibling element outside the core. Everything is the
+  //     same but the dispatch target, so if `defaultPrevented` were coming from
+  //     some app-wide or browser-wide handler rather than from the core, arm B
+  //     would show it too. Measured during the audit: canvas=true, sibling=false.
+  //
+  // This goes red when sendInput() is a no-op (arm A never fires), when it
+  // regresses to dispatching at `document` instead of the core canvas (the real
+  // 2026-06-02 regression — arm A never fires), when the core fails to install
+  // its input handler (arm A dp=false), and when multi-core routing sends the
+  // keys to the wrong console's canvas (arm A never fires). Validated: red
+  // under the sendInput no-op negative control, green here.
+  //
+  // Scope, stated honestly: this proves synthetic RetroPad keys reach and are
+  // consumed by THIS core's input driver. It does NOT prove the game reacted —
+  // see the [FRAME-SHAPE] note below for why nothing here can prove that.
+  const reachRes = await withTimeout(page.evaluate(async () => {
+    const canvas = window.__client?.delegate?.emuCanvas || window.__client?.emuCanvas || null;
+    if (!canvas) return { ok: false, why: 'no emuCanvas on the running client' };
+    const seen = [];
+    const rec = (ev) => seen.push({ code: ev.code, dp: ev.defaultPrevented, onCore: ev.currentTarget === canvas });
+    canvas.addEventListener('keydown', rec, false); // bubble phase → runs after the core's own handler
+    const sibling = document.createElement('div');
+    document.body.appendChild(sibling);
+    const control = [];
+    try {
+      for (const [code, key] of [['Enter', 'Enter'], ['KeyH', 'h'], ['KeyG', 'g']]) {
+        window.__client.sendInput('keydown', code, key);             // ARM A
+        const ev = new KeyboardEvent('keydown', { code, key, bubbles: true, cancelable: true });
+        sibling.dispatchEvent(ev);                                   // ARM B, same instant
+        control.push({ code, dp: ev.defaultPrevented });
+        window.__client.sendInput('keyup', code, key);
+        await new Promise((r) => setTimeout(r, 120));
+      }
+    } finally {
+      canvas.removeEventListener('keydown', rec, false);
+      sibling.remove();
+    }
+    return { ok: true, seen, control };
+  }), 30000, 'inputReachesCore');
+  const reach = reachRes.ok ? reachRes.v : null;
+  const coreArm = reach?.seen || [];
+  const ctrlArm = reach?.control || [];
+  const coreArmOk = coreArm.length === 3 && coreArm.every((e) => e.onCore === true && e.dp === true);
+  const ctrlArmOk = ctrlArm.length === 3 && ctrlArm.every((e) => e.dp === false);
+  const reachDetail = `coreArm=${JSON.stringify(coreArm)} controlArm=${JSON.stringify(ctrlArm)}`
+    + (reach?.why ? ` why=${reach.why}` : '') + (reachRes.ok ? '' : ` TIMED OUT (${reachRes.label})`);
+  ok('[INPUT-REACHES-CORE] synthetic RetroPad keys sent through the real client.sendInput() are delivered to '
+     + "THIS console's own canvas and consumed by the core's input handler, while an identical KeyboardEvent "
+     + 'dispatched at the same instant to a non-core element is NOT consumed (two arms, one variable: the target)',
+     coreArmOk && ctrlArmOk, reachDetail);
+
+  // --- Step 3: try to advance past the memory-card prompt via the REAL
+  // client.sendInput() path (same primitive GameInputMgr uses), mirroring the
+  // prior confirmation's proven Start/Cross navigation ---
   for (let i = 0; i < 4; i++) allPressesOk = (await press('Enter', 'Enter')) && allPressesOk;
   const shot3 = await captureNamed('probe-ps2-timecrisis2-03-afterstart.png', 500);
   for (let i = 0; i < 6; i++) allPressesOk = (await press('KeyH', 'h')) && allPressesOk;
@@ -310,22 +486,39 @@ try {
     (s.stats.grayPanel > s.stats.tvTotal * 0.05 && s.stats.darkBanner > s.stats.tvTotal * 0.02) ||
     (s.stats.nightSky > s.stats.tvTotal * 0.05 && s.stats.whiteBeam > 0)
   );
-  ok('[REAL-CONTENT] at least one post-input frame shows recognizable memory-card-screen OR cutscene palette '
+  // [AUDIT 2026-07-29] "post-input" was wrong: allShots includes shot1/shot2,
+  // both captured before any press. Wording corrected; this stays a content-
+  // plausibility check, not an input-response one.
+  ok('[REAL-CONTENT] at least one frame in the run shows recognizable memory-card-screen OR cutscene palette '
      + '(gray panel / dark banner / violet highlight box, OR night-sky / white spotlight-beam colors)',
      allShots.some(cutsceneSignature),
      allShots.map((s) => `${s.name}: gray=${s.stats?.grayPanel} dark=${s.stats?.darkBanner} violet=${s.stats?.violetHighlight} sky=${s.stats?.nightSky} beam=${s.stats?.whiteBeam}`).join(' | '));
 
-  // [Codex review, 2026-07-27] The check above only requires SOME frame in
-  // the whole run (including shot1, the pre-input Namco splash, which
-  // already trips the nightSky/whiteBeam heuristic) to match — it can't
-  // actually tell "Start/Cross advanced into the cutscene" apart from "the
-  // splash screen alone happened to match the palette buckets". Pin it to
-  // the actual final post-input capture specifically.
-  ok('[CUTSCENE-ADVANCE SIGNAL] the FINAL post-input capture (well after both Start and Cross) specifically shows the cutscene/menu palette, not just some earlier frame',
+  // [Codex review, 2026-07-27] pinned this to the final capture rather than
+  // "some frame in the run".
+  // [AUDIT 2026-07-29] It was still named "[CUTSCENE-ADVANCE SIGNAL]" and read
+  // as "the synthetic input advanced the game into the cutscene". It does not
+  // establish that. It is an ABSOLUTE palette-bucket test on one frame with no
+  // no-input arm: a title that reaches the same state on its own over ~25s of
+  // boot, with every press dropped on the floor, satisfies it identically.
+  // MEASURED, not assumed — with EmulatorClient.sendInput() no-op'd it passed
+  // at gray=759 dark=19616 sky=28146 beam=49 vs the working run's gray=618
+  // dark=45369 sky=10544 beam=11, i.e. it matched its bucket MORE strongly
+  // while nothing whatsoever reached the emulated PS2. Renamed to say only
+  // what it establishes. The causal claim now lives in [INPUT-REACHES-CORE].
+  ok('[FRAME-SHAPE, NOT CAUSAL] the final capture\'s TV palette falls in the memory-card/cutscene bucket '
+     + '(descriptive only — this frame is NOT attributed to the synthetic input; it passes unchanged with '
+     + 'sendInput() no-op\'d, see the audit note above)',
      cutsceneSignature(shot5),
      `${shot5.name}: gray=${shot5.stats?.grayPanel} dark=${shot5.stats?.darkBanner} sky=${shot5.stats?.nightSky} beam=${shot5.stats?.whiteBeam}`);
 
-  ok('[REAL-CONTENT] frame content changed across the run (not a single frozen frame — boot animation / menu / input response)',
+  // [AUDIT 2026-07-29] This is an elapsed-time drift check and nothing more:
+  // five time-separated signatures, Set size > 1. Time Crisis II's attract loop
+  // churns ~8-12k of the 56050 TV pixels every 2s with ZERO input (measured
+  // over 135s), so this passes on wall-clock alone. Kept as a liveness/
+  // not-frozen check, renamed so nobody reads it as an input-response signal.
+  ok('[LIVENESS, NOT CAUSAL] the TV kept rendering new frames across the run (not one frozen frame) — '
+     + 'elapsed-time drift only, this title animates on its own with no input at all',
      (() => {
        const sigs = allShots.map((s) => s.stats && `${s.stats.tvNonBlack}:${s.stats.grayPanel}:${s.stats.nightSky}:${s.stats.whiteBeam}:${s.stats.violetHighlight}`);
        return new Set(sigs.filter(Boolean)).size > 1;

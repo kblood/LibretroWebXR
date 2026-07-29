@@ -84,9 +84,30 @@
 // save-type detection doesn't recognize a from-scratch homebrew ROM. Not
 // re-litigated here.
 //
+// EVIDENCE AUDIT 2026-07-29 — what this probe does and does NOT establish.
+// Every gating assertion here was re-tested by breaking the capability it
+// claims to prove in a scratch checkout (junctioned to the real node_modules
+// and public/) and confirming it goes RED:
+//   * The bbox colour check ("REGRESSION SIGNAL") is SOUND: with every
+//     non-background pixel forced to black in FrameBridge._present() (a faithful
+//     replay of the historical GLideN64 fill-mode LLE-triangle bug's output) it
+//     fails at brightCount=0 vs ~33000 on a working build.
+//   * The two motion assertions did NOT survive. They compared silhouetteCount
+//     at t against t+3.5s and gated on a bare `!==`, so ANY pixel-count change
+//     satisfied them. With the presented frame shredded into ten horizontally
+//     displaced bands — no coherent cube anywhere on screen — the probe still
+//     reported 18/18. They are replaced below by a within-run, two-arm,
+//     same-instant relative comparison (see sampleMotion), validated to fail
+//     both a frozen picture and the shredded-geometry control.
+//   * The probe also had no way to tell it was even measuring THIS tree: with
+//     --strictPort its own vite exits when the port is taken, and waitForServer
+//     accepted any 200. A concurrent session's checkout on 5198 produced a
+//     clean, entirely meaningless 18/18. Guarded now at the pre-flight check.
+//
 // Usage:
 //   npm run probe:n64-scene-render
 //   node scripts/probe-n64-scene-render.mjs
+//   PROBE_PORT=5698 node scripts/probe-n64-scene-render.mjs   (concurrent runs)
 //
 // Exit code: 0 = all PASS assertions passed, 1 = at least one failed / setup
 // error. Since the GLideN64 fix above landed this probe is expected to pass
@@ -102,7 +123,7 @@ import { dirname, resolve } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
-const PORT = 5198;
+const PORT = Number(process.env.PROBE_PORT || 5198);
 const BASE = `http://localhost:${PORT}/?experimental=1`;
 const ROM = resolve(ROOT, 'public', 'roms', 'freeware', 'lwx-n64-scene.z64');
 const META = { file: 'lwx-n64-scene.z64', core: 'mupen64plus_next', system: 'n64', title: 'N64 Scene Render Probe' };
@@ -134,11 +155,31 @@ const info = (name, extra = '') => console.log(`INFO  ${name}${extra ? '  — ' 
 mkdirSync(SHOT_DIR, { recursive: true });
 const romB64 = readFileSync(ROM).toString('base64');
 
+// EVIDENCE-INTEGRITY PRE-FLIGHT (2026-07-29 audit). --strictPort makes OUR
+// vite exit if PORT is already bound, but waitForServer() below accepts ANY
+// HTTP 200 — so the whole probe would then run against WHOEVER already owns
+// the port. That is not hypothetical: during this audit a concurrent session's
+// scratch checkout was serving 5198, and this probe reported a clean 18/18
+// while measuring a completely different codebase's canvas. Refuse to run
+// rather than produce meaningless green. Set PROBE_PORT to run concurrently.
+if (await fetch(`http://localhost:${PORT}/`).then(() => true).catch(() => false)) {
+  console.error(`ERROR: port ${PORT} is already served by another process. This probe would `
+    + 'silently measure THAT tree instead of this one. Stop it, or re-run with '
+    + `PROBE_PORT=<free port> (e.g. PROBE_PORT=${PORT + 500}).`);
+  process.exit(1);
+}
+
 const vite = spawn('npx', ['vite', '--port', String(PORT), '--strictPort'],
   { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], shell: true });
+// Second half of the same guard: if our vite dies (bind failure, crash), never
+// fall through to some other server that happens to answer on PORT.
+let viteExited = false;
+vite.on('exit', () => { viteExited = true; });
 
 async function waitForServer(url, tries = 80) {
   for (let i = 0; i < tries; i++) {
+    if (viteExited) throw new Error('our vite process exited before serving — refusing to run '
+      + `against whatever else may answer on port ${PORT}`);
     try { const r = await fetch(url); if (r.ok) return true; } catch (_) {}
     await sleep(500);
   }
@@ -251,6 +292,76 @@ async function scanCubeBBox(page) {
   });
 }
 
+// --- WITHIN-RUN RELATIVE MOTION MEASUREMENT (2026-07-29 evidence audit) ------
+//
+// Replaces the previous motion assertions, which compared `silhouetteCount` at
+// t against `silhouetteCount` at t+3.5s and gated on a bare `!==`. That form
+// was shown to prove nothing about the scene: with the presented frame shredded
+// into ten horizontally displaced bands (a stand-in for a broken
+// geometry/transform stage — no coherent cube anywhere on screen, see the
+// negative-control note below) the probe still passed 18/18, because ANY change
+// in an integer pixel count over 3.5s satisfies `!==`. It also could not tell
+// real rotation from framebuffer jitter, and could false-FAIL whenever a
+// rotating cube happened to project to the same area twice.
+//
+// The replacement is a two-arm, same-instant, relative comparison, each arm
+// measured against its own immediately-prior frame ~300ms earlier:
+//   SIGNAL arm  — pixels inside the cube's own bbox must change.
+//   CONTROL arm — pixels OUTSIDE the cube's whole rotation envelope must change
+//                 in EXACTLY 0 pixels over that same frame pair.
+// Only the region differs between the arms; the frames, the instant and the
+// comparison are identical. A frozen picture fails the SIGNAL arm; anything
+// that moves pixels around the screen at large (jitter, a resize, shredded /
+// mis-projected geometry, whole-frame noise, different content) fails the
+// CONTROL arm. Both directions were validated — see the negative controls
+// documented at the assertions themselves.
+const CUBE_BOX = { x0: 100, x1: 360, y0: 130, y1: 380 };
+// Outer bound of everywhere the cube can ever project to over a full yaw lap at
+// this ROM's fixed pitch (0.3 rad; headless has no analog input to change it).
+// Derived from games/n64-scene/main.c's projection: half-diagonal 50*sqrt(3)
+// world units, FOCAL/zc scale in [0.65, 1.35], canvas scale 512/320 x 448/240,
+// centred at (256, 224). Everything outside this rect is scene background and
+// static black overscan, and must therefore be pixel-identical frame to frame.
+const CUBE_ENVELOPE = { x0: 95, x1: 415, y0: 45, y1: 400 };
+
+async function sampleMotion(page, cube, envelope) {
+  return page.evaluate((box, env) => {
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const prev = window.__lwxPrevFrame;
+    window.__lwxPrevFrame = new Uint8ClampedArray(data);
+    if (!prev || prev.length !== data.length) return null; // priming capture
+    let cubeChanged = 0, marginChanged = 0, totalChanged = 0;
+    let minX = 1e9, minY = 1e9, maxX = -1, maxY = -1;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = (y * width + x) * 4;
+        if (data[i] === prev[i] && data[i + 1] === prev[i + 1] && data[i + 2] === prev[i + 2]) continue;
+        totalChanged++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        if (x >= box.x0 && x < box.x1 && y >= box.y0 && y < box.y1) cubeChanged++;
+        if (x < env.x0 || x >= env.x1 || y < env.y0 || y >= env.y1) marginChanged++;
+      }
+    }
+    return {
+      cubeChanged, marginChanged, totalChanged,
+      changedBBox: maxX < 0 ? null : [minX, minY, maxX, maxY],
+    };
+  }, cube, envelope);
+}
+
+// Takes the priming capture, waits, then returns the real measurement — so the
+// two arms below always describe ONE frame pair a known short interval apart.
+async function measureMotionWindow(page, ms = 300) {
+  await sampleMotion(page, CUBE_BOX, CUBE_ENVELOPE);
+  await sleep(ms);
+  return sampleMotion(page, CUBE_BOX, CUBE_ENVELOPE);
+}
+
 let browser;
 try {
   if (!(await waitForServer(`http://localhost:${PORT}/`))) throw new Error('vite dev server never came up');
@@ -345,9 +456,23 @@ try {
 
   const diff12 = signatureDiff(shot1?.signature, shot2?.signature);
   info(`snapshot #1->#2 whole-canvas color-average diff: meanAbsChannelDiff=${diff12.toFixed(2)}`);
-  ok('snapshot #1->#2: cube silhouette AREA changes (rotation is real, independent of face color — the frame pump is not frozen/stalled)',
-     bbox1.silhouetteCount !== bbox2.silhouetteCount,
-     `silhouetteCount ${bbox1.silhouetteCount} -> ${bbox2.silhouetteCount} (darkCount ${bbox1.darkCount} -> ${bbox2.darkCount})`);
+  info(`snapshot #1->#2 cube-bbox silhouette AREA (diagnostic only — a bare !== on this number was the pre-2026-07-29 motion assertion and proves nothing; see the two-arm checks): silhouetteCount ${bbox1.silhouetteCount} -> ${bbox2.silhouetteCount} (darkCount ${bbox1.darkCount} -> ${bbox2.darkCount})`);
+
+  // Two-arm relative motion check, EARLY in the run. Validated in both
+  // directions on 2026-07-29 against scratch-checkout negative controls:
+  //   SIGNAL arm goes RED when FrameBridge._present() stops updating the canvas
+  //     after 60 frames (frozen picture, telemetry still perfectly healthy) —
+  //     cubeChanged 0 vs ~14k on a working build.
+  //   CONTROL arm goes RED when the presented frame is shredded into ten
+  //     horizontally displaced bands (broken geometry/transform stand-in) —
+  //     the old `!==` assertions passed that break 18/18.
+  const motionEarly = await measureMotionWindow(page);
+  ok('[MOTION SIGNAL ARM] within ONE ~300ms window, pixels inside the cube bbox change (the cube is being redrawn — not a frozen/stalled picture)',
+     !!motionEarly && motionEarly.cubeChanged > 200,
+     motionEarly ? `cubeChanged=${motionEarly.cubeChanged} (bbox ${CUBE_BOX.x0},${CUBE_BOX.y0}-${CUBE_BOX.x1},${CUBE_BOX.y1})` : 'no motion sample');
+  ok('[MOTION CONTROL ARM] over that SAME frame pair, pixels OUTSIDE the cube\'s whole rotation envelope change in EXACTLY 0 pixels (the change is the cube moving, not global jitter / a resize / shredded or mis-projected geometry / different content)',
+     !!motionEarly && motionEarly.marginChanged === 0,
+     motionEarly ? `marginChanged=${motionEarly.marginChanged}, totalChanged=${motionEarly.totalChanged}, changedBBox=${JSON.stringify(motionEarly.changedBBox)} vs envelope ${CUBE_ENVELOPE.x0},${CUBE_ENVELOPE.y0}-${CUBE_ENVELOPE.x1},${CUBE_ENVELOPE.y1}` : 'no motion sample');
 
   await sleep(3500);
   const shot3 = await captureCanvas(page);
@@ -357,9 +482,18 @@ try {
 
   const diff23 = signatureDiff(shot2?.signature, shot3?.signature);
   info(`snapshot #2->#3 whole-canvas color-average diff: meanAbsChannelDiff=${diff23.toFixed(2)}`);
-  ok('snapshot #2->#3: cube silhouette AREA keeps changing (motion continues across the whole run, no later stall)',
-     bbox2.silhouetteCount !== bbox3.silhouetteCount,
-     `silhouetteCount ${bbox2.silhouetteCount} -> ${bbox3.silhouetteCount} (darkCount ${bbox2.darkCount} -> ${bbox3.darkCount})`);
+  info(`snapshot #2->#3 cube-bbox silhouette AREA (diagnostic only, see above): silhouetteCount ${bbox2.silhouetteCount} -> ${bbox3.silhouetteCount} (darkCount ${bbox2.darkCount} -> ${bbox3.darkCount})`);
+
+  // Same two-arm check, LATE in the run — this is what covers "no later
+  // stall": a pump that dies after the first seconds fails the SIGNAL arm here
+  // while the early pair still passed.
+  const motionLate = await measureMotionWindow(page);
+  ok('[MOTION SIGNAL ARM, late] the same within-window cube-bbox change is still there ~9s in (motion continues across the whole run, no later stall)',
+     !!motionLate && motionLate.cubeChanged > 200,
+     motionLate ? `cubeChanged=${motionLate.cubeChanged}` : 'no motion sample');
+  ok('[MOTION CONTROL ARM, late] and the off-envelope margin is still EXACTLY 0 changed pixels over that same late frame pair',
+     !!motionLate && motionLate.marginChanged === 0,
+     motionLate ? `marginChanged=${motionLate.marginChanged}, totalChanged=${motionLate.totalChanged}, changedBBox=${JSON.stringify(motionLate.changedBBox)}` : 'no motion sample');
   info(`snapshot #3 bbox color check (restates the #1 assertion above, not a separate pass/fail axis): brightCount=${bbox3.brightCount}/${bbox3.area}, brightest pixel in bbox=${JSON.stringify(bbox3.maxPixel)} (sum=${bbox3.maxSum})`);
 
   // --- Frame-health metrics (informational — no established headless fps
