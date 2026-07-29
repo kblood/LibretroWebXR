@@ -373,6 +373,35 @@ export const SYSTEMS = {
     lightgun: { label: 'GunCon', core: 'mednafen_psx_hw', device: 260, port: 0, broken: false, coreOptions: {
       beetle_psx_gun_input_mode: 'lightgun', beetle_psx_hw_gun_input_mode: 'lightgun',
       beetle_psx_gun_cursor: 'cross', beetle_psx_hw_gun_cursor: 'cross',
+    } },
+    // PSX two-gun co-op (Point Blank, Lethal Enforcers I & II). UNLIKE the SNES
+    // Justifier — which chains two guns onto ONE port with distinct device ids
+    // (516/772) — a PSX GunCon is an ordinary controller, one per native port,
+    // so this is simply device 260 on ports 0 and 1. Verified against the
+    // vendored beetle-psx source at the pinned commit: retro_set_controller_
+    // port_device(in_port, device) is fully per-port, and the GunCon case calls
+    // FrontIO_SetInput(FIO, in_port, "guncon", ...) + FrontIO_SetCrosshairs
+    // Cursor(FIO, in_port, ...) with that same in_port. (That source also
+    // defines RETRO_DEVICE_PS_JUSTIFIER = SUBCLASS(LIGHTGUN,1) = 516, the PSX
+    // Konami Justifier — a possible future variant, not needed for GunCon.)
+    //
+    // `broken: true` — the CORE ARTIFACT can't consume two aims yet, and this
+    // is deliberately gated rather than shipped half-working. Per-port aim
+    // requires the frontend export rwebinput_set_lightgun(port,x,y,buttons)
+    // from docs/patches/rwebinput-lightgun-multiport.diff. The shipped
+    // mednafen_psx_jit build has the BASE gun patch but NOT the multiport one:
+    // `grep -c rwebinput_set_lightgun public/cores/<core>.js` is 1 for
+    // snes9x/nestopia/play/mupen64plus_next and 0 for mednafen_psx_jit (and 0
+    // in its .worker.js too). Without that export the worker gun path falls
+    // back to synthetic DOM mouse events on the shared canvas, which carry a
+    // SINGLE pointer — so two guns would silently read the same aim and look
+    // like an app bug. Rebuild per docs/PSX_CORE_BUILD.md (apply BOTH patches,
+    // in order, incl. the Makefile.emscripten EXPORTED_FUNCTIONS wrinkle), then
+    // flip this to `broken: false`. lightgunLoadConfig's `allowBroken` lets
+    // probes exercise the app-side wiring meanwhile.
+    lightgun2: { label: 'GunCon (2-gun)', core: 'mednafen_psx_hw', devices: [260, 260], ports: [0, 1], broken: true, coreOptions: {
+      beetle_psx_gun_input_mode: 'lightgun', beetle_psx_hw_gun_input_mode: 'lightgun',
+      beetle_psx_gun_cursor: 'cross', beetle_psx_hw_gun_cursor: 'cross',
     } } },
   n64:       { label: 'Nintendo 64',        defaultCore: 'mupen64plus_next', cores: ['mupen64plus_next'],             exts: ['n64','z64','v64'], aliases: ['n64','nintendo 64'], thumbnailRepo: 'Nintendo_-_Nintendo_64', medium: 'cartridge', experimental: true },
 };
@@ -461,9 +490,19 @@ export function twoGunForSystem(systemId) {
   return SYSTEMS[systemId]?.lightgun2 ?? null;
 }
 
-/** True if a system has a two-gun (co-op) light-gun peripheral. */
+/**
+ * True if a system has a two-gun (co-op) light-gun peripheral that actually
+ * WORKS. Mirrors lightgunForSystem's `broken` gate deliberately: main.js's
+ * _twoGunActiveFor feeds this straight into lightgunLoadConfig({ twoGun }), and
+ * a broken two-gun config makes that return null — which would drop the boot to
+ * NO gun at all rather than falling back to the single-gun path. Gating here
+ * means a `twoGun: true` game on a system whose two-gun device is gated (PSX
+ * today) still gets its ONE working gun. Probes that want the gated config ask
+ * for it explicitly via lightgunLoadConfig's allowBroken.
+ */
 export function isTwoGunCapable(systemId) {
-  return !!SYSTEMS[systemId]?.lightgun2;
+  const tg = SYSTEMS[systemId]?.lightgun2;
+  return !!tg && !tg.broken;
 }
 
 /**
@@ -476,7 +515,10 @@ export function isTwoGunCapable(systemId) {
  */
 export function twoGunPortsForSystem(systemId) {
   const tg = SYSTEMS[systemId]?.lightgun2;
-  return tg ? [...tg.ports] : [];
+  // Same `broken` gate as isTwoGunCapable — a gated two-gun device must yield []
+  // so libretroGunPortFor returns null and aim routes down the proven
+  // single-gun DOM-mouse path, exactly as before that device was registered.
+  return (tg && !tg.broken) ? [...tg.ports] : [];
 }
 
 /**

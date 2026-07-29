@@ -143,6 +143,22 @@ eq('twoGunPortsForSystem nes (single-gun) → []', twoGunPortsForSystem('nes'), 
 eq('twoGunPortsForSystem gb (no gun) → []', twoGunPortsForSystem('gb'), []);
 eq('twoGunPortsForSystem unknown → []', twoGunPortsForSystem('nope'), []);
 eq('twoGunPortsForSystem null → []', twoGunPortsForSystem(null), []);
+// PSX two-gun (GunCon on both native ports) is REGISTERED but `broken: true`
+// until the core is rebuilt with the multiport rwebinput patch that exports
+// rwebinput_set_lightgun(port,...) — without it both guns would share one DOM
+// mouse pointer. The gate must behave like a system with no two-gun device at
+// all, so a `twoGun: true` PSX game still gets its ONE working gun instead of
+// none (isTwoGunCapable false -> _twoGunActiveFor false -> single-gun path).
+ok('psx two-gun registered in the registry', !!twoGunForSystem('psx'));
+ok('psx NOT two-gun capable while broken', !isTwoGunCapable('psx'));
+eq('twoGunPortsForSystem psx (broken) → []', twoGunPortsForSystem('psx'), []);
+eq('psx twoGun request is gated → null', lightgunLoadConfig('psx', { twoGun: true }), null);
+// ...but the single-gun GunCon path is untouched by registering it.
+eq('psx single-gun still works', lightgunLoadConfig('psx')?.inputDevices, { 1: 260 });
+// allowBroken (probes only) yields the real two-gun shape: GunCon on ports 0+1.
+const psxTwo = lightgunLoadConfig('psx', { twoGun: true, allowBroken: true });
+eq('psx two-gun inputDevices (ports 0+1)', psxTwo?.inputDevices, { 1: 260, 2: 260 });
+eq('psx two-gun guns A/B → ports', psxTwo?.guns, [{ device: 260, port: 0 }, { device: 260, port: 1 }]);
 // Derivation matches lightgunLoadConfig's guns→ports for the two-gun config (the
 // value _twoGunPorts holds at boot), so primary === secondary for the same system.
 eq('twoGunPortsForSystem snes === lightgunLoadConfig guns ports',
