@@ -21,7 +21,8 @@ Think [EmuVR](https://emuvr.net), but open-source and running in a web page.
 - **17 systems** via libretro cores: SNES, NES, Game Boy / Color / Advance,
   Genesis / Master System / Game Gear / SG-1000 / Sega 32X, Virtual Boy,
   PC Engine / TurboGrafx-16, Atari 2600, C64, VIC-20, and **Amiga** (real
-  Kickstart boot). DOS (VirtualXT) is registered but currently blocked — see
+  Kickstart boot). DOS (VirtualXT) is registered (`experimental: true`, hidden
+  from the default shelf) but has **no working core** yet — see
   `docs/DOS_CORE_BUILD.md`.
 - Keyboard, gamepad, and WebXR-controller input with per-core RetroPad mapping;
   local couch co-op (up to 4 players, NES Four Score included); **light-gun**

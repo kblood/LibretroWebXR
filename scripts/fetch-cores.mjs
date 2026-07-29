@@ -52,10 +52,17 @@ const CORES = [
   'snes9x', 'nestopia', 'stella2014', 'genesis_plus_gx', 'mgba', 'mednafen_vb',
   'picodrive', 'gearsystem', 'fceumm', 'gambatte', 'mednafen_pce_fast',
   'vice_x64', 'vice_xvic', 'puae',
-  // DOS (VirtualXT). Prebuilt module-style on the buildbot. NOTE: the current
-  // buildbot binary boot-traps in this loader (RuntimeError: unreachable after
-  // mounting the disk) — see docs/DOS_CORE_BUILD.md. Listed so deploy fetches it
-  // alongside the others once a working build is available.
+  // DOS (VirtualXT). Prebuilt module-style on the buildbot IN THEORY, but as
+  // of 2026-07-29 it is ABSENT here (never copied by any local source this
+  // repo has fetched from recently) AND 404s on the live deploy — this is a
+  // routine "missing in source" warning below, not a hard error (virtualxt is
+  // not in CUSTOM_CORES, so checkCustomCoresPresent() doesn't cover it). A
+  // prior buildbot binary of this core was fetched once and boot-trapped
+  // (RuntimeError: unreachable after mounting the disk) — see
+  // docs/DOS_CORE_BUILD.md for both the trap history and the current absent/
+  // 404 state. `dos` is flagged `experimental: true` in src/systems.js so it
+  // isn't offered to real users either way. Left listed so deploy picks it up
+  // automatically once a working build (buildbot or a from-scratch one) exists.
   'virtualxt',
 ];
 

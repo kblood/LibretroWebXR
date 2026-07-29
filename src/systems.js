@@ -283,7 +283,22 @@ export const SYSTEMS = {
   // disk-based computers. DOS uses a MOUSE + keyboard; the mouse path is the
   // shared EmulatorClient.sendMouse primitive owned by the parallel mouse agent —
   // see the "DOS mouse" follow-up comment below SYSTEM_PORTS.
-  dos:       { label: 'DOS / IBM PC',       defaultCore: 'virtualxt',        cores: ['virtualxt'],                    exts: ['exe','com','bat','conf','img','dosz','zip','iso','cue'], aliases: ['dos','ms-dos','msdos','pc','ibm pc','dosbox','virtualxt'], thumbnailRepo: null, medium: 'floppy', keyboard: true },
+  //
+  // `experimental: true` (2026-07-29) — same mechanism/precedent as PSX/N64
+  // above: hides `dos` cartridges from the default shelf/collection UI
+  // (Collection.js's parseCollection, gated in main.js on `?experimental=1`)
+  // WITHOUT removing the system's registration, so real users never get
+  // offered a system that can't currently boot. Unlike PSX/N64 (whose cores
+  // are real and working, just not yet reachable from the normal cart-insert
+  // path), DOS's situation is worse: `virtualxt_libretro.wasm` is not even
+  // PRESENT in public/cores/ (absent locally AND 404s on the live server —
+  // verified 2026-07-29, see docs/DOS_CORE_BUILD.md), so picking `dos` today
+  // hits a dynamic-`import()` failure in EmulatorClient._loadCore, not the
+  // previously-documented post-mount boot trap (that trap was real too, on
+  // the buildbot binary that used to be here — both are "does not work",
+  // just at different stages). Remove this flag only once a real, present,
+  // non-trapping DOS core boots end-to-end.
+  dos:       { label: 'DOS / IBM PC',       defaultCore: 'virtualxt',        cores: ['virtualxt'],                    exts: ['exe','com','bat','conf','img','dosz','zip','iso','cue'], aliases: ['dos','ms-dos','msdos','pc','ibm pc','dosbox','virtualxt'], thumbnailRepo: null, medium: 'floppy', keyboard: true, experimental: true },
   // PlayStation 2 (Play!, see CORES.play). medium: 'floppy' is a placeholder —
   // there's no disc-shaped prop yet (only cartridge/floppy exist); PS2 discs
   // render as a floppy until one is built.
@@ -299,18 +314,22 @@ export const SYSTEMS = {
     // libretro's input path and the core builds/boots/renders with it present,
     // but "does a real GunCon2 game's driver actually attach to it" is untested.
     lightgun: { label: 'GunCon2', core: 'play', device: 260, port: 0, coreOptions: {} } },
-  // `experimental: true` (PSX + N64 below) hides a system's cartridges from
-  // the default shelf/manifest UI (see Collection.js's parseCollection /
-  // loadCollection `experimental` option, gated in main.js on the
-  // `?experimental=1` URL param) without removing the system's registration
-  // or its content — the underlying worker-execution cores are real and
-  // headless-verified, but per the 2026-07-24 review (docs/research/
+  // `experimental: true` (PSX + N64 below, and DOS above) hides a system's
+  // cartridges from the default shelf/manifest UI (see Collection.js's
+  // parseCollection / loadCollection `experimental` option, gated in main.js
+  // on the `?experimental=1` URL param) without removing the system's
+  // registration or its content — the underlying worker-execution cores are
+  // real and headless-verified, but per the 2026-07-24 review (docs/research/
   // psx-ps2-n64-review-2026-07-24.md, Phase A item A4) worker cores are not
   // yet reachable from the real in-VR cartridge-insert path (P0-2) and
   // weren't shippable-clean until the P0-1 gun/mouse regression was fixed —
   // this flag keeps them out of normal users' hands until Phase B lands, while
   // staying reachable for testing via the query param. Remove this flag (not
   // the mechanism — it's generic and cheap to keep) once Phase B ships.
+  // DOS's reason for the same flag is unrelated and simpler: its only core
+  // (virtualxt) isn't present in public/cores/ at all right now — see the
+  // `dos` entry's own comment above for specifics and docs/DOS_CORE_BUILD.md
+  // for the full history.
   // GunCon (Beetle PSX HW / mednafen_psx_hw). Device 260 = SUBCLASS(LIGHTGUN,0) —
   // VERIFIED FROM SOURCE (not guessed), matching this repo's pinned build
   // (public/cores/mednafen_psx_jit_libretro.build.json pins

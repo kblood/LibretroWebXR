@@ -51,8 +51,9 @@ This is **not** a greenfield plan; a working app was carried over (see
   and snap to floor or nearest wall; ghost preview in Move mode.
 - **17 systems** wired (SNES, NES, GB/GBC/GBA, Genesis/SMS/GG/SG-1000/Sega 32X,
   Virtual Boy, PC Engine, Atari 2600, C64, VIC-20, Amiga) via the `CORES` map /
-  `systems.js`; DOS (VirtualXT) is registered but currently blocked — see
-  **Mouse peripheral + new systems** and **DOS / VirtualXT** below.
+  `systems.js`; DOS (VirtualXT) is registered (`experimental: true` — hidden
+  from the default shelf, no working core) — see **Mouse peripheral + new
+  systems** and **DOS / VirtualXT** below.
 - COOP/COEP for SharedArrayBuffer (`vite.config.js`, `deploy/`), and a puppeteer
   health-check harness (`scripts/debug.js`, `DEBUGGING.md`).
 - Test suite: grows every phase (`npm test`; see `package.json` for the current
@@ -708,13 +709,22 @@ light-gun architecture (cord/plug into a console port, net-synced binding via
   collection) — verified structurally only, same caveat as Amiga before its
   own follow-up authoring work.
 
-## DOS / VirtualXT  ⚠ registered, blocked
+## DOS / VirtualXT  ⚠ registered, experimental, no working core
 A `virtualxt` core entry + `dos` system exist in `systems.js` (MPL-2.0,
 floppy/keyboard-capable), and `docs/DOS_CORE_BUILD.md` documents the build
-recipe — but the core currently **boot-traps under emscripten** and is not
-shippable yet. This is a parked spike, not a regression: `fetch-cores` doesn't
-fail on it (the core simply isn't fetched), so it costs nothing to leave
-registered for whenever the upstream issue is fixed or worked around.
+recipe — but as of 2026-07-29 `virtualxt_libretro.wasm` is **absent from
+`public/cores/` and 404s on the live deploy** (a prior buildbot binary that
+was tested here did boot-trap under emscripten, but that binary is gone now —
+today's failure is a missing-core fetch error, not the trap; see
+`docs/DOS_CORE_BUILD.md`'s "Current real status"). Neither state is
+shippable. `dos` now carries `experimental: true` in `systems.js` (same
+mechanism as PSX/N64: hides it from the default shelf without deleting the
+registration) so it is never offered to real users. This is a parked spike,
+not a regression: `fetch-cores` doesn't hard-fail on it (`virtualxt` isn't in
+the CUSTOM_CORES hard-error list, so a missing buildbot core is just a
+"missing in source" warning), so it costs nothing to leave registered for
+whenever a working core (buildbot fix, or a from-scratch DOSBox Pure build —
+see `docs/DOS_CORE_BUILD.md`'s chosen plan) lands.
 
 ## Comfort/UX fixes — duck + real power-off  ✅ shipped (2026-07-10)
 User feedback on the just-deployed build: "you need a way to duck or set
@@ -795,7 +805,10 @@ the artifact-integrity items.
     touching.
 11. **Atari 2600** — `stella2014` is the last "classic"-style core and renders
     0 draw calls; fix is shipping a `module`-style Stella build.
-12. **DOS / VirtualXT** — registered but boot-traps; see `docs/DOS_CORE_BUILD.md`.
+12. **DOS / VirtualXT** — registered (`experimental: true`), no working core:
+    `virtualxt_libretro.wasm` is absent from `public/cores/`/404s live; see
+    `docs/DOS_CORE_BUILD.md` for the chosen next step (DOSBox Pure, PUAE-style
+    build).
 
 **Test/tooling hygiene**
 13. **Audit remaining probe assertions against negative controls.** Two were

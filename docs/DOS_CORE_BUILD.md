@@ -5,12 +5,48 @@ DOS is registered as a system (`dos`) running on the **VirtualXT** libretro core
 BIOS needed). The system + core are wired into `src/systems.js` exactly like the
 other computer systems (`keyboard:true`, `medium:'floppy'`).
 
+## Current real status (verified 2026-07-29 — read this before anything below)
+
+**`virtualxt_libretro.wasm` is ABSENT from `public/cores/` and 404s on the live
+deploy.** The "prebuilt buildbot binary that boot-traps" described in the next
+section below is **not the current failure** — that binary isn't even present
+here anymore (it was fetched once for the original de-risk, tested, and never
+persisted/re-fetched since; no local core source this repo has used recently
+carries it, and `scripts/fetch-cores.mjs` treats a missing buildbot core as a
+soft "missing in source" warning, not a hard error — see its `virtualxt` entry
+comment). So a user picking DOS today hits **a missing-core fetch error**
+(`EmulatorClient._loadCore`'s `import(absoluteCoreUrl)` on a 404 .js file
+throws, caught by `main.js`'s `loadCartridge` try/catch, surfaced as a "couldn't
+load" message on the in-world TV/placeholder screen — see that function's
+`catch` block), not the `invoke_iii`/`unreachable` trap. Both states mean
+"does not work"; only the failure *stage* changed.
+
+To keep this honest, `src/systems.js`'s `dos` entry now carries
+**`experimental: true`** — the same mechanism PSX/N64 use (see the comment
+above `SYSTEMS.psx` in that file): it hides `dos` cartridges from the default
+shelf/collection UI (`Collection.js` gated on `?experimental=1` in `main.js`)
+without deleting the registration, so real users are never offered a system
+that can't currently boot, while the wiring stays reachable for testing/future
+work. `scripts/fetch-cores.mjs` still lists `virtualxt` (best-effort, not a
+hard error) so a working build gets picked up automatically once one exists.
+
+**Chosen plan (2026-07-29):** the de-risk below already showed VirtualXT
+resurrection is a dead end (Odin frontend, no emscripten path upstream, and the
+buildbot binary's trap is a content-independent build-level defect with no
+config/flag to try against it). Do **not** spend further real effort chasing
+virtualxt beyond a strict time-box. The next real DOS work should target
+**DOSBox Pure**, following the PUAE recipe (`docs/AMIGA_CORE_BUILD.md`):
+
+```json
+{"core":"dosbox_pure","verdict":"PROCEED-WITH-RISK","fastPath":"Before starting the DOSBox Pure build, spend at most ~10 minutes on: `node scripts/fetch-cores.mjs` (from C:\\LLM\\LibretroWebXR) to see if the buildbot's virtualxt_libretro.js/.wasm even lands in public/cores/ today (KNOWN STATE says it currently 404s/is absent, so this alone may just fail loudly). Do NOT spend real time trying to resurrect virtualxt further than that: the documented invoke_iii/unreachable trap is a content-independent, emscripten build-level defect in a core whose upstream CI has no emscripten target at all (Odin frontend, Linux/Windows/Android only) — there is no flag or config to try against it, and it will not have self-healed. Time-box strictly and move on to DOSBox Pure regardless of outcome."}
+```
+
 ## Feasibility outcome (de-risk)
 
 | Path | Result |
 |------|--------|
 | Prebuilt **DOSBox Pure** on the libretro emscripten buildbot | **Absent.** `RetroArch.7z` (762 MB, 825 cores) contains no `dosbox_*`. EmulatorJS CDN ships `dosbox_pure-*.data`, but that's the EmscriptenFS `.data` bundle format, which this loader does not consume (it wants `export default` MODULARIZE ES modules). |
-| Prebuilt **VirtualXT** on the buildbot | **Present** (`virtualxt_libretro.js/.wasm`, module-style `export default libretro_virtualxt`) and **dropped into `public/cores/`** — but the buildbot binary **TRAPS at boot** (see below). |
+| Prebuilt **VirtualXT** on the buildbot | **Was present** during the original de-risk (`virtualxt_libretro.js/.wasm`, module-style `export default libretro_virtualxt`, temporarily dropped into `public/cores/` to test it) and **TRAPPED at boot** (see below). That binary is **no longer on disk here** — see "Current real status" above; the trap was never fixed, just no longer reproducible locally because the file itself is gone. |
 
 ### The prebuilt VirtualXT boot trap (BLOCKER)
 
@@ -77,10 +113,13 @@ to avoid colliding with that agent's `EmulatorClient` changes.
 
 ## Files
 
-- `src/systems.js` — `CORES.virtualxt` + `SYSTEMS.dos` + `SYSTEM_PORTS.dos` +
-  the DOS-mouse follow-up comment. (committed)
+- `src/systems.js` — `CORES.virtualxt` + `SYSTEMS.dos` (now `experimental: true`)
+  + `SYSTEM_PORTS.dos` + the DOS-mouse follow-up comment. (committed)
 - `public/cores/virtualxt_libretro.{js,wasm}` — prebuilt buildbot core (gitignored;
-  fetched into `public/cores/`). NOTE: the current binary boot-traps; see above.
+  fetched into `public/cores/` by `scripts/fetch-cores.mjs`, best-effort). NOTE:
+  as of 2026-07-29 this is **absent** (404s on the live deploy too) — see
+  "Current real status" above. When present, expect the boot-trap described
+  above unless a newer buildbot build has fixed it upstream.
 - `public/roms/local/dos.collection.json` + `public/roms/local/dos/*` — gitignored
   local DOS test content (user-owned games + FreeDOS boot floppy).
 - `tmp/probe-dos-*.mjs`, `tmp/probe-vxt-*.mjs` — headless boot-verify harnesses.
