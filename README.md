@@ -25,9 +25,10 @@ Think [EmuVR](https://emuvr.net), but open-source and running in a web page.
   `docs/DOS_CORE_BUILD.md`.
 - Keyboard, gamepad, and WebXR-controller input with per-core RetroPad mapping;
   local couch co-op (up to 4 players, NES Four Score included); **light-gun**
-  peripherals (Zapper, Super Scope, Justifier 2-gun, Menacer, Light Phaser) and
-  a **mouse** peripheral (Amiga point-and-click) as grabbable, cord-connected,
-  net-synced props — see `docs/LIGHTGUN_SUPPORT.md` / `docs/MOUSE_SUPPORT.md`.
+  peripherals (Zapper, Super Scope, Justifier 2-gun, Menacer, Light Phaser,
+  PS1 GunCon incl. 2-gun, PS2 GunCon2) and a **mouse** peripheral (Amiga
+  point-and-click) as grabbable, cord-connected, net-synced props — see
+  `docs/LIGHTGUN_SUPPORT.md` / `docs/MOUSE_SUPPORT.md`.
 - Save states, spatial audio, in-VR menus, a C64/VIC-20 virtual keyboard.
 - **Networked multiplayer**: shared room presence, voice, room-object sync,
   and host-authoritative 2-player game streaming — see `docs/MULTIPLAYER.md`.

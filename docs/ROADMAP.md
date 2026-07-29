@@ -624,8 +624,22 @@ trigger — for every system that had one historically. Full design + status:
   (`src/net/GunSync.js`) so every peer agrees who's holding which gun.
 - Live core-switch reboot: arming the gun on a system that needs a different
   core reboots the primary console in place, no page reload (`0c973d8`).
-- **Remaining:** real-headset validation (aim feel, two-gun co-op timing) —
-  everything else is headless- and real-core-verified.
+- **PS1 GunCon + PSX two-gun (2026-07-29, `dbbb2f4`/`9578494`).** Single-gun
+  GunCon works on the custom `mednafen_psx_jit` core, and `SYSTEMS.psx.lightgun2`
+  (device 260 on ports 0 and 1) is un-gated for Point Blank / Lethal Enforcers
+  I & II. The blocker was never the registry: PSX is the only *worker-execution*
+  gun system and `EmulatorWorkerRuntime.forwardLightgun` had no multiport branch
+  at all, so both guns shared one DOM pointer regardless of what the core
+  exported. Verified `probe:psx-twogun` 23/23 against a real disc — two
+  crosshairs in per-port colours, plus a falsification arm (same shot, same
+  point, differing only in `port`: gun 1 `maxDiff=287`, gun 2 `maxDiff=0`).
+  Scope: mechanism + per-port isolation, **not** a played-through 2P session.
+- **Remaining:** real-headset validation (aim feel, two-gun co-op timing); a
+  real 2P play-through on PSX; the in-VR routing hop
+  (`LightGunMgr._portForGun` → `libretroGunPortFor`) has never been exercised
+  for PSX; and the MP host path does not forward gun-port *binding* changes
+  (known gap, documented at `_hostApplyGunWire`). Everything else is headless-
+  and real-core-verified.
 - **Arming-leak bug fixed (found + fixed 2026-07-11, disarm option):** the
   arming flag (`window.__lightgunArmed`) is deliberately sticky for the
   session but `isLightgunCapable` is system-level, not per-ROM — once armed,
@@ -727,6 +741,66 @@ your height" and "turning off a console only seems to pause it."
   gate on a `pcsx_rearmed` perf spike, HLE BIOS default** — and **N64 not viable**
   on a standalone Quest 3 (slideshow; skip unless wanted as a non-playable demo).
 - PWA install; per-headset storage UX; performance passes on Quest.
+
+## Open tasks (2026-07-29)
+
+Current work list, highest value first. Everything above this section is
+shipped; this is what is actually left. See `docs/HANDOFF.md` for context on
+the artifact-integrity items.
+
+**Ship what's built**
+1. **Deploy.** A long tail of committed-but-undeployed work is sitting on
+   `main` — the desktop pointer-lock fix, gun/mouse disarm, SNES/C64 mouse,
+   distance-grab, gun-aim-align, and now the PSX gun restore + two-gun. Run
+   `npm run deploy` and confirm the live build actually carries the patched
+   cores (`grep -c rwebinput_set_lightgun` on the deployed glue, not just
+   locally).
+2. **Real-headset validation.** The single biggest gap across the whole
+   project: the rack, the keyboard prop, light guns and two-gun co-op are all
+   headless-verified only. `docs/HEADSET_LIGHTGUN_VALIDATION.md` is the
+   checklist (rewritten 2026-07-29 — the old one told testers *not* to report
+   aim-sharing, which is now exactly the bug to report).
+
+**PSX / gun follow-ups**
+3. **Real 2P play-through** of Point Blank and Lethal Enforcers I & II. The
+   two-gun evidence is mechanism + per-port isolation, not gameplay — nobody
+   has driven either title through its 2P menus.
+4. **Exercise the in-VR routing hop for PSX.** `LightGunMgr._portForGun` →
+   `libretroGunPortFor` → `sendLightgun` has never run for PSX; the probe
+   drives `window.__client.sendLightgun` directly and bypasses it entirely.
+5. **MP host gun-port binding changes** (known gap at `_hostApplyGunWire`).
+   The `gun` channel carries aim samples, not binding events, so a remote
+   peer's port stays latched on the host's core until teardown. Needs a
+   two-ended protocol change.
+6. **Policenauts multi-disc swap test.** The C6 disc-swap UI has only ever
+   seen synthetic panel probes; Policenauts is a real 2-disc `.m3u` already
+   verified booting.
+7. **Genesis Menacer / SMS Light Phaser two-gun.** `genesis_plus_gx` now
+   genuinely carries the multiport patch, so a `lightgun2` block is possible
+   with no rebuild — the prerequisite that was missing for five weeks.
+
+**Core-level, still open**
+8. **PSX Lightrec JIT** — `jit.compiled=0` on every probe. Real leads exist
+   (map-lookup timing); see the Lightrec/GL investigation notes.
+9. **PSX hardware-GL renderer** — the `rhi_lib_gl.c` vs `glsm.c` shim gap.
+10. **N64 Phase D** — owned by a *different* concurrent session; check before
+    touching.
+11. **Atari 2600** — `stella2014` is the last "classic"-style core and renders
+    0 draw calls; fix is shipping a `module`-style Stella build.
+12. **DOS / VirtualXT** — registered but boot-traps; see `docs/DOS_CORE_BUILD.md`.
+
+**Test/tooling hygiene**
+13. **Audit remaining probe assertions against negative controls.** Two were
+    found proving nothing on 2026-07-29; there is no reason to assume they
+    were the only two.
+14. **Register 7 orphaned probe scripts** in `package.json` (`probe-autopause`,
+    `probe-feedback`, `probe-focus`, `probe-multitv`, `probe-persist`,
+    `probe-pong-boot`, `probe-repatch`) — committed but unreachable.
+15. **`probe:psx-twogun` flakiness** back-to-back with another PSX probe (one
+    observed 11/23 with the core never starting; passes cleanly on a re-run).
+16. **`window.__gunFire` hazard** — it swaps in a one-gun list, so under the
+    new binding sweep it releases any other gun's port for that tick. Harmless
+    today; a trap for any future two-gun headless test.
 
 ## Parked (user-deferred, low priority)
 - ✅ **Controller cords + spawnable screens — done**, superseded by the

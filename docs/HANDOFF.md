@@ -1,6 +1,9 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated
+**2026-07-29** — see "Core-artifact integrity + PSX two-gun (2026-07-29)"
+immediately below; it changes how you should treat any "verified N/N" claim
+in this repo. Previously updated
 2026-07-28 (N64 Phase D update: a real, confirmed bug found+fixed in the
 vendored Play!-CodeGen JIT library shared by PS2/PSX/N64 — see the Phase
 NJ1/D entry under "PSX / PS2 / N64 core status" below and
@@ -56,6 +59,44 @@ full picture, since it's too new to summarize in one line.** Deployed
 support, distance-grab, the Opwolf two-gun fix, and gun-aim-align are **on
 `main`, committed + pushed but NOT yet deployed** — run `npm run deploy`
 before expecting them live. Highlights, newest first:
+- **Core-artifact integrity + PSX two-gun (2026-07-29, `dbbb2f4`, `9578494`).**
+  **Read this before trusting any "verified N/N" claim in this repo.**
+  `public/cores/` is gitignored, so nothing in git and no test could notice a
+  core binary changing. Two incidents of that class were found on the same
+  day: `genesis_plus_gx` had shipped a *stock* build for five weeks while
+  `PATCHED.json` listed it (so `fetch-cores` was protecting the wrong binary
+  and would never repair it), and — worse — the shipped `mednafen_psx_jit` was
+  byte-identical to a build predating **any** gun patch, because a rollback on
+  2026-07-27 restored a 09:44 backup over the 12:17 gun rebuild. PSX GunCon
+  was therefore silently regressed for two days while `SYSTEMS.psx.lightgun.
+  broken` still read `false`. **No rebuild was needed** — the correct build was
+  still in the WSL tree at `~/n64-build/psx-full/scripts/cores/psx/core-build/
+  dist/`. Before starting any expensive core rebuild, **search the WSL build
+  trees first**; both times the artifact already existed and had merely never
+  been copied.
+  - `PATCHED.json` now separates `cores` (the protection list `fetch-cores`
+    reads) from `patchLevels` (what each build on disk actually contains).
+    `scripts/test-patched-cores.mjs`, in `npm test`, enforces it against the
+    artifacts, with a tripwire so a rebuild cannot land without the record
+    being updated. The only valid tell is the `.js` glue — the `.wasm`
+    minifies export names and the `.worker.js` is byte-identical across
+    patched/unpatched builds, so both read 0 for *every* core.
+  - **PSX two-gun un-gated**, and the blocker on record was only half of it:
+    PSX is the only worker-execution gun system, and
+    `EmulatorWorkerRuntime.forwardLightgun` had no multiport branch at all, so
+    two guns shared one DOM pointer no matter what the core exported. Also
+    replaced the sticky-port workaround — releasing ports by counting DOM-path
+    calls cleared and re-latched every live port every frame on an MP host,
+    which would have regressed the shipped SNES Justifier co-op. Release is now
+    event-driven from `LightGunMgr.tick`.
+  - **Two probes were proving nothing.** `probe:psx-guncon`'s gating assertion
+    passed at `maxDiff=407` with **no gun connected at all**, and both gun
+    probes set `__allowBrokenLightgun`, so they stayed green with their gate
+    up. Both fixed and validated against negative controls. Lesson worth
+    keeping: a check is not evidence until you have seen it go **red** when the
+    thing it tests is broken — and prefer within-run *relative* comparisons
+    (same instant, one variable) over before/after diffs, which silently
+    measure elapsed time.
 - **PSX / PS2 / N64 cores added (2026-07-17 through 2026-07-22, branch
   `n64-jit-plan` + `main`).** Three new emulated systems, all built from
   scratch in WSL2 and verified against real headless-Chrome boots (not just
@@ -1101,10 +1142,15 @@ inline. If you're picking up stale-looking doc claims again, check `git log
   (`Hub.js`'s `setState` has none); out of scope unless this proves to matter
   in practice.
 
-## Immediate next actions (as of 2026-07-11, items 0/0.5/1-4 below; see the
-new item 00 for what changed since)
+## Immediate next actions
 
-00. **(New, 2026-07-22) Decide whether to merge `n64-jit-plan` to `main`.**
+**Refreshed 2026-07-29 — the current task list is in `docs/ROADMAP.md` under
+"Open tasks (2026-07-29)". The numbered items below are the older 2026-07-11
+list, kept because most are still accurate app-layer work; item 00 is DONE.**
+
+00. ✅ **DONE (merged 2026-07-27).** ~~**(New, 2026-07-22) Decide whether to merge `n64-jit-plan` to `main`.**~~
+    `main` and `n64-jit-plan` were fast-forwarded to the same commit; the PSX,
+    PS2 and N64 core work all ship on `main`. Original text kept for context:
     It carries a real, working, headless-verified PSX core (with a genuine
     Wasm-JIT) and a real, working N64 interpreter core, both ready to ship as
     new systems — see "PSX / PS2 / N64 core status" above. Nothing about
