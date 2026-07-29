@@ -17,13 +17,19 @@ Background on how the loop works lives in
 
 ### Load the deployed build
 
-1. On the Quest, open the browser and go to the deployed build (the
-   `dionysus.dk` light-gun build — confirm with the orchestrator which path is
-   live; remote logging only auto-enables on the `dionysus.dk` host over HTTPS,
-   see [`src/Logger.js`](../src/Logger.js) `_detectServerUrl`).
+1. On the Quest, open the browser and go to:
+
+   ```
+   https://dionysus.dk/webxr/libretrowebxr2/
+   ```
+
+   Verified live on 2026-07-29 carrying all six gun-patched cores (nestopia,
+   snes9x, genesis_plus_gx, play, mupen64plus_next, mednafen_psx_jit — each
+   confirmed byte-identical to the locally-tested build). Remote logging
+   auto-enables on the `dionysus.dk` host over HTTPS, see
+   [`src/Logger.js`](../src/Logger.js) `_detectServerUrl`.
 2. Wait for the room to load (console + TV rack visible on a flat screen).
-3. Note the **room id** — it is the multiplayer room you joined (default is
-   `default` if you did not pick one). You need it to read logs (below).
+3. Note the **log session id** — see below. It is *not* always the room id.
 4. Press **Enter VR** and put the headset on if you took it off. You should be
    standing in the room with the TV(s) and the desk; the light-gun prop rests on
    the desk to the **left of the console** (orange/grey pistol, barrel pointing
@@ -38,15 +44,34 @@ Read them live from a PC browser at:
 https://dionysus.dk/logs?session=<room>
 ```
 
-where `<room>` is the room id from step 3 (e.g. `https://dionysus.dk/logs?session=default`).
+**Finding the right `<session>` — read this, it is the #1 way to waste a session.**
+If you joined a multiplayer room, `<session>` is the room id. **If you are testing
+solo (the normal case), it is NOT `default`** — `Logger.init()` rewrites `default`
+to a stable per-device `solo-<clientId>` so one device's telemetry is not buried in
+a shared bucket ([`src/Logger.js`](../src/Logger.js) `soloSession()`). Pointing the
+viewer at `?session=default` will show an empty page and look like logging is broken.
+
+Three reliable ways to get it right:
+
+- **Easiest:** open `https://dionysus.dk/logs` with **no** `?session=` — it shows
+  *all* sessions, with a dropdown listing live ones. Pick yours.
+- The app logs its own read URL as its first line:
+  `[Logger] remote logging active → … | session=… | read: …`. Find it in the
+  all-sessions view.
+- Raw JSON for scripting/grep: `https://dionysus.dk/logs.json?session=<session>`.
+
+Endpoints verified working 2026-07-29 (ingest `POST /log` → `204`, entries read
+back and still present 45s later). Note the paths differ: **`/log`** (singular)
+ingests, **`/logs`** serves the viewer. Retention is an in-memory ring, so read
+the logs while or shortly after testing — do not leave it until the next day.
 
 - Logging is `logger.event(name, fields)` → JSON entries (see
-  [`src/Logger.js`](../src/Logger.js)). Existing events you will see today include
-  `boot-attempt`, `rom-resolved`, `console-loaded`, `boot-error`, `input`.
-- **Today there is NO gun-specific telemetry** — see §4 for the events that should
-  be added so a headset session is diagnosable without seeing the screen. Until
-  those land, you are validating by **eye in VR** plus a **spotter watching the
-  TV** and reading the generic boot/input events.
+  [`src/Logger.js`](../src/Logger.js)). Generic events include `boot-attempt`,
+  `rom-resolved`, `console-loaded`, `boot-error`, `input`.
+- **Gun-specific telemetry now exists** — six events, listed in §4. You are no
+  longer validating by eye alone; a spotter can confirm aim, fire and port
+  routing from the log stream. Two events (`lightgun-release`, `lightgun-mgr-init`)
+  are still missing, so a *silent* log does not by itself prove nothing happened.
 - Tip: have a second person at the PC with the `/logs` page open while the tester
   is in the headset, calling out what events arrive (or do not).
 
@@ -56,6 +81,37 @@ where `<room>` is the room id from step 3 (e.g. `https://dionysus.dk/logs?sessio
 - 1 spotter at a PC: watches `/logs?session=<room>` AND, ideally, a cast/mirror of
   the headset view (Quest casting) so they can see where the in-game crosshair
   actually lands vs. where the tester says they are pointing.
+
+---
+
+## 1.5 Session script — run these in this order
+
+§2 is the exhaustive matrix and is more than one sitting. This is the ordered
+short list: it front-loads the checks that can only be answered in a headset and
+that nothing else in the project covers. **Stop and write down what you saw after
+each step** — a partial run of steps 1–4 is far more useful than a rushed sweep.
+
+| # | Step | Why it is first | Pass looks like |
+|---|---|---|---|
+| 1 | Boot the build, enter VR, open the all-sessions log view and confirm your session appears | If logging is not flowing, every later step becomes unverifiable hearsay | `[Logger] remote logging active` line visible |
+| 2 | Grab the gun prop, point at the TV, fire a few shots at an **NES** Zapper game | The best-understood path; if this is wrong, something broad is broken and the exotic systems will only confuse | `lightgun-grab`, then `lightgun-aim`/`lightgun-fire` events |
+| 3 | **PSX GunCon** (`?experimental=1`) — single gun, aim + fire | **Highest value in the whole document.** PSX is the only worker-execution gun system; its in-VR routing hop (`LightGunMgr._portForGun → libretroGunPortFor → sendLightgun`) has never been exercised by any automated test | Shots register; `lightgun-aim` shows `path: "multiport"` |
+| 4 | **PSX two-gun** — second gun, both players firing | Newly enabled 2026-07-29; headless-verified only | **Both ports report `path: "multiport"`**; ports do not cross-talk |
+| 5 | Aim accuracy sweep — corners + centre (§2c) | Needs a human eye; headless cannot judge "where it actually points" | Crosshair lands where the barrel points |
+| 6 | Arm-on-grab page reload in XR (§2b) | Known wrinkle; only reproducible in a real XR session | Session recovers, gun still works after reload |
+| 7 | Feel — latency, jitter, framerate (§2f) | Subjective by definition | No perceptible lag; framerate holds |
+
+**If you only have ten minutes, do steps 1–4.** Steps 3 and 4 are the ones that
+would change project decisions; 5–7 refine confidence in something already
+believed to work.
+
+Two cautions carried over from the headless work:
+
+- The gun and mouse are **armed on grab, and arming reboots the core.** A reload
+  mid-session is expected behaviour, not a crash (§2b).
+- A green log line proves the *app* dispatched the event. Whether the *core*
+  registered the hit is only visible on screen — which is why step 2 uses a game
+  whose hit feedback you can recognise instantly.
 
 ---
 
