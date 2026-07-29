@@ -14,11 +14,12 @@
                background: #1b1b1e; border-bottom: 1px solid #2a2a2e; z-index: 2; }
       header h1 { margin: 0 8px 0 0; font-size: 14px; font-weight: 600; letter-spacing: .03em; color: #9aa; }
       header .sp { flex: 1; }
-      header button, header label, header select {
+      header button, header label, header select, header a {
         font: inherit; font-size: 13px; background: #2a2a2e; color: #eee;
         border: 1px solid #3a3a40; border-radius: 6px; padding: 6px 10px; cursor: pointer;
+        text-decoration: none;
       }
-      header button:hover, header label:hover { background: #34343a; }
+      header button:hover, header label:hover, header a:hover { background: #34343a; }
       header select { max-width: 260px; }
       header input[type=file] { display: none; }
       input[type=text] { font: inherit; font-size: 13px; background: #161618; color: #eee;
@@ -62,6 +63,15 @@
       </div>
 
       <span class="sp"></span>
+
+      <!-- Cross-links to the other two builds. This is the flat-screen entry
+           point (no three.js/room); the VR build is the full room, and the
+           smoke test is the in-headset checklist. Relative paths so they work
+           in dev (vite root) and under the deploy subpath alike. -->
+      <div class="group">
+        <a href="./index.html" title="The full VR room build — 3D room, shelves, consoles, avatars. Works on a flat screen too.">🕶 VR Room</a>
+        <a href="./headset-test.html" title="In-headset VR smoke-test checklist">🧪 Headset Test</a>
+      </div>
 
       <div class="group">
         <span class="lbl">2-Player</span>
