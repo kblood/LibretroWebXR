@@ -153,6 +153,17 @@ export class EmulatorClient extends EventTarget {
     // lazily on first use (the core must be initialised). false = looked up, not
     // present (single-gun core → DOM-event fallback); null = not looked up yet.
     this._webgunSet = null;
+    // The counterpart export, rwebinput_clear_lightgun(port), behind the public
+    // clearLightgun() below. It exists because rwebinput_set_lightgun latches
+    // `lightgun[port].active = true`, and an active port IGNORES the shared DOM
+    // mouse for the rest of the core's life — so a port that STOPS being driven
+    // through the multiport path has to be handed back explicitly or it freezes
+    // at its last aim (with its trigger bit still held, if it was released
+    // mid-shot). Only an explicit caller knows when that has happened; see
+    // clearLightgun()'s comment for exactly which cases are and are NOT covered.
+    // Resolved lazily/defensively like _webgunSet; null = not looked up yet,
+    // false = core lacks the export (stock core → nothing was ever latched).
+    this._webgunClear = null;
     // Optional per-core system/BIOS files to provision into SYSTEM_DIR before
     // callMain ([{ name, url }] — e.g. PUAE's Kickstart so an Amiga boots the real
     // OS, not the AROS replacement). Fetched lazily in start(); a 404/failed fetch
@@ -378,6 +389,19 @@ export class EmulatorClient extends EventTarget {
       // negative coordinate. Use a coord just inside the edge for off-screen.
       const px = offscreen ? 0 : Math.max(0, Math.min(canvas.width - 1, Math.round(u * canvas.width)));
       const py = offscreen ? 0 : Math.max(0, Math.min(canvas.height - 1, Math.round(v * canvas.height)));
+      // Defensive: if the shared DOM path left a button held (this core booted
+      // before the setter resolved, or this console just switched a gun from the
+      // DOM path to a port), the multiport branch returns early and the matching
+      // mouseup would never be dispatched. Release it so the shared mouse's
+      // latched button can't bleed into any other port still reading it.
+      if (this._gunDown !== false) {
+        const r = canvas.getBoundingClientRect();
+        canvas.dispatchEvent(new MouseEvent('mouseup', {
+          clientX: r.left + u * r.width, clientY: r.top + v * r.height,
+          button: this._gunDown, buttons: 0, bubbles: true, cancelable: true, view: window,
+        }));
+        this._gunDown = false;
+      }
       try { this._webgunSet(port, px, py, buttons); } catch (e) { /* core gone */ }
       return;
     }
@@ -404,6 +428,37 @@ export class EmulatorClient extends EventTarget {
       canvas.dispatchEvent(new MouseEvent('mouseup', { ...base, button, buttons: 0 }));
       this._gunDown = false;
     }
+  }
+
+  // Hand libretro gun `port` back to the shared DOM mouse: undo the `active`
+  // latch that sendLightgun's multiport branch set on it, dropping any trigger
+  // bit that was still held. Idempotent, and a silent no-op on a core without
+  // the multiport patch (nothing was ever latched there) or before the core is
+  // up.
+  //
+  // WHO CALLS THIS, AND WHAT IS THEREFORE COVERED. This is an EXPLICIT
+  // binding-change signal, not something sendLightgun can infer from its own
+  // call pattern — a gun that is simply holding still sends the same port
+  // forever, and a mixed setup interleaves ported and un-ported calls every
+  // tick, so no call-ordering heuristic can tell "stopped driving" from
+  // "unchanged". The single caller is LightGunMgr.tick (see its
+  // `_gunPortBindings` sweep), which each frame knows the authoritative set of
+  // (console, port) bindings actually being driven. It therefore covers:
+  //   • a gun re-jacked to another cable port (port changes),
+  //   • a gun moved to another console (console changes),
+  //   • a gun UNPLUGGED (portForGun goes null),
+  //   • a gun dropped / no longer held (it leaves the active-gun set),
+  //   • a two-gun game replaced by a single-gun one (ports go null).
+  // NOT covered: a remote peer's gun in multiplayer. The host applies peers'
+  // aim through _hostApplyGunWire (main.js), and the 'gun' wire channel carries
+  // aim only — no binding-change event — so a REMOTE gun's port stays latched
+  // on the host's core until that core is torn down. See _hostApplyGunWire's
+  // comment; closing that needs a wire-protocol addition, not a change here.
+  clearLightgun(port) {
+    if (port == null) return;
+    const clear = this._resolveWebgunClear();
+    if (!clear) return;   // unpatched core (nothing latched) or runtime not up
+    try { clear(port); } catch (_) { /* core gone */ }
   }
 
   // Feed RELATIVE mouse motion + buttons to this core's RETRO_DEVICE_MOUSE.
@@ -506,6 +561,30 @@ export class EmulatorClient extends EventTarget {
       }
     } catch (_) { fn = null; }
     this._webgunSet = fn || false;
+    return fn || null;
+  }
+
+  // Resolve (once) rwebinput_clear_lightgun(port), the counterpart of the setter
+  // above. Same defensive resolution: the patched cores are linked with
+  // EXPORTED_RUNTIME_METHODS = callMain,FS,addFunction,removeFunction and NOT
+  // cwrap, so the raw `_rwebinput_clear_lightgun` export is what actually gets
+  // used; cwrap is preferred only where a build happens to expose it. Returns
+  // null on any core without the export (every stock/base-only core), so callers
+  // no-op instead of throwing.
+  _resolveWebgunClear() {
+    if (this._webgunClear) return this._webgunClear;
+    if (this._webgunClear === false) return null;  // looked up, absent
+    const M = this._getModule();
+    if (!M) return null;                           // runtime not ready yet
+    let fn = null;
+    try {
+      if (typeof M.cwrap === 'function' && (M._rwebinput_clear_lightgun || M.asm?.rwebinput_clear_lightgun)) {
+        fn = M.cwrap('rwebinput_clear_lightgun', null, ['number']);
+      } else if (typeof M._rwebinput_clear_lightgun === 'function') {
+        fn = (p) => M._rwebinput_clear_lightgun(p);
+      }
+    } catch (_) { fn = null; }
+    this._webgunClear = fn || false;
     return fn || null;
   }
 

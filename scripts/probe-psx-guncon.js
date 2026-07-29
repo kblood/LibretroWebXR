@@ -34,32 +34,63 @@
 // (mirroring the real public/roms/local/local.collection.json "Time Crisis"
 // entry, which now also carries lightgun:true + gunDevice:"guncon").
 //
-// What this ACTUALLY proves vs. what it can't: sendLightgun() reaching
-// EmulatorWorkerRuntime's new forwardLightgun() and dispatching real
-// mousemove/mousedown/mouseup on the worker's canvas is verifiable directly
-// (this probe does — see the "inputs" metrics assertion). Whether Beetle
-// PSX's OWN RetroArch frontend build was linked against a PATCHED rwebinput
-// (docs/patches/rwebinput-lightgun.diff — stock rwebinput has NO
-// RETRO_DEVICE_LIGHTGUN case, always reads 0) is NOT verifiable by
-// inspecting the release wasm (function bodies aren't visible via string
-// search) — mednafen_psx_jit_libretro is a bespoke from-scratch build
-// (docs/PSX_CORE_BUILD.md), not one relinked through the same WSL2 pipeline
-// that patched nestopia/snes9x/genesis_plus_gx.
+// What this proves: sendLightgun() reaching EmulatorWorkerRuntime's
+// forwardLightgun() and dispatching real mousemove/mousedown/mouseup on the
+// worker's canvas is verified directly (see the "inputs" metrics assertion),
+// and — separately — that gun state actually reaches Beetle PSX, via the
+// gating AIM DISCRIMINATION assertion below (two identical trigger sequences
+// differing only in aim; the on-target one advances the calibration, the
+// off-screen one changes nothing). Whether the core artifact was linked
+// against a PATCHED rwebinput (docs/patches/rwebinput-lightgun.diff — stock
+// rwebinput has NO RETRO_DEVICE_LIGHTGUN case, always reads 0) is not
+// answerable by string-searching the release wasm (function bodies aren't
+// visible that way); the cheap static tell is the .js glue, which is what
+// public/cores/PATCHED.json records and scripts/test-patched-cores.mjs
+// re-checks on every `npm test`. mednafen_psx_jit_libretro is a bespoke
+// from-scratch build (docs/PSX_CORE_BUILD.md), not one relinked through the
+// same WSL2 pipeline that patched nestopia/snes9x/genesis_plus_gx, so it
+// needed that patch applied by hand.
 //
-// RESULT (confirmed 2026-07-27, reproduced across multiple runs): the real
-// Time Crisis disc boots straight into its "Guncon Calibration" screen — a
-// FIXED printed target (no on-screen cursor; real GunCon hardware has no
-// screen-feedback loop for aim, only a photodiode read at the moment of
-// firing, so a moving cursor was never the right thing to look for — see the
-// aim-sweep analysis below, informational only). Firing directly at the
-// drawn target (screen center, matching the "Aim and shoot at the center of
-// the screen" prompt) leaves the frame byte-identical before and after,
-// across every attempt — the shot never registers. Combined with the metrics
-// proof that forwardLightgun DID run for every call, this pins the gap to
-// the core artifact itself: this build's RetroArch frontend most likely
-// wasn't linked against the patched rwebinput, so gun position never reaches
-// Beetle PSX. Fixing it means rebuilding the core (out of scope here) —
-// tracked as a follow-up, not silently declared "working."
+// RESULT (2026-07-29, this probe green end-to-end): the real Time Crisis disc
+// boots straight into its "Guncon Calibration" screen — a FIXED printed target
+// (no on-screen cursor; real GunCon hardware has no screen-feedback loop for
+// aim, only a photodiode read at the moment of firing, so a moving cursor was
+// never the right thing to look for — see the aim-sweep analysis below,
+// informational only). Firing at the drawn target (screen center, matching the
+// "Aim and shoot at the center of the screen" prompt) advances the game's own
+// state machine, and the OUTCOME DEPENDS ON AIM: the identical trigger sequence
+// fired off-screen leaves the frame byte-identical (maxDiff=0) while the
+// on-target one moves it (maxDiff=287), both measured against their own
+// immediately-preceding pre-shot frame over the same timing budget.
+//
+// That check was VALIDATED IN BOTH DIRECTIONS on 2026-07-29, which is the only
+// reason it can be quoted as evidence:
+//   * POSITIVE (this repo, working core):     off-screen 0   / on-target 287  → PASS, 14/14
+//   * NEGATIVE (scratch checkout with SYSTEMS.psx.lightgun.broken flipped back
+//     to true, so no GunCon is ever seated — worker telemetry
+//     `gun:{multiport:null,devices:null}`):   off-screen 412 / on-target 343  → FAIL, 12/14
+// The negative run is the same one that exposed the PREVIOUS version of this
+// assertion as worthless: it compared the settled post-shot frame against the
+// boot-time baseline and passed with NO GUN CONNECTED AT ALL at maxDiff=407 —
+// LARGER than a genuine hit's 287 — because that screen ("Check the GunCon
+// connection") drifts over the ~25s the comparison spanned. Any future
+// rewrite of this check must be re-validated against a negative control the
+// same way, or it proves nothing. See Analysis 2 for the full rationale.
+//
+// HISTORY, because this probe was red twice for two DIFFERENT reasons and the
+// distinction matters: on 2026-07-27 it first failed 12/13 — the shot left the
+// frame byte-identical every time while the metrics proved forwardLightgun had
+// run, pinning the gap to the core artifact, which turned out to have been
+// built without the rwebinput gun patch at all. Rebuilding with the patch
+// applied made it green (13/13, before this file's 14th assertion existed).
+// Then that rebuilt core was silently overwritten on disk hours later by a
+// restore from a pre-gun-work backup, so the shipping artifact carried NEITHER
+// patch again — and because public/cores/ is gitignored, nothing showed in
+// `git status` and no re-run happened to catch it; the regression was found by
+// inspection on 2026-07-29 and fixed by restoring the correct build. That is
+// the failure mode public/cores/PATCHED.json + scripts/test-patched-cores.mjs
+// now catch statically on every `npm test`, without needing a real disc.
+// See SYSTEMS.psx.lightgun2's comment in src/systems.js for the full incident.
 //
 // Usage:
 //   npm run probe:psx-guncon
@@ -68,6 +99,7 @@
 // Exit code: 0 = all PASS assertions passed, 1 = at least one failed.
 
 import puppeteer from 'puppeteer-core';
+import { isLightgunCapable } from '../src/systems.js';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -116,6 +148,25 @@ const ok = (name, cond, extra = '') => {
 const info = (name, extra = '') => console.log(`INFO  ${name}${extra ? '  — ' + extra : ''}`);
 
 mkdirSync(SHOT_DIR, { recursive: true });
+
+// --- Registry precondition (pure, no browser) --------------------------------
+// The un-gating guard. This whole probe runs WITHOUT the
+// `window.__allowBrokenLightgun` hook (see the boot step below). While
+// SYSTEMS.psx.lightgun was still gated — this probe is exactly what lifted that
+// gate — the run opted back in through that hook, but with the flag set
+// lightgunLoadConfig('psx') returns the identical { 1: 260 } whether `broken`
+// is true or false, so a re-raised gate could not have turned this probe red:
+// it could not guard the thing it exists to guard. Asserting isLightgunCapable
+// here, flag-free, is what makes it a regression guard — if the single-gun gate
+// ever goes back up, THIS assertion fails and the probe exits 1.
+// The guard rests on this assertion ALONE, and that is worth stating plainly:
+// reproduced on 2026-07-29 by flipping SYSTEMS.psx.lightgun.broken back to true,
+// the probe exits 1 with this as the ONLY failure — every browser assertion
+// below still passes, because with no gun seated (worker telemetry:
+// `gun:{multiport:null,devices:null}`) the browser half simply never notices.
+// Mirrors scripts/probe-psx-twogun.js's isTwoGunCapable assertion.
+ok('registry: the GunCon is offered UN-GATED (isLightgunCapable(psx) === true, no allowBroken override)',
+   isLightgunCapable('psx') === true);
 
 const vite = spawn('npx', ['vite', '--port', String(PORT), '--strictPort'],
   { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], shell: true });
@@ -214,13 +265,11 @@ try {
     window.__client.addEventListener('metrics', (e) => window.__psxMetrics.push({ t: performance.now(), ...e.detail }));
   });
 
-  // SYSTEMS.psx.lightgun carries `broken: true` (this probe is exactly why —
-  // see its comment in systems.js): lightgunLoadConfig returns null for it
-  // by default so real players are never auto-armed into a gun that
-  // provably can't register a shot yet. This probe explicitly opts back in
-  // via the allowBroken test hook so it keeps exercising the real app-side
-  // wiring end-to-end while that gate is up.
-  await page.evaluate(() => { window.__allowBrokenLightgun = true; });
+  // NOTE: `window.__allowBrokenLightgun` is deliberately NOT set — see the
+  // registry precondition above for why. SYSTEMS.psx.lightgun carried
+  // `broken: true` while this probe was being written, and the probe opted back
+  // in through that hook; the flag was dropped once the gate came down, so
+  // everything below now takes the same path a real player's boot takes.
 
   // --- Step 1: boot the real disc through the REAL cartridge-insert path
   //     (window.__insertCartridge -> handleCartridgeInserted -> loadCartridge),
@@ -284,21 +333,74 @@ try {
   }
   ok('all aim-sweep snapshots captured', aimShots.every((s) => !!s.shot));
 
-  // --- Step 3: trigger pull AT the calibration target (screen center,
-  //     matching the "center" aim point above and the on-screen target's
-  //     drawn position — see psx-guncon-baseline.png) — a real GunCon
-  //     trigger pull is a mousedown edge on the worker canvas. Give the game
-  //     real time to react after releasing the trigger, then capture a
-  //     settled post-shot frame. ---
-  await page.evaluate((u, v) => window.__client.sendLightgun(u, v, true, null), 0.5, 0.5);
-  await sleep(600);
-  const triggerDownShot = await captureCanvas(page);
-  if (triggerDownShot) saveShot(triggerDownShot.dataUrl, 'psx-guncon-trigger-down.png');
-  await page.evaluate((u, v) => window.__client.sendLightgun(u, v, false, null), 0.5, 0.5);
-  await sleep(2500);
-  const triggerUpShot = await captureCanvas(page);
-  if (triggerUpShot) saveShot(triggerUpShot.dataUrl, 'psx-guncon-trigger-up.png');
-  ok('trigger down/up snapshots captured', !!triggerDownShot && !!triggerUpShot);
+  // --- Step 3 (the DISCRIMINATOR): fire the SAME trigger sequence TWICE,
+  //     differing ONLY in where the gun is pointed, and require the on-target
+  //     pull to move the screen materially more than the off-target one.
+  //
+  //     WHY IT IS SHAPED THIS WAY — read this before weakening it. The earlier
+  //     version of this check compared the settled post-shot frame against the
+  //     boot-time `baseline` captured ~25s earlier and passed on ANY non-zero
+  //     difference. That is not a discriminator: a control run with NO GUN
+  //     CONNECTED AT ALL (a scratch checkout with SYSTEMS.psx.lightgun.broken
+  //     flipped back to true, so the GunCon is never seated — worker telemetry
+  //     `gun:{multiport:null,devices:null}`) PASSED it at maxDiff=407, LARGER
+  //     than the ~287 a genuine hit produces, purely from elapsed time on a
+  //     different ("Check the GunCon connection") screen. Its stated premise —
+  //     "this screen is pixel-static across all preceding shots" — held for the
+  //     aim sweep (max=0) but NOT for the long baseline→shot interval it
+  //     actually measured, so it was reading the clock, not the gun.
+  //     Both arms below are therefore RELATIVE and identically shaped: park the
+  //     aim FIRST, capture that arm's OWN pre-shot frame immediately before the
+  //     pull, then pull/release/settle on the same timing budget. Elapsed-time
+  //     drift lands in BOTH arms; only the aim differs. Same technique as
+  //     scripts/probe-psx-twogun.js's ISOLATION check (which varies `port`
+  //     instead of aim) — being relative and same-shaped is what makes the
+  //     result immune to drift.
+  //
+  //     3a  OFF-SCREEN control (u=v=-0.25): a real GunCon pointed away from the
+  //         screen reads out of range, and forwardLightgun's `offscreen` branch
+  //         delivers the pull as the offscreen/reload button rather than an
+  //         on-screen trigger, so it cannot satisfy "Aim and shoot at the
+  //         center of the screen" and the calibration must NOT advance.
+  //     3b  ON-TARGET (screen centre — the drawn target visible in
+  //         psx-guncon-baseline.png): the calibration should register the shot.
+  //     The off-screen arm runs FIRST so 3b's state advance cannot contaminate
+  //     it. ---
+  const shotArm = async (label, u, v, names) => {
+    // Park the aim and let it settle BEFORE the pre-shot capture, so any gun
+    // cursor movement is already in the baseline and the measured delta is the
+    // GAME reacting to the trigger, not the crosshair sliding.
+    await page.evaluate((uu, vv) => window.__client.sendLightgun(uu, vv, false, null), u, v);
+    await sleep(2000);
+    const pre = await captureCanvas(page);
+    if (pre) saveShot(pre.dataUrl, names.pre);
+    await page.evaluate((uu, vv) => window.__client.sendLightgun(uu, vv, true, null), u, v);
+    await sleep(700);
+    const down = await captureCanvas(page);
+    if (down) saveShot(down.dataUrl, names.down);
+    await page.evaluate((uu, vv) => window.__client.sendLightgun(uu, vv, false, null), u, v);
+    await sleep(2500);
+    const post = await captureCanvas(page);
+    if (post) saveShot(post.dataUrl, names.up);
+    const diffs = cellDiffs(pre, post);
+    const max = diffs ? Math.max(...diffs) : null;
+    info(`[shot arm: ${label}] aim=(${u}, ${v}) — pre-shot vs settled post-shot max cell diff=${max ?? 'unavailable'}`);
+    return { pre, down, post, diffs, max };
+  };
+
+  const offScreenShot = await shotArm('OFF-SCREEN control', -0.25, -0.25, {
+    pre: 'psx-guncon-offscreen-pre.png',
+    down: 'psx-guncon-offscreen-trigger-down.png',
+    up: 'psx-guncon-offscreen-trigger-up.png',
+  });
+  const onTargetShot = await shotArm('ON-TARGET', 0.5, 0.5, {
+    pre: 'psx-guncon-pre-shot.png',
+    down: 'psx-guncon-trigger-down.png',
+    up: 'psx-guncon-trigger-up.png',
+  });
+  ok('both shot arms (off-screen control + on-target) captured their pre/down/post snapshots',
+     !!offScreenShot.pre && !!offScreenShot.down && !!offScreenShot.post
+     && !!onTargetShot.pre && !!onTargetShot.down && !!onTargetShot.post);
 
   // --- Analysis 1 (informational only — see header comment): does ANYTHING
   //     localized to the commanded aim point change between opposite-corner
@@ -330,26 +432,30 @@ try {
       `NOT expected for a real GunCon (see comment above), so a flat/zero diff here is NOT itself evidence of a gap`);
   }
 
-  // --- Analysis 2 (the REAL gating check): did shooting the calibration
-  //     target actually register with the game? Compare the settled
-  //     post-trigger-up frame against the pre-input baseline — a real hit
-  //     should advance Time Crisis's GunCon calibration flow (e.g. to a
-  //     "shot registered" / next-step / confirmation state), producing a
-  //     content-level frame change distinct from static "camera did nothing"
-  //     playback (this screen has already been shown to be pixel-static
-  //     across all preceding shots — baseline/top-left/bottom-right/top-
-  //     right/center/trigger-down are all identical, so ANY change here is
-  //     meaningful, not just idle-animation noise). If this stays flat, the
-  //     honest conclusion is that GunCon input is not reaching the core for
-  //     this specific build — a real, separate gap from the app-side wiring
-  //     (postMessage -> forwardLightgun -> DOM events on the worker canvas),
-  //     which the metrics assertions below independently confirm DID run. ---
-  const postShotDiffs = cellDiffs(baseline, triggerUpShot);
-  const postShotChanged = !!postShotDiffs && Math.max(...postShotDiffs) > 0;
-  info(`[gating] baseline vs settled post-trigger-up frame: ${postShotDiffs ? `max cell diff=${Math.max(...postShotDiffs)}` : 'comparison unavailable'}`);
-  ok('[GUNCON END-TO-END SIGNAL] shooting the calibration target actually changed game state (the settled post-trigger-up frame differs from the pre-input baseline) — a real hit reaching Beetle PSX, not just app-side event dispatch',
-     postShotChanged,
-     postShotDiffs ? `maxDiff=${Math.max(...postShotDiffs)} (screen was otherwise pixel-static across every capture up to this point)` : 'baseline/trigger-up shot grid mismatch or missing data');
+  // --- Analysis 2 (the REAL gating check): AIM DISCRIMINATION. Two identical
+  //     trigger sequences, the ONLY difference being where the gun pointed.
+  //     A shot the core never sees cannot depend on aim, so the two arms would
+  //     move together (both flat, or both carrying the same drift); requiring
+  //     the on-target arm to change while the off-screen control stays still is
+  //     therefore a falsification test of "gun state reaches Beetle PSX", not a
+  //     restatement of "the screen changed at some point".
+  //     Both conditions are load-bearing and both were checked against the
+  //     no-gun negative control described in Step 3's comment:
+  //       * off-screen control EXACTLY flat — any drift at all fails here, which
+  //         is what catches an elapsed-time/animation explanation;
+  //       * on-target arm clearly above it (twogun's ISOLATION margin, x4 + 10).
+  //     If this stays flat, the honest conclusion is that GunCon input is not
+  //     reaching the core for this specific build — a real, separate gap from
+  //     the app-side wiring (postMessage -> forwardLightgun -> DOM events on the
+  //     worker canvas), which the metrics assertions below independently
+  //     confirm DID run. ---
+  const offMax = offScreenShot.max;
+  const onMax = onTargetShot.max;
+  info(`[gating] aim discrimination: off-screen control maxDiff=${offMax ?? 'unavailable'} vs on-target maxDiff=${onMax ?? 'unavailable'} ` +
+    `(identical trigger sequence + timing in both arms; only the aim differed)`);
+  ok('[GUNCON AIM DISCRIMINATION] the identical trigger sequence advanced the calibration ONLY when aimed AT the target, and did nothing aimed off-screen — an outcome that depends on aim, i.e. gun state reaching Beetle PSX rather than app-side event dispatch or elapsed time',
+     offMax !== null && onMax !== null && offMax === 0 && onMax > offMax * 4 + 10,
+     `off-screen maxDiff=${offMax} (must be exactly 0), on-target maxDiff=${onMax} (must exceed off*4+10)`);
 
   // --- Frame-health metrics (same baseline sanity layer as every other
   //     worker-execution probe in this repo) ---
@@ -358,9 +464,11 @@ try {
   // sendLightgun call landed — give it up to ~1.5s past that interval to
   // post one more sample reflecting the trigger-up call before reading, so
   // this doesn't race a real periodic broadcast.
+  // 4 aim-sweep calls + 3 per shot arm (park / trigger down / trigger up) x 2 arms.
+  const EXPECTED_INPUTS = aimPoints.length + 6;
   await page.waitForFunction(
     (n) => (window.__psxMetrics || []).some((s) => (s.inputs || 0) >= n),
-    { timeout: 2500 }, aimPoints.length + 2,
+    { timeout: 2500 }, EXPECTED_INPUTS,
   ).catch(() => {});
   const metricsLog = await page.evaluate(() => window.__psxMetrics || []);
   const last = metricsLog[metricsLog.length - 1] || null;
@@ -380,8 +488,8 @@ try {
   // real race, not a dropped input.
   const maxInputs = metricsLog.reduce((m, s) => Math.max(m, s.inputs || 0), 0);
   ok('metrics: worker recorded the sendLightgun-driven input calls (forwardLightgun ran in the worker)',
-     maxInputs >= aimPoints.length + 2,
-     `maxInputs=${maxInputs} (expected >= ${aimPoints.length + 2})`);
+     maxInputs >= EXPECTED_INPUTS,
+     `maxInputs=${maxInputs} (expected >= ${EXPECTED_INPUTS})`);
 
   ok('NO pageerror across the whole boot/aim/fire run', pageErrors.length === 0, JSON.stringify(pageErrors));
   const relevantConsoleErrors = consoleErrors.filter((m) =>

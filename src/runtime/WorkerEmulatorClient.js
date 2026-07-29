@@ -138,6 +138,16 @@ export class WorkerEmulatorClient extends EventTarget {
     this.worker.postMessage(requestMessage(0, 'lightgun', { u, v, trigger: !!trigger, port: port ?? null }));
   }
 
+  // Hand libretro gun `port` back to the shared DOM mouse — the worker twin of
+  // EmulatorClient.clearLightgun (see that method for which cases are and are
+  // NOT covered). Fire-and-forget (id 0) like sendLightgun: it is ordered behind
+  // any aim already posted for that port, which is what makes "clear, then the
+  // next binding's first aim" arrive in that order.
+  clearLightgun(port) {
+    if (!this.worker || port == null) return;
+    this.worker.postMessage(requestMessage(0, 'lightgun-clear', { port }));
+  }
+
   async stop() {
     if (!this.worker) return;
     try { await this._request('stop'); } catch (_) {}

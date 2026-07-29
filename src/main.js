@@ -40,7 +40,7 @@ import { createDiscSwapPanel } from './DiscSwapPanel.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, libretroGunPortFor, twoGunPortsForSystem, isMouseCapable, mouseLoadConfig, isTwoMouseCapable, libretroMousePortFor, twoMousePortsForSystem, fourScoreLoadConfig, extOf, pickPrimaryFile } from './systems.js';
+import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, twoGunForSystem, libretroGunPortFor, twoGunPortsForSystem, isMouseCapable, mouseLoadConfig, isTwoMouseCapable, libretroMousePortFor, twoMousePortsForSystem, fourScoreLoadConfig, extOf, pickPrimaryFile } from './systems.js';
 import { Patchbay } from './Patchbay.js';
 import { RackMgr } from './RackMgr.js';
 import { ConsoleRuntime } from './ConsoleRuntime.js';
@@ -724,9 +724,22 @@ function _twoMousePortsForConsole(consoleId) {
 // must declare twoGun, the system must actually have a two-gun device, and the
 // gun must be enabled (game-flagged or armed this session). When false the boot
 // uses the single-gun path (or none), 100% unchanged.
+//
+// `window.__allowBrokenLightgun` bypasses the registry's `broken` gate here for
+// the same reason lightgunLoadConfig's `allowBroken` does (see its doc comment):
+// probes/de-risk tooling need to exercise the real app-side two-gun wiring while
+// a device is gated pending verification. WITHOUT this, allowBroken was a dead
+// letter for two-gun configs — every caller computes `twoGun` here FIRST and
+// passes it down, so isTwoGunCapable()'s gate short-circuited the request to the
+// single-gun path before lightgunLoadConfig ever saw allowBroken, making a gated
+// two-gun device impossible to verify (and so impossible to ever un-gate).
+// Real callers never set the flag, so a gated two-gun device is still never
+// offered to a real user.
 function _twoGunActiveFor(meta) {
   const armed = !!(meta?.lightgun || window.__lightgunArmed);
-  return armed && !!meta?.twoGun && isTwoGunCapable(meta?.system);
+  const capable = isTwoGunCapable(meta?.system)
+    || (!!window.__allowBrokenLightgun && !!twoGunForSystem(meta?.system));
+  return armed && !!meta?.twoGun && capable;
 }
 
 // Emit rich light-gun boot telemetry so a HEADSET session is diagnosable from the
@@ -1481,6 +1494,13 @@ function _gunClientFor(cableId, localClient) {
       net.sendWire('gun', { cableId, u, v, trigger, port });
       localClient?.sendLightgun?.(u, v, trigger, port);
     },
+    // LightGunMgr's multiport port-release (see EmulatorClient.clearLightgun):
+    // applied to THIS peer's own local core only. There is deliberately no wire
+    // send here — the 'gun' channel carries aim samples, not binding-change
+    // events, and inventing one would need a protocol addition on both ends. So
+    // on the host's authoritative core a REMOTE peer's gun port stays latched
+    // until teardown; see _hostApplyGunWire.
+    clearLightgun: (port) => localClient?.clearLightgun?.(port),
   };
 }
 
@@ -1501,6 +1521,16 @@ function _mouseClientFor(cableId, localClient) {
 // the whole M1 game-sync model is scoped to the one shared/authoritative game,
 // same as gamepad input, so these always target CONSOLE_ID, not a secondary
 // rack console.
+//
+// KNOWN GAP (pre-existing, multiplayer only): with a `port`, sendLightgun takes
+// the patched cores' multiport path, which LATCHES that port active — it then
+// ignores the shared DOM mouse until someone calls clearLightgun(port). The
+// local release is driven by LightGunMgr's per-tick binding sweep, which only
+// sees THIS peer's held guns; a remote peer's binding change (re-jacked,
+// unplugged, dropped gun) is invisible here because the 'gun' channel carries
+// aim samples only. So a remote gun's port stays latched on the host's core,
+// frozen at its last aim, until the core is torn down. Fixing it needs a
+// binding-change message on the wire (both ends), not a change at this line.
 function _hostApplyGunWire(data) {
   if (!net?.isHost() || !data) return;
   rackMgr.get(CONSOLE_ID)?.client?.sendLightgun(data.u, data.v, !!data.trigger, data.port ?? null);
@@ -5102,7 +5132,14 @@ async function armLightGunAndReload() {
   // Build the SAME gun boot config the load path uses, so the fresh boot seats the
   // device on the right port(s). twoGun seats two guns on two-gun-capable games.
   const twoGun = _twoGunActiveFor(m);
-  const gun = lightgunLoadConfig(m.system, { twoGun });
+  // `allowBroken` must be threaded here exactly as the two load-path call sites
+  // do it (see loadCartridge / rebootPrimaryConsole). _twoGunActiveFor honours
+  // the same flag, so passing it to one and not the other is not symmetric:
+  // with the flag set and a GATED lightgun2, _twoGunActiveFor returns true while
+  // a flag-less lightgunLoadConfig returns null, and this reboot would arm NO
+  // gun at all — strictly worse than the single-gun fallback the gate exists to
+  // provide. Real callers never set the flag.
+  const gun = lightgunLoadConfig(m.system, { twoGun, allowBroken: window.__allowBrokenLightgun });
   logger?.event?.('lightgun-arm-reboot', { system: sys, gun: lg?.label || null, file: m.file, core: m.core, title: m.title, twoGun: !!(gun && gun.guns?.length > 1) });
   try {
     // LIVE reboot: re-boot the same ROM with the gun device attached, no reload.

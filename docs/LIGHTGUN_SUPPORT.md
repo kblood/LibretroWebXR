@@ -331,6 +331,222 @@ so two guns on the **same** console would share one aim point. The **multiport p
 pointer slot + the exported setter `rwebinput_set_lightgun(port,x,y,buttons)`, so the
 frontend drives each gun's port independently. nestopia + snes9x are relinked with it.
 
+**`genesis_plus_gx` shipped STALE for five weeks — fixed 2026-07-29.** The core *was*
+relinked with the multiport patch on 2026-06-20, but only in the WSL build tree; the
+artifacts were never copied into `public/cores/`. The shipped pair was the 08:49 build
+(js 261 224 B) while `~/lightgun-build/genesis/RetroArch/` held the 16:15 build
+(js 261 548 B). Word-diffing the two **glue** files showed the only change there is the
+two added exports (`_rwebinput_set_lightgun` / `_rwebinput_clear_lightgun`) plus the
+knock-on renumbering of the `wasmExports` keys after them.
+`grep -c rwebinput_set_lightgun public/cores/<core>_libretro.js` is the check: 1 on a
+multiport core, 0 on a stale/stock one. It read **0** for `genesis_plus_gx` even though
+`PATCHED.json` already listed it, so the marker was protecting a build that did not
+have the patch it claimed.
+
+**Correction (2026-07-29): "the only change is the two exports" was true of the `.js`,
+false of the `.wasm`.** The shipped `genesis_plus_gx.wasm` is not just a relink of the
+same sources — it is a **newer upstream snapshot**: core v1.7.4 `f33876c` vs `162c343`,
+built Jun 20 vs Jun 1 2026, +18 functions and ~+11 KB of data. So this was a core version
+bump *as well as* the exports, and the earlier wording understated it. It is not
+unexplained drift, though: it aligns the core with the Jun 20 nestopia/snes9x batch, and
+those two show the **same signature** — wasm ~+29 KB (nestopia +29 038 B, snes9x
++29 594 B) against a js delta of exactly +324 B, the same +324 B seen here. A ~29 KB
+wasm / +324 B js pair is what a multiport relink from that batch looks like; treat a
+*different* shape as the thing worth investigating.
+
+**No behaviour changed by shipping it**, because SMS/Genesis define no `lightgun2`
+block, so `_twoGunPorts` is empty, `libretroGunPortFor()` returns `null` on its
+empty-`twoGunPorts` guard (`systems.js:659`), and `EmulatorClient.sendLightgun()` takes the
+DOM-mouse branch regardless of what the core exports — its multiport branch is gated on
+`port != null && this._resolveWebgun()` (`EmulatorClient.js:396`). This is purely the
+prerequisite being put in place: a Menacer/Phaser `lightgun2` block is now possible
+without a rebuild. **Lesson: `PATCHED.json` records intent, not fact — verify the
+artifact with the grep above, not the marker.**
+
+**The same grep found the inverse gap: `play` and `mupen64plus_next` read 1 but were
+never listed.** Both PS2 and N64 carry the multiport patch, yet neither appeared in
+`PATCHED.json`'s `cores`, and `fetch-cores.mjs`'s `CUSTOM_CORES` loop skips a core only
+when it is **both** listed and complete on disk — the `isProtected(core) && hasCompleteBuild`
+guard in the `CUSTOM_CORES` loop (`fetch-cores.mjs:222`), where `hasCompleteBuild` requires
+`.js`, `.wasm` *and* `.worker.js`
+— a listed-but-partial build is deliberately repaired from source rather than protected).
+An **unlisted** core is never skipped at all, so any
+`fetch-cores --from <dir>` / `$LIBRETRO_CORES_DIR` run against a machine holding stock
+builds would have copied over them without a word. (A bare `npm run fetch-cores`, as
+`deploy.ps1:88` runs it, passes no `--from` — but `candidateDirs()`
+(`fetch-cores.mjs:100-106`) *also* reads `$LIBRETRO_CORES_DIR`, so a bare run **does**
+copy from that dir whenever the variable is set. That it has never fired here is a
+property of this machine's current environment, not a guarantee of the command; assume
+any `fetch-cores` invocation can clobber.) Both are listed now. Cost of listing: a
+*legitimate* PS2/N64 rebuild copied in
+via `--from` is now skipped too, so pulling one in needs `--refresh-patched` or a
+temporary de-list.
+
+**`cores` vs `patchLevels` — protection list vs fact record (2026-07-29).**
+`PATCHED.json` now carries both, and they are deliberately allowed to differ. `cores` is
+what `fetch-cores` must not overwrite; `patchLevels` maps each core to the patches its
+build *actually* contains (`["base"]` or `["base","multiport"]`), verified by the grep,
+not assumed. `mednafen_psx_jit` is the case that forced the split: it is a custom core
+(`docs/PSX_CORE_BUILD.md`) so it must be protected, but its shipped artifact grepped **0**
+while every doc and flag said its gun worked. It was first recorded here as `["base"]`,
+on the strength of that grep — right about the number, wrong about the reason. The real
+reason was worse than a base-only build (see "The PSX clobber" below): the artifact carried
+**neither** patch, because a backup restore had clobbered the gun-enabled build. It is
+`["base","multiport"]` as of 2026-07-29, the patched build having been restored and the
+grep now reading 1. Note what the marker does while a protected core is wrong: it is
+protected, complete on disk, and (then) unpatched, so a `--from` fetch skips rather than
+repairs it — de-list or `--refresh-patched` when a repair has to arrive that way.
+
+**`scripts/test-patched-cores.mjs` checks `PATCHED.json` against the artifacts, and is in
+`npm test`** (also standalone: `npm run test:patched-cores`). It asserts that `cores` and
+`patchLevels` cover the same cores in both directions, that every multiport-claimed core
+exports both `rwebinput_set_lightgun` and `rwebinput_clear_lightgun` in its `.js` glue,
+and — as a tripwire — that a core recorded as base-only exports neither. That last
+assertion is meant to go red: the day a base-only core is relinked, the test fails until
+someone updates `patchLevels` (and, for `mednafen_psx_jit`, decides separately whether
+`SYSTEMS.psx.lightgun2.broken` can follow), so the record cannot drift back out of sync.
+
+A hardening pass on 2026-07-29 closed five ways the first version of that script could
+exit 0 while checking nothing (each reproduced against a throwaway copy of
+`public/cores/`, not theorised — see its own header). Now enforced, and confirmed by
+reading the script after the fix landed: **both** export names are asserted on **both**
+branches, so a half-applied relink exporting only one is red; a listed core with a
+`.wasm` but no `.js` **FAILS** rather than skipping (it is protected, unrepairable by any
+`--from` fetch, and 404s the loader at runtime — only a core absent *entirely* is still a
+skip); a falsy/non-object marker fails instead of falling through; a **missing** marker
+with built cores beside it fails, because that is the state in which nothing is protected
+at all; and every `patchLevels` value must be exactly `base` or `multiport`, since a typo
+like `multiPort` used to route a patched core into the base-only tripwire and assert the
+opposite of the truth. Read the script rather than this paragraph if the exact assertions
+matter. Independently of the script: only the `.js` glue is a valid
+tell — the `.wasm` minifies its export names and the `.worker.js` is pthread bootstrap,
+byte-identical between patched and stock builds; both read 0 for *every* core.
+
+### The PSX clobber — a verified, shipping gun feature silently regressed (2026-07-27 → restored 2026-07-29)
+
+The headline lesson of this whole sweep, and worse than the stale `genesis_plus_gx` case
+above, because here the feature had been **verified working and was already shipping**.
+Timeline, all on 2026-07-27:
+
+| Time | Event |
+|---|---|
+| 09:44 | A pre-gun-work backup of the PSX core is taken (`tmp/psx-core-backup-20260721/` — the `20260721` in the name is the build it captures, not the day it was made). |
+| ~11:45 | The gun-patched core is verified **13/13** by `npm run probe:psx-guncon` — real Time Crisis calibration screen advancing on a shot (`docs/PSX_CORE_BUILD.md`). |
+| 12:17 | The patched core is rebuilt in WSL; `SYSTEMS.psx.lightgun.broken` is `false`. |
+| 12:36 | `public/cores/` is overwritten from the **09:44 backup**, silently reverting gun support — most likely collateral damage from rolling back a Lightrec/GL experiment. |
+| +2 days | (2026-07-29) Found and restored from the WSL build dir (`scripts/cores/psx/core-build/dist`) — same 12:17 build, byte-verified against its own `.build.json` manifest. |
+
+For two days the shipped `mednafen_psx_jit` carried **neither** the base nor the multiport
+gun patch, while `SYSTEMS.psx.lightgun.broken` said `false`, `PATCHED.json` protected it,
+this document described a 13/13 pass, and `npm test` was green. Nothing was lying on
+purpose — every record was written when it was true, and the *artifact* moved underneath
+them. The two builds pin **identical** upstream commits (RetroArch `45246ce8`, Beetle
+`d6caed07`, Play--CodeGen `a5009f7d`, Play--Framework `587f2789`, emsdk 3.1.46), so this
+was a straight regression, not a divergent experiment someone chose to ship.
+
+Why nothing caught it: `public/cores/` is **gitignored**, so the overwrite produced no
+`git status` entry, no diff and no review; no test compared the bytes on disk against
+anything; and the probe's evidence (`tmp/psx-guncon-*.png`) is *also* gitignored and was
+left over from the passing run, so it still looked right.
+
+**The two checks that catch this**, both cheap enough to run before trusting any gun
+claim about a core:
+
+```sh
+# 1. Does the shipped GLUE actually export the multiport setters?
+grep -c rwebinput_set_lightgun   public/cores/mednafen_psx_jit_libretro.js
+grep -c rwebinput_clear_lightgun public/cores/mednafen_psx_jit_libretro.js
+# 1 on BOTH = multiport. 0 on both = stock/stale/clobbered. One of each = a
+# half-applied patch, equally broken. (.js only — .wasm minifies its export
+# names and .worker.js is pthread glue, so both read 0 for every core.)
+
+# 2. Is the artifact on disk the BUILD you think it is?
+sha256sum public/cores/mednafen_psx_jit_libretro.{js,wasm,worker.js}
+#   compare against (a) the build dir it was copied from, and (b) the per-file
+#   sha256s recorded in the adjacent mednafen_psx_jit_libretro.build.json manifest.
+#   A manifest that disagrees with the binaries beside it is the tell that the
+#   files were swapped from elsewhere.
+```
+
+Check 1 is now automated for every listed core by `scripts/test-patched-cores.mjs` in
+`npm test`. Check 2 is not automated — a manifest/binary sha256 comparison would be the
+obvious next tripwire. Full PSX-side writeup, including the rebuild recipe that must not
+be lost again: `docs/PSX_CORE_BUILD.md` ("Light-gun (GunCon) support").
+
+### PSX two-gun GunCon co-op — UN-GATED (2026-07-29)
+
+`SYSTEMS.psx.lightgun2` (GunCon `260` on ports 0 *and* 1 — one gun per native port,
+unlike the SNES Justifier's two device ids on one chained peripheral) carried
+`broken: true` from commit `f98e549`. The stated blocker was the core artifact missing
+the per-port `rwebinput_set_lightgun` export. That was real but **only half of it**, and
+the other half would have survived any number of core rebuilds:
+
+> PSX is this app's **only worker-execution gun system** (`CORES.mednafen_psx_hw.execution
+> = 'worker'`). The multiport call site lived *exclusively* in the main-thread
+> `EmulatorClient.sendLightgun` — the path the SNES Justifier rides and PSX never touches.
+> `EmulatorWorkerRuntime.forwardLightgun()` had **no multiport branch at all**: it used
+> `port` purely as a `gunDownByPort` trigger-edge key and pushed every aim through the
+> shared canvas `mousemove`. Two GunCons really would have read one pointer — the exact
+> failure the gate warned about, for app-side reasons nobody had written down.
+
+Fixed by adding the worker twin of `EmulatorClient._resolveWebgun` (`resolveWebgun()` +
+the multiport branch in `forwardLightgun`, coordinates derived from the same
+`getBoundingClientRect()` the DOM path uses so both land in one coordinate space). The
+worker now also reports a `gun` block in its metrics (`multiport` tri-state, the seated
+`devices`, and the last aim per port tagged `multiport`/`dom`), which makes "did two guns
+get two aims?" directly observable instead of inferred.
+
+**Verified — `npm run probe:psx-twogun`, 23/23**, real core, real commercial disc (Time
+Crisis), booted through the real cartridge-insert path with `twoGun: true` and **no
+`window.__allowBrokenLightgun` override**, so the run takes the same flag-free path a real
+boot takes. (The probe set that flag while the gate was still up; with it set the run was
+bit-identical either way — it threads into *both* `_twoGunActiveFor` and
+`lightgunLoadConfig`'s `allowBroken` — so it could never have caught a re-gating. It now
+runs without it and asserts `isTwoGunCapable('psx') === true` outright, which is what makes
+it a regression guard on the flip rather than a demo of the mechanism.) Four independent
+layers, each falsifying the shared-pointer mode:
+
+| Layer | Evidence |
+|---|---|
+| Seating | worker wrote `inputDevices {1:260, 2:260}` into the RA cfg + remap |
+| Routing | both ports `path='multiport'`, `gun.multiport=true`, distinct coords `(77,246)` vs `(435,246)` |
+| Rendering | Beetle PSX drew **two crosshairs at once in its per-port colours** — port 0 red `[247,62,32]`, port 1 blue `[56,158,223]` — on one identical background; gun 1's stayed put while gun 2 moved (`tmp/psx-twogun-cursors-apart.png`) |
+| Isolation | same shot, same point, differing **only** in `port`: gun 2 → `maxDiff=0`, gun 1 → `maxDiff=287` (the same signal `probe:psx-guncon`'s single-gun 14/14 control gives). A shared pointer would have registered both. |
+
+Single-gun `probe:psx-guncon` re-run **14/14** and `probe:lightgun` 9/9 / `probe:ps2-guncon`
+15/15 after the change — the proven single-gun path (which passes no `port`) is untouched.
+(That single-gun probe's gating assertion was itself replaced on 2026-07-29 after a
+negative control showed the old one passed *with no gun connected at all* — see
+`docs/PSX_CORE_BUILD.md`, "The probe's gating assertion was replaced". The two-gun
+Isolation row above was never affected: it is a within-run, same-instant comparison
+differing only in `port`, which is precisely why it is immune to that failure mode.)
+
+**Scope — do not over-quote this.** It is core-level plus per-port isolation against a real
+game, **not** a played-through 2-player co-op session: nobody has yet driven Point Blank or
+Lethal Enforcers I & II through their 2P menus with two guns. The mechanism is proven; that
+play-through is the remaining confidence gap.
+
+**Second scope limit — the VR routing hop is not covered for PSX.** The probe calls
+`client.sendLightgun(u, v, trigger, port)` directly with an explicit port. The hop that
+decides that port *in VR* — `LightGunMgr._portForGun(gun)` → `main.js`'s `portForGun`
+callback → `libretroGunPortFor(_gunSlotIndex(gun, consoleId), _twoGunPortsForConsole(…))`
+→ `sendLightgun` — is never exercised on PSX by anything. So "which physical gun becomes
+port 0 vs port 1" is untested here; only "port 0 and port 1 are genuinely separate once
+chosen" is. The one test that does drive that hop is SNES-only and *gitignored*:
+`tmp/verify-twogun-opwolf-snes9x.mjs`, which is also the sole consumer of the
+`window.__gunLibretroPort(cableId)` debug hook (`src/main.js`) — that hook has exactly one
+caller in the whole tree, and it is a file that is not committed. Closing this properly
+means a committed probe that spawns a second gun prop and reads its resolved port, on PSX.
+
+One gap this exposed and closed: `main.js`'s `_twoGunActiveFor()` gated on
+`isTwoGunCapable()` with no `allowBroken` escape, and every caller computes `twoGun` there
+*before* `lightgunLoadConfig` ever sees `allowBroken`. So a gated two-gun device was
+impossible for a probe to exercise — and therefore impossible to ever un-gate. It now
+honours `window.__allowBrokenLightgun` like the single-gun path does. The escape stays for
+the *next* gated two-gun device; `probe:psx-twogun` itself no longer uses it (above), and
+with no registered `lightgun2` carrying `broken: true` any more, the gated behaviour is
+covered by the temporary `__gatedtest` fixture in `scripts/test-systems.mjs`.
+
 ### SNES Konami Justifier two-gun co-op — VERIFIED ON THE REAL CORE (2026-06-21)
 
 Topology finding (read from `snes9x/libretro/libretro.cpp` + `controls.cpp`): although

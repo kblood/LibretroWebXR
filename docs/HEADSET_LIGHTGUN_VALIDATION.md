@@ -180,12 +180,40 @@ Off-screen / wrong-console aim sends `sendLightgun(-1,-1,trigger)` = a reload.
   conflict with normal pad input. Watch for: pad input lost when the Phaser is
   armed, or the gun not registering because the pad device holds the port. (NES/
   SNES/Genesis guns are on port 1 and do not have this conflict.)
-- **Single-mouse → 2 guns on one console share aim.** `rwebinput` exposes a single
-  mouse, so the patched core feeds the **same** aim point to every light-gun port
-  on a console. Two guns on the **same** console (e.g. 2-player Duck Hunt) would
-  share one crosshair — **co-op is not yet supported.** Two guns on **different**
-  consoles are independent. Do not file aim-sharing on one console as a bug; note
-  it as the expected co-op gap.
+- **Two guns on ONE console: supported — and aim-sharing is now a BUG, file it.**
+  This entry used to say the opposite ("`rwebinput` exposes a single mouse … co-op
+  is not yet supported … do not file aim-sharing as a bug"). That stopped being
+  true on 2026-06-21 and is left here only so an older printout of this checklist
+  isn't trusted. The **multiport patch**
+  (`docs/patches/rwebinput-lightgun-multiport.diff`) gives every libretro port its
+  own pointer slot behind the exported setter `rwebinput_set_lightgun(port,x,y,
+  buttons)`, so each gun on a console drives its own aim state. Cores built with
+  it are listed in `public/cores/PATCHED.json` (checked on every `npm test` by
+  `scripts/test-patched-cores.mjs`). **If two guns on one console share a
+  crosshair, that is a regression — file it.**
+  What has actually been verified, and by what:
+  - **SNES Justifier** (2026-06-21) — real patched `snes9x`, headless, 9/9: the
+    core's own per-gun crosshairs follow their own ports, swap when the aims swap,
+    and stay isolated. See `docs/LIGHTGUN_SUPPORT.md` §"SNES Konami Justifier".
+  - **PSX GunCon** (2026-07-29) — real core + real commercial disc,
+    `npm run probe:psx-twogun` 23/23: both ports seated (device 260 on ports 0+1),
+    both aims carried by the per-port setter with distinct coordinates at the same
+    instant, two crosshairs drawn simultaneously in their per-port colours, and the
+    same shot at the same point registering differently depending only on `port`.
+  - **Scope limit — read this before signing anything off.** Both are *core-level*
+    evidence plus per-port isolation. Nobody has played a 2-player co-op session
+    through: no one has driven Point Blank or Lethal Enforcers I & II through their
+    2P menus with two guns, and the SNES result came from a headless harness, not
+    a headset. **The in-VR routing hop has never been exercised for PSX at all** —
+    `LightGunMgr._portForGun` → `libretroGunPortFor(_gunSlotIndex(gun), twoGunPorts)`
+    → `sendLightgun(u,v,trigger,port)` is what turns "which jack the gun's cord is
+    plugged into" into a libretro port, and it is exactly the leg a headless probe
+    cannot reach and **you can**. So: plug two guns into one console, note which
+    jack each cord sits in, and check each gun drives the crosshair the seating
+    order predicts — then swap the two cords between jacks and confirm the players
+    swap with them. Record the result; that hop is currently unvalidated.
+  - Two guns on **different** consoles remain independent (separate clients,
+    canvases and pointers) — that path predates the multiport patch.
 
 ---
 

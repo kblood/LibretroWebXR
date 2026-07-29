@@ -56,7 +56,10 @@ export class LightGunMgr {
    * @param {Function} opts.getActiveGuns   () => [{ gun, controller }]  held guns + the XR controller holding each
    * @param {Function} opts.getScreenTargets () => [{ tvId, mesh }]      the rack's TV screen meshes to raycast
    * @param {Function} opts.consoleIdForTV  (tvId) => consoleId|null     which console feeds a TV (Patchbay.sourceOf)
-   * @param {Function} opts.clientForGun    (gun) => EmulatorClient|null  the console the gun is plugged into
+   * @param {Function} opts.clientForGun    (gun) => EmulatorClient|null  the console the gun is plugged into.
+   *        Receives sendLightgun() per tick, plus clearLightgun(port) when this
+   *        gun's (console, port) binding changes or the gun leaves the active
+   *        set — clearLightgun is optional on the client (see _releaseGunPort).
    * @param {Function} opts.consoleIdForGun (gun) => consoleId|null       the console the gun is plugged into
    * @param {Function} [opts.portForGun]    (gun) => number|null          the controller PORT (0-based) this gun drives.
    *        Required for two-gun co-op: gun A → port X, gun B → port Y feed two
@@ -84,6 +87,27 @@ export class LightGunMgr {
     this._ray = new THREE.Ray();
     // Per-gun previous trigger state, to flash on the rising edge.
     this._wasTriggered = new WeakMap();
+    // Multiport port-release bookkeeping: gun -> { client, key, port } for every
+    // gun currently driving a libretro PORT through the multiport path. The
+    // patched cores latch `lightgun[port].active = true` on the first per-port
+    // write and that port then IGNORES the shared DOM mouse until something
+    // calls client.clearLightgun(port) — so when a gun stops driving a port, it
+    // has to be handed back explicitly or it freezes at its last aim with its
+    // last trigger bit held (see EmulatorClient.clearLightgun).
+    //
+    // This manager is the right place to notice that because it is the only
+    // thing that knows, every frame, the AUTHORITATIVE set of (console, port)
+    // bindings actually being driven: getActiveGuns() is the held guns and
+    // portForGun()/consoleIdForGun() resolve each one's live cable seat. So the
+    // release is EVENT-driven (the binding changed / the gun left the set), not
+    // inferred from how sendLightgun happened to be called — a gun that simply
+    // holds still keeps sending the same port forever, so no call-pattern
+    // heuristic can tell "stopped driving" from "unchanged".
+    //
+    // A Map (not a WeakMap) because the sweep has to ENUMERATE it; entries are
+    // removed the moment a gun stops driving a port, so it holds at most one
+    // entry per gun currently in a two-gun co-op seat.
+    this._gunPortBindings = new Map();
   }
 
   /** Per-frame update. dt in seconds (for muzzle-flash decay). */
@@ -91,21 +115,42 @@ export class LightGunMgr {
     const guns = this._getActiveGuns?.() || [];
     this._aimAccum += dt;
     const aimDue = this._aimAccum >= AIM_LOG_INTERVAL;
-    if (!guns.length) return;
-    const targets = this._getScreenTargets?.() || [];
-    const meshes = targets.map((t) => t.mesh);
+    // Guns that drove a port this tick. Only allocated when something was
+    // latched before this tick began — with nothing latched there is nothing to
+    // release, and a null set tells the sweep to skip entirely (every binding it
+    // could see would have been created by THIS tick, i.e. is live by
+    // definition).
+    const drivenThisTick = this._gunPortBindings.size ? new Set() : null;
 
+    // PASS 1 — resolve every gun's live seat (client + console + port) and
+    // settle ALL multiport port bindings for the tick. Deliberately a separate
+    // pass: every release for this tick therefore lands BEFORE any aim in it, so
+    // two guns swapping each other's jacks in one frame can't have gun B's
+    // release of the port gun A just took wipe A's freshly-written aim.
+    const seats = [];
     for (const { gun, controller } of guns) {
       const ud = gun?.userData;
       if (!ud?.getAimRay) continue;
-
-      const trigger = !!controller?.userData?.inputSource?.gamepad?.buttons?.[0]?.pressed;
       const client = this._clientForGun?.(gun) || null;
       const myConsole = this._consoleIdForGun?.(gun) ?? null;
       // Per-gun controller port for two-gun co-op (gun A→portX, gun B→portY drive
       // independent aim points via the patched multiport core). null/undefined →
       // sendLightgun without a port = single-gun DOM-mouse path (unchanged).
       const gunPort = this._portForGun ? this._portForGun(gun) : null;
+      this._noteGunPortBinding(gun, client, myConsole, gunPort, drivenThisTick);
+      seats.push({ gun, controller, ud, client, myConsole, gunPort });
+    }
+    // Any gun that held a port but did NOT drive one this tick (dropped, or it
+    // has no aim ray) hands its port back.
+    this._sweepGunPortBindings(drivenThisTick);
+
+    if (!guns.length) return;
+    const targets = this._getScreenTargets?.() || [];
+    const meshes = targets.map((t) => t.mesh);
+
+    // PASS 2 — aim.
+    for (const { gun, controller, ud, client, myConsole, gunPort } of seats) {
+      const trigger = !!controller?.userData?.inputSource?.gamepad?.buttons?.[0]?.pressed;
 
       // Raycast the barrel ray against the TV screens.
       ud.getAimRay(this._ray);
@@ -149,6 +194,50 @@ export class LightGunMgr {
       ud.tick?.(dt);
     }
     if (aimDue) this._aimAccum = 0;
+  }
+
+  /**
+   * Record the (console, port) this gun drives this tick, releasing the port it
+   * drove before if that binding changed. `key` folds console + port together so
+   * a gun moved between consoles onto the same port number still counts as a
+   * change — and so the comparison never depends on client OBJECT identity,
+   * which is not stable: on a non-host multiplayer peer main.js's _gunClientFor
+   * builds a fresh forwarding shim on every call.
+   * @private
+   */
+  _noteGunPortBinding(gun, client, consoleId, port, drivenThisTick) {
+    const prev = this._gunPortBindings.get(gun);
+    // No client or no port = this gun is on the shared DOM-mouse path (or is
+    // unplugged) and has nothing latched of its own.
+    const key = client && port != null ? `${consoleId ?? '?'}:${port}` : null;
+    if (prev && prev.key !== key) this._releaseGunPort(prev);
+    if (key == null) {
+      if (prev) this._gunPortBindings.delete(gun);
+      return;
+    }
+    // Refresh the client on an unchanged binding: after a console reboot the
+    // same (console, port) is served by a NEW client instance, and the release
+    // has to reach the live one.
+    if (prev && prev.key === key) prev.client = client;
+    else this._gunPortBindings.set(gun, { client, key, port });
+    drivenThisTick?.add(gun);
+  }
+
+  /** Release every recorded port whose gun did not drive it this tick. @private */
+  _sweepGunPortBindings(drivenThisTick) {
+    if (!drivenThisTick || !this._gunPortBindings.size) return;
+    for (const [gun, rec] of [...this._gunPortBindings]) {
+      if (drivenThisTick.has(gun)) continue;
+      this._gunPortBindings.delete(gun);
+      this._releaseGunPort(rec);
+    }
+  }
+
+  /** @private */
+  _releaseGunPort(rec) {
+    // Optional on the client: a delegate without clearLightgun is one that never
+    // had the multiport setter either, so nothing was ever latched.
+    try { rec?.client?.clearLightgun?.(rec.port); } catch (_) { /* client gone */ }
   }
 }
 

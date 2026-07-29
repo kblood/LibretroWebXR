@@ -76,6 +76,10 @@ export class RuntimeEmulatorClient extends EventTarget {
   stop() { return this.delegate?.stop?.(); }
   sendInput(...args) { return this.delegate?.sendInput(...args); }
   sendLightgun(...args) { return this.delegate?.sendLightgun?.(...args); }
+  // Release a multiport light-gun port's `active` latch (LightGunMgr's binding
+  // sweep). Optional on the delegate — a delegate without it just means nothing
+  // was ever latched.
+  clearLightgun(...args) { return this.delegate?.clearLightgun?.(...args); }
   sendMouse(...args) { return this.delegate?.sendMouse?.(...args); }
   canSerialize() { return !!this.delegate?.canSerialize?.(); }
   serializeState() { return this.delegate?.serializeState(); }

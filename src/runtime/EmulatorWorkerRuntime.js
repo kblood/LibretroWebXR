@@ -60,6 +60,40 @@ const metrics = { framesProduced: 0, framesSkipped: 0, inputs: 0, audioBatches: 
 // (or the string 'default' when no port is given, i.e. a single-gun boot);
 // value is `false` (up) or the DOM button index currently held down.
 const gunDownByPort = {};
+// Multiport light-gun side-channel — the WORKER's mirror of EmulatorClient.js's
+// `_webgunSet`/`_resolveWebgun`. The patched (multiport) cores export
+// rwebinput_set_lightgun(port,x,y,buttons) so each controller port carries its
+// OWN aim point; a single canvas can only ever carry ONE DOM mouse pointer, so
+// this export is the ONLY way two guns on one console drive two ports
+// independently. Until this existed here, forwardLightgun() ignored `port` for
+// AIM entirely (it was only ever a gunDownByPort bookkeeping key) and every gun
+// on a worker-execution core — i.e. PSX, the only worker-execution gun system —
+// fell through to the shared DOM-mouse path. Resolved lazily on first use (the
+// core must be initialised first). null = not looked up yet; false = looked up
+// and absent (unpatched core → DOM fallback); function = resolved.
+let webgunSet = null;
+// The counterpart export, rwebinput_clear_lightgun(port), behind the
+// 'lightgun-clear' RPC. Resolved the same lazy/defensive way as webgunSet
+// (null = not looked up, false = absent, function = resolved). It exists
+// because rwebinput_set_lightgun latches `lightgun[port].active = true` and a
+// port that is active IGNORES the shared DOM mouse forever — so a port that
+// STOPS being driven through the multiport path has to be handed back
+// explicitly, or it freezes at its last aim (and, if it was released mid-shot,
+// with its trigger bit still held) until the core is torn down. Only an
+// explicit caller can know that happened; see clearLightgunPort() below for
+// which cases are and are NOT covered.
+let webgunClear = null;
+// Last value actually written per gun port, for probe/telemetry observability
+// (reported in postMetrics as `gun.ports`). `path` records WHICH code path
+// carried it — 'multiport' = straight into the core's per-port slot,
+// 'dom' = the shared single-pointer canvas events. Two ports both reading
+// 'dom' is exactly the silent two-guns-share-one-aim failure mode.
+const gunAimByPort = {};
+// Echo of the per-port device overrides writeConfig() actually wrote into the
+// RetroArch cfg + remap for this launch ({ player: libretroDeviceId }). Lets a
+// probe confirm two guns really were SEATED on two ports, at the place where
+// that decision lands, instead of inferring it from the page side.
+let seatedInputDevices = null;
 
 class WorkerEventTarget {
   constructor() { this.listeners = new Map(); }
@@ -271,6 +305,7 @@ function writeConfig(payload = {}) {
   // FILE — not the main cfg's input_libretro_device_pN — is what actually
   // connects the device at boot).
   let cfg = RETROARCH_CFG;
+  seatedInputDevices = payload.inputDevices ? { ...payload.inputDevices } : null;
   if (payload.inputDevices) {
     const RETRO_DEVICE_MASK = 0xff, RETRO_DEVICE_MOUSE = 2, RETRO_DEVICE_LIGHTGUN = 4, RETRO_DEVICE_POINTER = 6;
     const validPorts = Object.entries(payload.inputDevices)
@@ -459,6 +494,18 @@ function realEvent(type, props) {
 // harmless defensive fallback in case a differently-built core's frontend
 // resolves its listener target differently — dispatchEvent() on a target
 // with no matching listener is a no-op either way.
+//
+// MULTIPORT (two-gun) path — added 2026-07-29. Everything above describes the
+// SHARED DOM-mouse path, which is all this function had: `port` was only ever a
+// gunDownByPort key, so two guns on a worker-execution core (PSX) both wrote the
+// same canvas pointer and both libretro ports read the SAME aim. That is the
+// exact failure SYSTEMS.psx.lightgun2's `broken` gate was guarding against, and
+// it lived on the app side, not in the core artifact. When a `port` is supplied
+// AND the core exports the multiport setter, write that port's aim straight into
+// its own slot and SKIP the shared mouse entirely — mirroring
+// EmulatorClient.sendLightgun's multiport branch line-for-line. Callers that
+// omit `port` (every single-gun boot, incl. probe:psx-guncon) take the DOM path
+// below unchanged, so the proven single-gun behaviour is untouched.
 function forwardLightgun(payload) {
   if (!canvas) return;
   metrics.inputs++;
@@ -466,13 +513,69 @@ function forwardLightgun(payload) {
   const offscreen = u < 0 || u > 1 || v < 0 || v > 1;
   const key = port ?? 'default';
   const rect = canvas.getBoundingClientRect();
+
+  if (port != null && resolveWebgun()) {
+    // Coordinate space: rwebinput_mouse_cb stores `mouse.x = targetX * dpr`,
+    // where targetX is canvas-relative CSS pixels — so the equivalent of what
+    // the DOM path below produces is (u * rect.width) * dpr. Deriving it from
+    // the SAME getBoundingClientRect() the DOM path uses (rather than from
+    // canvas.width) keeps the two paths in one coordinate space by
+    // construction: RetroArch's platform_emscripten.c deliberately stomps
+    // canvas.width during startup probing (see installWorkerDomShim's
+    // layoutWidth comment), so the backing-store size is not a stable
+    // reference here the way it is on the main thread.
+    const dpr = globalThis.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(rect.width * dpr));
+    const h = Math.max(1, Math.round(rect.height * dpr));
+    // buttons bitmask: bit index = DOM MouseEvent.button, per rwebinput's
+    // `mask = 1 << mouse_event->button` and RWEBINPUT_MOUSE_BTNL=0 / BTNM=1 /
+    // BTNR=2. So 1 = left/trigger (on-screen shot), 4 = right/offscreen reload
+    // — the same split the DOM path's button/buttons pair encodes.
+    let buttons = 0;
+    if (trigger) buttons = offscreen ? 4 : 1;
+    // Clamp into the framebuffer; an off-screen aim still needs valid pixels so
+    // the core's IS_OFFSCREEN test fires on the (held) reload button rather
+    // than on a negative coordinate.
+    const px = offscreen ? 0 : Math.max(0, Math.min(w - 1, Math.round(u * w)));
+    const py = offscreen ? 0 : Math.max(0, Math.min(h - 1, Math.round(v * h)));
+    // Defensive: this key may have dispatched a DOM mousedown before the setter
+    // resolved (canvas exists from start()'s first statements, moduleInstance
+    // only after the core factory resolves), and the multiport branch below
+    // returns early, so the matching mouseup would never be emitted. Release it
+    // here. In practice rwebinput registers its DOM mouse callbacks inside
+    // callMain, which runs strictly AFTER moduleInstance is assigned — i.e.
+    // after resolveWebgun() starts succeeding — so no listener can actually have
+    // seen that mousedown and the C-side mouse.buttons cannot be latched. What
+    // this DOES fix is the JS-side bookkeeping: a stale non-false gunDownByPort
+    // entry would suppress the first real mousedown if this key ever fell back
+    // to the DOM path, and would misreport `buttons` in the telemetry below.
+    const heldOnDom = gunDownByPort[key];
+    if (heldOnDom !== undefined && heldOnDom !== false) {
+      const upProps = { clientX: rect.left + u * rect.width, clientY: rect.top + v * rect.height, button: heldOnDom, buttons: 0 };
+      try { canvas.dispatchEvent(realEvent('mouseup', upProps)); } catch (_) {}
+      try { inputTarget?.dispatchEvent(duckEvent('mouseup', upProps)); } catch (_) {}
+      gunDownByPort[key] = false;
+    }
+    try {
+      webgunSet(port, px, py, buttons);
+      gunAimByPort[key] = { x: px, y: py, buttons, path: 'multiport' };
+    } catch (_) { /* core gone */ }
+    return;
+  }
+
   const clientX = rect.left + u * rect.width;
   const clientY = rect.top + v * rect.height;
   const moveProps = { clientX, clientY };
   try { canvas.dispatchEvent(realEvent('mousemove', moveProps)); } catch (_) {}
   try { inputTarget?.dispatchEvent(duckEvent('mousemove', moveProps)); } catch (_) {}
 
-  const wasDown = gunDownByPort[key] ?? false;
+  // Seed the entry on first sight. Without this the no-trigger path never writes
+  // it, so `gunDownByPort[key]` stayed `undefined` until the first trigger edge —
+  // matching neither branch of the `buttons` expression below and falling through
+  // to 1, i.e. every idle single-gun boot reported "trigger held" from the first
+  // aim until the first real shot.
+  if (gunDownByPort[key] === undefined) gunDownByPort[key] = false;
+  const wasDown = gunDownByPort[key];
   if (trigger && wasDown === false) {
     // Off-screen shots use the right button (offscreen_shot_mbtn = 2); an
     // on-screen shot uses the left/trigger button (button 0 / buttons bit 1)
@@ -489,6 +592,88 @@ function forwardLightgun(payload) {
     try { inputTarget?.dispatchEvent(duckEvent('mouseup', upProps)); } catch (_) {}
     gunDownByPort[key] = false;
   }
+  gunAimByPort[key] = {
+    x: Math.round(clientX), y: Math.round(clientY),
+    buttons: gunDownByPort[key] === false ? 0 : (gunDownByPort[key] === 2 ? 4 : 1),
+    path: 'dom',
+  };
+}
+
+// Resolve (once) the patched core's multiport light-gun setter. Returns a bound
+// (port,x,y,buttons)=>void on a multiport-patched core, or null on an unpatched
+// core / before the runtime is ready (so forwardLightgun falls back to the
+// shared DOM path). Line-for-line the worker twin of
+// EmulatorClient.js's _resolveWebgun — cwrap preferred (it marshals args), with
+// the raw _rwebinput_set_lightgun export as the fallback.
+function resolveWebgun() {
+  if (webgunSet) return webgunSet;
+  if (webgunSet === false) return null;    // looked up, absent
+  const M = moduleInstance;
+  if (!M) return null;                     // runtime not ready yet — retry later
+  let fn = null;
+  try {
+    if (typeof M.cwrap === 'function' && (M._rwebinput_set_lightgun || M.asm?.rwebinput_set_lightgun)) {
+      fn = M.cwrap('rwebinput_set_lightgun', null, ['number', 'number', 'number', 'number']);
+    } else if (typeof M._rwebinput_set_lightgun === 'function') {
+      fn = (p, x, y, b) => M._rwebinput_set_lightgun(p, x, y, b);
+    }
+  } catch (_) { fn = null; }
+  webgunSet = fn || false;
+  return fn || null;
+}
+
+// Resolve (once) rwebinput_clear_lightgun(port), the counterpart of the setter
+// resolved above. Same defensive resolution — this build's EXPORTED_RUNTIME_
+// METHODS are callMain,FS,addFunction,removeFunction and NOT cwrap, so the raw
+// `_rwebinput_clear_lightgun` export is the path that actually gets used; cwrap
+// is preferred only when a build happens to have it. Returns null on a core that
+// lacks the export (every stock/base-only core), so callers no-op gracefully.
+function resolveWebgunClear() {
+  if (webgunClear) return webgunClear;
+  if (webgunClear === false) return null;  // looked up, absent
+  const M = moduleInstance;
+  if (!M) return null;                     // runtime not ready yet — retry later
+  let fn = null;
+  try {
+    if (typeof M.cwrap === 'function' && (M._rwebinput_clear_lightgun || M.asm?.rwebinput_clear_lightgun)) {
+      fn = M.cwrap('rwebinput_clear_lightgun', null, ['number']);
+    } else if (typeof M._rwebinput_clear_lightgun === 'function') {
+      fn = (p) => M._rwebinput_clear_lightgun(p);
+    }
+  } catch (_) { fn = null; }
+  webgunClear = fn || false;
+  return fn || null;
+}
+
+// Hand libretro gun `port` back to the shared DOM mouse: undo the `active`
+// latch forwardLightgun's multiport branch set on it, dropping any trigger bit
+// still held. The worker end of the 'lightgun-clear' RPC —
+// WorkerEmulatorClient.clearLightgun -> here — and the exact twin of
+// EmulatorClient.clearLightgun. Idempotent; a silent no-op on a core without
+// the multiport patch (nothing was ever latched there) or before the core is
+// up.
+//
+// This is an EXPLICIT binding-change signal, NOT something forwardLightgun can
+// infer from its own call pattern: a gun holding still sends the same port
+// forever, and a mixed setup interleaves ported and un-ported calls every tick,
+// so no call-ordering heuristic can separate "stopped driving" from
+// "unchanged". The only caller is LightGunMgr.tick's binding sweep (via
+// RuntimeEmulatorClient -> WorkerEmulatorClient), which each frame knows the
+// authoritative set of (console, port) bindings being driven — so this covers a
+// gun re-jacked to another port, moved to another console, unplugged, dropped,
+// or left port-less when a two-gun game is replaced by a single-gun one. NOT
+// covered: a REMOTE peer's gun in multiplayer — the host applies peers' aim via
+// main.js's _hostApplyGunWire and the 'gun' wire channel carries aim only, no
+// binding-change event, so a remote gun's port stays latched on the host's core
+// until teardown. Closing that needs a wire-protocol addition.
+function clearLightgunPort(payload) {
+  const port = payload?.port;
+  if (port == null) return;
+  const clear = resolveWebgunClear();
+  if (!clear) return;   // unpatched core (nothing latched) or runtime not up
+  try { clear(port); } catch (_) { /* core gone */ }
+  const rec = gunAimByPort[port];
+  if (rec) { rec.buttons = 0; rec.released = true; }
 }
 
 async function serializeState() {
@@ -521,6 +706,19 @@ function postMetrics() {
     ...metrics,
     uptimeMs: performance.now() - startedAt,
     jit: jit?.snapshot() || null,
+    // Light-gun routing snapshot. `multiport` is the tri-state resolution of the
+    // per-port setter (null = never looked up because no ported gun call has
+    // happened yet, false = core lacks the multiport patch, true = resolved);
+    // `devices` echoes the per-port device overrides actually written into the
+    // RA cfg/remap at boot; `ports` is the last aim written per port, tagged
+    // with which path carried it. Together these make "did two guns really get
+    // two independent aims?" directly observable instead of inferred — see
+    // scripts/probe-psx-twogun.js.
+    gun: {
+      multiport: webgunSet === null ? null : !!webgunSet,
+      devices: seatedInputDevices,
+      ports: { ...gunAimByPort },
+    },
   }));
 }
 
@@ -536,6 +734,13 @@ function stop() {
   discBridge = new DiscControlBridge(null, { discCount: 1 });
   canvas = null;
   for (const k of Object.keys(gunDownByPort)) delete gunDownByPort[k];
+  for (const k of Object.keys(gunAimByPort)) delete gunAimByPort[k];
+  // The resolved setter/clearer are bound to the module we just dropped —
+  // re-resolve against the next core rather than calling into a freed instance.
+  // The core's own per-port latch state dies with that module.
+  webgunSet = null;
+  webgunClear = null;
+  seatedInputDevices = null;
 }
 
 async function handle(method, payload) {
@@ -551,6 +756,7 @@ async function handle(method, payload) {
     case 'read-save-ram': return readSaveRam(payload.slot || 1);
     case 'input': forwardInput(payload); return null;
     case 'lightgun': forwardLightgun(payload); return null;
+    case 'lightgun-clear': clearLightgunPort(payload); return null;
     case 'serialize-state': return serializeState();
     case 'unserialize-state': await unserializeState(payload.data); return null;
     case 'stop': stop(); return null;

@@ -143,22 +143,44 @@ eq('twoGunPortsForSystem nes (single-gun) → []', twoGunPortsForSystem('nes'), 
 eq('twoGunPortsForSystem gb (no gun) → []', twoGunPortsForSystem('gb'), []);
 eq('twoGunPortsForSystem unknown → []', twoGunPortsForSystem('nope'), []);
 eq('twoGunPortsForSystem null → []', twoGunPortsForSystem(null), []);
-// PSX two-gun (GunCon on both native ports) is REGISTERED but `broken: true`
-// until the core is rebuilt with the multiport rwebinput patch that exports
-// rwebinput_set_lightgun(port,...) — without it both guns would share one DOM
-// mouse pointer. The gate must behave like a system with no two-gun device at
-// all, so a `twoGun: true` PSX game still gets its ONE working gun instead of
-// none (isTwoGunCapable false -> _twoGunActiveFor false -> single-gun path).
+// PSX two-gun = a GunCon (260) on EACH native port. Un-gated 2026-07-29 after
+// `npm run probe:psx-twogun` verified per-port aim end-to-end against the real
+// core and a real disc (23/23) — see SYSTEMS.psx.lightgun2's "How it was
+// verified" comment. Unlike the SNES Justifier (two device ids on one chained
+// peripheral) this is the same device id twice, one per port, so the pair being
+// [260, 260] is correct and NOT a copy-paste slip.
 ok('psx two-gun registered in the registry', !!twoGunForSystem('psx'));
-ok('psx NOT two-gun capable while broken', !isTwoGunCapable('psx'));
-eq('twoGunPortsForSystem psx (broken) → []', twoGunPortsForSystem('psx'), []);
-eq('psx twoGun request is gated → null', lightgunLoadConfig('psx', { twoGun: true }), null);
-// ...but the single-gun GunCon path is untouched by registering it.
+ok('psx two-gun capable (un-gated after probe:psx-twogun)', isTwoGunCapable('psx'));
+eq('twoGunPortsForSystem psx → [0,1]', twoGunPortsForSystem('psx'), [0, 1]);
+// ...and the single-gun GunCon path is untouched by un-gating the two-gun one.
 eq('psx single-gun still works', lightgunLoadConfig('psx')?.inputDevices, { 1: 260 });
-// allowBroken (probes only) yields the real two-gun shape: GunCon on ports 0+1.
-const psxTwo = lightgunLoadConfig('psx', { twoGun: true, allowBroken: true });
+const psxTwo = lightgunLoadConfig('psx', { twoGun: true });
 eq('psx two-gun inputDevices (ports 0+1)', psxTwo?.inputDevices, { 1: 260, 2: 260 });
 eq('psx two-gun guns A/B → ports', psxTwo?.guns, [{ device: 260, port: 0 }, { device: 260, port: 1 }]);
+eq('psx two-gun core', psxTwo?.core, 'mednafen_psx_hw');
+// allowBroken is a no-op now that the gate is down — same config either way.
+eq('psx two-gun allowBroken === plain request', lightgunLoadConfig('psx', { twoGun: true, allowBroken: true }), psxTwo);
+// The `broken` gate machinery must keep working for any FUTURE gated device.
+// PSX was the only descriptor carrying `broken: true`, so un-gating it would
+// otherwise silently drop all coverage of the gate itself — inject a temporary
+// gated system and drive the REAL exported functions against it.
+SYSTEMS.__gatedtest = {
+  label: 'Gated Test', defaultCore: 'snes9x', cores: ['snes9x'], exts: [], aliases: [],
+  lightgun: { label: 'G1', core: 'snes9x', device: 260, port: 1, broken: true },
+  lightgun2: { label: 'G2', core: 'snes9x', devices: [516, 772], ports: [1, 2], broken: true },
+};
+ok('gated: descriptor is still visible in the registry', !!twoGunForSystem('__gatedtest'));
+ok('gated: isTwoGunCapable false', !isTwoGunCapable('__gatedtest'));
+eq('gated: twoGunPortsForSystem → []', twoGunPortsForSystem('__gatedtest'), []);
+eq('gated: twoGun request → null', lightgunLoadConfig('__gatedtest', { twoGun: true }), null);
+eq('gated: single-gun request → null', lightgunLoadConfig('__gatedtest'), null);
+// allowBroken (probes/de-risk tooling only) bypasses the gate for both shapes.
+eq('gated: allowBroken yields the real two-gun inputDevices',
+  lightgunLoadConfig('__gatedtest', { twoGun: true, allowBroken: true })?.inputDevices, { 2: 516, 3: 772 });
+eq('gated: allowBroken yields the real single-gun inputDevices',
+  lightgunLoadConfig('__gatedtest', { allowBroken: true })?.inputDevices, { 2: 260 });
+delete SYSTEMS.__gatedtest;
+eq('gated: temporary fixture removed', twoGunForSystem('__gatedtest'), null);
 // Derivation matches lightgunLoadConfig's guns→ports for the two-gun config (the
 // value _twoGunPorts holds at boot), so primary === secondary for the same system.
 eq('twoGunPortsForSystem snes === lightgunLoadConfig guns ports',
