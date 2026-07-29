@@ -71,8 +71,27 @@ Systems & guns under test (from `docs/LIGHTGUN_SUPPORT.md`):
 |---|---|---|---|
 | NES | nestopia | Zapper | 1 (player 2) |
 | SNES | snes9x | Super Scope | 1 (player 2) |
+| SNES | snes9x | Justifier **2-gun** | both on port 1 (chained, device ids 516/772) |
 | Genesis | genesis_plus_gx | Menacer | 1 (player 2) |
 | SMS | genesis_plus_gx | Light Phaser | 0 (player 1) — shares the pad port |
+| PSX | mednafen_psx_hw | GunCon | 0 (player 1) |
+| PSX | mednafen_psx_hw | GunCon **2-gun** | 0 **and** 1 (one gun per native port) |
+| PS2 | play | GunCon2 | 0 (player 1) |
+
+**PSX/PS2 are behind `?experimental=1`** in the shipped UI (`src/systems.js`) —
+append it to the URL or these systems will not appear.
+
+**PSX is the highest-value row on this page.** It is the only
+*worker-execution* gun system, so it exercises a completely different code path
+(`EmulatorWorkerRuntime.forwardLightgun`) from every other row above, and its
+in-VR routing hop — `LightGunMgr._portForGun` → `libretroGunPortFor` →
+`sendLightgun` — has **never been exercised for PSX by any test**. The headless
+probes drive `window.__client.sendLightgun` directly and bypass it entirely.
+A headset session is currently the *only* way to cover that path.
+
+Two-gun rows need **two** physical controllers held as two guns, on one
+console. What you are checking is that each gun has its **own** aim: if both
+crosshairs move together, that is a real bug — file it (see §3).
 
 ### 2a. Prop / grab behaviour
 
@@ -217,16 +236,37 @@ Off-screen / wrong-console aim sends `sendLightgun(-1,-1,trigger)` = a reload.
 
 ---
 
-## 4. Telemetry to add (SPEC ONLY — do not write code here)
+## 4. Telemetry — MOSTLY IMPLEMENTED (spec kept for the two that aren't)
 
-Today there are **zero** gun-specific `logger.event` calls, so a headset session
-is effectively a black box: the spotter can only infer from generic boot/input
-events. Add the events below so the whole gun loop is diagnosable purely from
-`dionysus.dk/logs?session=<room>` without seeing the screen. Style matches the
-existing `logger?.event?.('name', { …fields })` calls in `main.js`. The logger
-instance is the module singleton exported from `src/Logger.js`; `LightGunMgr` does
-not currently import it, so it must be injected (e.g. an `opts.logger` /
-`opts.onAim` accessor on the constructor) rather than reaching for a global.
+**Corrected 2026-07-29.** This section used to open "today there are **zero**
+gun-specific `logger.event` calls" and was headed SPEC ONLY. That is no longer
+true — most of it was built. What actually ships today, all readable from
+`dionysus.dk/logs?session=<room>`:
+
+| Event | Where | Spec below |
+|---|---|---|
+| `lightgun-boot` | `src/main.js:753` | — |
+| `lightgun-grab` | `src/main.js:2304` | 4.1 |
+| `lightgun-aim` (throttled) | `src/LightGunMgr.js:186` | 4.4 |
+| `lightgun-fire` (rising edge) | `src/LightGunMgr.js:185` | 4.5 |
+| `lightgun-arm-reboot` / `-fallback` | `src/main.js:5143` / `:5157` | 4.3 (renamed) |
+| `lightgun-disarm` / `-fail` | `src/main.js:5246` / `:5262` | — |
+
+**Still missing: `lightgun-release` (4.2) and `lightgun-mgr-init` (4.6).**
+Without `lightgun-release` a spotter cannot tell a *deliberate* put-down from a
+tracking dropout, which matters for the new port-release behaviour — releasing a
+gun now clears its core-side port (`clearLightgun`), so a spurious release is
+visible in-game as the gun handing aim back to the shared pointer for a frame.
+
+There is also worker-side gun telemetry in the metrics block (not the log
+stream): `gun.multiport`, `gun.devices`, and `gun.ports[port] = {x, y, buttons,
+path}` where `path` is `dom` or `multiport`. **On a two-gun PSX session both
+ports must read `path: "multiport"`** — if either reads `dom`, the guns are
+sharing one pointer and that is the bug to file.
+
+The spec below is kept verbatim for 4.2 and 4.6, and as a record of intent for
+the rest; where an implemented event's name or fields differ from its spec, the
+**code is the truth**.
 
 ### 4.1 `lightgun-grab` — gun picked up
 - **Where:** the `onObjectGrabbed` handler in `src/main.js` (line ~1613, the
