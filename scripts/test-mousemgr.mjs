@@ -1,8 +1,10 @@
 // Unit tests for the pure MouseMgr helpers ([[src/MouseMgr.js]]):
 //   • worldDeltaToMouse — world hand motion → integer libretro mouse deltas
 //   • buttonsFromController — XR controller buttons → L/R bitmask
+//   • stickToMouse — thumbstick deflection → continuous per-tick libretro deltas
+//   • stickAxesFromController — XR controller → xr-standard thumbstick axes
 // Pure logic only — no scene, no DOM. Run: node scripts/test-mousemgr.mjs
-import { worldDeltaToMouse, buttonsFromController } from '../src/MouseMgr.js';
+import { worldDeltaToMouse, buttonsFromController, stickToMouse, stickAxesFromController } from '../src/MouseMgr.js';
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -50,6 +52,39 @@ eq('trigger only → 1 (left)', buttonsFromController(mk(true, false)), 1);
 eq('squeeze only → 2 (right)', buttonsFromController(mk(false, true)), 2);
 eq('both → 3', buttonsFromController(mk(true, true)), 3);
 eq('neither → 0', buttonsFromController(mk(false, false)), 0);
+
+// --- stickToMouse: thumbstick → continuous per-tick libretro deltas ---------
+// Same screen-space convention as worldDeltaToMouse: +dx=right, +dy=down.
+// xr-standard axes[3]=-1 for "pushed forward" maps directly to -dy (up),
+// mirroring worldDeltaToMouse's push-mouse-forward(-Z)→-dy(up) convention.
+{
+  const dt = 1; // 1s, so speed alone (minus deadzone/clamp) sets the output
+  eq('centred stick → 0,0', stickToMouse(0, 0, dt, 900, 0.15, 999), { dx: 0, dy: 0 });
+  eq('inside deadzone → 0,0', stickToMouse(0.1, -0.1, dt, 900, 0.15, 999), { dx: 0, dy: 0 });
+  ok('full-right ramps to full speed', stickToMouse(1, 0, dt, 900, 0.15, 999).dx === 900);
+  ok('full-left → -speed', stickToMouse(-1, 0, dt, 900, 0.15, 999).dx === -900);
+  ok('full-forward(-1) → up (negative dy)', stickToMouse(0, -1, dt, 900, 0.15, 999).dy === -900);
+  ok('full-back(+1) → down (positive dy)', stickToMouse(0, 1, dt, 900, 0.15, 999).dy === 900);
+  // Half-deflection (past the deadzone) ramps smoothly, not a jump.
+  const half = stickToMouse(0.5, 0, dt, 900, 0.15, 999).dx;
+  ok('half-deflection lands strictly between 0 and full speed', half > 0 && half < 900);
+}
+// dt scales the output — a shorter tick moves proportionally less.
+eq('dt halves the per-tick delta', stickToMouse(1, 0, 0.5, 900, 0, 999), { dx: 450, dy: 0 });
+// The clamp still applies (protects against a huge dt spike, e.g. a
+// backgrounded tab resuming) — same MAX_STEP-style guard as worldDeltaToMouse.
+{
+  const r = stickToMouse(1, 1, 10, 900, 0, 120); // 10s dt would be 9000px unclamped
+  ok('dx clamped', r.dx === 120);
+  ok('dy clamped', r.dy === 120);
+}
+
+// --- stickAxesFromController: xr-standard axes[2]/[3] extraction ------------
+const mkAxes = (x, y) => ({ userData: { inputSource: { gamepad: { axes: [0, 0, x, y] } } } });
+eq('no controller → 0,0', stickAxesFromController(null), { x: 0, y: 0 });
+eq('no gamepad → 0,0', stickAxesFromController({ userData: {} }), { x: 0, y: 0 });
+eq('short axes array → 0,0', stickAxesFromController({ userData: { inputSource: { gamepad: { axes: [0, 0] } } } }), { x: 0, y: 0 });
+eq('reads axes[2]/[3]', stickAxesFromController(mkAxes(0.4, -0.7)), { x: 0.4, y: -0.7 });
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

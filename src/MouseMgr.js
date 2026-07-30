@@ -5,6 +5,14 @@
 // [[src/LightGunMgr.js]] but feeds RELATIVE motion (not an absolute aim point),
 // so there is no raycast — just a per-prop "where was it last frame" tracker.
 //
+// TWO cursor-motion sources are summed each tick, from the SAME controller
+// holding the mouse prop: (1) hand tracking (precise, but a VR hand can't lift
+// perfectly vertically the way a real mouse does off a desk pad, so repositioning
+// for a big cursor jump drags some drift with it) and (2) the thumbstick
+// (stickToMouse / stickAxesFromController — continuous pan while deflected, for
+// fast long-distance travel that doesn't fight the hand's own arc). Hand motion
+// stays the precise/near-field input; the stick is the "declutch" for distance.
+//
 // It also owns the DESKTOP path: when not in VR, the computer mouse drives one
 // mouse via Pointer Lock (relative movementX/Y). attachDesktop(getEl, opts) wires
 // pointerlock on a target element and routes movementX/Y + buttons to the first
@@ -12,8 +20,9 @@
 // injected accessors so the same code serves single- and multi-console paths and
 // is unit-testable. main.js supplies the accessors.
 //
-// The world-motion → libretro-pixel conversion is the subtle part and lives in
-// the pure, exported worldDeltaToMouse() so it can be unit-tested without a scene.
+// Both motion sources' world/axis → libretro-pixel conversions are the subtle
+// part and live in the pure, exported worldDeltaToMouse() / stickToMouse() so
+// they can be unit-tested without a scene.
 
 import * as THREE from 'three';
 
@@ -24,6 +33,16 @@ const DEFAULT_GAIN = 1400;
 // Clamp any single-frame delta so a teleport / tracking glitch can't fling the
 // pointer across the screen. Libretro mice expect small per-frame deltas.
 const MAX_STEP = 120;
+
+// Thumbstick cursor-pan speed, in libretro pixels/second at full deflection.
+// Independent of DEFAULT_GAIN (that's metres-of-hand-motion→pixels; this is
+// stick-deflection→pixels/sec). Crosses a ~720px Amiga screen in <1s at full
+// deflection — fast enough to feel like a "declutch", not another slow drag.
+const DEFAULT_STICK_SPEED = 900;
+// Axis magnitude below which the stick is treated as centred (ignores resting
+// drift). Output ramps smoothly from 0 at this edge to full speed at full
+// deflection — no jump at the boundary.
+const DEFAULT_STICK_DEADZONE = 0.15;
 
 /**
  * Convert a world-space motion vector (the prop's position change since last
@@ -45,6 +64,32 @@ export function worldDeltaToMouse(dxWorld, dyWorld, dzWorld, gain = DEFAULT_GAIN
   return { dx: Math.round(dx), dy: Math.round(dy) };
 }
 
+/** Ramp linearly from 0 at the deadzone edge to 1 at full deflection (±1). */
+function applyDeadzone(v, dz) {
+  const a = Math.abs(v);
+  if (a < dz) return 0;
+  return Math.sign(v) * (a - dz) / (1 - dz);
+}
+
+/**
+ * Convert raw thumbstick axis values into a continuous per-tick libretro mouse
+ * delta — fast long-distance cursor travel that doesn't require physically
+ * moving the hand (see the file-header comment for why this exists alongside
+ * worldDeltaToMouse's hand-tracked motion). Same screen-space convention as
+ * worldDeltaToMouse: +dx = right, +dy = down. xr-standard gives axes[3] = -1
+ * for "stick pushed forward/away", mapped straight to -dy (cursor up) — no
+ * sign flip needed, since that mirrors worldDeltaToMouse's own push-mouse-
+ * forward(-Z)→-dy(up) convention. Pure — exported for unit tests.
+ * @returns {{dx:number, dy:number}}
+ */
+export function stickToMouse(x, y, dt, speed = DEFAULT_STICK_SPEED, deadzone = DEFAULT_STICK_DEADZONE, maxStep = MAX_STEP) {
+  let dx = applyDeadzone(x, deadzone) * speed * dt;
+  let dy = applyDeadzone(y, deadzone) * speed * dt;
+  dx = Math.max(-maxStep, Math.min(maxStep, dx));
+  dy = Math.max(-maxStep, Math.min(maxStep, dy));
+  return { dx: Math.round(dx), dy: Math.round(dy) };
+}
+
 /**
  * Derive the held-button bitmask (bit0=left, bit1=right) from an XR controller's
  * gamepad buttons. Trigger (button 0) = left; squeeze (button 1) = right — the
@@ -59,6 +104,18 @@ export function buttonsFromController(controller) {
   return mask;
 }
 
+/**
+ * Read the xr-standard thumbstick axes off an XR controller's gamepad
+ * (axes[2]=X, axes[3]=Y — same layout as [[src/LocomotionMgr.js]] /
+ * [[src/GrabMgr.js]]). Returns {x:0, y:0} when no gamepad/axes are present.
+ * Pure — exported for unit tests.
+ */
+export function stickAxesFromController(controller) {
+  const axes = controller?.userData?.inputSource?.gamepad?.axes;
+  if (!axes || axes.length < 4) return { x: 0, y: 0 };
+  return { x: axes[2] || 0, y: axes[3] || 0 };
+}
+
 export class MouseMgr {
   /**
    * @param {object} opts
@@ -66,13 +123,17 @@ export class MouseMgr {
    * @param {Function} opts.clientForMouse  (mouse) => EmulatorClient|null  the console the mouse is plugged into
    * @param {Function} [opts.portForMouse]  (mouse) => number|null  the libretro mouse PORT (two-mouse co-op); null → single-mouse DOM path
    * @param {number}   [opts.gain]          world-metres → libretro-pixels gain
+   * @param {number}   [opts.stickSpeed]    thumbstick-pan libretro-pixels/second at full deflection
+   * @param {number}   [opts.stickDeadzone] thumbstick-pan deadzone (axis magnitude, 0-1)
    * @param {Function} [opts.log]           telemetry sink log(name, fields)
    */
-  constructor({ getActiveMice, clientForMouse, portForMouse = null, gain = DEFAULT_GAIN, log = null }) {
+  constructor({ getActiveMice, clientForMouse, portForMouse = null, gain = DEFAULT_GAIN, stickSpeed = DEFAULT_STICK_SPEED, stickDeadzone = DEFAULT_STICK_DEADZONE, log = null }) {
     this._getActiveMice = getActiveMice;
     this._clientForMouse = clientForMouse;
     this._portForMouse = typeof portForMouse === 'function' ? portForMouse : null;
     this._gain = gain;
+    this._stickSpeed = stickSpeed;
+    this._stickDeadzone = stickDeadzone;
     this._log = typeof log === 'function' ? log : null;
     // Per-mouse last world position (to derive the frame delta).
     this._lastPos = new WeakMap();
@@ -101,6 +162,14 @@ export class MouseMgr {
       if (prev) {
         const m = worldDeltaToMouse(cur.x - prev.x, cur.y - prev.y, cur.z - prev.z, this._gain);
         dx = m.dx; dy = m.dy;
+      }
+      // Thumbstick pan, from the SAME controller holding the mouse — summed
+      // with the hand-tracked motion above for fast long-distance travel.
+      // See stickToMouse's doc comment for why both sources exist.
+      const { x: sx, y: sy } = stickAxesFromController(controller);
+      if (sx || sy) {
+        const s = stickToMouse(sx, sy, _dt, this._stickSpeed, this._stickDeadzone);
+        dx += s.dx; dy += s.dy;
       }
       // Save the current position for next frame (clone — cur is reused scratch).
       this._lastPos.set(mouse, cur.clone());
