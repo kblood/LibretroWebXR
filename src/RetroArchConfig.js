@@ -155,10 +155,33 @@ global_core_options = "true"
 // HAVE_HW builds and "beetle_psx_" otherwise; the unused one is ignored.
 // Note this option is "Restart required" in the core, so it has to be in the
 // core-options file before content loads (which is what this constant is for).
+// dosbox_pure_voodoo_perf is the SAME class of fix as the Beetle PSX options
+// above, found by reading dosbox_pure_libretro.cpp directly (2026-07-30/31).
+// Its default "auto" (and "4") make retro_load_game() request an HW render
+// context purely to support optional 3dfx Voodoo emulation — but once that
+// context exists, DOSBox Pure's `dbp_opengl_draw` function pointer gets set
+// in HWContext::Reset and from then on EVERY frame (Voodoo or not — plain
+// VGA/text DOS content included) is submitted through its own internal GL
+// blit-into-FBO path instead of the plain `video_cb(buf.video, ...)`
+// software path. In this project's worker/OffscreenCanvas WebGL2 context
+// that GL blit path produces a persistently solid-black presented frame
+// (thousands of frames presented at full rate, zero core/worker errors,
+// real content genuinely running underneath — confirmed via a real FreeDOS
+// floppy mounting and DOSBox's own program dispatcher selecting it) even
+// though DOSBox's software framebuffer (`buf.video`) itself is fine. Setting
+// voodoo_perf to any non-auto/non-"4" value (e.g. "1" = Software Multi
+// Threaded) skips HW render negotiation in retro_load_game() entirely, so
+// dbp_opengl_draw never gets set and every frame takes the working
+// video_cb(buf.video, ...) path — at the cost of 3dfx Voodoo emulation
+// running in software instead of via host OpenGL, which nothing in this
+// project currently depends on. Also a "Restart required" option per the
+// core, so (like the Beetle options) it must be in the core-options file
+// before content loads.
 export const RETROARCH_CORE_OPTIONS = `beetle_psx_cpu_dynarec = "disabled"
 beetle_psx_hw_cpu_dynarec = "disabled"
 beetle_psx_renderer = "software"
 beetle_psx_hw_renderer = "software"
+dosbox_pure_voodoo_perf = "1"
 `;
 
 // Players 2-4 keyboard binds, generated from the same table GameInputMgr

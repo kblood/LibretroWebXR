@@ -1,11 +1,103 @@
-# DOS support (VirtualXT) — status & build notes
+# DOS support — status & build notes
 
-DOS is registered as a system (`dos`) running on the **VirtualXT** libretro core
-(an Intel 8088 / IBM PC-XT emulator, MPL-2.0, built-in GLaBIOS — no proprietary
-BIOS needed). The system + core are wired into `src/systems.js` exactly like the
-other computer systems (`keyboard:true`, `medium:'floppy'`).
+## Current real status (2026-07-31 — read this before anything below, supersedes everything about VirtualXT)
 
-## Current real status (verified 2026-07-29 — read this before anything below)
+The 2026-07-29 plan below ("target DOSBox Pure next") was actually carried out
+on branch/commit `2715c65` the same day: a real **DOSBox Pure** emscripten
+core was built (pthreads/`HAVE_THREADS=1`, `HAVE_OPENGLES3=1`) and staged to
+`~/dosbox-build/stage/latest` in WSL2 — but left "staged, NOT installed" (no
+`public/cores/` copy, no `systems.js` entry, no boot verification). That is
+the working core this doc's older sections say doesn't exist yet; it was just
+never plugged in. Status as of this session (2026-07-30/31):
+
+- **Installed** into `public/cores/dosbox_pure_libretro.{js,wasm,worker.js}`
+  (gitignored, as with every other core) with a matching `.build.json`
+  manifest (also gitignored — no core manifest in this repo is git-tracked,
+  see `git ls-files public/cores/`; verify a core is real by hash/behavior,
+  not by the manifest, per the gitignored-artifact-regression lesson from the
+  PSX work).
+- **Headless boot infra built and working**: `test/dos-core-e2e/{index.html,harness.js}`
+  + `scripts/probe-dos-core.js`, following the exact N64/PSX pattern.
+- **The pthread worker-in-worker risk flagged at build time is retired.**
+  This is the first core in the app to call real `pthread_create()`
+  (`DBP_ThreadControl`) from inside our own dedicated execution Worker. It
+  works: the core boots, runs its main loop indefinitely at full frame rate,
+  mounts a real FAT12 floppy (`public/roms/local/dos/freedos-boot.img`,
+  gitignored), and its internal program dispatcher selects and runs a real
+  program — all with zero crashes and zero worker errors, sustained over
+  1000+ frames / 20+ seconds.
+- **Found and fixed a real, generic app bug this exposed**: Emscripten's
+  pthread-enabled glue does internal `postMessage()` scheduling calls (a
+  `setImmediate` polyfill trick) on the same worker message channel this
+  app's own REQUEST/RESPONSE/EVENT/FRAME protocol uses. `assertProtocolMessage()`
+  in `src/runtime/protocol.js` used to treat any message missing a `protocol`
+  field as fatal; it now silently ignores such "foreign traffic" instead, only
+  throwing for a message that claims the protocol but has the wrong version.
+  Fixed in `protocol.js`, `WorkerEmulatorClient.js`, `EmulatorWorkerRuntime.js`.
+  This would have blocked ANY future pthread-enabled core, not just this one.
+- **Found and fixed a real core-side rendering bug, by reading DOSBox Pure's
+  own C++ source** (`~/dosbox-build/dosbox-pure/dosbox_pure_libretro.cpp` in
+  WSL2): its `voodoo_perf` core option defaults to `"auto"`, which makes
+  `retro_load_game()` negotiate an OpenGL **HW render context purely for
+  optional 3dfx Voodoo emulation** — but once that context exists, DOSBox
+  Pure's `dbp_opengl_draw` function pointer is set in `HWContext::Reset` and
+  **every** frame after that (Voodoo or not) is submitted through its own
+  internal GL blit-into-FBO path instead of the plain
+  `video_cb(buf.video, ...)` software path. In this project's worker/
+  OffscreenCanvas WebGL2 context that GL path presented nothing (solid
+  black), exactly the same class of bug already fixed for Beetle PSX HW (see
+  the `RETROARCH_CORE_OPTIONS` comment in `src/RetroArchConfig.js`). Fix:
+  `dosbox_pure_voodoo_perf = "1"` (Software Multi Threaded) in
+  `RETROARCH_CORE_OPTIONS`, which skips HW render negotiation entirely.
+  Confirmed via verbose (`-v`) boot logs: the "Requesting OpenGL context...",
+  "Using HW render, OpenGL driver forced.", and "[GL] Initializing HW render"
+  lines are all gone after the fix, replaced by the plain software `gl`
+  display-driver path. This fix is real and worth keeping regardless of the
+  next point.
+
+**Still broken / open**: even with the HW-render bug fixed, the presented
+video is **still solid black** — confirmed both by 5-point canvas sampling
+and by direct visual review of full screenshots taken at multiple points
+during a 25+ second boot with real content mounted. So there are (at least)
+two independent problems here, not one: the HW-render-path bug above (real,
+fixed) and something else keeping DOSBox's own software framebuffer
+(`buf.video`) from ever showing content, even though the core reports no
+errors, keeps presenting frames at a steady rate, and its `PUREMENU`/`DOSBOX`
+program dispatcher log lines show it selecting real content to run. No
+`[DOSBOX] Resolution changed ...` log line — which fires on every VGA mode
+change — was ever observed, which is *consistent with* (but does not prove)
+either a normal 80x25 text-mode boot that never changes mode, or a stalled
+emulation thread that never gets far enough to draw anything. **Leading
+untested hypothesis**: a pthread/semaphore synchronization stall specific to
+this worker-in-worker topology, occurring after DOSBox's program-selection
+logic runs (which appears to happen very early, likely still
+initialization-phase) but before its CPU-emulation thread actually starts
+executing/drawing — this would explain continuous frame *presentation*
+(driven by this app's own timer-based frame pump, independent of whether the
+core's own emulation thread is alive) coexisting with zero real video
+content. Not yet confirmed; would need core-side instrumentation (e.g.
+enabling `dosbox_pure_perfstats` to check for periodic speed/cycle log
+output over a much longer wait, or adding temporary debug logging to the
+core's CPU loop and rebuilding) to verify. Do not treat this as fixed until
+a real screenshot shows real DOS video content.
+
+**Not done as a result**: `dosbox_pure` is not yet added to `src/systems.js`'s
+`CORES`/`SYSTEMS.dos` — that should wait until content actually renders, so
+`experimental:true` DOS stays exactly as broken/hidden as it already was
+rather than silently swapping in a differently-broken core.
+
+---
+
+## History: the original VirtualXT attempt (superseded, kept for context)
+
+DOS was originally registered as a system (`dos`) running on the **VirtualXT**
+libretro core (an Intel 8088 / IBM PC-XT emulator, MPL-2.0, built-in GLaBIOS —
+no proprietary BIOS needed). The system + core were wired into `src/systems.js`
+exactly like the other computer systems (`keyboard:true`, `medium:'floppy'`).
+VirtualXT is a dead end (see below) — DOSBox Pure per the section above is the
+live path.
+
+### Status as last verified for VirtualXT (2026-07-29)
 
 **`virtualxt_libretro.wasm` is ABSENT from `public/cores/` and 404s on the live
 deploy.** The "prebuilt buildbot binary that boot-traps" described in the next

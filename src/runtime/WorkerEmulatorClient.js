@@ -195,6 +195,7 @@ export class WorkerEmulatorClient extends EventTarget {
   _onMessage(raw) {
     let message;
     try { message = assertProtocolMessage(raw); } catch (error) { this._fatal(error.message); return; }
+    if (message === null) return; // foreign traffic on the same channel (see assertProtocolMessage) — not ours, not an error
     if (message.type === WorkerMessage.RESPONSE) {
       const pending = this._pending.get(message.id);
       if (!pending) return;

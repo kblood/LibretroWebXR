@@ -832,6 +832,7 @@ self.addEventListener('message', async (event) => {
   let message;
   try { message = assertProtocolMessage(event.data); }
   catch (error) { postMessage(eventMessage('error', serializeError(error))); return; }
+  if (message === null) return; // foreign traffic on the same channel (see assertProtocolMessage) — not ours, not an error
   if (message.type === WorkerMessage.FRAME_ACK) { framePending = false; clearFrameAckWatchdog(); return; }
   if (message.type !== WorkerMessage.REQUEST) return;
   try {
