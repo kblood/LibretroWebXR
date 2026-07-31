@@ -1,6 +1,76 @@
 # DOS support — status & build notes
 
-## Current real status (2026-07-31 — read this before anything below, supersedes everything about VirtualXT)
+## Current real status (2026-08-01 — RESOLVED, read this before anything below, supersedes everything about VirtualXT)
+
+**DOSBox Pure genuinely renders now.** Installed, wired into `src/systems.js`
+(`CORES.dosbox_pure`, `SYSTEMS.dos.defaultCore = 'dosbox_pure'`), and
+headless-verified via `scripts/probe-dos-core.js`: a screenshot of the booted
+core shows a fully legible **DOSBOX PURE START MENU** (real text, real UI,
+real colors) on the synthetic FreeDOS boot floppy
+(`public/roms/local/dos/freedos-boot.img`, gitignored). Not just non-black
+pixels — actual, readable content. `experimental: true` stays set (same
+in-VR-cart-insert-path reachability gap as PSX/N64, plus only tested against
+a synthetic boot floppy so far, not a real commercial game).
+
+The two bugs documented below (protocol.js foreign-message handling,
+`voodoo_perf` HW-render bypass) were real and necessary but NOT sufficient —
+video was still solid black after both. The actual root cause, found via
+C-level (`retro_run()`) and JS-level (`Browser.mainLoop`) instrumentation of
+the running core, not guesswork:
+
+**Root cause: `EM_TIMING_SETIMMEDIATE` doesn't work in a nested-Worker
+topology.** Emscripten's main-loop scheduler supports three timing modes —
+`EM_TIMING_RAF` (requestAnimationFrame), `EM_TIMING_SETTIMEOUT` (a plain
+timer), and `EM_TIMING_SETIMMEDIATE` (a message-based "run as fast as
+possible" polyfill). Inside a Worker, the `SETIMMEDIATE` polyfill calls bare
+`postMessage({target:"setimmediate"})` — which in a Worker's global scope
+posts the message **outward to whatever created the worker**, not back to
+itself. Stock Emscripten shell.html JS has a complementary listener that
+relays it straight back in, closing the loop. This app has no such relay: the
+whole RetroArch+core runtime already lives inside its own custom Worker
+(`src/runtime/EmulatorWorkerRuntime.js`), and the main thread that owns that
+worker (`WorkerEmulatorClient.js`) has never heard of this Emscripten-internal
+convention. The message vanishes, `Browser.mainLoop`'s continuation never
+arrives, and the loop silently stops ticking forever after the very first
+`emscripten_resume_main_loop()` call — `retro_run()` never gets called again,
+while this app's own timer-driven frame-presentation pump keeps right on
+"presenting" whatever stale (black) framebuffer content is sitting there,
+which is exactly the "steady frame count, zero video, zero errors" symptom
+that made this so slow to pin down.
+
+Confirmed empirically, not by inspection alone: a temporary C-level diagnostic
+in `retro_run()` (logs unconditionally on its very first call) never fired at
+all; JS-level instrumentation of `Browser.mainLoop.pause()/resume()` and the
+`checkIsRunning()`/scheduler chain showed `resume()` correctly re-arming a
+scheduler, that scheduler correctly getting invoked once, `Browser_emulated_
+setImmediate()` correctly firing and posting `{target:"setimmediate"}` — and
+then nothing: the matching `Browser_setImmediate_messageHandler` never once
+received that message back. (A *stale*, already-queued `requestAnimationFrame`
+callback from an earlier, superseded scheduler setup DID fire once — but by
+then `Browser.mainLoop.currentlyRunningMainloop` had already advanced past
+it, so `checkIsRunning()` correctly self-cancelled it before it could reach
+`retro_run()`. Red herring, not the fix.)
+
+**Fix** (RetroArch source level — `~/amiga-build/RetroArch/frontend/drivers/
+platform_emscripten.c`, the shared checkout every core in this repo builds
+against): every call site that could select `EM_TIMING_SETIMMEDIATE`
+(`thread_main()`, `platform_emscripten_enter_fake_block()`,
+`platform_emscripten_set_main_loop_interval()`) now resolves to
+`EM_TIMING_SETTIMEOUT` instead, specifically when `HAVE_THREADS` is defined —
+sidestepping the message round-trip entirely via a plain timer tick. Scoped
+narrowly with `#if defined(HAVE_THREADS)` so N64/PSX's non-threaded
+`EM_TIMING_RAF` path (which works fine as-is — RAF has no such round-trip
+requirement) is completely untouched. This is a local patch to the shared
+WSL2 RetroArch checkout, not upstreamed — re-applying it is a prerequisite
+for any *future* HAVE_THREADS=1 core rebuild in this repo (see the `LWX:`
+comments at each call site for exact patch text if the checkout ever gets
+reset/re-cloned).
+
+Also confirmed along the way, in case future pthread-core work re-treads this
+ground: `PTHREAD_POOL_SIZE` already defaults to 4 in `Makefile.emscripten`
+(`?= 4`, wired into `LDFLAGS` automatically whenever `HAVE_THREADS=1`) — a
+"cold pthread pool" theory was floated and ruled out before the real
+root cause was found; no pool-size tuning was needed or applied.
 
 The 2026-07-29 plan below ("target DOSBox Pure next") was actually carried out
 on branch/commit `2715c65` the same day: a real **DOSBox Pure** emscripten
@@ -55,36 +125,14 @@ never plugged in. Status as of this session (2026-07-30/31):
   display-driver path. This fix is real and worth keeping regardless of the
   next point.
 
-**Still broken / open**: even with the HW-render bug fixed, the presented
-video is **still solid black** — confirmed both by 5-point canvas sampling
-and by direct visual review of full screenshots taken at multiple points
-during a 25+ second boot with real content mounted. So there are (at least)
-two independent problems here, not one: the HW-render-path bug above (real,
-fixed) and something else keeping DOSBox's own software framebuffer
-(`buf.video`) from ever showing content, even though the core reports no
-errors, keeps presenting frames at a steady rate, and its `PUREMENU`/`DOSBOX`
-program dispatcher log lines show it selecting real content to run. No
-`[DOSBOX] Resolution changed ...` log line — which fires on every VGA mode
-change — was ever observed, which is *consistent with* (but does not prove)
-either a normal 80x25 text-mode boot that never changes mode, or a stalled
-emulation thread that never gets far enough to draw anything. **Leading
-untested hypothesis**: a pthread/semaphore synchronization stall specific to
-this worker-in-worker topology, occurring after DOSBox's program-selection
-logic runs (which appears to happen very early, likely still
-initialization-phase) but before its CPU-emulation thread actually starts
-executing/drawing — this would explain continuous frame *presentation*
-(driven by this app's own timer-based frame pump, independent of whether the
-core's own emulation thread is alive) coexisting with zero real video
-content. Not yet confirmed; would need core-side instrumentation (e.g.
-enabling `dosbox_pure_perfstats` to check for periodic speed/cycle log
-output over a much longer wait, or adding temporary debug logging to the
-core's CPU loop and rebuilding) to verify. Do not treat this as fixed until
-a real screenshot shows real DOS video content.
-
-**Not done as a result**: `dosbox_pure` is not yet added to `src/systems.js`'s
-`CORES`/`SYSTEMS.dos` — that should wait until content actually renders, so
-`experimental:true` DOS stays exactly as broken/hidden as it already was
-rather than silently swapping in a differently-broken core.
+**Resolved 2026-08-01** — see the top of this section for the real root cause
+(Emscripten's `EM_TIMING_SETIMMEDIATE` message-relay never closing the loop
+in this app's nested-Worker topology) and the fix. The "stalled pthread/
+semaphore in DOSBox's own CPU thread" hypothesis floated at the time this
+paragraph was written turned out to be wrong — the CPU-emulation thread was
+never the problem; `retro_run()` (RetroArch's own per-frame driver call) was
+simply never being invoked at all, at the frontend level, regardless of
+whether DOSBox's internal threads were healthy.
 
 ---
 

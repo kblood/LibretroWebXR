@@ -83,8 +83,9 @@ export const CORES = {
   // with NO external BIOS and runs .com/.exe booters + FAT disk images directly.
   // Scope caveat: XT-class only (CGA, no 386/486) — fine for .COM/simple .EXE
   // DOS programs and 80s titles; later 386+ games (and anything needing a VxD or
-  // protected mode) need DOSBox Pure, which the buildbot does NOT ship prebuilt
-  // (it would require a heavy WSL2 emscripten build — see the dos system note).
+  // protected mode) need DOSBox Pure (CORES.dosbox_pure below, now the dos
+  // system's default core — the buildbot doesn't ship virtualxt prebuilt in
+  // this checkout either, see the dos system note for current core status).
   // weight 3 = heavy tier (full x86 + 18 MB wasm); cap to one live rack slot.
   virtualxt:         { url: 'cores/virtualxt_libretro.js',         exts: ['img','com','exe','ini'], label: 'DOS (VirtualXT)', style: 'module', license: 'MPL-2.0', weight: 3 },
   // PlayStation 2, via a from-scratch Emscripten build of jpd002/Play- (no
@@ -164,6 +165,47 @@ export const CORES = {
   mupen64plus_next:  { url: 'cores/mupen64plus_next_libretro.js',    exts: ['n64','z64','v64'], label: 'Nintendo 64 (Mupen64Plus-Next)', style: 'module', license: 'GPLv2', weight: 3,
     execution: 'worker', requiresThreads: true, contentIo: 'transfer-memfs',
     buildHash: 'mupen64plus-98c1b0d8-n0-interpreter', experimental: true },
+  // DOS / IBM PC, via a from-scratch WSL2/Emscripten build of DOSBox Pure
+  // (EmulatorJS's fork, the only one with a working platform=emscripten
+  // Makefile block) — see docs/DOS_CORE_BUILD.md for the recipe. Unlike
+  // virtualxt above, this is a REAL RetroArch+core build (HAVE_THREADS=1,
+  // real pthread_create — the first core here compiled that way, not the
+  // libco/Asyncify hack N64/PSX use), so it needs the same dedicated-worker
+  // execution topology as PSX/N64.
+  // Two real bugs found+fixed along the way (kept regardless of any future
+  // DOS work): protocol.js's assertProtocolMessage() used to treat any
+  // worker message missing a `protocol` field as fatal — pthread-enabled
+  // Emscripten glue posts its own internal scheduling traffic on the same
+  // channel, now silently ignored instead of killing the worker. And
+  // dosbox_pure_voodoo_perf defaulting to "auto" routed ALL frames through a
+  // GL blit path that renders nothing in this app's worker/OffscreenCanvas
+  // context (same class of bug as the Beetle PSX HW fix) — forced to "1" in
+  // RETROARCH_CORE_OPTIONS (src/RetroArchConfig.js) to skip HW negotiation.
+  // The THIRD and actual root cause of a still-black screen after both of
+  // those: Emscripten's EM_TIMING_SETIMMEDIATE main-loop mode is a
+  // message-based polyfill that, inside a Worker, posts
+  // {target:"setimmediate"} OUTWARD to the page that created the worker,
+  // expecting stock Emscripten shell.html JS to relay it back in so the
+  // loop can continue ticking. This app hosts the whole runtime inside its
+  // own custom worker (src/runtime/EmulatorWorkerRuntime.js) with no such
+  // relay, so that message was silently dropped and RetroArch's main loop
+  // (hence retro_run()) never ticked again after the very first
+  // emscripten_resume_main_loop() call — confirmed via C-level
+  // (retro_run()) and JS-level (Browser.mainLoop) instrumentation, not
+  // guessed. Fixed at the RetroArch source level (platform_emscripten.c,
+  // the shared checkout every core here builds against): every
+  // EM_TIMING_SETIMMEDIATE call site now resolves to EM_TIMING_SETTIMEOUT
+  // instead when HAVE_THREADS is defined, sidestepping the message
+  // round-trip entirely. Scoped narrowly (HAVE_THREADS-only), so N64/PSX's
+  // non-threaded EM_TIMING_RAF path is untouched. Verified headless
+  // (scripts/probe-dos-core.js): real, legible DOSBOX PURE START MENU text
+  // renders on a synthetic FreeDOS boot floppy — not just non-black pixels.
+  // experimental: true — headless-verified only; not yet reachable from the
+  // real in-VR cartridge-insert path (same P0-2 gap as PSX/N64 above), and
+  // only tested against a synthetic boot floppy, not a real commercial game.
+  dosbox_pure:       { url: 'cores/dosbox_pure_libretro.js',         exts: ['exe','com','bat','conf','img','dosz','zip','iso','cue'], label: 'DOS (DOSBox Pure)', style: 'module', license: 'GPLv2', weight: 3,
+    execution: 'worker', requiresThreads: true, contentIo: 'transfer-memfs',
+    buildHash: 'dosbox-pure-ef363f86-retroarch-058f4999', experimental: true },
 };
 
 // Rack budget calibration (see RackBudget.js). Tuned to the Phase-0 Quest-3
@@ -273,32 +315,31 @@ export const SYSTEMS = {
     // is future-proofed to use a patched per-port setter when present, else the shared
     // DOM path. See docs/MOUSE_SUPPORT.md "Two-mouse caveat".
     mouse2: { label: 'Amiga 2-Mouse', core: 'puae', devices: [2, 2], ports: [0, 1] } },
-  // DOS / IBM PC. Computer-class system (keyboard:true, like c64/amiga). Runs on
-  // virtualxt (prebuilt buildbot core; XT/8088-class — see CORES.virtualxt).
-  // exts: virtualxt loads .com/.exe booters and FAT .img disk images directly. We
-  // also list the common DOSBox archive/disc exts (zip/dosz/iso/cue/conf/bat) so
-  // that IF a DOSBox-class core is later added (DOSBox Pure would need a WSL2
-  // build; the buildbot ships none), those games still auto-detect as `dos` — the
-  // current virtualxt core ignores them. medium 'floppy' mirrors the other
-  // disk-based computers. DOS uses a MOUSE + keyboard; the mouse path is the
-  // shared EmulatorClient.sendMouse primitive owned by the parallel mouse agent —
+  // DOS / IBM PC. Computer-class system (keyboard:true, like c64/amiga). Default
+  // core is now dosbox_pure (see CORES.dosbox_pure for the full build/fix
+  // history) — a real WSL2/Emscripten build that headless-verifies real,
+  // legible video content, not just a boot with no crash. virtualxt (prebuilt
+  // buildbot core, XT/8088-class only) is kept listed as a fallback/lighter
+  // option for whenever it's actually built — as of this writing
+  // `virtualxt_libretro.wasm` is still NOT PRESENT in public/cores/ (absent
+  // locally, would 404 on deploy), so selecting it explicitly still hits a
+  // dynamic-`import()` failure; only dosbox_pure currently works. exts cover
+  // both cores' content: .com/.exe/.img (virtualxt's, when built) plus the
+  // common DOSBox archive/disc exts (zip/dosz/iso/cue/conf/bat) dosbox_pure
+  // understands. medium 'floppy' mirrors the other disk-based computers. DOS
+  // uses a MOUSE + keyboard; the mouse path is the shared
+  // EmulatorClient.sendMouse primitive owned by the parallel mouse agent —
   // see the "DOS mouse" follow-up comment below SYSTEM_PORTS.
   //
-  // `experimental: true` (2026-07-29) — same mechanism/precedent as PSX/N64
-  // above: hides `dos` cartridges from the default shelf/collection UI
-  // (Collection.js's parseCollection, gated in main.js on `?experimental=1`)
-  // WITHOUT removing the system's registration, so real users never get
-  // offered a system that can't currently boot. Unlike PSX/N64 (whose cores
-  // are real and working, just not yet reachable from the normal cart-insert
-  // path), DOS's situation is worse: `virtualxt_libretro.wasm` is not even
-  // PRESENT in public/cores/ (absent locally AND 404s on the live server —
-  // verified 2026-07-29, see docs/DOS_CORE_BUILD.md), so picking `dos` today
-  // hits a dynamic-`import()` failure in EmulatorClient._loadCore, not the
-  // previously-documented post-mount boot trap (that trap was real too, on
-  // the buildbot binary that used to be here — both are "does not work",
-  // just at different stages). Remove this flag only once a real, present,
-  // non-trapping DOS core boots end-to-end.
-  dos:       { label: 'DOS / IBM PC',       defaultCore: 'virtualxt',        cores: ['virtualxt'],                    exts: ['exe','com','bat','conf','img','dosz','zip','iso','cue'], aliases: ['dos','ms-dos','msdos','pc','ibm pc','dosbox','virtualxt'], thumbnailRepo: null, medium: 'floppy', keyboard: true, experimental: true },
+  // `experimental: true` — same mechanism/precedent as PSX/N64 above: hides
+  // `dos` cartridges from the default shelf/collection UI (Collection.js's
+  // parseCollection, gated in main.js on `?experimental=1`) WITHOUT removing
+  // the system's registration. dosbox_pure is real and headless-verified
+  // (screenshot shows legible DOSBOX PURE START MENU text) but not yet
+  // reachable from the normal in-VR cart-insert path (same P0-2 gap as
+  // PSX/N64) and only tested against a synthetic FreeDOS boot floppy, not a
+  // real commercial game — remove this flag once both are addressed.
+  dos:       { label: 'DOS / IBM PC',       defaultCore: 'dosbox_pure',      cores: ['dosbox_pure','virtualxt'],      exts: ['exe','com','bat','conf','img','dosz','zip','iso','cue'], aliases: ['dos','ms-dos','msdos','pc','ibm pc','dosbox','virtualxt'], thumbnailRepo: null, medium: 'floppy', keyboard: true, experimental: true },
   // PlayStation 2 (Play!, see CORES.play). medium: 'floppy' is a placeholder —
   // there's no disc-shaped prop yet (only cartridge/floppy exist); PS2 discs
   // render as a floppy until one is built.

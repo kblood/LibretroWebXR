@@ -247,7 +247,9 @@ async function start(payload) {
   await hydrateLaunch(payload);
 
   if (payload.entrypoint === 'retroarch') {
-    try { moduleInstance.callMain(payload.arguments || ['-c', RA_CFG_PATH, entryPath]); }
+    try {
+      moduleInstance.callMain(payload.arguments || ['-c', RA_CFG_PATH, entryPath]);
+    }
     catch (error) {
       // emscripten_set_main_loop uses this sentinel to unwind the C stack.
       if (String(error) !== 'unwind') throw error;
@@ -832,7 +834,9 @@ self.addEventListener('message', async (event) => {
   let message;
   try { message = assertProtocolMessage(event.data); }
   catch (error) { postMessage(eventMessage('error', serializeError(error))); return; }
-  if (message === null) return; // foreign traffic on the same channel (see assertProtocolMessage) — not ours, not an error
+  if (message === null) {
+    return; // foreign traffic on the same channel (see assertProtocolMessage) — not ours, not an error
+  }
   if (message.type === WorkerMessage.FRAME_ACK) { framePending = false; clearFrameAckWatchdog(); return; }
   if (message.type !== WorkerMessage.REQUEST) return;
   try {
