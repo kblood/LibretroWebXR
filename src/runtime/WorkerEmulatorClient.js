@@ -138,6 +138,26 @@ export class WorkerEmulatorClient extends EventTarget {
     this.worker.postMessage(requestMessage(0, 'lightgun', { u, v, trigger: !!trigger, port: port ?? null }));
   }
 
+  // Relative mouse motion + held buttons for a worker-hosted core. Mirrors
+  // EmulatorClient.sendMouse's contract — (dx, dy) are RELATIVE deltas in
+  // pointer-lock movementX/Y units, `buttons` a bitmask (1=left, 2=right,
+  // 4=middle) the core latches until released. Fire-and-forget (id 0) like
+  // sendInput/sendLightgun.
+  //
+  // `port` is accepted for signature parity with EmulatorClient.sendMouse but is
+  // NOT honoured: the multiport mouse setter (rwebinput_set_mouse) doesn't exist
+  // in any core we ship, so there is no per-port slot to write and every mouse
+  // here rides the single shared canvas pointer. Two mice on one worker core
+  // would both drive the same pointer — the same limitation documented on
+  // SYSTEMS.amiga.mouse2. Until this method existed at all, RuntimeEmulatorClient's
+  // `this.delegate?.sendMouse?.(...)` optional-chained straight to undefined, so
+  // a mouse on ANY worker core (dosbox_pure, mednafen_psx_hw, mupen64plus_next)
+  // was a silent no-op.
+  sendMouse(dx, dy, buttons = 0, _port = null) {
+    if (!this.worker) return;
+    this.worker.postMessage(requestMessage(0, 'mouse', { dx, dy, buttons }));
+  }
+
   // Hand libretro gun `port` back to the shared DOM mouse — the worker twin of
   // EmulatorClient.clearLightgun (see that method for which cases are and are
   // NOT covered). Fire-and-forget (id 0) like sendLightgun: it is ordered behind

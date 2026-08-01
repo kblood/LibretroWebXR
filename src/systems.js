@@ -203,8 +203,21 @@ export const CORES = {
   // experimental: true — headless-verified only; not yet reachable from the
   // real in-VR cartridge-insert path (same P0-2 gap as PSX/N64 above), and
   // only tested against a synthetic boot floppy, not a real commercial game.
-  dosbox_pure:       { url: 'cores/dosbox_pure_libretro.js',         exts: ['exe','com','bat','conf','img','dosz','zip','iso','cue'], label: 'DOS (DOSBox Pure)', style: 'module', license: 'GPLv2', weight: 3,
+  // exts track the core's own .info (zip|dosz|exe|com|bat|iso|chd|cue|ins|img|
+  // ima|vhd|jrc|m3u|m3u8|conf) minus the ones another core owns: `chd` is PS2's
+  // (AMBIGUOUS_EXT_DEFAULT pins it to `play`) and m3u/jrc/ins have no content
+  // path here. `vhd` and `ima` were MISSING until 2026-08-02 — which is why the
+  // published DOS-TOOLS.vhd could not be loaded at all even though the core
+  // mounts VHDs natively; only the .img twin worked. `vhd` is unambiguous (no
+  // other core claims it), `ima` likewise.
+  dosbox_pure:       { url: 'cores/dosbox_pure_libretro.js',         exts: ['exe','com','bat','conf','img','ima','vhd','dosz','zip','iso','cue'], label: 'DOS (DOSBox Pure)', style: 'module', license: 'GPLv2', weight: 3,
     execution: 'worker', requiresThreads: true, contentIo: 'transfer-memfs',
+    // remapName: the RetroArch library name for this core's remap dir/file, which
+    // is what carries an inputDevices port override to the core at boot (the
+    // worker runtime logs an error if inputDevices is set without one). Needed by
+    // SYSTEMS.dos.mouse. DOSBox Pure additionally reads the DOM mouse regardless
+    // of the port device, so the mouse works even if the remap never applies.
+    remapName: 'DOSBox-pure',
     buildHash: 'dosbox-pure-ef363f86-retroarch-058f4999', experimental: true },
 };
 
@@ -327,9 +340,7 @@ export const SYSTEMS = {
   // both cores' content: .com/.exe/.img (virtualxt's, when built) plus the
   // common DOSBox archive/disc exts (zip/dosz/iso/cue/conf/bat) dosbox_pure
   // understands. medium 'floppy' mirrors the other disk-based computers. DOS
-  // uses a MOUSE + keyboard; the mouse path is the shared
-  // EmulatorClient.sendMouse primitive owned by the parallel mouse agent —
-  // see the "DOS mouse" follow-up comment below SYSTEM_PORTS.
+  // uses a MOUSE + keyboard; see the `mouse` descriptor on the entry below.
   //
   // NOT `experimental` (2026-08-01). It was, on two stated grounds, both now
   // discharged rather than merely assumed:
@@ -346,7 +357,18 @@ export const SYSTEMS = {
   // what makes DOS work on the deployed site for ordinary visitors.
   // CORES.dosbox_pure keeps its own `experimental` marker: nothing filters on
   // it, and the core is still young (no real DOS *game* has been run yet).
-  dos:       { label: 'DOS / IBM PC',       defaultCore: 'dosbox_pure',      cores: ['dosbox_pure','virtualxt'],      exts: ['exe','com','bat','conf','img','dosz','zip','iso','cue'], aliases: ['dos','ms-dos','msdos','pc','ibm pc','dosbox','virtualxt'], thumbnailRepo: null, medium: 'floppy', keyboard: true },
+  dos:       { label: 'DOS / IBM PC',       defaultCore: 'dosbox_pure',      cores: ['dosbox_pure','virtualxt'],      exts: ['exe','com','bat','conf','img','ima','vhd','dosz','zip','iso','cue'], aliases: ['dos','ms-dos','msdos','pc','ibm pc','dosbox','virtualxt'], thumbnailRepo: null, medium: 'floppy', keyboard: true,
+    // DOS mouse. Almost every DOS game past ~1990 is mouse-driven, so this is
+    // not an optional extra the way the C64's 1351 is. Port 0 / RETRO_DEVICE_MOUSE
+    // matches the descriptor shape every other system uses, but DOSBox Pure is
+    // unusual: it polls the DOM mouse directly whatever device the port carries,
+    // so the inputDevices override is belt-and-braces and the transport
+    // (sendMouse -> movementX/Y) is what actually matters. dosbox_pure_mouse_input
+    // is the core's own on/off switch for that polling — set explicitly rather
+    // than relying on its default so an upstream default flip can't silently kill
+    // the mouse.
+    mouse: { label: 'DOS Mouse', core: 'dosbox_pure', device: 2, port: 0,
+      coreOptions: { dosbox_pure_mouse_input: 'true' } } },
   // PlayStation 2 (Play!, see CORES.play). medium: 'floppy' is a placeholder —
   // there's no disc-shaped prop yet (only cartridge/floppy exist); PS2 discs
   // render as a floppy until one is built.
@@ -558,16 +580,11 @@ const SYSTEM_PORTS = {
   psx: 2,     // two native digital-pad ports (no stock multitap)
   n64: 4,     // four native controller ports
 };
-// --- DOS mouse follow-up (do NOT implement here) -------------------------
-// DOS games are mouse-driven. The mouse transport is the SHARED
-// `EmulatorClient.sendMouse(dx, dy, buttons)` primitive being built by the
-// parallel mouse-peripheral agent (branch feat/mouse-peripheral). When that
-// lands, wire `dos` to it: virtualxt reads RETRO_DEVICE_MOUSE on port 0, so a
-// `dos` boot should route the room's mouse prop / aim-ray through sendMouse to
-// the active DOS console's EmulatorClient (relative-motion + L/R buttons). No
-// core option is needed — virtualxt enables the PS/2 mouse by default. This file
-// intentionally does NOT touch the mouse path to avoid colliding with that
-// agent's EmulatorClient changes; this comment is the hook/TODO.
+// (The "DOS mouse follow-up" TODO that stood here is DONE as of 2026-08-02:
+// SYSTEMS.dos now carries a `mouse` descriptor, and the worker execution
+// topology grew the matching transport — WorkerEmulatorClient.sendMouse plus
+// EmulatorWorkerRuntime.forwardMouse — without which every mouse call against
+// dosbox_pure was optional-chained into a silent no-op.)
 const DEFAULT_PORTS = 2;   // unknown system / no game loaded yet
 export const MAX_PORTS = 4; // hardware ceiling the console mesh renders
 

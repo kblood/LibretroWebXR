@@ -30,6 +30,26 @@ const KEYMAP = {
   Enter: 'Start', ShiftRight: 'Select', ShiftLeft: 'Select',
 };
 
+// Keys we never swallow, even in raw-keyboard mode: browser chrome the user
+// needs to keep working (reload, devtools, fullscreen, tab switching). Ctrl/Alt/
+// Meta chords are excluded wholesale in _onKey for the same reason — Ctrl+Alt+Del
+// style combos are exactly what a DOS user does NOT want intercepted by a web page.
+const RESERVED_KEYS = new Set([
+  'F5', 'F6', 'F11', 'F12', 'Escape',
+]);
+
+// True if the event originated in a text field / contenteditable, i.e. the user
+// is typing into page chrome (the nick or room box) rather than playing. Without
+// this, raw-keyboard mode would make those inputs untypable — every keystroke
+// would be preventDefault'd and shipped to the core instead. It also fixes the
+// pre-existing mapped-mode version of the same bug: Arrow/Enter/Shift in the room
+// box were being preventDefault'd out from under the caret.
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true;
+}
+
 const AXIS_THRESHOLD = 0.5;
 
 // Standard-gamepad button index → logical RetroPad button. Layout follows the
@@ -60,12 +80,24 @@ export class DesktopInput {
   /**
    * @param {object} opts
    * @param {(btn:string, down:boolean)=>void} opts.onButton  logical transition sink
+   * @param {(e:KeyboardEvent, down:boolean)=>void} [opts.onRawKey]  raw-key sink
+   *        (only called while raw-keyboard mode is on — see setRawKeyboard)
    * @param {EventTarget} [opts.keyTarget=window]             where to bind key listeners
    */
-  constructor({ onButton, keyTarget = window } = {}) {
+  constructor({ onButton, onRawKey = null, keyTarget = window } = {}) {
     this.onButton = onButton || (() => {});
+    this.onRawKey = onRawKey || (() => {});
     this.keyTarget = keyTarget;
     this.enabled = true;
+    // Raw-keyboard mode: forward the PHYSICAL key to the core verbatim instead of
+    // translating it through KEYMAP. Computer-class systems (DOS, Amiga, C64 —
+    // SYSTEMS[sys].keyboard) are unusable without it: you cannot type `DIR` or
+    // `C:\GAME\SETUP` when Enter means Start and A means the Y button. Console
+    // systems keep the mapped path, where a fixed pad layout is the whole point.
+    // Gamepads are unaffected either way — a physical controller still drives the
+    // RetroPad in both modes.
+    this.rawKeyboard = false;
+    this._rawHeld = new Map();   // code -> {code,key,keyCode,location} held in raw mode
     // Edge-detection state: logical button -> held? (separate maps so a button
     // held on BOTH keyboard and pad doesn't double-fire / early-release).
     this._keyHeld = new Map();   // btn -> bool
@@ -94,15 +126,46 @@ export class DesktopInput {
   }
 
   _onKey(e, down) {
+    // Never intercept while the user is typing into page chrome (nick/room box).
+    if (isTypingTarget(e.target)) return;
+
+    if (this.rawKeyboard) {
+      // Leave browser chrome and modifier chords alone; everything else is the
+      // emulated machine's keyboard.
+      if (RESERVED_KEYS.has(e.code) || e.ctrlKey || e.altKey || e.metaKey) return;
+      // Auto-repeat is noise: the core latches a key down until its keyup, so a
+      // repeat stream would just re-assert a state it already holds.
+      if (down && e.repeat) return;
+      e.preventDefault();
+      if (!this.enabled) return;
+      // Keep the full payload, not just the code: releaseAll has to synthesise a
+      // faithful keyup later, and a keyup with keyCode 0 is not the same event.
+      if (down) this._rawHeld.set(e.code, { code: e.code, key: e.key, keyCode: e.keyCode, location: e.location });
+      else this._rawHeld.delete(e.code);
+      this.onRawKey(e, down);
+      return;
+    }
+
     const btn = KEYMAP[e.code];
     if (!btn) return;
     // Stop arrows/Enter/Shift from scrolling or activating page chrome while the
-    // emulator has focus. (Typing in an <input> still works: those fire on the
-    // input element and we only map bare game keys here.)
+    // emulator has focus.
     if (down) e.preventDefault();
     if (!this.enabled) return;
     this._keyHeld.set(btn, down);
     this._reconcile();
+  }
+
+  /**
+   * Turn raw-keyboard passthrough on/off (see the `rawKeyboard` field). Flipping
+   * it releases whatever the OUTGOING mode was holding, so a key held across the
+   * switch can't latch in a mode that will never emit its keyup.
+   */
+  setRawKeyboard(on) {
+    const next = !!on;
+    if (next === this.rawKeyboard) return;
+    this.releaseAll();
+    this.rawKeyboard = next;
   }
 
   // Per-frame physical-gamepad poll (call from the rAF tick). Cheap no-op when
@@ -137,6 +200,12 @@ export class DesktopInput {
   // Release everything currently held (e.g. on role change or disconnect) so a
   // held button doesn't latch. Emits keyup transitions through onButton.
   releaseAll() {
+    // Raw-held physical keys have no logical-button representation, so they need
+    // their own explicit keyup sweep — _reconcile below only covers KEYMAP/pad.
+    if (this._rawHeld.size) {
+      for (const payload of [...this._rawHeld.values()]) this.onRawKey(payload, false);
+      this._rawHeld.clear();
+    }
     this._keyHeld.clear();
     this._padHeld.clear();
     this._reconcile();

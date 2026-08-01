@@ -89,6 +89,15 @@ let webgunClear = null;
 // 'dom' = the shared single-pointer canvas events. Two ports both reading
 // 'dom' is exactly the silent two-guns-share-one-aim failure mode.
 const gunAimByPort = {};
+// Held DOM mouse-button bitmask for forwardMouse() (1=left, 2=right, 4=middle).
+// Mirrors EmulatorClient._mouseButtons: RetroArch latches a button until the
+// matching mouseup, so we diff against this and emit clean edges rather than
+// re-firing mousedown every call.
+let mouseButtons = 0;
+// Last relative motion + buttons actually forwarded, for probe/telemetry
+// observability (reported in postMetrics as `mouse`). `moves` counts motion
+// events so a probe can tell "mouse wired but idle" from "never reached us".
+const mouseState = { dx: 0, dy: 0, buttons: 0, moves: 0 };
 // Echo of the per-port device overrides writeConfig() actually wrote into the
 // RetroArch cfg + remap for this launch ({ player: libretroDeviceId }). Lets a
 // probe confirm two guns really were SEATED on two ports, at the place where
@@ -601,6 +610,56 @@ function forwardLightgun(payload) {
   };
 }
 
+// Relative mouse motion + buttons for a worker-hosted core — the worker twin of
+// EmulatorClient.sendMouse's single-mouse DOM path, and the reason DOS/Amiga
+// mice work at all in worker execution. Before this existed, RuntimeEmulatorClient
+// optional-chained `sendMouse` (`this.delegate?.sendMouse?.(...)`), so every mouse
+// call against a worker core (dosbox_pure is worker+threaded) silently did
+// NOTHING — no error, no log, just a mouse that never moved.
+//
+// rwebinput reads relative motion from a mousemove's movementX/movementY (the
+// pointer-lock delta), not from clientX/Y, so that is the field that has to
+// carry the payload; clientX/Y are pinned to the canvas centre purely so the
+// event is well-formed. Same dual dispatch as forwardLightgun — a real Event on
+// the genuine OffscreenCanvas EventTarget, plus the duck-typed twin on the
+// document shim as a defensive fallback.
+function forwardMouse(payload) {
+  if (!canvas) return;
+  metrics.inputs++;
+  const { dx = 0, dy = 0, buttons = 0 } = payload || {};
+  const mask = buttons & 0x7;
+  const rect = canvas.getBoundingClientRect();
+  const clientX = rect.left + rect.width / 2;
+  const clientY = rect.top + rect.height / 2;
+
+  if (dx || dy) {
+    const moveProps = { clientX, clientY, movementX: dx, movementY: dy, buttons: mask };
+    try { canvas.dispatchEvent(realEvent('mousemove', moveProps)); } catch (_) {}
+    try { inputTarget?.dispatchEvent(duckEvent('mousemove', moveProps)); } catch (_) {}
+    mouseState.dx = dx; mouseState.dy = dy; mouseState.moves++;
+  }
+
+  if (mask !== mouseButtons) {
+    const changed = mask ^ mouseButtons;
+    // DOM `button` is the index (0=left, 1=middle, 2=right); `buttons` is the
+    // resulting held bitmask. rwebinput uses `mask = 1 << button` with
+    // BTNL=0/BTNM=1/BTNR=2, i.e. 1=left, 2=middle, 4=right on the C side — the
+    // same index mapping EmulatorClient.sendMouse's BIT_TO_BUTTON encodes.
+    const BIT_TO_BUTTON = { 1: 0, 2: 2, 4: 1 };
+    for (const bit of [1, 2, 4]) {
+      if (!(changed & bit)) continue;
+      const button = BIT_TO_BUTTON[bit];
+      const goingDown = (mask & bit) !== 0;
+      const newMask = goingDown ? (mouseButtons | bit) : (mouseButtons & ~bit);
+      const props = { clientX, clientY, button, buttons: newMask };
+      try { canvas.dispatchEvent(realEvent(goingDown ? 'mousedown' : 'mouseup', props)); } catch (_) {}
+      try { inputTarget?.dispatchEvent(duckEvent(goingDown ? 'mousedown' : 'mouseup', props)); } catch (_) {}
+      mouseButtons = newMask;
+    }
+    mouseState.buttons = mouseButtons;
+  }
+}
+
 // Resolve (once) the patched core's multiport light-gun setter. Returns a bound
 // (port,x,y,buttons)=>void on a multiport-patched core, or null on an unpatched
 // core / before the runtime is ready (so forwardLightgun falls back to the
@@ -721,6 +780,10 @@ function postMetrics() {
       devices: seatedInputDevices,
       ports: { ...gunAimByPort },
     },
+    // Mouse routing snapshot. `moves` separates the two failure modes a silent
+    // mouse has: 0 means nothing ever reached the worker (page side not wired),
+    // >0 with a dead pointer in-game means the core isn't reading movementX/Y.
+    mouse: { ...mouseState },
   }));
 }
 
@@ -743,6 +806,10 @@ function stop() {
   webgunSet = null;
   webgunClear = null;
   seatedInputDevices = null;
+  // Held buttons die with the module; a stale mask would suppress the next
+  // core's first real mousedown (the diff in forwardMouse would see no change).
+  mouseButtons = 0;
+  Object.assign(mouseState, { dx: 0, dy: 0, buttons: 0, moves: 0 });
 }
 
 async function handle(method, payload) {
@@ -758,6 +825,7 @@ async function handle(method, payload) {
     case 'read-save-ram': return readSaveRam(payload.slot || 1);
     case 'input': forwardInput(payload); return null;
     case 'lightgun': forwardLightgun(payload); return null;
+    case 'mouse': forwardMouse(payload); return null;
     case 'lightgun-clear': clearLightgunPort(payload); return null;
     case 'serialize-state': return serializeState();
     case 'unserialize-state': await unserializeState(payload.data); return null;

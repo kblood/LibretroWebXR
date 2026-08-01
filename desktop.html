@@ -39,6 +39,14 @@
       }
       .host-video { object-fit: contain; }
 
+      #capture-hint { position: absolute; inset: auto auto 16px 50%; transform: translateX(-50%);
+        background: rgba(20,20,24,.86); border: 1px solid #3a3a40; border-radius: 8px;
+        padding: 10px 16px; font-size: 13px; color: #dde; cursor: pointer; text-align: center;
+        display: flex; flex-direction: column; gap: 2px; z-index: 3; }
+      #capture-hint[hidden] { display: none; }
+      #capture-hint small { color: #778; font-size: 11px; }
+      #capture-hint:hover { background: rgba(40,40,48,.92); }
+
       footer { padding: 6px 14px; font-size: 11px; color: #778; background: #1b1b1e;
                border-top: 1px solid #2a2a2e; display: flex; gap: 18px; flex-wrap: wrap; }
       footer b { color: #9aa; font-weight: 600; }
@@ -49,6 +57,17 @@
   <body class="mp-disconnected">
     <header>
       <h1>LibretroWebXR</h1>
+
+      <!-- System first, then game. Picking the machine up front is what makes
+           the rest of the page make sense: the controls a system needs (a pad,
+           a full keyboard, a captured mouse) differ enough that inferring them
+           only AFTER a game boots leaves you staring at a screen you can't
+           drive. The system choice filters the game list and is remembered in
+           ?system= so a link lands on the right machine. -->
+      <div class="group">
+        <span class="lbl">System</span>
+        <select id="system-select" title="Filter the game list by machine"><option value="">All systems</option></select>
+      </div>
 
       <div class="group">
         <span class="lbl">Game</span>
@@ -84,12 +103,20 @@
 
     <div id="screen">
       <canvas id="emu" width="320" height="240"></canvas>
+      <!-- Click-to-capture overlay for mouse-driven systems (DOS, Amiga, C64).
+           Pointer lock can only be requested from a user gesture, so the mouse
+           cannot be captured automatically at boot — this is that gesture. -->
+      <div id="capture-hint" hidden>Click to capture mouse &amp; keyboard<small>Esc releases</small></div>
     </div>
 
     <div id="status">Loading…</div>
 
     <footer>
-      <span><b>Keyboard:</b> Arrows = D-pad · Z/X = B/A · A/S = Y/X · Q/W = L/R · Enter = Start · Shift = Select</span>
+      <!-- Two control schemes, chosen per system (see DesktopInput.setRawKeyboard).
+           #controls-hint is rewritten at boot to whichever one is actually live,
+           because showing a pad mapping to someone at a DOS prompt is worse than
+           showing nothing. -->
+      <span id="controls-hint"><b>Keyboard:</b> Arrows = D-pad · Z/X = B/A · A/S = Y/X · Q/W = L/R · Enter = Start · Shift = Select</span>
       <span><b>Gamepad:</b> plug in a controller — standard mapping</span>
       <span><b>2-Player:</b> one player picks a game (hosts), the other enters the same room code &amp; joins</span>
     </footer>

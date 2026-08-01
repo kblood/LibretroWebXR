@@ -19,7 +19,7 @@
 import { RuntimeEmulatorClient } from '../RuntimeEmulatorClient.js';
 import { loadCollection } from '../Collection.js';
 import { romUrlFor } from '../RomResolver.js';
-import { coreInfo, coreForFile, systemForFile, extOf, SYSTEMS } from '../systems.js';
+import { coreInfo, coreForFile, systemForFile, extOf, SYSTEMS, isMouseCapable, mouseLoadConfig } from '../systems.js';
 import { DesktopInput, dispatchToCore } from './DesktopInput.js';
 import { DesktopNet } from './DesktopNet.js';
 import { sanitiseRoom, randomRoomSuffix } from '../net/SessionUtils.js';
@@ -29,8 +29,11 @@ const $ = (id) => document.getElementById(id);
 const canvas = $('emu');
 const screen = $('screen');
 const gameSelect = $('game-select');
+const systemSelect = $('system-select');
 const fileInput = $('file-input');
 const status = $('status');
+const captureHint = $('capture-hint');
+const controlsHint = $('controls-hint');
 const saveBtn = $('save-state');
 const loadBtn = $('load-state');
 // Multiplayer widgets
@@ -127,10 +130,19 @@ async function bootLocal(meta, buffer) {
         { entryExtensions: core.exts },
       );
     }
+    // Mouse-capable systems (DOS, Amiga, C64) get the libretro MOUSE device
+    // seated at boot — mouseLoadConfig is the same registry lookup the VR build
+    // uses, so both entry points wire a mouse identically. Unlike the VR room
+    // there is no mouse PROP to grab here: the computer's own pointer is the
+    // mouse, so it is armed unconditionally for any system that has one rather
+    // than waiting for a grab gesture that can't happen on a flat page.
+    const mouse = isMouseCapable(meta.system) ? mouseLoadConfig(meta.system) : null;
     await client.start(canvas, content, {
       coreUrl: core.url, coreName: core.name, moduleStyle: core.style,
-      contentExt: extOf(meta.file), coreOptions: core.coreOptions, systemFiles: core.systemFiles,
-      remapName: core.remapName,
+      contentExt: extOf(meta.file), systemFiles: core.systemFiles,
+      coreOptions: { ...(core.coreOptions || {}), ...(mouse?.coreOptions || {}) },
+      inputDevices: mouse?.inputDevices,
+      remapName: mouse?.remapName || core.remapName,
       execution: core.execution, requiresThreads: core.requiresThreads,
       coreBuildHash: core.buildHash,
       // Worker cores take their requested video size from opts.width/height,
@@ -157,6 +169,7 @@ async function bootLocal(meta, buffer) {
   loadedMeta = meta;
   client.resume();
   showCanvas();
+  applyInputScheme(meta.system);
   setStatus(`Playing ${meta.title || meta.file}`);
   return true;
 }
@@ -228,7 +241,94 @@ function onLocalButton(btn, down) {
   }
 }
 
-const input = new DesktopInput({ onButton: onLocalButton });
+// Raw physical key → the core, verbatim. Only fires on computer-class systems
+// (SYSTEMS[sys].keyboard), where the RetroPad translation is useless: a DOS
+// prompt needs `D`, `I`, `R`, Enter — not "Y button, then Start".
+//
+// Deliberately NOT forwarded to a netplay peer. The wire protocol carries logical
+// RetroPad buttons (forwardGameInput takes {player, btn}), and there is no
+// keyboard channel; a joined client on a DOS host keeps the mapped pad path, which
+// is the honest behaviour rather than dropping keys silently at the host.
+function onLocalRawKey(e, down) {
+  if (!booted || role() === 'client') return;
+  client.sendInput(down ? 'keydown' : 'keyup', e.code, e.key, e.keyCode, e.location);
+}
+
+const input = new DesktopInput({ onButton: onLocalButton, onRawKey: onLocalRawKey });
+
+// --- mouse capture (pointer lock) --------------------------------------------
+// A deliberate ~30-line reimplementation of MouseMgr.attachDesktop rather than an
+// import of it: MouseMgr pulls in three.js for its in-VR positional path, and this
+// page's entire premise is being three-free (importing it would add ~600 kB to a
+// bundle that currently has none of it). The semantics below are the same ones
+// attachDesktop uses and that PUAE was de-risk-verified against — relative
+// movementX/Y, buttons as a 1=left/2=right bitmask, events only while locked.
+let mouseWired = false;    // does the CURRENT boot have a libretro mouse device?
+let mouseButtons = 0;
+
+function sendMouse(dx, dy) {
+  if (document.pointerLockElement !== canvas) return;
+  if (!booted || role() === 'client') return;
+  client.sendMouse(dx, dy, mouseButtons, null);
+}
+
+function requestCapture() {
+  if (!mouseWired) return;
+  try { canvas.requestPointerLock?.(); } catch (_) {}
+}
+
+document.addEventListener('mousemove', (e) => {
+  if (document.pointerLockElement !== canvas) return;
+  sendMouse(e.movementX || 0, e.movementY || 0);
+});
+document.addEventListener('mousedown', (e) => {
+  if (document.pointerLockElement !== canvas) return;
+  const bit = e.button === 0 ? 1 : e.button === 2 ? 2 : 0;
+  mouseButtons |= bit; sendMouse(0, 0);
+});
+document.addEventListener('mouseup', (e) => {
+  if (document.pointerLockElement !== canvas) return;
+  const bit = e.button === 0 ? 1 : e.button === 2 ? 2 : 0;
+  mouseButtons &= ~bit; sendMouse(0, 0);
+});
+// A right-click inside a captured game belongs to the game, not to the browser.
+canvas.addEventListener('contextmenu', (e) => { if (document.pointerLockElement === canvas) e.preventDefault(); });
+canvas.addEventListener('click', requestCapture);
+captureHint?.addEventListener('click', requestCapture);
+// Esc drops the lock (the browser does this itself); re-show the hint so it's
+// obvious how to get back in, and release any button held at that moment so it
+// can't latch down inside the core forever.
+document.addEventListener('pointerlockchange', () => {
+  const locked = document.pointerLockElement === canvas;
+  if (!locked && mouseButtons) { mouseButtons = 0; client.sendMouse?.(0, 0, 0, null); }
+  if (captureHint) captureHint.hidden = locked || !mouseWired;
+});
+
+// Apply the input scheme a freshly-booted system needs: raw keyboard for
+// computer-class machines, mouse capture where a mouse device exists, and a
+// footer hint describing whichever scheme is actually live.
+function applyInputScheme(system) {
+  const sys = SYSTEMS[system];
+  const wantsKeyboard = !!sys?.keyboard;
+  mouseWired = isMouseCapable(system);
+  input.setRawKeyboard(wantsKeyboard);
+
+  if (!mouseWired && document.pointerLockElement === canvas) {
+    // Previous boot captured the cursor and this one has no use for it. Leaving
+    // it captured reads as the page having hung.
+    try { document.exitPointerLock?.(); } catch (_) {}
+  }
+  if (captureHint) captureHint.hidden = !mouseWired || document.pointerLockElement === canvas;
+
+  if (controlsHint) {
+    const parts = [];
+    parts.push(wantsKeyboard
+      ? '<b>Keyboard:</b> full passthrough — type as if at the real machine (Esc, F5/F6/F11/F12 and Ctrl/Alt combos stay with the browser)'
+      : '<b>Keyboard:</b> Arrows = D-pad · Z/X = B/A · A/S = Y/X · Q/W = L/R · Enter = Start · Shift = Select');
+    if (mouseWired) parts.push('<b>Mouse:</b> click the screen to capture · Esc releases');
+    controlsHint.innerHTML = parts.join(' &nbsp;·&nbsp; ');
+  }
+}
 
 // Host side: inject a remote player's button into our core, tracking held
 // buttons so a mid-press disconnect can be flushed cleanly.
@@ -309,6 +409,9 @@ function onRoleMaybeChanged(tvValue, ownerId) {
   flushRemotePlayer(2);
   if (r === 'client') {
     // Someone else hosts — stop our core, show their game info, await video.
+    // Drop any pointer capture too: our core is paused, so a captured cursor
+    // would be feeding a machine that isn't running.
+    if (document.pointerLockElement === canvas) { try { document.exitPointerLock?.(); } catch (_) {} }
     if (booted) client.pause();
     setStatus(`Watching ${tvValue?.title || "host's game"}`);
   } else if (r === 'host') {
@@ -354,9 +457,23 @@ loadBtn?.addEventListener('click', () => {
 });
 
 // --- game picker + file upload ----------------------------------------------
+// Option values are indices into `games`, NOT positions in the <select>. That
+// matters once the system filter can hide entries: keying off the option's own
+// position would boot whatever game happened to sit at that slot in the
+// filtered list.
 gameSelect?.addEventListener('change', () => {
   const idx = Number(gameSelect.value);
   if (Number.isInteger(idx) && games[idx]) loadBundled(games[idx]);
+});
+systemSelect?.addEventListener('change', () => {
+  renderGameList();
+  // Reflect the choice in the URL so the page can be linked/reloaded on the
+  // same machine. replaceState, not a navigation — reloading would drop a live
+  // core and any netplay session.
+  const url = new URL(location.href);
+  if (systemSelect.value) url.searchParams.set('system', systemSelect.value);
+  else url.searchParams.delete('system');
+  history.replaceState(null, '', url);
 });
 fileInput?.addEventListener('change', () => {
   const f = fileInput.files?.[0];
@@ -378,17 +495,44 @@ async function loadGameList() {
   // never show those systems at all, even deliberately.
   const col = await loadCollection(collectionUrl, { experimental: params.get('experimental') === '1' });
   games = col.games || [];
-  if (gameSelect) {
-    gameSelect.innerHTML = '<option value="">— pick a game —</option>';
-    games.forEach((g, i) => {
-      const sysLabel = SYSTEMS[g.system]?.label || g.system || '';
+
+  // System list is derived from the games actually present, not from the whole
+  // SYSTEMS registry — offering "Nintendo 64" when the collection has no N64
+  // cartridge just produces an empty game list and a dead end.
+  if (systemSelect) {
+    const present = [...new Set(games.map((g) => g.system).filter(Boolean))]
+      .sort((a, b) => (SYSTEMS[a]?.label || a).localeCompare(SYSTEMS[b]?.label || b));
+    systemSelect.innerHTML = '<option value="">All systems</option>';
+    for (const sys of present) {
       const opt = document.createElement('option');
-      opt.value = String(i);
-      opt.textContent = `${g.title || g.file} (${sysLabel})`;
-      gameSelect.appendChild(opt);
-    });
+      opt.value = sys;
+      const n = games.filter((g) => g.system === sys).length;
+      opt.textContent = `${SYSTEMS[sys]?.label || sys} (${n})`;
+      systemSelect.appendChild(opt);
+    }
+    const wanted = params.get('system');
+    if (wanted && present.includes(wanted)) systemSelect.value = wanted;
   }
-  setStatus(games.length ? 'Pick a game or drop a ROM file' : 'No bundled games found — drop a ROM file');
+
+  renderGameList();
+  setStatus(games.length ? 'Pick a system, then a game — or drop a ROM file' : 'No bundled games found — drop a ROM file');
+}
+
+// (Re)fill the game <select> honouring the current system filter.
+function renderGameList() {
+  if (!gameSelect) return;
+  const filter = systemSelect?.value || '';
+  gameSelect.innerHTML = '<option value="">— pick a game —</option>';
+  games.forEach((g, i) => {
+    if (filter && g.system !== filter) return;
+    const sysLabel = SYSTEMS[g.system]?.label || g.system || '';
+    const opt = document.createElement('option');
+    opt.value = String(i);
+    // With a system filter active the label is redundant — every row is that
+    // system — so drop it and let the titles use the width instead.
+    opt.textContent = filter ? (g.title || g.file) : `${g.title || g.file} (${sysLabel})`;
+    gameSelect.appendChild(opt);
+  });
 }
 
 // --- boot --------------------------------------------------------------------
@@ -402,6 +546,20 @@ window.__desktop = {
   role,
   booted: () => booted,
   ticks: () => ticks,
+  // Input-scheme surface for probes: "is raw keyboard live / is a mouse device
+  // wired / is the pointer actually captured" are the three things that decide
+  // whether a DOS or Amiga boot is controllable at all, and none of them are
+  // visible from the DOM.
+  input: () => ({
+    rawKeyboard: input.rawKeyboard,
+    mouseWired,
+    pointerLocked: document.pointerLockElement === canvas,
+    system: loadedMeta?.system ?? null,
+  }),
+  // Test hooks: pointer lock needs a real user gesture, which a headless probe
+  // cannot produce, so these let one exercise the transport directly.
+  __sendMouse: (dx, dy, buttons = 0) => client.sendMouse(dx, dy, buttons, null),
+  __sendRawKey: (code, key, down) => client.sendInput(down ? 'keydown' : 'keyup', code, key, 0, 0),
   net_debug: () => net?.debugApi?.() ?? null,
 };
 
