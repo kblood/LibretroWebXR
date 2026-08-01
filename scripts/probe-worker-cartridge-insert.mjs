@@ -65,6 +65,20 @@ const CASES = [
     title: 'N64 Worker Smoke',
     romPath: resolve(ROOT, 'public', 'roms', 'freeware', 'lwx-n64-smoke.z64'),
   },
+  {
+    core: 'dosbox_pure',
+    system: 'dos',
+    file: 'freedos-boot.img',
+    title: 'DOS Worker Smoke',
+    romPath: resolve(ROOT, 'public', 'roms', 'local', 'dos', 'freedos-boot.img'),
+    // Unlike the PSX/N64 content above, this is NOT in the repo: public/roms/*
+    // is gitignored, so a fresh clone has no DOS image and this case skips
+    // rather than failing the probe. Regenerate/sideload it to cover DOS
+    // locally. (dosbox_pure is execution:'worker', so this probe's stated
+    // "every worker core" contract does cover it — the skip is about content
+    // availability, not about DOS being exempt.)
+    optional: true,
+  },
 ];
 
 const CHROME = [
@@ -78,12 +92,17 @@ if (!CHROME) {
   process.exit(1);
 }
 
-const missing = CASES.filter((c) => !existsSync(c.romPath));
+const missing = CASES.filter((c) => !c.optional && !existsSync(c.romPath));
 if (missing.length) {
   console.error('ERROR: required test content missing:');
   for (const c of missing) console.error(`  ${c.romPath}`);
   process.exit(2);
 }
+// Skips are announced, never silent — a quietly-dropped case would make this
+// probe read as "all worker cores covered" while covering fewer than it claims.
+const skipped = CASES.filter((c) => c.optional && !existsSync(c.romPath));
+for (const c of skipped) console.log(`SKIP  [${c.core}] test content not present: ${c.romPath}`);
+const ACTIVE_CASES = CASES.filter((c) => existsSync(c.romPath));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
@@ -113,7 +132,7 @@ try {
     args: ['--enable-features=SharedArrayBuffer', '--no-sandbox'],
   });
 
-  for (const testCase of CASES) {
+  for (const testCase of ACTIVE_CASES) {
     const page = await browser.newPage();
     page.setDefaultTimeout(60000);
     const pageErrors = [];

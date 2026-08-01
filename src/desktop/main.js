@@ -16,7 +16,7 @@
 //   idle   — connected but nobody is hosting yet (load a game to host) — also
 //            the offline single-player state.
 
-import { EmulatorClient } from '../EmulatorClient.js';
+import { RuntimeEmulatorClient } from '../RuntimeEmulatorClient.js';
 import { loadCollection } from '../Collection.js';
 import { romUrlFor } from '../RomResolver.js';
 import { coreInfo, coreForFile, systemForFile, extOf, SYSTEMS } from '../systems.js';
@@ -55,7 +55,15 @@ const mpStatus = $('mp-status');
   };
 })(canvas);
 
-const client = new EmulatorClient();
+// RuntimeEmulatorClient, not EmulatorClient directly: it picks the execution
+// topology per core, so this page can host worker/threaded cores (dosbox_pure,
+// mednafen_psx_hw, mupen64plus_next) as well as the classic page-bound ones.
+// Threaded cores additionally need the page to be crossOriginIsolated — that
+// comes from the COOP/COEP headers in public/.htaccess, which deploy.ps1 ships
+// explicitly. One caveat is structural, not a bug: a <canvas> can only ever
+// have one context type, so switching between a main-thread and a worker core
+// without a reload raises RuntimeModeSwitchError (see bootLocal).
+const client = new RuntimeEmulatorClient();
 let net = null;
 let games = [];               // normalized collection entries
 let loadedMeta = null;        // the meta WE booted locally (host/solo)
@@ -101,13 +109,47 @@ function refreshMpStatus() {
 async function bootLocal(meta, buffer) {
   const core = coreInfo(meta.core) || coreForFile(meta.file);
   if (!core) { setStatus(`No core for ${meta.file}`); return false; }
+  if (core.requiresThreads && !globalThis.crossOriginIsolated) {
+    setStatus(`${core.label} needs SharedArrayBuffer — this page is not cross-origin isolated (COOP/COEP headers missing)`);
+    return false;
+  }
   setStatus(`Loading ${meta.title || meta.file}…`);
   try {
-    await client.start(canvas, buffer, {
+    // Worker cores take a ContentBundle, not a bare buffer. Single-file content
+    // is all this page ever produces (one pick, one drop, one fetched entry), so
+    // this is the single-source case of main.js's wrapWorkerContent — the
+    // multi-file CUE/M3U companion-fetch branches there have no equivalent here.
+    let content = buffer;
+    if (core.execution === 'worker') {
+      const { ContentBundle } = await import('../ContentBundle.js');
+      content = await ContentBundle.fromNamedSources(
+        [{ path: meta.file, source: buffer }],
+        { entryExtensions: core.exts },
+      );
+    }
+    await client.start(canvas, content, {
       coreUrl: core.url, coreName: core.name, moduleStyle: core.style,
       contentExt: extOf(meta.file), coreOptions: core.coreOptions, systemFiles: core.systemFiles,
+      remapName: core.remapName,
+      execution: core.execution, requiresThreads: core.requiresThreads,
+      coreBuildHash: core.buildHash,
+      // Worker cores take their requested video size from opts.width/height,
+      // falling back to the canvas's CURRENT size (WorkerEmulatorClient.js).
+      // #emu carries width=320 height=240 as a placeholder, which would pin the
+      // core to 320x240 and downscale its real output into an illegible mush —
+      // DOSBox Pure's 640x400 text mode is unreadable that way. Main-thread
+      // cores are unaffected: Emscripten sizes the canvas itself, and
+      // FrameBridge still resizes to whatever each frame actually is.
+      ...(core.execution === 'worker' ? { width: 640, height: 480 } : {}),
     });
   } catch (e) {
+    // A mode switch can't be serviced in place (the canvas already has the
+    // other context type), so say what actually fixes it rather than leaving a
+    // bare error that looks like the core failed to load.
+    if (e?.code === 'MODE_SWITCH_REQUIRED') {
+      setStatus('Reload the page to switch between this core and the previous one');
+      return false;
+    }
     setStatus(`Failed to load: ${e?.message || e}`);
     return false;
   }
@@ -331,7 +373,10 @@ screen?.addEventListener('drop', (e) => {
 async function loadGameList() {
   const params = new URLSearchParams(location.search);
   const collectionUrl = params.get('collection') || 'roms/manifest.json';
-  const col = await loadCollection(collectionUrl);
+  // Same `?experimental=1` gate index.html uses (Collection.js drops entries
+  // whose system is flagged experimental). Without passing it, this page could
+  // never show those systems at all, even deliberately.
+  const col = await loadCollection(collectionUrl, { experimental: params.get('experimental') === '1' });
   games = col.games || [];
   if (gameSelect) {
     gameSelect.innerHTML = '<option value="">— pick a game —</option>';

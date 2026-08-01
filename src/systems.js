@@ -331,15 +331,22 @@ export const SYSTEMS = {
   // EmulatorClient.sendMouse primitive owned by the parallel mouse agent —
   // see the "DOS mouse" follow-up comment below SYSTEM_PORTS.
   //
-  // `experimental: true` — same mechanism/precedent as PSX/N64 above: hides
-  // `dos` cartridges from the default shelf/collection UI (Collection.js's
-  // parseCollection, gated in main.js on `?experimental=1`) WITHOUT removing
-  // the system's registration. dosbox_pure is real and headless-verified
-  // (screenshot shows legible DOSBOX PURE START MENU text) but not yet
-  // reachable from the normal in-VR cart-insert path (same P0-2 gap as
-  // PSX/N64) and only tested against a synthetic FreeDOS boot floppy, not a
-  // real commercial game — remove this flag once both are addressed.
-  dos:       { label: 'DOS / IBM PC',       defaultCore: 'dosbox_pure',      cores: ['dosbox_pure','virtualxt'],      exts: ['exe','com','bat','conf','img','dosz','zip','iso','cue'], aliases: ['dos','ms-dos','msdos','pc','ibm pc','dosbox','virtualxt'], thumbnailRepo: null, medium: 'floppy', keyboard: true, experimental: true },
+  // NOT `experimental` (2026-08-01). It was, on two stated grounds, both now
+  // discharged rather than merely assumed:
+  //   * "not reachable from the normal in-VR cart-insert path (same P0-2 gap
+  //     as PSX/N64)" — scripts/probe-worker-cartridge-insert.mjs now drives
+  //     the real handleCartridgeInserted path for worker cores end to end and
+  //     passes 12/12, ending in {mode:'worker', ready:true}. The gap is shut
+  //     for the worker topology as a whole, which is what actually gated this.
+  //   * "only tested against a synthetic FreeDOS boot floppy" — dosbox_pure is
+  //     now verified booting the real 256MB DOS-TOOLS.img release disk, with a
+  //     screenshot of DOSBox Pure's start menu enumerating its executables.
+  // Dropping the flag is what lets a `dos` cartridge survive parseCollection
+  // (Collection.js) and appear on the shelf without `?experimental=1` — i.e.
+  // what makes DOS work on the deployed site for ordinary visitors.
+  // CORES.dosbox_pure keeps its own `experimental` marker: nothing filters on
+  // it, and the core is still young (no real DOS *game* has been run yet).
+  dos:       { label: 'DOS / IBM PC',       defaultCore: 'dosbox_pure',      cores: ['dosbox_pure','virtualxt'],      exts: ['exe','com','bat','conf','img','dosz','zip','iso','cue'], aliases: ['dos','ms-dos','msdos','pc','ibm pc','dosbox','virtualxt'], thumbnailRepo: null, medium: 'floppy', keyboard: true },
   // PlayStation 2 (Play!, see CORES.play). medium: 'floppy' is a placeholder —
   // there's no disc-shaped prop yet (only cartridge/floppy exist); PS2 discs
   // render as a floppy until one is built.
@@ -896,13 +903,23 @@ export function fourScoreLoadConfig(systemId, coreName) {
 // only way to pick `mednafen_psx_hw` for an ambiguous .cue/.chd is an
 // explicit `?core=mednafen_psx_hw` / `override` argument to coreForFile.
 //
-// .exe is ALSO ambiguous, between `virtualxt` (DOS) and `mednafen_psx_hw`
-// (bare PS-X EXE homebrew) — unlike cue/chd there's no disc to sniff, so
-// there's no better-than-filename signal here at all. Defaults to `virtualxt`
-// (existing shipped behaviour); loading a PS-X EXE needs an explicit
+// .exe is ALSO ambiguous, between the DOS cores and `mednafen_psx_hw` (bare
+// PS-X EXE homebrew) — unlike cue/chd there's no disc to sniff, so there's no
+// better-than-filename signal here at all. Loading a PS-X EXE needs an explicit
 // override (`?core=mednafen_psx_hw`) until/unless this gets a real content
 // sniff (a PS-X EXE header starts with the ASCII magic "PS-X EXE").
-const AMBIGUOUS_EXT_DEFAULT = { bin: 'stella2014', cue: 'play', chd: 'play', exe: 'virtualxt' };
+//
+// .exe/.com/.img all name `dosbox_pure`, NOT `virtualxt`. Both cores claim
+// these, `virtualxt` is declared first, and Object.entries order would hand it
+// every DOS file — but its binary is not installed (fetch-cores.mjs: absent /
+// 404 on the buildbot), so that silently boot-trapped ALL DOS content. It is
+// also no longer the system default (SYSTEMS.dos.defaultCore is dosbox_pure,
+// which is verified booting a real 256MB FAT16 hard-disk image). .img needs an
+// entry for the same declaration-order reason even though it isn't ambiguous
+// in the PSX sense. Extensions only dosbox_pure claims (bat/conf/dosz/zip)
+// need no entry; .iso/.cue stay with picodrive/play, which are declared ahead
+// of dosbox_pure, so adding the DOS core did not steal Sega/PS2 discs.
+const AMBIGUOUS_EXT_DEFAULT = { bin: 'stella2014', cue: 'play', chd: 'play', exe: 'dosbox_pure', com: 'dosbox_pure', img: 'dosbox_pure' };
 
 /** Core short-name → its info, or null. */
 export function coreInfo(name) {
