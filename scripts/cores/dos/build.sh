@@ -53,10 +53,22 @@
 #     FORCE_RECLONE=1        re-clone dosbox-pure from scratch
 #     FORCE_REBUILD_CORE=1   `make clean` + rebuild the core step
 #     FORCE_RELINK=1         always re-run the RetroArch link step
-#   Extra flags can be appended to the final link command (e.g. if phase 7's
-#   verification finds a stalled pthread_create and the mitigation in the
-#   build plan applies) via:
-#     EXTRA_LINK_FLAGS='-sPTHREAD_POOL_SIZE=2' bash scripts/cores/dos/build.sh
+#   Extra arguments can be appended to the final `make` invocation via:
+#     EXTRA_LINK_FLAGS='PTHREAD_POOL_SIZE=8' bash scripts/cores/dos/build.sh
+#   IMPORTANT: this only works for bare `VAR=value` Makefile variable
+#   overrides (like the example above, or LIBRETRO=/HAVE_THREADS=/etc. which
+#   this script already passes the same way) — NOT for raw `-s`-prefixed
+#   emscripten linker flags. `$EXTRA_LINK_FLAGS` is spliced directly onto the
+#   `make` command line (see PHASE 5 below), and GNU make intercepts any
+#   argument starting with `-` as ITS OWN flag (e.g. `-sFOO=1` gets parsed as
+#   `-s` + `-F` + `-O` + ... and fails with a usage error) — confirmed the
+#   hard way via `EXTRA_LINK_FLAGS='-sPTHREAD_POOL_SIZE=2'` failing with
+#   `FAILED (exit 1) at phase: 5-link` (2026-08-01). If you need to change an
+#   actual emscripten LDFLAGS-only setting (no bare Makefile variable exists
+#   for it), patch it at the source level instead — see the `LWX:`-tagged
+#   patches in `~/amiga-build/RetroArch/frontend/drivers/
+#   platform_emscripten.c` (docs/DOS_CORE_BUILD.md's "Fix" section) for the
+#   pattern this repo already uses for exactly that situation.
 #
 # CONCURRENCY NOTE
 #   ~/amiga-build/RetroArch is a SHARED checkout reused by every core build
@@ -149,7 +161,7 @@ log "  RETROARCH_DIR           = $RETROARCH_DIR"
 log "  RWEBAUDIO_SOURCE_REPO   = $RWEBAUDIO_SOURCE_REPO"
 log "  LIBRETRO_NAME           = $LIBRETRO_NAME"
 log "  HAVE_THREADS            = $HAVE_THREADS"
-log "  EXTRA_LINK_FLAGS        = '${EXTRA_LINK_FLAGS}'  (empty by default — see header comment for -sPTHREAD_POOL_SIZE=2 retry)"
+log "  EXTRA_LINK_FLAGS        = '${EXTRA_LINK_FLAGS}'  (empty by default — bare VAR=value make overrides only, see header comment)"
 log "  JOBS                    = $JOBS"
 log "  FORCE_RECLONE           = $FORCE_RECLONE"
 log "  FORCE_REBUILD_CORE      = $FORCE_REBUILD_CORE"
