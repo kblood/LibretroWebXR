@@ -60,9 +60,11 @@ const CORES = [
   // prior buildbot binary of this core was fetched once and boot-trapped
   // (RuntimeError: unreachable after mounting the disk) — see
   // docs/DOS_CORE_BUILD.md for both the trap history and the current absent/
-  // 404 state. `dos` is flagged `experimental: true` in src/systems.js so it
-  // isn't offered to real users either way. Left listed so deploy picks it up
-  // automatically once a working build (buildbot or a from-scratch one) exists.
+  // 404 state. It is NO LONGER the DOS default and `dos` is no longer
+  // experimental (2026-08-01) — dosbox_pure took both roles and is a real,
+  // verified build, so virtualxt being absent no longer means DOS is broken.
+  // Left listed so deploy picks it up automatically if a working build ever
+  // appears (SYSTEMS.dos still offers it as a secondary core).
   'virtualxt',
 ];
 
@@ -82,7 +84,16 @@ const CORES = [
 // found `npm run deploy` was silently shipping a build where these three
 // systems are registered and visible in the app but their core files 404 —
 // this script had no idea they existed. See the hard-error check below.
-const CUSTOM_CORES = ['play', 'mednafen_psx_jit', 'mupen64plus_next'];
+// dosbox_pure joined this list on 2026-08-01, when it became SYSTEMS.dos's
+// default core and `dos` stopped being experimental. It is the same kind of
+// artifact as the other three — a from-scratch WSL2 Emscripten build that is
+// NOT on the buildbot (scripts/cores/dos/build.sh, docs/DOS_CORE_BUILD.md),
+// pthread-enabled so it ships a .worker.js too. Listing it here is what makes
+// a deploy HARD-ERROR when the binary is absent instead of silently shipping a
+// build where DOS is on the shelf but its core 404s — precisely the failure the
+// 2026-07-24 review caught for play/psx/n64, and an easy one to re-introduce
+// because public/cores/ is gitignored.
+const CUSTOM_CORES = ['play', 'mednafen_psx_jit', 'mupen64plus_next', 'dosbox_pure'];
 // All three are pthread/Emscripten builds and each actually ships a
 // `.worker.js` (verified on disk 2026-07-27 — every one of
 // play/mednafen_psx_jit/mupen64plus_next has one in public/cores/), so it's
