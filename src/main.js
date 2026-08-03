@@ -6473,7 +6473,10 @@ async function bootOnPrimary(meta, bootCore, content, startOptions) {
     });
     rebindPrimaryClient(next.client);
     wireClientEvents(next.client);
-    next.client.resume?.();
+    // Through the RUNTIME, not next.client, so the M1.4 display-only gate applies
+    // (RackMgr.add → setCanRun). Identical for a host; refused for a non-host, which
+    // is what keeps a fresh runtime from becoming a watcher's second live core.
+    next.resume?.();
     return next.client;
   }
   // Mirrors ConsoleRuntime.load()'s ensureBranch call (B3, 2026-07-25 review):
@@ -6549,7 +6552,8 @@ async function rebootPrimaryConsole(meta, gun, mouse = null) {
   // ready/error handlers (the old client's listeners don't carry over).
   rebindPrimaryClient(next.client);
   wireClientEvents(next.client);
-  next.client.resume?.();   // make sure the fresh core is actually running
+  next.resume?.();          // make sure the fresh core runs — via the runtime, so
+                            // the M1.4 display-only gate still applies (see above)
 
   // Mirror loadCartridge's post-boot bookkeeping so the rest of the app agrees on
   // what's now running on the primary (and that the gun device is connected).
