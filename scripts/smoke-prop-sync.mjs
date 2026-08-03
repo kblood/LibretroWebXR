@@ -68,10 +68,14 @@ async function openPeer(nick) {
 }
 
 // Poll a page-side predicate; args are passed to page.evaluate.
+// Errors are swallowed and retried: a peer can be mid-navigation (the M1.4 client
+// reloads to adopt a host room layout that the prop deltas can't express), and
+// window.__props is briefly undefined then. Without this the first such poll threw
+// out of the whole run and reported a failure that wasn't one.
 async function waitFor(page, fn, ms = 10000, ...evalArgs) {
   const start = Date.now();
   while (Date.now() - start < ms) {
-    if (await page.evaluate(fn, ...evalArgs)) return true;
+    try { if (await page.evaluate(fn, ...evalArgs)) return true; } catch { /* mid-reload */ }
     await sleep(150);
   }
   return false;

@@ -220,6 +220,38 @@ window.__client = client;
 // The module-level tick callback always runs (added once below); it no-ops
 // when `net` is null so the solo experience is completely unchanged.
 let net = null;
+
+// --- M1.4 room-role helpers -------------------------------------------------
+//
+// The SERVER elects the room host (server/Hub.js: first in wins, migration by
+// seniority when the host actually LEAVES). These three predicates are the ONLY
+// thing the ~dozen boot/ownership gates below consult, so "may I run a core?" is
+// answered identically everywhere instead of being re-derived (and re-derived
+// wrong) per call site. The overturned rule — "whoever last wrote `tv` is the
+// host" — is gone: writing `tv` no longer makes anyone the host.
+//
+//   amRoomHost()          solo (no session) OR the elected host. May boot cores,
+//                         own the room + shelf, publish `tv`, stream video.
+//   isDisplayOnlyClient() in a session with a known host that isn't us. May ONLY
+//                         display the host's video feed and forward input. Must
+//                         never boot a core — a joiner may not even own the ROM.
+//   roleUndecided()       in a session, election not landed yet (socket down, or
+//                         HELLO/HOST not seen). Deliberately NEITHER: a boot
+//                         attempt is queued (_pendingInsertMeta) and replayed
+//                         from _applyHostRole, so a race can't start a 2nd core.
+function amRoomHost() { return !net || (!!net.connected && net.isHost()); }
+function isDisplayOnlyClient() { return !!net && !!net.connected && net.hostId() != null && !net.isHost(); }
+function roleUndecided() { return !!net && (!net.connected || net.hostId() == null); }
+// A cart insert made while the role was still undecided; replayed once it lands.
+let _pendingInsertMeta = null;
+// The host's incoming <video> element while we're a display-only client. Held at
+// module level (not just handed to scene.setScreenVideo once) so routeVideo() can
+// re-paint it after ANY later local re-route — see routeVideo below.
+let _hostVideoEl = null;
+// Were we last known to be a display-only client? Drives the "restore what was
+// suppressed while watching" work on promotion (local ROM library + saved rack).
+let _wasDisplayOnly = false;
+
 // Shared-gamepad ghost renderer (non-null only while in a session).
 let ghostGpMgr = null;
 // Shared-light-gun ghost renderer (non-null only while in a session).
@@ -274,7 +306,14 @@ let _applyLiveDrag = () => {};
 // peer (the real effects — ghost-pad animation, live drag, console reset,
 // M1.3 peripheral forwarding — are internal).
 // Exposed as window.__wireRx in buildCartridgeWorld. Capped so it can't grow.
-const _wireRxLog = { gp: [], drag: [], reset: [], gun: [], mouse: [], kbd: [] };
+const _wireRxLog = {
+  gp: [], drag: [], reset: [], gun: [], mouse: [], kbd: [],
+  // M1.4 shared-game channels: `insert` is a client asking the host to play a
+  // cart, `insert-nack` the host's refusal, `peripheral` a client's gun/mouse
+  // grab. All three are host-authoritative round trips a smoke has to observe
+  // from the OTHER side, so they are logged like the rest.
+  insert: [], 'insert-nack': [], peripheral: [],
+};
 function _recordWireRx(ch, data) {
   const buf = _wireRxLog[ch];
   if (!buf) return;
@@ -359,6 +398,17 @@ function connectToRoom(room, nick, color) {
     // M0.5 room-object sync: reflect a remote peer's shared state into our scene.
     onObjectState: (key, value) => {
       if (key === 'tv') applyRemoteTv(value);
+      // M1.4: the host's room snapshot can arrive AFTER HELLO (the server replays
+      // shared STATE right after it), so a widget-joiner's adoption check has to
+      // run here too — not only in the host-role callback.
+      if (key === ROOM_STATE_KEY) _maybeAdoptHostRoomLive();
+      // M1.4 shelf inheritance: the host owns what's ON the shelves, and two of
+      // its shelf sources can't be resolved by a client from the room descriptor
+      // alone — a DROPPED/imported collection (ref `dropped:<id>`, not fetchable)
+      // and the host's picker-loaded local carts (never in the descriptor at
+      // all). The host publishes both as their own keys; apply them here.
+      if (key === SHELF_COLLECTIONS_KEY) _applyHostShelfCollections(value);
+      if (key === SHELF_LOCAL_KEY) _applyHostLocalShelf(value);
       if (isGamepadStateKey(key)) _reconcileGamepadState();
       if (isGunStateKey(key)) _reconcileGunState();
       if (isMouseStateKey(key)) _reconcileMouseState();
@@ -366,7 +416,7 @@ function connectToRoom(room, nick, color) {
       if (isPowerStateKey(key)) _applyRemotePower(key, value);
     },
     // M1.1 host-authoritative input: inject remote buttons only when we are host.
-    onGameInput: (ev) => { if (net?.isHost()) gameInput?.setRemoteButton(ev); },
+    onGameInput: (ev) => { if (amRoomHost()) gameInput?.setRemoteButton(ev); },
     // M2 transient relay: a peer's per-frame ephemera. 'gp' = a held pad's live
     // button state → animate that pad's ghost in the holder's hand. 'drag' = a
     // prop's live transform while held → move our copy in real time. 'gun'/
@@ -374,7 +424,7 @@ function connectToRoom(room, nick, color) {
     // core only when we're the host (mirrors onGameInput's isHost() gate) — a
     // non-host receiving another non-host's forward is a harmless no-op, same
     // "broadcast to everyone" tradeoff 'gp'/'drag' already make.
-    onWire: (ch, data) => {
+    onWire: (ch, data, fromId) => {
       _recordWireRx(ch, data);
       if (ch === 'gp' && data?.cableId) ghostGpMgr?.applyInput(data.cableId, data);
       else if (ch === 'drag' && data?.id) _applyLiveDrag(data);
@@ -382,7 +432,22 @@ function connectToRoom(room, nick, color) {
       else if (ch === 'gun') _hostApplyGunWire(data);
       else if (ch === 'mouse') _hostApplyMouseWire(data);
       else if (ch === 'kbd') _hostApplyKbdWire(data);
+      // fromId (NetMgr passes the relay's `id`) is who to nack if we can't serve it.
+      else if (ch === 'insert') _hostApplyInsertRequest(data, fromId);
+      // A client grabbed/dropped the gun or mouse: the DEVICE must be attached on
+      // the host's core, since that's the one that's running (see
+      // _forwardPeripheralArm). Host-gated inside the handler.
+      else if (ch === 'peripheral') _hostApplyPeripheralWire(data);
+      // M1.4: the host refused our insert request (it doesn't own that ROM, or the
+      // core is unknown there). Without this the requester sat forever on
+      // "asked the host to play …" with no idea the answer was no. Broadcast, so
+      // filter to the addressee.
+      else if (ch === 'insert-nack') _applyInsertNack(data);
     },
+    // M1.4: the server elected/migrated the room host. Fired from HELLO and from
+    // any later HOST message (the previous host left, or we reclaimed the role
+    // after our own reload).
+    onHostChange: _applyHostRole,
     // M1.2 host video: paint the host's frames on the TV; pause our core while
     // watching (it isn't authoritative). Resume + revert when the stream ends.
     // primaryCanvas (a getter, resolved per-capture-frame in NetMgr) so the host
@@ -390,8 +455,36 @@ function connectToRoom(room, nick, color) {
     // #canvas. client.pause/resume read the live `client` binding (let, rebound on
     // reboot); the revert paints whatever the primary console is now showing.
     videoCanvas: primaryCanvas,
-    onHostVideo: (videoEl) => { scene.setScreenVideo(videoEl); client.pause(); },
-    onHostVideoEnded: () => { scene.setScreenSource(primaryCanvas()); client.resume(); },
+    // M1.4: the game AUDIO rides the same peer connection. canvas.captureStream()
+    // is video-only, so before this a watching client saw the host's game in
+    // total silence. The tap sits on the primary console's spatial-audio branch
+    // (src/SpatialAudio.js captureStream) — i.e. after focus/power gain, so a
+    // client hears what the host hears. Resolved per-capture so it also works
+    // when the branch is created later (first boot / a live primary reboot).
+    videoAudio: () => audioRouter?.captureStream?.(CONSOLE_ID),
+    onHostVideo: (videoEl, hostId, stream) => {
+      _hostVideoEl = videoEl;
+      // Route through routeVideo() (not a one-shot setScreenVideo) so the feed is
+      // re-asserted after every later local re-route instead of being clobbered.
+      routeVideo();
+      client.pause();
+      // Play the host's audio through OUR WebAudio graph, positioned on the TV.
+      // Deliberately not by unmuting the <video>: an unmuted element can be
+      // paused outright by the autoplay policy, which would freeze the VIDEO
+      // TEXTURE too and give the client a still image.
+      if (stream) audioRouter?.attachRemoteAudio?.(stream, scene.tv?.group);
+      logger?.event?.('mp-host-video', { hostId, audio: !!stream?.getAudioTracks?.().length });
+    },
+    // M1.4: only resume the local core if we are allowed to run one. A non-host
+    // whose host stream drops (ICE churn, host reload) must stay idle — resuming
+    // would restart the independent-core divergence this release fixes.
+    onHostVideoEnded: () => {
+      _hostVideoEl = null;
+      audioRouter?.detachRemoteAudio?.();
+      setPrimaryScreen(primaryCanvas());
+      if (amRoomHost()) client.resume();
+      else setStatus('host stream interrupted — waiting for it to come back');
+    },
     // FIX 1: clear latched remote keys when a peer disconnects mid-keypress.
     // NOTE (FIX E): clearRemote() clears ALL remote input, not just the leaving
     // peer's buttons. In a 3+ peer session this is a ~1-tick blip for other
@@ -402,7 +495,7 @@ function connectToRoom(room, nick, color) {
     // entries, which is invasive across GameInputMgr, its tests, and the
     // network contract. The conservative all-clear is safe and correct for the
     // common 2-player case; the blip is benign in 3+ sessions.
-    onPeerLeave: (_peerId) => { if (net?.isHost()) gameInput?.clearRemote(); },
+    onPeerLeave: (_peerId) => { if (amRoomHost()) gameInput?.clearRemote(); },
   });
   net = newNet;
   net.connect();
@@ -427,11 +520,18 @@ function disconnectFromRoom() {
   if (!net) return;
   // If we were watching a host video, revert the TV to our own canvas and
   // resume the local core (same as onHostVideoEnded but triggered by leave).
-  scene.setScreenSource?.(primaryCanvas());
-  client.resume?.();
+  // ORDER MATTERS: drop the host feed and tear the session down FIRST, so the
+  // re-route below sees "solo" and paints our own canvas. Re-routing while `net`
+  // was still live left isDisplayOnlyClient() true, so the TV kept the (now
+  // dead) host video and Leave looked like it did nothing.
+  _hostVideoEl = null;
+  _pendingInsertMeta = null;
+  audioRouter?.detachRemoteAudio?.();
   net.disconnect();
   net = null;
   window.__net = null;
+  setPrimaryScreen(primaryCanvas());
+  client.resume?.();
   // Back to a findable solo bucket (not null → the shared 'default') so post-leave
   // solo play stays diagnosable. See Logger.soloSession().
   logger._sessionId = logger.soloSession();
@@ -440,7 +540,12 @@ function disconnectFromRoom() {
 
 // Register the single persistent tick callback. Guards on `net` being non-null
 // so there is zero cost when the user is in solo mode.
-scene.addTickCallback((dt) => net?.tick(dt));
+scene.addTickCallback((dt) => {
+  net?.tick(dt);
+  // M1.4: while hosting, keep the room's authoritative room/shelf snapshot in sync
+  // with what we actually have built (see _syncHostRoomState). Self-throttled.
+  if (net) _syncHostRoomState(performance.now());
+});
 
 // --- Wire the in-app multiplayer header widget ----------------------------
 //
@@ -845,10 +950,26 @@ rackMgr.setBudgetEnabled(loadAutoPause());
 let _lastRouteSig = '';
 const routeVideo = () => {
   const diag = [];
+  // M1.4: for a display-only client the PRIMARY console's screen is the HOST's
+  // video feed, not any local canvas. Deciding that here — inside the single
+  // video-routing authority — instead of with a one-shot scene.setScreenVideo()
+  // at stream-arrival time is what makes the host picture SURVIVE every later
+  // local re-route. Before this, any TV/console power toggle, console spawn,
+  // live primary reboot or video-cord repatch called routeVideo() and silently
+  // clobbered the host's picture with our own (idle, paused) canvas — after
+  // which nothing ever restored it, so the client sat on a dead screen while
+  // still forwarding input. Only the primary console's TV shows it: secondary
+  // rack consoles are local-only scenery for a watcher.
+  const hostVideo = (_hostVideoEl && isDisplayOnlyClient()) ? _hostVideoEl : null;
   for (const tv of scene._tvs) {
     // A powered-off TV shows the idle screen regardless of what's patched to it.
     if (!isTvOn(tv.id)) { tv.setSource(placeholderCanvas); diag.push(`${tv.id}=off`); continue; }
     const src = cable.sourceOf(tv.id);             // consoleId | null
+    if (hostVideo && src === CONSOLE_ID) {
+      tv.setVideo(hostVideo);
+      diag.push(`${tv.id}<-hostvideo`);
+      continue;
+    }
     // A powered-off console feeds nothing — its TV falls back to the idle screen.
     const canvas = (src && isConsoleOn(src)) ? rackMgr.get(src)?.canvas : null;
     // A TV with no patched console shows the idle screen (a pulled video cord
@@ -865,6 +986,19 @@ const routeVideo = () => {
     logger?.event?.('video-route', { map: sig });
   }
 };
+
+// Paint the primary console's TV while respecting the netplay role. Every place
+// that used to call scene.setScreenSource() directly now goes through here: a
+// display-only client's screen belongs to the host's feed, and a bare
+// setScreenSource() there is exactly how the client's picture kept getting
+// replaced by its own idle canvas. `canvas` is an explicit override (a
+// freshly-booted runtime's canvas, or placeholderCanvas on a load error);
+// omit it to just re-assert the normal patch-graph routing.
+function setPrimaryScreen(canvas) {
+  if (_hostVideoEl && isDisplayOnlyClient()) { routeVideo(); return; }
+  if (canvas) scene.setScreenSource?.(canvas);
+  else routeVideo();
+}
 
 // ── Focus (gaze) → live-budget + audio mute ─────────────────────────────────
 // The console whose TV the user is looking at is the "focused" one: the rack
@@ -1199,6 +1333,15 @@ function addTvControls(tvId, tv) {
 // window.__rack for headless verification. Returns the new console's id.
 let _spawnSeq = 0;
 async function spawnConsole(system, opts = {}) {
+  // M1.4 client-boot suppression at the source: spawning a console boots a core.
+  // Gated HERE (not only at the menu button) so every caller — the Add panel, the
+  // window.__rack debug hook, restoreRack's replay, a room descriptor's saved rack
+  // — is covered by one check. Throws rather than silently resolving so callers
+  // surface it (spawnNextConsole turns it into a status line).
+  if (!amRoomHost()) {
+    logger?.event?.('console-spawn-suppressed', { system, hostId: net?.hostId?.() ?? null });
+    throw new Error('only the room host can run consoles — you are watching the host’s screen');
+  }
   const { game } = opts;
   const games = window.__games || [];
   const meta = game || games.find((g) => g.system === system) || games[0];
@@ -1341,6 +1484,16 @@ function applyRackLayout(layout) {
 async function restoreRack() {
   const saved = loadRack();
   if (!saved || !saved.consoles.length) return;
+  // M1.4 client-boot suppression: every restored console BOOTS A CORE. In a
+  // session only the host runs cores, so a display-only client (or one whose role
+  // hasn't been elected yet) must not replay its saved rack — that was one of the
+  // paths by which a "watching" machine ended up running its own games. The rack
+  // is only persisted locally, so nothing is lost: _applyHostRole replays this if
+  // we're ever promoted.
+  if (!amRoomHost()) {
+    logger?.event?.('rack-restore-suppressed', { consoles: saved.consoles.length, hostId: net?.hostId?.() ?? null });
+    return;
+  }
   const games = window.__games || [];
   setStatus(`Restoring ${saved.consoles.length} console(s)…`);
   for (const c of saved.consoles) {
@@ -1447,6 +1600,10 @@ function requestPersistentStorage() {
 // running (so repeated taps cycle through the library's systems). Wired to the
 // Add panel's "Spawn Console" button and window.__rack.spawnNext.
 async function spawnNextConsole() {
+  if (!amRoomHost()) {
+    setStatus('Only the room host can add consoles — you are watching the host’s screen');
+    return null;
+  }
   const games = window.__games || [];
   if (!games.length) { setStatus('No games available to spawn'); return null; }
   const running = new Set(rackMgr.runtimes().map((r) => r.system).filter(Boolean));
@@ -1488,7 +1645,7 @@ function _cabledObjFor(cableId) {
 // forwarding — see also _kbdSendInputFor for the keyboard equivalent). Host
 // peers (and solo) get the real client straight back — no shim, no forwarding.
 function _gunClientFor(cableId, localClient) {
-  if (!net || net.isHost()) return localClient;
+  if (amRoomHost()) return localClient;
   return {
     sendLightgun: (u, v, trigger, port) => {
       net.sendWire('gun', { cableId, u, v, trigger, port });
@@ -1505,7 +1662,7 @@ function _gunClientFor(cableId, localClient) {
 }
 
 function _mouseClientFor(cableId, localClient) {
-  if (!net || net.isHost()) return localClient;
+  if (amRoomHost()) return localClient;
   return {
     sendMouse: (dx, dy, buttons, port) => {
       net.sendWire('mouse', { cableId, dx, dy, buttons, port });
@@ -1532,18 +1689,79 @@ function _mouseClientFor(cableId, localClient) {
 // frozen at its last aim, until the core is torn down. Fixing it needs a
 // binding-change message on the wire (both ends), not a change at this line.
 function _hostApplyGunWire(data) {
-  if (!net?.isHost() || !data) return;
+  if (!amRoomHost() || !data) return;
   rackMgr.get(CONSOLE_ID)?.client?.sendLightgun(data.u, data.v, !!data.trigger, data.port ?? null);
 }
 
 function _hostApplyMouseWire(data) {
-  if (!net?.isHost() || !data) return;
+  if (!amRoomHost() || !data) return;
   rackMgr.get(CONSOLE_ID)?.client?.sendMouse(data.dx ?? 0, data.dy ?? 0, data.buttons ?? 0, data.port ?? null);
 }
 
 function _hostApplyKbdWire(data) {
-  if (!net?.isHost() || !data?.type) return;
+  if (!amRoomHost() || !data?.type) return;
   rackMgr.get(_kbdTargetConsoleId)?.sendInput(data.type, data.code, data.key, data.keyCode, data.location);
+}
+
+// M1.4: a non-host peer asked for a different game (it inserted a cart on its
+// side; handleCartridgeInserted forwarded the request instead of booting). We are
+// authoritative, so WE boot it and republish `tv` — which is what puts the new
+// game on everybody's screen via the host video stream. Gated on isHost() like
+// every other host-side wire handler, and on the core actually existing here (the
+// requester's shelf is a copy of ours, so it normally does).
+// VALIDATION (the reason this isn't a straight pass-through to
+// handleCartridgeInserted): the request names a game by FILE only, and the host
+// must resolve it against what the host actually owns — including that game's ROM
+// PROVENANCE (`rom`). Booting `{file, core}` blind is what made a client's
+// local-only cart trigger a cross-core `location.reload()` on the host followed by
+// a 404 on `roms/<file>`: the host came back with a dead placeholder, its video
+// broadcast gone, and the whole room's screen died on a request it could never
+// have served. So: resolve or refuse (and tell the requester which).
+function _resolveHostOwnedGame(file) {
+  if (!file) return null;
+  // 1) The host's collections (shelf games) — carries rom/lightgun/twoGun flags.
+  const fromGames = (window.__games || []).find((g) => g.file === file);
+  if (fromGames) return fromGames;
+  // 2) A cart physically on the host's shelf (covers picked carts minted this
+  //    session, whose userData.rom holds the sha1/bundle provenance).
+  const fromCart = (cartridges || []).find((c) => c.userData?.file === file);
+  if (fromCart?.userData) {
+    const u = fromCart.userData;
+    // A cart we ourselves adopted from a PREVIOUS host has no local bytes.
+    if (u.rom?.source === 'host') return null;
+    return { file: u.file, core: u.core, system: u.system, title: u.title, rom: u.rom || undefined };
+  }
+  // 3) The persisted local-ROM library (OPFS-backed; survives reloads).
+  const fromLocal = (loadLocalRoms() || []).find((e) => e.file === file);
+  if (fromLocal) return lrlToCartMeta(fromLocal);
+  return null;
+}
+
+function _hostApplyInsertRequest(data, fromId = null) {
+  if (!amRoomHost() || !net || !data?.file) return;
+  const nack = (reason) => {
+    net.sendWire('insert-nack', { to: fromId, file: data.file, title: data.title, reason });
+    setStatus(`can't play ${data.title || data.file} — ${reason}`);
+    logger?.event?.('mp-insert-request-nack', { file: data.file, core: data.core, reason });
+  };
+  const owned = _resolveHostOwnedGame(data.file);
+  if (!owned) return nack('not on this machine');
+  const core = owned.core || data.core;
+  if (!CORES[core]) return nack(`unknown core ${core}`);
+  logger?.event?.('mp-insert-request-apply', { file: owned.file, core, requestedCore: data.core || null });
+  // Boot the HOST's own resolved meta (its rom provenance, its gun/mouse flags),
+  // not the requester's description of it. Always on the shared primary console.
+  handleCartridgeInserted({ ...owned, core, consoleId: CONSOLE_ID });
+}
+
+// The host refused (or couldn't find) the game we asked for. Broadcast channel, so
+// only the addressee reacts; `to:null` (a host with no sender id) is treated as
+// addressed to everyone, which is honest — the room's answer was "no".
+function _applyInsertNack(data) {
+  if (!data?.file || amRoomHost()) return;
+  if (data.to && net?.selfId && data.to !== net.selfId) return;
+  setStatus(`the host can't play ${data.title || data.file} (${data.reason || 'refused'})`);
+  logger?.event?.('mp-insert-nack', { file: data.file, reason: data.reason || null });
 }
 
 // Which gun-in-jack-order this gun is among the GUNS plugged into a console (0,1,…),
@@ -1820,7 +2038,8 @@ const _consoleSystems = new Map(); // consoleId -> system string (set on each bo
 function _kbdSendInputFor(consoleId) {
   return (type, code, key, keyCode, location) => {
     rackMgr.get(consoleId)?.sendInput(type, code, key, keyCode, location);
-    if (net && !net.isHost()) net.sendWire('kbd', { type, code, key, keyCode, location });
+    // !amRoomHost() implies we're in a session and not (yet) the host.
+    if (!amRoomHost()) net.sendWire('kbd', { type, code, key, keyCode, location });
   };
 }
 
@@ -2013,24 +2232,184 @@ async function loadRoomCollections(room, inline) {
 // late joiners adopt (see _awaitHostRoom + buildCartridgeWorld).
 const ROOM_STATE_KEY = 'room';
 
-// Wait briefly for the room handoff to resolve when joining a session. Returns
-// the host's published room snapshot if one exists, else null when we appear to
-// be the first peer (the host) — or on timeout / no connection, so solo and
-// offline still build their local room. The server replays all shared STATE in
-// one burst right after HELLO, so once our selfId is assigned a short grace
-// window is enough to see a 'room' key (or conclude there isn't one yet).
-function _awaitHostRoom({ timeoutMs = 2000, graceMs = 500 } = {}) {
+// M1.4 shelf inheritance. The host decides what is ON the shelves; a client
+// inherits that, never its own library. The room descriptor alone can't express
+// two of the host's shelf sources, which is why two machines that "joined the
+// same room" still saw different games:
+//
+//   shelf:collections — collections the client CANNOT fetch by ref. A dropped/
+//        imported *.collection.json becomes the ref `dropped:<id>`, which is not
+//        a URL; loadCollection() 404s it into an empty collection, so the client
+//        built the host's shelf props with no carts on them. The host publishes
+//        the parsed collection inline under this key instead. Ordinary URL refs
+//        (roms/manifest.json, http…) are deliberately NOT republished — they
+//        resolve identically on the client and would bloat every join.
+//   shelf:local — the host's picker-loaded ("local") carts. Those never enter the
+//        room descriptor at all (no URL/collection ref), so they were invisible to
+//        clients. Only the METADATA travels: a client mints a matching cart whose
+//        insertion sends an `insert` request the HOST resolves from its own bytes.
+//        No ROM data ever crosses the wire.
+//
+// Both are `shelf:*` — server/Hub.js isHostOwnedKey() rejects non-host writes to
+// them, so a client can't push its own library onto the room.
+const SHELF_COLLECTIONS_KEY = 'shelf:collections';
+const SHELF_LOCAL_KEY = 'shelf:local';
+// Refs a client can't resolve on its own (see above). Everything else is a URL.
+const _unfetchableRef = (ref) => typeof ref === 'string' && ref.startsWith('dropped:');
+// Host-published collections, as [[ref, collectionObj], …]. Read at build time
+// (buildCartridgeWorld seeds them as `inline`) and kept for later live updates.
+let _hostShelfCollections = [];
+// Host-published local-cart metas, as [{file, core, system, title}, …].
+let _hostLocalShelf = [];
+
+// HOST side: publish the two shelf keys above. Called after the room is built and
+// again whenever the host's own shelf gains a local cart or a dropped collection.
+// No-op for a non-host (the server would reject the write anyway) and solo.
+let _lastPublishedShelf = '';
+function _publishHostShelf() {
+  if (!net || !amRoomHost()) return;
+  try {
+    const cols = [];
+    const seen = new Set();
+    for (const ref of roomCollectionRefs(currentRoom || {})) {
+      if (!_unfetchableRef(ref) || seen.has(ref)) continue;
+      const col = currentCollections?.byKey?.get(ref);
+      if (!col) continue;
+      seen.add(ref);
+      // Strip the regenerable art candidate lists — normalizeGame rebuilds them
+      // client-side from (system, file), and they're the bulk of the payload.
+      cols.push([ref, {
+        id: col.id, title: col.title, author: col.author,
+        games: (col.games || []).map(({ boxartList, ...g }) => g),
+      }]);
+    }
+    // Our OWN picked/OPFS-backed carts only. A cart we adopted from a previous
+    // host (rom.source:'host') is deliberately excluded — we don't hold its bytes,
+    // so republishing it would advertise a game we can't serve.
+    const locals = (cartridges || [])
+      .filter((c) => isLocalRomMeta(c.userData || {}))
+      .map((c) => ({
+        file: c.userData.file, core: c.userData.core,
+        system: c.userData.system, title: c.userData.title,
+      }))
+      .filter((m) => m.file && m.core);
+    // Dedupe: this runs from the periodic host-state watcher as well as from the
+    // explicit call sites, and re-broadcasting an unchanged shelf to every peer a
+    // few times a second would be pure noise.
+    const sig = JSON.stringify([cols, locals]);
+    if (sig === _lastPublishedShelf) return;
+    _lastPublishedShelf = sig;
+    net.setObjectState(SHELF_COLLECTIONS_KEY, cols);
+    net.setObjectState(SHELF_LOCAL_KEY, locals);
+    logger?.event?.('mp-shelf-publish', { collections: cols.length, locals: locals.length });
+  } catch (e) {
+    console.warn('[main] shelf publish failed:', e);
+  }
+}
+
+// HOST side: keep the room's authoritative snapshot in sync with what the host has
+// actually got in front of it. The host owns the room, and it changes the room from
+// a dozen places (Add-mode props, Load Collection, a dropped .room.json, Change-mode
+// shelf swaps, prop deletion, a picked ROM landing on a shelf). Publishing from each
+// of those call sites means the next one added silently isn't synced — which is how
+// "the host's room setup isn't shared" kept coming back. One cheap watcher over the
+// serialized snapshot covers all of them, present and future.
+//
+// Only runs while hosting a session; compares a serialization before sending, so a
+// static room costs one JSON.stringify per interval and zero traffic. Prop MOVES
+// keep riding the finer-grained prop:* deltas — this is about structure.
+const HOST_ROOM_WATCH_MS = 2000;
+let _lastPublishedRoom = '';
+let _hostRoomWatchAt = 0;
+function _syncHostRoomState(nowMs) {
+  if (!net || !amRoomHost() || !currentRoom) return;
+  if (nowMs - _hostRoomWatchAt < HOST_ROOM_WATCH_MS) return;
+  _hostRoomWatchAt = nowMs;
+  let snap;
+  try { snap = serializeRoom(currentRoom); } catch { return; }
+  const sig = JSON.stringify(snap);
+  if (sig !== _lastPublishedRoom) {
+    _lastPublishedRoom = sig;
+    net.setObjectState(ROOM_STATE_KEY, snap);
+    logger?.event?.('mp-room-republish', { props: snap?.props?.length ?? 0 });
+  }
+  _publishHostShelf();
+}
+
+// CLIENT side: a host-published collection set arrived. Stored for the next
+// world build (the adoption reload re-reads it) and registered live so an
+// already-built shelf can resolve the ref. A host that changes its shelf also
+// rewrites `room`, which is what triggers the adoption reload that rebuilds
+// against these.
+function _applyHostShelfCollections(value) {
+  if (!Array.isArray(value)) return;
+  _hostShelfCollections = value.filter((e) => Array.isArray(e) && typeof e[0] === 'string');
+  if (!currentCollections) return;
+  for (const [ref, obj] of _hostShelfCollections) {
+    // experimental:true — the HOST already applied its own filter, and a client's
+    // shelf must mirror the host's exactly (it can't boot any of it locally).
+    const col = parseCollection(obj, { sourceLabel: `mp-host:${ref}`, experimental: true });
+    currentCollections.byKey.set(ref, col);
+    if (col.id) currentCollections.byKey.set(col.id, col);
+    if (!currentCollections.list.includes(col)) currentCollections.list.push(col);
+  }
+}
+
+// CLIENT side: mint a shelf cart for each of the host's local (picker-loaded)
+// carts we don't already have. `rom.source:'host'` marks it unresolvable HERE —
+// grabbing it sends an insert request the host serves from its own bytes.
+async function _applyHostLocalShelf(value) {
+  if (!Array.isArray(value)) return;
+  _hostLocalShelf = value.filter((m) => m && m.file && m.core);
+  if (!grabMgr || amRoomHost()) return;       // world not built yet, or we're the host
+  for (const m of _hostLocalShelf) {
+    if ((cartridges || []).some((c) => c.userData?.file === m.file)) continue;
+    try {
+      await addLocalRomToShelf({
+        file: m.file, core: m.core, system: m.system || 'unknown',
+        title: m.title || m.file, rom: { source: 'host' }, hostOwned: true,
+      });
+      logger?.event?.('mp-shelf-local-adopt', { file: m.file, core: m.core });
+    } catch (e) {
+      console.warn('[main] host local cart mint failed:', e);
+    }
+  }
+}
+
+// M1.4: wait for the room handoff to resolve when joining a session. The room's
+// HOST — server-elected as the longest-present peer, see server/Hub.js — owns the
+// layout; every other peer adopts its published snapshot rather than building a
+// divergent local default ("the host's room setup isn't shared").
+//
+// Resolves to the host's room snapshot (→ adopt it) or null (→ build our own:
+// either we ARE the host, or nothing arrived in time / we're offline). HELLO
+// carries `host` and is immediately followed by the server's STATE replay, so a
+// short grace window after selfId is assigned is enough to see the 'room' key.
+function _awaitHostRoom({ timeoutMs = 3000, graceMs = 600 } = {}) {
   return new Promise((resolve) => {
     const start = performance.now();
     let settledAt = 0;
+    let _sawRoomAt = 0;
     const poll = () => {
       if (!net) return resolve(null);
+      // Elected host → our own room is the authoritative one; never adopt.
+      if (net.selfId && net.isHost()) return resolve(null);
       const hostRoom = net.getObjectState(ROOM_STATE_KEY);
-      if (hostRoom) return resolve(hostRoom);          // a host already published → adopt
+      if (hostRoom) {
+        // The host publishes `room` BEFORE `shelf:collections` (it builds first,
+        // then publishes its shelf), so on the replay `room` can land one poll
+        // ahead of the collections a `dropped:` shelf ref needs. One extra tick
+        // costs 40ms on join and guarantees the inline collections are in hand
+        // before we build shelves against them.
+        if (!_sawRoomAt) { _sawRoomAt = performance.now(); setTimeout(poll, 40); return; }
+        return resolve(hostRoom);                      // the host published → adopt
+      }
       const now = performance.now();
       if (net.selfId) {                                // HELLO seen → STATE replay delivered
         if (!settledAt) settledAt = now;
-        if (now - settledAt >= graceMs) return resolve(null); // no host room → we are the host
+        // A non-host whose host hasn't published yet: keep waiting to the full
+        // timeout (it may still be building), then fall back to our own layout.
+        if (now - settledAt >= graceMs && now - start >= timeoutMs) return resolve(null);
       }
       if (now - start >= timeoutMs) return resolve(null);
       setTimeout(poll, 40);
@@ -2051,29 +2430,43 @@ async function buildCartridgeWorld() {
   // adopted room's collections) and BEFORE buildRoom (so we build exactly once:
   // no teardown/rebuild, and no page reload that would drop a VR user out of
   // immersive). Ongoing edits still ride the existing prop:* deltas on top.
+  // M1.4: the SERVER decides who the host is, so the decision here is simply
+  // "am I the host?" — no more inferring it from who published a room first
+  // (which raced) or from `_resumeAsHost`. A host that reloaded reclaims its role
+  // via the sid grace window (server/Hub.js), so it lands here as host again and
+  // republishes its bridged room; `_resumeAsHost` is now only telemetry.
   let _publishHostRoom = false;
+  // M1.4 shelf inheritance: collections the host published inline because a client
+  // can't fetch their ref (a dropped/imported collection → `dropped:<id>`). Seeded
+  // into loadRoomCollections' `inline` list so the adopted room's shelves resolve
+  // to the HOST's carts instead of building empty planks.
+  let inheritedInline = [];
   if (net) {
-    if (_resumeAsHost) {
-      // We were the host before our OWN cross-core / gun-arm reload. Don't adopt a
-      // peer's snapshot — our bridged room (consumeRoomBridge, resolved above) is
-      // the authoritative layout. Republish it so the persisted 'room' STATE tracks
-      // our reload and we re-claim host, instead of being overwritten by the staler
-      // copy a peer may have echoed while we were briefly disconnected.
-      _publishHostRoom = true;
-      logger?.event?.('mp-room-resume-host', { props: room?.props?.length ?? 0 });
-    } else {
-      const hostRoom = await _awaitHostRoom();
-      if (hostRoom) {
-        room = parseRoom(hostRoom, { sourceLabel: 'mp-host' });
-        logger?.event?.('mp-room-adopt', { props: room?.props?.length ?? 0 });
-      } else {
-        _publishHostRoom = true;
+    const hostRoom = await _awaitHostRoom();
+    if (hostRoom && !net.isHost()) {
+      room = parseRoom(hostRoom, { sourceLabel: 'mp-host' });
+      const published = net.getObjectState(SHELF_COLLECTIONS_KEY);
+      if (Array.isArray(published)) {
+        _hostShelfCollections = published.filter((e) => Array.isArray(e) && typeof e[0] === 'string');
+        // experimental:true — mirror the host's shelf exactly; it already applied
+        // its own filter and we can't boot any of this locally anyway.
+        inheritedInline = _hostShelfCollections.map(([ref, obj]) =>
+          [ref, parseCollection(obj, { sourceLabel: `mp-host:${ref}`, experimental: true })]);
       }
+      logger?.event?.('mp-room-adopt', {
+        props: room?.props?.length ?? 0,
+        inheritedCollections: inheritedInline.length,
+        inheritedGames: inheritedInline.reduce((n, [, c]) => n + (c.games?.length || 0), 0),
+      });
+    } else {
+      _publishHostRoom = !!net.isHost();
+      logger?.event?.(_publishHostRoom ? 'mp-room-publish-host' : 'mp-room-no-host-snapshot',
+        { props: room?.props?.length ?? 0, resumeAsHost: _resumeAsHost });
     }
   }
 
   currentRoom = room;
-  const collections = await loadRoomCollections(room, inline);
+  const collections = await loadRoomCollections(room, [...inline, ...inheritedInline]);
   currentCollections = collections; // Phase E.3: build a new shelf against these
   const allGames = collections.list.flatMap((c) => c.games);
   window.__games = allGames; // debug hook: harness boots via these metas
@@ -2147,23 +2540,19 @@ async function buildCartridgeWorld() {
   // publish our just-built room so later joiners adopt this exact layout.
   // serializeRoom(currentRoom) with no live-transform map is an identity
   // round-trip of the descriptor → the room@1 wire shape parseRoom() expects.
+  // M1.4: only the elected host reaches here, and it is authoritative — so it
+  // OVERWRITES whatever 'room' snapshot is in the room state (e.g. one left by a
+  // previous host that has since left). The old "don't overwrite, first write
+  // wins" race mitigation is gone: with a single server-elected publisher there
+  // is no race to mitigate.
   if (_publishHostRoom && net) {
-    // Final check right before publishing: another peer may have published a
-    // 'room' state in the brief window since _awaitHostRoom's last poll (up to
-    // its 40ms granularity plus network latency) — a narrow but real race when
-    // two peers join the same empty room near-simultaneously. Don't overwrite
-    // one that's already there: whichever peer's write reaches the server
-    // FIRST should stay authoritative for future late joiners, not whichever
-    // write happens to land last. This peer still keeps using the room it
-    // already built locally (adopting the winner's layout live would need a
-    // rebuild, out of scope for this narrow mitigation) — a residual,
-    // low-probability limitation; see docs/HANDOFF.md.
-    if (!net.getObjectState(ROOM_STATE_KEY)) {
-      net.setObjectState(ROOM_STATE_KEY, serializeRoom(currentRoom));
-      logger?.event?.('mp-room-publish', { props: currentRoom?.props?.length ?? 0 });
-    } else {
-      logger?.event?.('mp-room-publish-raced', { props: currentRoom?.props?.length ?? 0 });
-    }
+    const snap = serializeRoom(currentRoom);
+    _lastPublishedRoom = JSON.stringify(snap);   // seed the watcher (no instant re-send)
+    net.setObjectState(ROOM_STATE_KEY, snap);
+    logger?.event?.('mp-room-publish', { props: currentRoom?.props?.length ?? 0 });
+    // …and what's ON the shelves, for the two sources the descriptor can't carry.
+    // Deferred to the end of the build (below) because our local carts don't exist
+    // yet at this point — see the _publishHostShelf() call after restoreLocalRoms.
   }
 
   // A room may omit a console/gamepad; the load + input wiring below needs
@@ -2475,12 +2864,27 @@ async function buildCartridgeWorld() {
 
   // Phase 5 persistence: re-create any consoles the user spawned in a previous
   // session (survives the cross-core reload too). Best-effort, fire-and-forget.
+  // restoreRack() boots a core per saved console, so it is host/solo-only — see
+  // its own gate; a client that is later promoted replays it from _applyHostRole.
   restoreRack().catch((e) => console.warn('[main] restoreRack failed:', e));
 
-  // Local-ROM library: re-mint shelf cartridges for every file the user ever
-  // loaded via the in-app picker, so they reappear automatically after a reload.
-  // Best-effort, fire-and-forget.
-  restoreLocalRoms().catch((e) => console.warn('[main] restoreLocalRoms failed:', e));
+  // Shelf ownership (M1.4). The HOST decides what's on the shelves:
+  //   • host/solo → re-mint OUR local-ROM library, then publish the shelf so
+  //     clients inherit exactly this set.
+  //   • display-only client → do NOT mint our own local library (that's how two
+  //     machines ended up with different shelves); mint the HOST's local carts
+  //     instead. Ours stay in localStorage and come back the moment we're solo
+  //     or promoted.
+  // Best-effort, fire-and-forget either way.
+  if (isDisplayOnlyClient()) {
+    logger?.event?.('mp-shelf-local-skipped', { reason: 'display-only-client' });
+    _applyHostLocalShelf(net.getObjectState(SHELF_LOCAL_KEY) || _hostLocalShelf)
+      .catch((e) => console.warn('[main] host local shelf adopt failed:', e));
+  } else {
+    restoreLocalRoms()
+      .then(() => _publishHostShelf())
+      .catch((e) => console.warn('[main] restoreLocalRoms failed:', e));
+  }
 
   // In-VR room editor (Phase E.1): registers the room's props as editable
   // grabbables (inert until edit mode) and serializes them back on export.
@@ -2585,7 +2989,10 @@ async function buildCartridgeWorld() {
     saved: () => loadRack(),
     autoPause: (on) => { if (on !== undefined) { rackMgr.setBudgetEnabled(on); saveAutoPause(on); rackMgr.applyBudget(); refreshAudioFocus(); } return rackMgr.isBudgetEnabled(); },
     live: () => rackMgr.runtimes().map((r) => ({ id: r.id, core: r.coreName, live: r.isLive() })),
-    tvs: () => scene._tvs.map((t) => ({ id: t.id, source: t.sourceCanvas?.id || null, active: t.isActive() })),
+    // `video: true` means this screen is painting a remote HOST's WebRTC feed
+    // (TV.setVideo) rather than a local canvas — the display-only client's whole
+    // reason for existing, so headless smokes can assert on it.
+    tvs: () => scene._tvs.map((t) => ({ id: t.id, source: t.sourceCanvas?.id || null, video: !!t.sourceVideo, active: t.isActive() })),
     video: () => scene._tvs.map((t) => ({ tv: t.id, console: cable.sourceOf(t.id) })),
     // Phase 4: drive the video patch cord headlessly. repatch moves a console's
     // plug onto a TV's jack and releases it (exercising the real snap + rewire);
@@ -2734,6 +3141,10 @@ async function buildCartridgeWorld() {
    *                           review), the first caller that needs this.
    */
   window.__pickLocalRom = async (name, data, opts = {}) => {
+    // Same client-boot suppression as the real romInput handler this stands in
+    // for: it boots through bootOnPrimary, so it must not run on a display-only
+    // client (the headless probes assert exactly this).
+    if (!amRoomHost()) throw new Error('only the room host can boot a game — you are watching the host’s screen');
     const buf = data instanceof ArrayBuffer ? data : data.buffer;
     const coreInfo = (opts.core && CORES[opts.core]) ? { name: opts.core, ...CORES[opts.core] } : detectCore(name, coreOverride);
     if (!coreInfo) throw new Error(`no core for "${name}"`);
@@ -5050,6 +5461,38 @@ function handleCartridgeInserted(meta, { echo = true } = {}) {
     setStatus(`unknown core ${meta.core}`);
     return;
   }
+  // M1.4 client-boot suppression. In a session only the HOST runs a core. A
+  // non-host inserting a cart used to boot its own independent instance of the
+  // game (the "two separate games" bug); now it ASKS the host to switch instead,
+  // over the transient 'insert' wire channel — the host boots it, republishes the
+  // `tv` state, and everyone (including us) sees the new game on the host's
+  // stream. `echo:false` inserts come from applyRemoteTv and are already
+  // host-gated there, so they're exempt.
+  //
+  // Role still being elected (socket reconnecting, HELLO/HOST not seen yet): do
+  // NOT boot on a guess. Queue the insert and replay it from _applyHostRole once
+  // the answer lands — as host we boot it, as client we forward it. Booting
+  // optimistically here is exactly how a client transiently started its own core.
+  if (echo && roleUndecided()) {
+    _pendingInsertMeta = { ...meta };
+    setStatus(`waiting for the room host… (${meta.title || meta.file} queued)`);
+    logger?.event?.('mp-insert-queued', { file: meta.file, core: meta.core });
+    return;
+  }
+  if (echo && isDisplayOnlyClient()) {
+    const ok = net.sendWire('insert', {
+      file: meta.file, core: meta.core, system: meta.system, title: meta.title,
+      // A client may only ask about the SHARED (primary) console. Forwarding its
+      // local secondary-console id would make the host boot into a console the
+      // client can't see and whose video is never streamed.
+      consoleId: null,
+    });
+    setStatus(ok
+      ? `asked the host to play ${meta.title || meta.file}…`
+      : `only the room host can change the game`);
+    logger?.event?.('mp-insert-request', { file: meta.file, core: meta.core, sent: ok });
+    return;
+  }
   // Multi-console rack: a cartridge dropped into a SECONDARY console boots into
   // that console's own runtime (own canvas + core) and shows on its own TV via
   // the patch graph. Pre-fix every load hit the primary client/emuCanvas, so the
@@ -5111,9 +5554,36 @@ function handleCartridgeInserted(meta, { echo = true } = {}) {
 // gun-capable game running just sets the flag so the next gun-capable game boots
 // armed. Falls back to the old reload bridge if the live reboot throws, so arming
 // never hard-fails.
+// M1.4: ask the HOST to (dis)connect a peripheral on its authoritative core. A
+// libretro device only attaches at a fresh boot, and the boot that matters is the
+// host's — a display-only client rebooting its own (paused, unwatched) core would
+// both violate client-boot suppression and leave the host's core still without the
+// device, so a client's gun/mouse aim forwarded over the 'gun'/'mouse' channels had
+// nowhere to land. Returns true when the request went out.
+function _forwardPeripheralArm(device, on) {
+  const ok = !!net?.sendWire?.('peripheral', { device, on: !!on });
+  setStatus(ok
+    ? `asked the host to ${on ? 'connect' : 'disconnect'} the ${device === 'gun' ? 'light gun' : 'mouse'}…`
+    : `only the room host can change peripherals`);
+  logger?.event?.('mp-peripheral-request', { device, on: !!on, sent: ok });
+  return ok;
+}
+
+// Host side of the above. Runs the host's own real arm/disarm path, which reboots
+// the host's core with the device attached and re-streams it to everyone.
+function _hostApplyPeripheralWire(data) {
+  if (!amRoomHost() || !data?.device) return;
+  logger?.event?.('mp-peripheral-apply', { device: data.device, on: !!data.on });
+  if (data.device === 'gun') (data.on ? armLightGunAndReload() : disarmLightGunAndReload())?.catch?.(() => {});
+  else if (data.device === 'mouse') (data.on ? armMouseAndReload() : disarmMouseAndReload())?.catch?.(() => {});
+}
+
 async function armLightGunAndReload() {
   try { sessionStorage.setItem(LIGHTGUN_ARM_KEY, '1'); } catch (_) {}
   window.__lightgunArmed = true;                 // arm future gun-capable boots
+  // Display-only client: the local flag above is enough for OUR gun prop to start
+  // forwarding aim; the device itself has to be attached on the host's core.
+  if (!amRoomHost()) { _forwardPeripheralArm('gun', true); syncPeripheralArmButtons(); return; }
   if (_lightgunArmedConsole) return;             // current game already has the gun
   const sys = currentMeta?.system;
   if (!sys || !isLightgunCapable(sys) || !_lastLoadedMeta) return;
@@ -5180,6 +5650,8 @@ async function armLightGunAndReload() {
 async function armMouseAndReload() {
   try { sessionStorage.setItem(MOUSE_ARM_KEY, '1'); } catch (_) {}
   window.__mouseArmed = true;                  // arm future mouse-capable boots
+  // Display-only client: forward to the host (see _forwardPeripheralArm).
+  if (!amRoomHost()) { _forwardPeripheralArm('mouse', true); syncPeripheralArmButtons(); return; }
   if (_mouseArmedConsole) return;              // current game already has the mouse
   const sys = currentMeta?.system;
   if (!sys || !isMouseCapable(sys) || !_lastLoadedMeta) return;
@@ -5244,6 +5716,8 @@ async function disarmLightGunAndReload() {
   try { sessionStorage.removeItem(LIGHTGUN_ARM_KEY); } catch (_) {}
   window.__lightgunArmed = false;
   logger?.event?.('lightgun-disarm', { system: currentMeta?.system || null, consoleId: CONSOLE_ID, hadDevice: _lightgunArmedConsole });
+  // Display-only client: the host owns the device (see _forwardPeripheralArm).
+  if (!amRoomHost()) { _forwardPeripheralArm('gun', false); syncPeripheralArmButtons(); return; }
   const declaredByGame = !!_lastLoadedMeta?.lightgun;
   if (!_lightgunArmedConsole || declaredByGame) {
     syncPeripheralArmButtons();
@@ -5273,6 +5747,8 @@ async function disarmMouseAndReload() {
   try { sessionStorage.removeItem(MOUSE_ARM_KEY); } catch (_) {}
   window.__mouseArmed = false;
   logger?.event?.('mouse-disarm', { system: currentMeta?.system || null, consoleId: CONSOLE_ID, hadDevice: _mouseArmedConsole });
+  // Display-only client: the host owns the device (see _forwardPeripheralArm).
+  if (!amRoomHost()) { _forwardPeripheralArm('mouse', false); syncPeripheralArmButtons(); return; }
   const declaredByGame = !!_lastLoadedMeta?.mouse;
   if (!_mouseArmedConsole || declaredByGame) {
     syncPeripheralArmButtons();
@@ -5522,6 +5998,23 @@ async function resolvePs2DiscCue(meta, cueBuf) {
 }
 
 async function loadCartridge(meta, { echo = true } = {}) {
+  // M1.4 client-boot suppression, LAST LINE OF DEFENCE. Every intentional path
+  // into a boot is gated upstream (handleCartridgeInserted, the ROM picker,
+  // spawnConsole, restoreRack), but this is the one function that actually starts
+  // a core, and the audit found real ways to arrive here as a non-host — chiefly
+  // resumePendingLoad() after a reload whose host-reclaim window had expired, and
+  // applyRemoteTv racing an election. Booting here is precisely the "each computer
+  // runs its own game" bug, so refuse and queue instead: _applyHostRole replays
+  // _pendingInsertMeta the moment we are (or become) the host.
+  if (!amRoomHost()) {
+    _pendingInsertMeta = { ...meta };
+    logger?.event?.('mp-boot-suppressed', {
+      file: meta.file, core: meta.core, where: 'loadCartridge',
+      hostId: net?.hostId?.() ?? null, connected: !!net?.connected,
+    });
+    _showClientWaiting(net?.getObjectState?.('tv'));
+    return;
+  }
   setStatus(`loading ${meta.title}…`);
   // Boot telemetry (diagnoses headset boot failures): how the ROM resolves +
   // whether the OPFS cache is even available on this device, logged BEFORE the
@@ -5642,14 +6135,18 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // M0.5: tell the shared room which game is now on the TV. Suppressed when
     // this load is reflecting a remote peer's state (echo:false) so it can't
     // bounce a stale value back over a newer overwrite.
+    // M1.4: publishing `tv` + streaming is a HOST action. It no longer *makes* us
+    // the host (the server elects that) — and the guard at the top of this function
+    // means only a host or a solo player can reach here at all, so there is no
+    // longer a "non-host booted anyway" branch to handle.
     if (echo) {
-      // Booting a game ourselves makes us the host (tv-state owner). If we were
-      // previously watching another host (core paused, M1.2 follow-up), make sure
-      // our own core is running before we broadcast it.
+      // Make sure our own core is actually running before we broadcast it (we may
+      // have been paused while watching a previous host's stream).
       client.resume();
       net?.setObjectState('tv', { file: meta.file, core: meta.core, system: meta.system, title: meta.title });
-      // M1.2: booting the game makes us the host (tv-state owner) — start
-      // streaming our canvas to the room so non-hosts see it on their TV.
+      // M1.2: stream our canvas (and its audio) to the room so clients see it on
+      // their TV. Safe to call repeatedly — startBroadcast re-captures when the
+      // canvas identity changed, which is exactly what a fresh boot does.
       net?.startVideoBroadcast();
     }
   } catch (e) {
@@ -5676,7 +6173,7 @@ async function loadCartridge(meta, { echo = true } = {}) {
         ? `ROM not installed: ${meta.title || meta.file}`
         : `Couldn't load ${meta.title || meta.file}`);
     placeholder.start();
-    scene.setScreenSource(placeholderCanvas);
+    setPrimaryScreen(placeholderCanvas);
     nowPlayingPanel?.userData.setNowPlaying?.({});
     discSwapPanel?.userData.setStatus(null);
   }
@@ -6041,22 +6538,231 @@ function _updateSpawnedMeta(consoleId, meta) {
   }
 }
 
-// M0.5: a remote peer loaded a game — reflect it onto our TV. A peer with
-// nothing running (or running the same core) boots it seamlessly; we deliberately
-// do NOT yank a player who's mid-game on a *different* core into a page reload —
-// we just surface it. Late joiners (nothing running) always converge via the
-// server's state snapshot. Loop-safe: the reflected load runs with echo:false so
-// it never re-announces the value back to the room.
+// M1.4: the HOST published which game is on the room's TV.
+//
+// A non-host peer is a DISPLAY-ONLY client: it must never boot the ROM into its
+// own core. Doing so was the root cause of "each computer appeared to be playing
+// its own separate game" — two independent cores, diverging immediately, with the
+// host's WebRTC video the only thing that (sometimes, if ICE succeeded) papered
+// over it. Worse, a client may not even HAVE the ROM (different machine, local-only
+// cart), so booting it is not just wrong but often impossible.
+//
+// So all a client does here is reflect the *information*: label the TV/panel with
+// what's playing, snap the matching cart into the slot if it owns a copy of the
+// prop, and make sure its own core is idle. The pixels arrive over the host video
+// stream (onHostVideo → scene.setScreenVideo).
+//
+// Only the host ever boots from this path, and only in the one case where it can
+// legitimately be behind: it reclaimed the host role after its own reload and the
+// room state still names the game it was running.
 function applyRemoteTv(value) {
-  if (!value || !value.file || !value.core || !CORES[value.core]) return;
-  if (currentMeta && currentMeta.file === value.file && currentCore === value.core) return;
-  if (currentCore && currentCore !== value.core) {
-    setStatus(`${value.title || 'A game'} is playing in this room — insert it to join (different system)`);
+  const isHost = amRoomHost();
+  if (!value) {                                  // host cleared the TV (no game)
+    if (!isHost) _showClientWaiting(null);
     return;
   }
-  handleCartridgeInserted({ file: value.file, core: value.core, system: value.system, title: value.title }, { echo: false });
+  if (!value.file || !value.core) return;
+  // Visual: snap our copy of the cart into the console slot either way.
   const cart = cartridges.find((c) => c.userData.file === value.file);
   if (cart && grabMgr) grabMgr.setInsertedCart(cart);
+  nowPlayingPanel?.userData.setNowPlaying?.({
+    system: value.system,
+    coreLabel: CORES[value.core]?.label || value.core,
+    title: value.title,
+  });
+
+  if (!isHost) { _showClientWaiting(value); return; }
+
+  // Host-side convergence only (we are authoritative and not yet running it).
+  if (!CORES[value.core]) return;
+  if (currentMeta && currentMeta.file === value.file && currentCore === value.core) return;
+  handleCartridgeInserted({ file: value.file, core: value.core, system: value.system, title: value.title }, { echo: false });
+}
+
+// A non-host client's local state while the host is authoritative: our own core
+// must not run (it isn't shown and isn't authoritative), and the TV shows the
+// host's stream as soon as WebRTC delivers it. Until then, say so rather than
+// leaving a stale/black screen with no explanation.
+function _showClientWaiting(tvValue) {
+  try { client?.pause?.(); } catch (e) { console.warn('[main] client pause', e); }
+  const who = net?.presence?.get?.(net.hostId?.())?.nick || 'the host';
+  setStatus(tvValue?.title
+    ? `Watching ${who}: ${tvValue.title}`
+    : `Watching ${who} — waiting for them to start a game`);
+}
+
+// M1.4: react to the server's host election / migration. This — not a `tv` write
+// — is what flips a peer between "runs the one authoritative core" and
+// "display-only client".
+function _applyHostRole({ isHost, hostId, prevHostId } = {}) {
+  if (!net) return;
+  logger?.event?.('mp-host-role', {
+    isHost, hostId: hostId ?? net.hostId(), prevHostId: prevHostId ?? null,
+    selfId: net.selfId, connected: !!net.connected,
+  });
+
+  // ELECTION PENDING (hostId === null): the socket dropped, or the server has
+  // deliberately left the room hostless for its reclaim window while the previous
+  // host reloads (server/Hub.js HOST_RECLAIM_MS). This is NOT a demotion and must
+  // change nothing: pausing here would stop a live host's game on a momentary
+  // socket blip, and "promoting" here is what used to make a client boot the
+  // room's cartridge into its own core every time the host switched games.
+  if ((hostId ?? net.hostId()) == null) {
+    setStatus(net.connected ? 'waiting for the room host…' : 'reconnecting to the room…');
+    return;
+  }
+
+  if (isHost) {
+    // Promoted: we are first in, OR the previous host actually LEFT and we are the
+    // longest-present remaining peer, OR we reclaimed our own role after our own
+    // reload. From here on we own the room layout, the shelf and the one core.
+    _hostVideoEl = null;                        // our own canvas owns the TV again
+    audioRouter?.detachRemoteAudio?.();
+    setPrimaryScreen(primaryCanvas());
+    try { client?.resume?.(); } catch (_) { /* nothing booted yet */ }
+    // Force a full re-publish: the dedupe signatures may still hold values from a
+    // previous hosting stint (or from before a demotion), and a new host MUST
+    // overwrite the departed host's room/shelf rather than assume they match.
+    _lastPublishedRoom = '';
+    _lastPublishedShelf = '';
+    if (currentRoom) {
+      const snap = serializeRoom(currentRoom);
+      _lastPublishedRoom = JSON.stringify(snap);
+      net.setObjectState(ROOM_STATE_KEY, snap);
+    }
+    // Publish the shelf too: a promoted client's shelf becomes the room's shelf,
+    // and (crucially) it must REPLACE the departed host's `shelf:local` list —
+    // otherwise clients keep carts for ROMs nobody in the room can serve.
+    _publishHostShelf();
+    // Our own local library was suppressed while we were watching (see the shelf
+    // ownership branch in buildCartridgeWorld) — bring it back now that our carts
+    // are playable, then republish so the room sees them.
+    if (grabMgr && _wasDisplayOnly) {
+      _wasDisplayOnly = false;
+      restoreLocalRoms().then(() => _publishHostShelf())
+        .catch((e) => console.warn('[main] promoted restoreLocalRoms failed:', e));
+      // Same for the saved rack: suppressed while watching, valid again now.
+      restoreRack().catch((e) => console.warn('[main] promoted restoreRack failed:', e));
+    }
+    // A cart insert made while the role was undecided (or refused because we were
+    // a client) replays now — this is what makes "grab a cart the instant you
+    // join, before the election lands" do the obvious thing instead of nothing.
+    const queued = _pendingInsertMeta;
+    _pendingInsertMeta = null;
+    if (currentMeta?.file && currentMeta?.core) {
+      net.setObjectState('tv', {
+        file: currentMeta.file, core: currentMeta.core, system: currentMeta.system, title: currentMeta.title,
+      });
+      net.startVideoBroadcast();
+      setStatus(`Hosting ${currentMeta.title || currentMeta.file}`);
+      if (queued && queued.file !== currentMeta.file) handleCartridgeInserted(queued);
+    } else if (queued) {
+      logger?.event?.('mp-host-queued-boot', { file: queued.file, core: queued.core });
+      handleCartridgeInserted(queued);
+    } else {
+      // Promoted with nothing booted (we were a display-only client until the old
+      // host left). The room's `tv` state survives its author, so continue that
+      // game on OUR core — otherwise the room's screen just goes dark when the
+      // host walks out. applyRemoteTv is host-gated, so this is the one path that
+      // boots from it. If we don't have the ROM, loadCartridge surfaces that on
+      // the TV like any other missing cart. Streaming starts either way, so a
+      // REMAINING WATCHER gets a live picture from us rather than a frozen frame.
+      const tv = net.getObjectState('tv');
+      if (tv?.file && tv?.core) {
+        logger?.event?.('mp-host-takeover-boot', { file: tv.file, core: tv.core });
+        applyRemoteTv(tv);
+      }
+      net.startVideoBroadcast();
+      setStatus(tv?.title ? `Taking over: ${tv.title}` : 'You are hosting this room');
+    }
+  } else {
+    // Demoted / joined as a client: stop streaming, stop emulating, adopt the
+    // host's room + shelf if ours differ, and wait for their video.
+    _wasDisplayOnly = true;
+    _lastPublishedRoom = '';
+    _lastPublishedShelf = '';
+    net.stopVideoBroadcast?.();
+    // A queued insert is now a request, not a boot (see handleCartridgeInserted).
+    const queued = _pendingInsertMeta;
+    _pendingInsertMeta = null;
+    _showClientWaiting(net.getObjectState('tv'));
+    // A previously-received host feed belongs to the OLD host; drop it so the TV
+    // doesn't sit on a dead stream while the new host's offer arrives.
+    if (prevHostId && prevHostId !== hostId) {
+      _hostVideoEl = null;
+      audioRouter?.detachRemoteAudio?.();
+      routeVideo();
+    } else if (_hostVideoEl) {
+      // Same host, we just learned our role: re-assert its feed on the TV.
+      routeVideo();
+    }
+    _maybeAdoptHostRoomLive();
+    _applyHostLocalShelf(net.getObjectState(SHELF_LOCAL_KEY) || _hostLocalShelf)
+      .catch((e) => console.warn('[main] host local shelf adopt failed:', e));
+    if (queued) handleCartridgeInserted(queued);
+  }
+}
+
+// Live room adoption for the IN-APP (widget / VR menu) join path. On the
+// `?session=` URL path the room handoff happens inside buildCartridgeWorld before
+// anything is built; a widget-joiner has already built its own local room by then,
+// which is why two machines that each joined from the widget saw completely
+// different rooms. Rebuilding the world in place would mean tearing down every
+// prop, cart, cable and console, so we reuse the app's existing, well-tested
+// "stash + reload" world-swap (the same one a dropped .room.json uses) and bridge
+// the session across it so the reload is invisible apart from a reboot.
+//
+// Guards: only when a host snapshot exists AND differs from ours, never while
+// presenting in XR (a reload would eject the user from immersive; they get a status
+// line instead), and never twice for the SAME snapshot.
+//
+// That last guard used to be keyed on the ROOM NAME, i.e. "adopt at most one
+// layout per tab per session". It stopped a reload-loop, but it also meant a host
+// that changed its room a second time (load another *.room.json, drop a new
+// collection) was silently NOT followed — probe #3 confirmed the client stayed on
+// the first adopted layout for the rest of the tab's life, which reads exactly like
+// "rooms aren't synced". Keying on a hash of the snapshot keeps the loop
+// protection (the same snapshot is never adopted twice — and after adopting, ours
+// EQUALS the host's, so the equality check above short-circuits anyway) while
+// following the host through any number of genuine changes.
+const ROOM_ADOPT_KEY = 'libretrowebxr.roomAdopted';
+function _snapshotKey(obj) {
+  const s = JSON.stringify(obj);
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return `${s.length}:${h.toString(36)}`;
+}
+function _maybeAdoptHostRoomLive() {
+  // Only a peer that KNOWS it is a client adopts. While the election is pending
+  // (`roleUndecided`) we might still turn out to be the host, and reloading into
+  // someone else's layout on a guess is unrecoverable.
+  if (!isDisplayOnlyClient()) return false;
+  const hostRoom = net.getObjectState(ROOM_STATE_KEY);
+  if (!hostRoom || !currentRoom) return false;
+  let mine;
+  try { mine = serializeRoom(currentRoom); } catch { return false; }
+  if (JSON.stringify(hostRoom) === JSON.stringify(mine)) return false;
+  const stamp = `${net.room}|${_snapshotKey(hostRoom)}`;
+  try {
+    if (sessionStorage.getItem(ROOM_ADOPT_KEY) === stamp) return false;
+    sessionStorage.setItem(ROOM_ADOPT_KEY, stamp);
+  } catch { /* storage blocked → fall through, the reload is still one-shot-ish */ }
+  if (scene.renderer?.xr?.isPresenting) {
+    setStatus("Host's room layout differs — leave VR and rejoin to adopt it");
+    logger?.event?.('mp-room-adopt-deferred-xr', {});
+    return false;
+  }
+  logger?.event?.('mp-room-adopt-live', { props: hostRoom?.props?.length ?? 0 });
+  try {
+    sessionStorage.setItem(DROP_KEY, JSON.stringify({ kind: 'room', text: JSON.stringify(hostRoom) }));
+    stashSessionRejoin();
+    setStatus("adopting the host's room…");
+    location.reload();
+    return true;
+  } catch (e) {
+    console.warn('[main] live room adoption failed:', e);
+    return false;
+  }
 }
 
 async function resumePendingLoad() {
@@ -6259,7 +6965,9 @@ function wireClientEvents(c) {
     resetBtn.disabled = false;
     input.attach(window);
     placeholder.stop();
-    scene.setScreenSource(c.emuCanvas ?? primaryCanvas());
+    // setPrimaryScreen (not setScreenSource): a display-only client's TV belongs
+    // to the host's feed, and this fires on OUR core's ready event too.
+    setPrimaryScreen(c.emuCanvas ?? primaryCanvas());
   });
   c.addEventListener('error', (e) => {
     setStatus('error: ' + e.detail);
@@ -6369,6 +7077,19 @@ romInput.addEventListener('change', async (e) => {
   if (!files.length) return;
   // Reset so the same file(s) can be re-picked.
   romInput.value = '';
+
+  // M1.4 client-boot suppression — the file picker was a wide-open bypass of it
+  // (probe #9): it calls bootOnPrimary directly, so a "watching" client could
+  // start a completely different game in its own core while still showing the
+  // host's stream on the TV. And there is nothing useful to do with the bytes
+  // either: they exist only on this machine, so the host could never serve them
+  // (an insert request would be nacked). Refuse plainly instead. The host's own
+  // picker is unaffected; leaving the room re-enables ours.
+  if (!amRoomHost()) {
+    setStatus('Only the room host picks the game — you are watching the host’s screen');
+    logger?.event?.('mp-rom-pick-suppressed', { files: files.length, hostId: net?.hostId?.() ?? null });
+    return;
+  }
 
   const isMultiFile = files.length > 1;
   // A multi-file pick (CUE+BIN, M3U+discs) may not put the entry file first —

@@ -1,8 +1,11 @@
-// Headless host-video smoke (M1.2): the HOST boots the room's game (claims the
-// shared `tv` state) and broadcasts its emulator canvas; every other peer
+// Headless host-video smoke (M1.2, updated for M1.4): the room's HOST — the
+// first peer in, as elected by the server — boots the room's game, publishes it
+// on the shared `tv` state and broadcasts its emulator canvas; every other peer
 // receives the WebRTC video track and would paint it onto its in-world TV.
 // Proves the full signaling → peer-connection → media path for the game stream,
-// fanned out to multiple clients, without a headset.
+// fanned out to multiple clients, without a headset. The tail of the test covers
+// M1.4 host MIGRATION: the host leaves, the longest-present remaining peer is
+// promoted, and its receive-PC teardown lets it drive its own TV again.
 //
 // Like scripts/smoke-voice.mjs but for the video channel: the host captures
 // `#canvas` via captureStream() (real media, no fake device needed) and is the
@@ -75,9 +78,11 @@ try {
   ok(true, 'three peers connected to the room server');
   ok(await waitFor(host, () => window.__net.peerCount() >= 2), 'host sees both clients');
 
-  // Host boots the room's game → becomes the tv-state owner (host) → broadcasts.
+  // M1.4: the first peer in is already the host — no tv write needed to earn it.
+  ok(await waitFor(host, () => window.__net.isHost()), 'the first peer in the room is the elected host');
+  ok((await client.evaluate(() => window.__net.isHost())) === false, 'a later joiner is not the host');
+  // The host publishes what it is running, then broadcasts its canvas.
   await host.evaluate(() => window.__net.setObjectState('tv', { file: 'lwx-nes-pong.nes', core: 'fceumm', system: 'nes', title: 'Pong' }));
-  ok(await waitFor(host, () => window.__net.isHost()), 'tv-state owner reports itself as host');
   ok(await host.evaluate(() => window.__net.startVideoBroadcast()), 'host captured its canvas and started broadcasting');
   ok(await waitFor(host, () => window.__net.video.sourcing()), 'host is sourcing a video stream');
 
@@ -102,24 +107,49 @@ try {
   ok((await client.evaluate(() => window.__net.video.amHost())) === false, 'client is not the host');
   ok((await client.evaluate(() => window.__net.video.sourcing())) === false, 'client is not sourcing video');
 
-  // M1.2 follow-up: a watcher pauses its OWN core while showing the host's
-  // streamed frames (it isn't authoritative and isn't displayed → no point
-  // burning CPU/battery emulating it). The local core is exposed as
-  // window.__client; .paused reflects the emscripten main-loop pause.
-  ok(await waitFor(client, () => window.__client && window.__client.paused === true),
-    'client paused its local core while watching the host video');
-  ok(await waitFor(cleo, () => window.__client && window.__client.paused === true),
-    'second client also paused its local core');
+  // M1.4: a watcher does not run a core AT ALL — it never boots one (the old
+  // model let it boot the same ROM and merely paused it, which is how two peers
+  // ended up emulating independently). Assert on the rack, not on
+  // window.__client.paused: that flag is false on an un-STARTED client too, so it
+  // would pass vacuously either way.
+  const noCore = () => (window.__rack?.live?.() || []).every((r) => !r.core);
+  ok(await waitFor(client, noCore), 'client never booted a core while watching the host video');
+  ok(await waitFor(cleo, noCore), 'second client also booted no core');
 
-  // Resume path: when a watcher takes over as host (claims the tv state →
-  // becomes the tv-state owner), the video handover closes its receive PC,
-  // fires onHostVideoEnded, and it resumes its local core to drive its own TV.
-  // Use a DIFFERENT game than the host's so it isn't a no-op (setObjectState
-  // skips an unchanged value), which would leave ownership with the old host.
+  // M1.4: a watcher writing the tv state must NOT steal the host role any more
+  // (that old rule is what let two peers each think they were authoritative).
   await client.evaluate(() => window.__net.setObjectState('tv', { file: 'lwx-gb-snake.gb', core: 'gambatte', system: 'gb', title: 'Snake' }));
-  ok(await waitFor(client, () => window.__net.video.amHost()), 'client became the new host after claiming tv state');
-  ok(await waitFor(client, () => window.__client && window.__client.paused === false),
-    'client resumed its local core after the host handover');
+  await sleep(1200);
+  ok((await client.evaluate(() => window.__net.video.amHost())) === false, 'a tv-state write does NOT promote a client to host');
+  ok((await client.evaluate(() => (window.__rack?.live?.() || []).every((r) => !r.core))) === true,
+    'the client still has no core of its own (still display-only)');
+
+  // Real handover: the host LEAVES. The longest-present remaining peer (client,
+  // which joined before cleo) is promoted; its receive PC is torn down,
+  // onHostVideoEnded fires, and it resumes its own core to drive its own TV.
+  await browsers[0].close();
+  // Deferred by Hub.HOST_RECLAIM_MS (15 s) so a host that is merely reloading can
+  // reclaim the role instead of a client being promoted and booting its own core.
+  // The wait has to outlast that window or correct behaviour reads as a failure.
+  ok(await waitFor(client, () => window.__net.video.amHost(), 25000), 'host left → the senior remaining peer is promoted');
+  ok((await cleo.evaluate(() => window.__net.video.amHost())) === false, 'the junior peer was not promoted');
+  ok(await waitFor(client, () => (window.__rack?.live?.() || []).some((r) => r.core && r.live), 60000),
+    "the promoted peer boots the room's game itself after the host migration");
+  ok(await waitFor(client, () => window.__net.video.receivingCount() === 0, 10000),
+    'the promoted peer is no longer receiving a stream');
+  // And the peer that STAYED a watcher must be re-served by the NEW host, with a
+  // picture that actually decodes frames. Before M1.4 it kept a dead track from a
+  // host that no longer existed, so its TV went black for the rest of the session.
+  ok(await waitFor(cleo, () => window.__net.video.receivingCount() >= 1, 60000),
+    'the remaining watcher regains video from the NEW host');
+  ok(await waitFor(cleo, () => (window.__rack?.tvs?.() || []).some((t) => t.video), 15000),
+    "the remaining watcher's TV is painting the new host's feed");
+  const before = await cleo.evaluate(() => window.__net.video.hostVideo());
+  await sleep(2500);
+  const after = await cleo.evaluate(() => window.__net.video.hostVideo());
+  ok(!!before && !!after && after.w > 0 && (after.frames ?? 0) > (before.frames ?? 0) && !after.paused,
+    `the remaining watcher's picture is advancing (${JSON.stringify(after)})`);
+  ok(await waitFor(cleo, noCore), 'the remaining watcher still never booted a core');
 } catch (e) {
   failed++; console.error('  FAIL:', e.message);
 }

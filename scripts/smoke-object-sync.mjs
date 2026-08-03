@@ -1,10 +1,12 @@
 // Headless room-object sync smoke (M0.5): opens two Chrome pages joined to the
 // same room and exercises the shared STATE channel end-to-end through the real
 // app + room server — set a value on one peer, see it on the other; bidirectional
-// last-writer-wins; a LATE joiner converges via the server's state snapshot; and
-// clearing a key propagates. This is the *network* part (protocol → Hub persist →
-// snapshot → client registry); booting the actual game on the remote TV
-// (applyRemoteTv → core start) is the UI/integration part covered separately.
+// last-writer-wins on FREE keys; the M1.4 **host-owned** keys (`tv`, `room`,
+// `shelf:*`) rejecting a client's write and correcting it back; a LATE joiner
+// converging via the server's state snapshot; and clearing a key propagating.
+// This is the *network* part (protocol → Hub persist → snapshot → client
+// registry); the shared-game behaviour on top of it lives in
+// scripts/smoke-shared-game.mjs and scripts/smoke-room-inherit.mjs.
 //
 // Prereqs (start first): a room server + the vite dev server.
 //   $env:PORT=8797; node server/room-server.mjs        # terminal 1
@@ -71,27 +73,50 @@ try {
   ok(await waitFor(a, () => window.__net.peerCount() >= 1), 'Ava sees Ben in the roster');
   ok(await waitFor(b, () => window.__net.peerCount() >= 1), 'Ben sees Ava in the roster');
 
-  // Ava sets the shared TV state → Ben must receive it.
+  // Ava is the first peer in, so she is the room's elected HOST (M1.4).
+  ok(await waitFor(a, () => window.__net.isHost()), 'Ava (first in) is the room host');
+
+  // The host sets the shared TV state → Ben must receive it.
   await a.evaluate((tv) => window.__net.setObjectState('tv', tv), PONG);
   ok(await waitFor(b, (f) => window.__net.objectState('tv')?.file === f, 8000, PONG.file),
-    'Ben receives Ava\'s TV state over the channel');
+    'Ben receives the host\'s TV state over the channel');
   ok(await a.evaluate((f) => window.__net.objectState('tv')?.file === f, PONG.file),
-    'Ava\'s own registry reflects the value she set');
+    'the host\'s own registry reflects the value she set');
 
-  // Bidirectional, last-writer-wins: Ben overwrites it → Ava converges.
+  // `tv` is a HOST-OWNED key since M1.4 (Hub.isHostOwnedKey): a client writing it
+  // is rejected and corrected back, so the room can never have two peers each
+  // believing they decide what is playing. Not last-writer-wins any more.
   await b.evaluate((tv) => window.__net.setObjectState('tv', tv), SNAKE);
-  ok(await waitFor(a, (f) => window.__net.objectState('tv')?.file === f, 8000, SNAKE.file),
-    'Ava converges to Ben\'s overwrite (last-writer-wins)');
+  await sleep(1500);
+  ok(await a.evaluate((f) => window.__net.objectState('tv')?.file === f, PONG.file),
+    'a CLIENT cannot overwrite the host-owned tv state');
+  ok(await waitFor(b, (f) => window.__net.objectState('tv')?.file === f, 8000, PONG.file),
+    'the rejected writer is corrected back to the host\'s value');
+
+  // Bidirectional last-writer-wins still applies to the FREE keys (prop:*, pose,
+  // holds …) — that's the generic behaviour this smoke exists to cover.
+  const KEY = 'prop:smoke-object-sync';
+  await a.evaluate((k) => window.__net.setObjectState(k, { pos: [1, 2, 3] }), KEY);
+  ok(await waitFor(b, (k) => window.__net.objectState(k)?.pos?.[0] === 1, 8000, KEY),
+    'Ben receives Ava\'s prop state over the channel');
+  await b.evaluate((k) => window.__net.setObjectState(k, { pos: [9, 9, 9] }), KEY);
+  ok(await waitFor(a, (k) => window.__net.objectState(k)?.pos?.[0] === 9, 8000, KEY),
+    'Ava converges to Ben\'s overwrite (last-writer-wins on a free key)');
 
   // LATE JOINER: Cara joins after state exists → must converge from the snapshot.
   const c = await openPeer('Cara');
-  ok(await waitFor(c, (f) => window.__net.objectState('tv')?.file === f, 8000, SNAKE.file),
+  ok(await waitFor(c, (f) => window.__net.objectState('tv')?.file === f, 8000, PONG.file),
     'a late joiner converges to the current TV state via the server snapshot');
+  ok(await waitFor(c, (k) => window.__net.objectState(k)?.pos?.[0] === 9, 8000, KEY),
+    'the late joiner also gets the free-key state from the snapshot');
 
-  // Clearing a key propagates to everyone.
+  // Clearing a key propagates to everyone (from the owner in each case).
   await a.evaluate(() => window.__net.setObjectState('tv', null));
   ok(await waitFor(b, () => window.__net.objectState('tv') === null), 'clearing the key propagates to Ben');
   ok(await waitFor(c, () => window.__net.objectState('tv') === null), 'clearing the key propagates to the late joiner');
+  await b.evaluate((k) => window.__net.setObjectState(k, null), KEY);
+  ok(await waitFor(c, (k) => window.__net.objectState(k) === null, 8000, KEY),
+    'clearing a free key propagates too');
 } catch (e) {
   failed++; console.error('  FAIL:', e.message);
 }

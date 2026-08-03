@@ -1,6 +1,8 @@
-// Headless host-resolution smoke (M1.1): proves the host-authoritative input
-// path resolves the HOST automatically from shared `tv` state, then relays a
-// client's input directly to that host (and to no one else).
+// Headless host-resolution smoke (M1.1, updated for M1.4): proves the
+// host-authoritative input path resolves the HOST from the SERVER's election
+// (the longest-present peer — no longer "whoever last wrote the shared `tv`
+// state"), then relays a client's input directly to that host (and to no one
+// else).
 //
 // M1.0 (scripts/smoke-gameinput.mjs) verified the raw INPUT transport with an
 // explicit `to`. M1.1 adds the wiring that DECIDES who `to` is: whoever owns the
@@ -73,17 +75,21 @@ try {
 
   const hostId = await host.evaluate(() => window.__net.selfId());
 
-  // Before any game is booted there is no host, so nobody is anybody's host.
-  ok((await client.evaluate(() => window.__net.hostId())) === null, 'no host before a game is loaded');
-  ok((await client.evaluate(() => window.__net.isHost())) === false, 'client is not host pre-boot');
-
-  // Host "boots a game" by claiming the shared `tv` state → it becomes the host.
-  await host.evaluate(() => window.__net.setObjectState('tv', { file: 'lwx-nes-pong.nes', core: 'fceumm', system: 'nes', title: 'Pong' }));
-  ok(await waitFor(host, () => window.__net.isHost()), 'tv-state owner reports itself as host');
-
-  // The client converges on the same host id from the replicated tv state.
-  ok(await waitFor(client, (id) => window.__net.hostId() === id, 8000, hostId), 'client resolves the host from shared tv state');
+  // M1.4: the host is decided the instant HELLO lands — the FIRST peer in the
+  // room is it, with no game booted and nobody having written `tv`.
+  ok(await waitFor(host, () => window.__net.isHost()), 'the first peer in the room is the host (no game needed)');
+  ok(await waitFor(client, (id) => window.__net.hostId() === id, 8000, hostId), 'client resolves the elected host id');
   ok((await client.evaluate(() => window.__net.isHost())) === false, 'client is not the host');
+  ok((await bystander.evaluate(() => window.__net.isHost())) === false, 'bystander is not the host either');
+
+  // The old rule is gone: a client writing the shared `tv` state must NOT make it
+  // the host. (Writing it is a host-only action in the app; here we poke the
+  // transport directly to prove the ELECTION, not the app gate.)
+  await client.evaluate(() => window.__net.setObjectState('tv', { file: 'lwx-gb-snake.gb', core: 'gambatte', system: 'gb', title: 'Snake' }));
+  await sleep(800);
+  ok((await client.evaluate(() => window.__net.isHost())) === false, 'writing tv state does NOT make a client the host');
+  ok((await client.evaluate(() => window.__net.hostId())) === hostId, 'the host is unchanged after a tv-state write');
+  ok((await host.evaluate(() => window.__net.isHost())) === true, 'the elected host keeps the role');
 
   // forwardGameInput routes to the resolved host with no explicit `to`.
   await client.evaluate(() => {
@@ -105,6 +111,18 @@ try {
   // Directed, not broadcast: the bystander must NOT have received the inputs.
   await sleep(500);
   ok((await bystander.evaluate(() => window.__net.recvInputs().length)) === 0, 'bystander received nothing (directed relay)');
+
+  // M1.4 migration: the host leaves → the longest-present remaining peer (the
+  // client, which joined before the bystander) is promoted by the server.
+  // Deliberately DEFERRED by Hub.HOST_RECLAIM_MS (15 s): a host that is merely
+  // reloading its own page must be able to reclaim the role instead of a client
+  // being promoted and booting a core of its own. So this wait has to outlast
+  // that window — a shorter timeout fails on correct behaviour.
+  await browsers[0].close();
+  ok(await waitFor(client, () => window.__net.isHost(), 25000), 'host left → the longest-present remaining peer is promoted');
+  const newHost = await client.evaluate(() => window.__net.selfId());
+  ok(await waitFor(bystander, (id) => window.__net.hostId() === id, 10000, newHost), 'the bystander agrees on the new host');
+  ok((await bystander.evaluate(() => window.__net.isHost())) === false, 'the junior peer was NOT promoted');
 } catch (e) {
   failed++; console.error('  FAIL:', e.message);
 }

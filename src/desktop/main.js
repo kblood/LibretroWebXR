@@ -22,7 +22,16 @@ import { romUrlFor } from '../RomResolver.js';
 import { coreInfo, coreForFile, systemForFile, extOf, SYSTEMS, isMouseCapable, mouseLoadConfig } from '../systems.js';
 import { DesktopInput, dispatchToCore } from './DesktopInput.js';
 import { DesktopNet } from './DesktopNet.js';
+import { installDesktopAudio } from './DesktopAudio.js';
 import { sanitiseRoom, randomRoomSuffix } from '../net/SessionUtils.js';
+
+// Audio graph. Installed at module scope, BEFORE any core is fetched, because it
+// works by replacing window.AudioContext (see DesktopAudio.js). Gives this page
+// three things it lacked: a capturable stream so the host's broadcast has sound, a
+// sink for worker-core PCM (previously silent), and a way to play the host's
+// incoming audio without unmuting the <video> (which the autoplay policy can pause,
+// freezing the picture as well).
+const audio = installDesktopAudio();
 
 // --- DOM ---------------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
@@ -67,6 +76,10 @@ const mpStatus = $('mp-status');
 // have one context type, so switching between a main-thread and a worker core
 // without a reload raises RuntimeModeSwitchError (see bootLocal).
 const client = new RuntimeEmulatorClient();
+// Worker-execution cores (DOSBox Pure, PSX, N64) run off the main thread and emit
+// decoded PCM as an 'audio' event rather than calling `new AudioContext()`. Nothing
+// on this page listened, so those cores were mute locally AND in the broadcast.
+client.addEventListener('audio', (e) => audio.pushSamples(e.detail));
 let net = null;
 let games = [];               // normalized collection entries
 let loadedMeta = null;        // the meta WE booted locally (host/solo)
@@ -177,6 +190,7 @@ async function bootLocal(meta, buffer) {
 // Fetch a bundled game's ROM and boot it. If we're connected, claim the host
 // role (broadcast the tv state) and start streaming our canvas.
 async function loadBundled(meta) {
+  if (!hostGate(() => loadBundled(meta))) return;
   const url = romUrlFor(meta);
   setStatus(`Fetching ${meta.title || meta.file}…`);
   let buffer;
@@ -189,12 +203,13 @@ async function loadBundled(meta) {
     return;
   }
   const ok = await bootLocal(meta, buffer);
-  if (ok) becomeHost(meta);
+  if (ok) publishTv(meta);
 }
 
 // Load a user-supplied ROM file (drag/drop or picker). System + core are
 // auto-detected from the extension via the registry.
 async function loadFile(file) {
+  if (!hostGate()) return;
   const core = coreForFile(file.name);
   const system = systemForFile(file.name);
   if (!core) { setStatus(`Unrecognised ROM type: ${file.name}`); return; }
@@ -204,12 +219,43 @@ async function loadFile(file) {
   };
   const buffer = await file.arrayBuffer();
   const ok = await bootLocal(meta, buffer);
-  if (ok) becomeHost(meta);
+  if (ok) publishTv(meta);
 }
 
-// Claim/refresh the host role for a freshly-booted game.
-function becomeHost(meta) {
-  if (!net || !net.connected) return;
+// M1.4 client-boot suppression: only the room's HOST may boot a core. A joined
+// client is a display + input surface for the host's game — booting its own
+// core is exactly the "both machines played their own separate game" bug. Returns
+// true when a local boot is allowed (solo, or we are the host).
+function hostGate(retry = null) {
+  if (!net || !net.connected || net.isHost()) return true;
+  if (net.hostId() == null) {
+    // Election hasn't landed (we just joined, or the server is holding the room
+    // hostless during the previous host's reclaim window). Don't boot on a guess —
+    // queue the pick and replay it from onHostChange once we know the answer.
+    pendingPick = retry;
+    setStatus('Waiting for the room host…');
+    return false;
+  }
+  setStatus('Only the room host picks the game — you are watching the host’s screen');
+  return false;
+}
+
+// A pick made while the role was still being elected; replayed on promotion.
+let pendingPick = null;
+
+// Boot the game the room is already playing, on OUR core, after being promoted to
+// host with nothing running. Resolves against our own collection first so the full
+// entry (with its `rom` provenance) is used rather than the bare wire record.
+function takeOverRoomGame(tv) {
+  const owned = games.find((g) => g.file === tv.file);
+  loadBundled(owned || { file: tv.file, system: tv.system, core: tv.core, title: tv.title });
+}
+
+// Publish the game WE (the host) just booted so peers converge, and stream our
+// canvas. No longer "become" the host: the role is the server's to hand out
+// (M1.4), and writing `tv` does not change it.
+function publishTv(meta) {
+  if (!net || !net.connected || !net.isHost()) return;
   net.setObjectState('tv', {
     file: meta.file, system: meta.system, core: meta.core, title: meta.title || meta.file,
   });
@@ -358,6 +404,8 @@ function connect() {
   net = new DesktopNet({
     room, nick, serverUrl,
     getCaptureCanvas: () => canvas,
+    // Game sound for the broadcast — without it the peer watched in silence.
+    getCaptureAudio: () => audio.captureStream(),
     onConnect: () => { refreshMpStatus(); },
     onDisconnect: () => { refreshMpStatus(); },
     onRoster: (peers) => {
@@ -372,14 +420,62 @@ function connect() {
       refreshMpStatus();
     },
     onTvState: (value, ownerId) => {
-      // The room's loaded game changed. If someone else is now hosting, switch
-      // to client mode: pause our core, await their video. If it cleared (host
-      // left) revert to idle.
+      // The room's loaded game changed (only the host writes it). As a client we
+      // never boot it — we just show what's playing and await the host's video.
       onRoleMaybeChanged(value, ownerId);
     },
+    // M1.4: the server elected/migrated the host. This — not a tv-state write —
+    // is what flips us between authoritative and display-only.
+    onHostChange: ({ isHost, hostId, prevHostId }) => {
+      // Election PENDING (hostId null: socket blip, or the server's deliberate
+      // reclaim window while the previous host reloads). Not a demotion — change
+      // nothing, or a momentary drop would stop a live host's game.
+      if (hostId == null) { refreshMpStatus(); return; }
+      if (isHost) {
+        // Promoted: first in, the previous host left and we're the most senior
+        // remaining peer, or we reclaimed after our own reload. The room's screen
+        // is ours now.
+        audio.detachRemote();
+        const queued = pendingPick;
+        pendingPick = null;
+        if (queued) {
+          queued();                                  // the pick we deferred above
+        } else if (booted) {
+          publishTv(loadedMeta);
+        } else {
+          // Promoted with NOTHING booted (we were watching until the host left).
+          // Without this the room simply went dark: the old `booted &&` guard meant
+          // a promoted watcher published nothing and started no core, so every
+          // remaining peer sat on a frozen last frame forever. The room's `tv` state
+          // outlives its author, so continue that game on our core.
+          const tv = net?.getObjectState('tv');
+          if (tv?.file && tv?.core) {
+            setStatus(`Taking over: ${tv.title || tv.file}`);
+            takeOverRoomGame(tv);
+          } else {
+            setStatus('You are hosting this room — load a game');
+          }
+        }
+      } else if (prevHostId && prevHostId !== hostId) {
+        // The host CHANGED while we stay a client: the old feed is dead.
+        audio.detachRemote();
+        showCanvas();
+      }
+      onRoleMaybeChanged(net?.getObjectState('tv') ?? null, net?.hostId() ?? null);
+    },
     onGameInput: onRemoteGameInput,
-    onHostVideo: (videoEl) => { showHostVideo(videoEl); setStatus('Watching host'); },
-    onHostVideoEnded: () => { showCanvas(); if (role() !== 'host') setStatus('Host stream ended'); },
+    onHostVideo: (videoEl, hostId, stream) => {
+      showHostVideo(videoEl);
+      // Play the host's audio through our own graph; the element stays muted so the
+      // autoplay policy can't pause it (which would freeze the picture too).
+      audio.attachRemote(stream);
+      setStatus('Watching host');
+    },
+    onHostVideoEnded: () => {
+      audio.detachRemote();
+      showCanvas();
+      if (role() !== 'host') setStatus('Host stream ended');
+    },
   });
   net.connect();
   connectBtn.textContent = 'Leave';
@@ -390,6 +486,8 @@ function connect() {
 function disconnect() {
   flushRemotePlayer(2);
   input.releaseAll();
+  pendingPick = null;
+  audio.detachRemote();
   net?.disconnect();
   net = null;
   prevPeerIds = [];
@@ -558,6 +656,10 @@ window.__desktop = {
   }),
   // Test hooks: pointer lock needs a real user gesture, which a headless probe
   // cannot produce, so these let one exercise the transport directly.
+  // The audio graph (see DesktopAudio.js): whether the host's incoming sound is
+  // actually attached is invisible from the DOM, and it's half of "the client sees
+  // the host's game" — verify-desktop-netplay.mjs asserts on it.
+  audio,
   __sendMouse: (dx, dy, buttons = 0) => client.sendMouse(dx, dy, buttons, null),
   __sendRawKey: (code, key, down) => client.sendInput(down ? 'keydown' : 'keyup', code, key, 0, 0),
   net_debug: () => net?.debugApi?.() ?? null,

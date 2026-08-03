@@ -7,10 +7,12 @@
 // is reused here verbatim: PresenceState, RoomObjects, VideoMgr, NetProtocol.
 //
 // Netplay model (unchanged from the VR build, see [[src/net/VideoMgr.js]]):
-//   • The HOST is whoever owns the shared `tv` object-state (last to load a game).
-//     The host runs the one authoritative core and streams its canvas to peers.
-//   • A non-host CLIENT shows the host's video and forwards its controls to the
-//     host as player 2 (MSG.INPUT, routed by NetProtocol.hostInputTarget).
+//   • The HOST is elected by the SERVER (M1.4): the peer that has been in the
+//     room longest, re-elected only when it disconnects. It runs the one
+//     authoritative core and streams its canvas to peers.
+//   • A non-host CLIENT never boots a core of its own: it shows the host's video
+//     and forwards its controls to the host as player 2 (MSG.INPUT, routed by
+//     NetProtocol.hostInputTarget).
 //
 // Liveness: we don't send VR poses, so peers would otherwise be pruned after the
 // presence TTL. Instead we send a tiny empty POSE as a heartbeat (~every 2s); the
@@ -24,8 +26,19 @@ import {
   MSG, makeJoin, makePose, makeState, makeSignal, makeInput,
   hostInputTarget, encode, decode,
 } from '../net/NetProtocol.js';
+import { stableSessionId } from '../net/SessionUtils.js';
+import { FALLBACK_HOST_KEY, normaliseClaim, resolveFallbackHost } from '../net/HostElection.js';
 
 const HEARTBEAT_MS = 2000;
+// M1.4: how long to wait for the SERVER to name a host before the peers elect one
+// among themselves. Only a pre-M1.4 room server (one that sends no `host` key in
+// HELLO) ever reaches the deadline; against a current server the flag flips on the
+// first HELLO and this never fires. Without it, deploying this page against an
+// un-upgraded relay would leave hostId null forever - which the boot gate reads as
+// "nobody may host", i.e. no game at all for anyone.
+const FALLBACK_ELECT_MS = 1200;
+// Backoff for re-opening the socket after an UNEXPECTED close.
+const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
 
 function defaultServerUrl() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -36,6 +49,7 @@ export class DesktopNet {
   constructor({
     room, nick, color, serverUrl,
     getCaptureCanvas,
+    getCaptureAudio = null,  // () => MediaStream|null - the host's game AUDIO tap
     onTvState = null,        // (value, ownerId) => void  — room's loaded game changed
     onGameInput = null,      // ({from,player,btn,down}) => void — host receives remote input
     onRoster = null,         // (peers[]) => void — roster changed (count/names)
@@ -43,7 +57,9 @@ export class DesktopNet {
     onHostVideoEnded = null, // (hostId) => void — stream ended; revert
     onConnect = null,        // (selfId) => void
     onDisconnect = null,     // () => void
+    onHostChange = null,     // ({hostId,prevHostId,isHost}) => void — M1.4 election
     iceServers = null,
+    sessionId = null,
     now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now()),
   } = {}) {
     this.room = room || 'lobby';
@@ -51,6 +67,9 @@ export class DesktopNet {
     this.color = color || '#88aaff';
     this.serverUrl = serverUrl || defaultServerUrl();
     this._now = now;
+    this._hostId = null;              // M1.4: server-elected, not tv-derived
+    this._onHostChange = onHostChange;
+    this.sessionId = sessionId || stableSessionId();
 
     this.presence = new PresenceState({ ttlMs: 5000 });
     this.objects = new RoomObjects();
@@ -65,10 +84,24 @@ export class DesktopNet {
     this._hbAcc = 0;
     this._lastRosterSig = '';
     this._recvInputs = []; // small ring of inputs we received as host (debug)
+    // M1.4 election bookkeeping (mirrors NetMgr): has the SERVER named a host, and
+    // the peer-side fallback claims used when it never does.
+    this._serverElects = false;
+    this._fallbackClaims = new Map();   // peerId -> { id, at }
+    this._fallbackTimer = null;
+    this._joinedAt = Date.now();
+    // Reconnect bookkeeping. `_closing` distinguishes OUR disconnect() from a
+    // dropped socket, which must not be silent (the role has to be given up).
+    this._closing = false;
+    this._reconnectTries = 0;
+    this._reconnectTimer = null;
 
     this.video = new VideoMgr({
       getSelfId: () => this.presence.selfId,
       getCaptureCanvas: () => (typeof getCaptureCanvas === 'function' ? getCaptureCanvas() : getCaptureCanvas),
+      // canvas.captureStream() is video-only, so without this the peer watched the
+      // host's game in silence.
+      getCaptureAudio: () => (typeof getCaptureAudio === 'function' ? getCaptureAudio() : getCaptureAudio),
       iceServers: iceServers ?? undefined,
       onHostVideo,
       onHostVideoEnded,
@@ -84,10 +117,80 @@ export class DesktopNet {
 
   get selfId() { return this.presence.selfId; }
   get connected() { return this._connected; }
-  hostId() { return this.objects.ownerOf('tv'); }
+  // M1.4: the room's server-elected host (longest-present peer). Stable — it does
+  // NOT follow the shared `tv` state any more.
+  hostId() { return this._hostId; }
   isHost() {
     const self = this.presence.selfId;
-    return !!self && self === this.objects.ownerOf('tv');
+    return !!self && self === this._hostId;
+  }
+  // `silent` is for our OWN deliberate disconnect(): the app is tearing the session
+  // down anyway, and firing a demotion callback mid-teardown made the role handler
+  // run against a half-dismantled session.
+  _setHost(id, { silent = false } = {}) {
+    const next = id == null ? null : String(id);
+    if (next === this._hostId) return false;
+    const prev = this._hostId;
+    this._hostId = next;
+    if (this._onHostChange && !silent) {
+      try { this._onHostChange({ hostId: next, prevHostId: prev, isHost: this.isHost(), connected: this._connected }); }
+      catch (e) { console.warn('[desktop-net] onHostChange', e); }
+    }
+    return true;
+  }
+
+  // --- M1.4 fallback election (pre-M1.4 room server) -------------------------
+  // Same algorithm as NetMgr's, over the same pure helper: the EARLIEST claim by a
+  // still-present peer wins (ties broken by id), which reproduces the server's
+  // seniority rule. Claims ride the persisted STATE channel so they're replayed to
+  // late joiners.
+  _noteFallbackClaim(raw) {
+    const c = normaliseClaim(raw);
+    if (!c) return;
+    const prev = this._fallbackClaims.get(c.id);
+    if (!prev || c.at < prev.at) this._fallbackClaims.set(c.id, c);
+    if (!this._serverElects) this._runFallbackElection();
+  }
+
+  _runFallbackElection() {
+    if (this._serverElects || !this._connected) return;
+    const selfId = this.presence.selfId;
+    if (!selfId) return;
+    if (!this._fallbackClaims.has(selfId)) {
+      this._fallbackClaims.set(selfId, { id: selfId, at: this._joinedAt });
+    }
+    const stored = this.objects.get(FALLBACK_HOST_KEY);
+    this._noteFallbackClaimQuiet(stored);
+    const { hostId, announce } = resolveFallbackHost({
+      claims: [...this._fallbackClaims.values()],
+      presentIds: [selfId, ...this.presence.peers().map((p) => p.id)],
+      selfId,
+      now: this._joinedAt,
+      stored,
+    });
+    if (announce) this.setObjectState(FALLBACK_HOST_KEY, announce);
+    this._setHost(hostId);
+  }
+
+  _noteFallbackClaimQuiet(raw) {
+    const c = normaliseClaim(raw);
+    if (!c) return;
+    const prev = this._fallbackClaims.get(c.id);
+    if (!prev || c.at < prev.at) this._fallbackClaims.set(c.id, c);
+  }
+
+  _armFallbackElection() {
+    if (this._serverElects || this._fallbackTimer) return;
+    this._fallbackTimer = setTimeout(() => {
+      this._fallbackTimer = null;
+      if (this._serverElects || this._hostId) return;
+      console.warn('[desktop-net] no host announced by the room server - electing among peers (legacy server?)');
+      this._runFallbackElection();
+    }, FALLBACK_ELECT_MS);
+  }
+
+  _clearFallbackTimer() {
+    if (this._fallbackTimer) { clearTimeout(this._fallbackTimer); this._fallbackTimer = null; }
   }
   peerCount() { return this.presence.size; }
   peers() { return this.presence.peers(); }
@@ -110,7 +213,10 @@ export class DesktopNet {
 
   _applyState(msg) {
     const r = this.objects.apply(msg);
-    if (r && r.changed && msg.key === 'tv' && this._onTvState) {
+    if (!r) return;
+    // Fallback-election claims are protocol plumbing, never app state.
+    if (msg.key === FALLBACK_HOST_KEY) { this._noteFallbackClaim(r.value); return; }
+    if (r.changed && msg.key === 'tv' && this._onTvState) {
       try { this._onTvState(r.value, r.id); } catch (e) { console.warn('[desktop-net] onTvState', e); }
     }
   }
@@ -119,13 +225,17 @@ export class DesktopNet {
 
   startVideoBroadcast() { return this.video.startBroadcast(); }
   stopVideoBroadcast() { this.video.stopBroadcast(); }
+  // Re-hand the live host <video> to the app (after a local DOM change detached it,
+  // e.g. showCanvas() during a transient role flip).
+  reattachHostVideo() { return this.video.reattach(); }
+  hostVideoEl() { return this.video.hostVideoEl(); }
 
   // --- game input relay ------------------------------------------------------
 
   // Client → host: forward one logical RetroPad transition. No-op when we're the
   // host or no game is loaded (hostInputTarget returns null).
   forwardGameInput({ player, btn, down }) {
-    const to = hostInputTarget({ hostId: this.objects.ownerOf('tv'), selfId: this.presence.selfId });
+    const to = hostInputTarget({ hostId: this._hostId, selfId: this.presence.selfId });
     if (!to || !this._connected || !this.ws) return false;
     try { this.ws.send(encode(makeInput({ to, player, btn, down }))); return true; }
     catch { return false; }
@@ -148,6 +258,10 @@ export class DesktopNet {
       peerCount: () => this.presence.size,
       hostId: () => this.hostId(),
       isHost: () => this.isHost(),
+      sessionId: () => this.sessionId,
+      tvOwner: () => this.objects.ownerOf('tv'),
+      serverElects: () => this._serverElects,
+      fallbackClaims: () => [...this._fallbackClaims.values()],
       recvInputs: () => this._recvInputs.slice(),
       video: this.video.debugApi(),
     };
@@ -157,12 +271,14 @@ export class DesktopNet {
 
   connect() {
     const sep = this.serverUrl.includes('?') ? '&' : '?';
-    const url = `${this.serverUrl}${sep}room=${encodeURIComponent(this.room)}`;
+    const url = `${this.serverUrl}${sep}room=${encodeURIComponent(this.room)}&sid=${encodeURIComponent(this.sessionId)}`;
     let ws;
     try { ws = new WebSocket(url); } catch (e) { console.warn('[desktop-net] connect failed', e); return this; }
     this.ws = ws;
     ws.addEventListener('open', () => {
       this._connected = true;
+      this._reconnectTries = 0;
+      this._joinedAt = Date.now();
       ws.send(encode(makeJoin({ nick: this.nick, color: this.color })));
       console.log(`[desktop-net] connected to "${this.room}" as ${this.nick}`);
     });
@@ -176,22 +292,72 @@ export class DesktopNet {
         this._applyState(msg);
       } else if (msg.type === MSG.INPUT) {
         this._applyGameInput(msg);
+      } else if (msg.type === MSG.HOST) {
+        this._serverElects = true;                   // M1.4 migration / reclaim
+        this._clearFallbackTimer();
+        this._setHost(msg.id);
       } else if (msg.type === MSG.HELLO) {
         this.presence.apply(msg, this._now());
+        // A server that does host election ALWAYS sends the key (even as null,
+        // during a departed host's reclaim window). Its ABSENCE means a pre-M1.4
+        // relay, in which case the peers must elect among themselves - otherwise
+        // nobody is ever host and the boot gate refuses every game.
+        if ('host' in msg) {
+          this._serverElects = true;
+          this._clearFallbackTimer();
+          this._setHost(msg.host ?? null);
+        } else {
+          this._armFallbackElection();
+        }
         if (this._onConnect) { try { this._onConnect(this.presence.selfId); } catch (_) {} }
         this._emitRoster();
       } else {
         // JOIN / LEAVE / POSE roster traffic.
+        const leftId = (msg.type === MSG.LEAVE) ? msg.id : null;
         this.presence.apply(msg, this._now());
+        if (leftId != null && !this._serverElects) {
+          // A departing fallback host hands over to the earliest remaining claim.
+          this._fallbackClaims.delete(String(leftId));
+          if (this._hostId === String(leftId)) this._setHost(null);
+          this._runFallbackElection();
+        }
         this._emitRoster();
       }
     });
+    // An UNEXPECTED close (Wi-Fi blip, server restart, proxy timeout): we are no
+    // longer the room's authority. Stop streaming and give up the role - a host that
+    // kept both would become a SECOND host the moment the server migrates - then
+    // reconnect (the server holds our sid in its reclaim window, so a quick return
+    // gets the role back). Our own disconnect() sets _closing and skips all this.
     ws.addEventListener('close', () => {
+      const wasConnected = this._connected;
       this._connected = false;
+      this.video.stopBroadcast();
+      if (!this._closing) {
+        this._setHost(null);
+        if (wasConnected || this._reconnectTries) this._scheduleReconnect();
+      }
       if (this._onDisconnect) { try { this._onDisconnect(); } catch (_) {} }
     });
     ws.addEventListener('error', () => { /* close follows */ });
     return this;
+  }
+
+  _scheduleReconnect() {
+    if (this._closing || this._reconnectTimer) return;
+    const delay = RECONNECT_DELAYS_MS[Math.min(this._reconnectTries, RECONNECT_DELAYS_MS.length - 1)];
+    this._reconnectTries++;
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      if (this._closing) return;
+      console.log(`[desktop-net] reconnecting to "${this.room}" (attempt ${this._reconnectTries})`);
+      // The server assigns a NEW peer id on reconnect, so the old roster and the
+      // old fallback claims are meaningless. Shared object state is replayed.
+      this.presence.clear();
+      this._fallbackClaims.clear();
+      this.video.disable();
+      this.connect();
+    }, delay);
   }
 
   // Called every frame from the app's rAF tick.
@@ -202,7 +368,7 @@ export class DesktopNet {
     this.video.update({
       peerIds: this.presence.peers().map((p) => p.id),
       selfId: this.presence.selfId,
-      hostId: this.objects.ownerOf('tv'),
+      hostId: this._hostId,
     });
     // Heartbeat so peers don't prune us (we send no VR poses).
     if (!this._connected || !this.ws) return;
@@ -223,8 +389,14 @@ export class DesktopNet {
   }
 
   disconnect() {
+    this._closing = true;
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+    this._clearFallbackTimer();
     try { this.ws?.close(); } catch { /* already closing */ }
     this._connected = false;
+    this._setHost(null, { silent: true });
+    this._serverElects = false;
+    this._fallbackClaims.clear();
     this.video.disable();
     this.presence.clear();
     this.objects.clear();

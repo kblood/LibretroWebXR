@@ -29,6 +29,9 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
   const byConsole = new Map();    // consoleId -> branch
   let pending = null;             // { consoleId, sourceObject } for the next core
   let focusedId = null;
+  // M1.4: the host's incoming game audio while we're a display-only client
+  // ({ stream, src, sink, positional }) — see attachRemoteAudio below.
+  let remoteAudio = null;
   // Consoles explicitly powered off (see [[src/main.js]] setConsolePower). A
   // single-console room never calls setFocus (updateFocus no-ops below 2 TVs),
   // so without this a powered-off solo console's audio only stops if its core
@@ -82,6 +85,14 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
   if ('webkitAudioContext' in window) window.webkitAudioContext = StubAudioContext;
 
   const resume = () => { if (ctx.state !== 'running') ctx.resume().catch(() => {}); };
+  // Tear down the client-side host-audio graph (see attachRemoteAudio below).
+  function detachRemote() {
+    if (!remoteAudio) return;
+    try { remoteAudio.src.disconnect(); } catch (_) {}
+    try { remoteAudio.sink.disconnect(); } catch (_) {}
+    try { remoteAudio.positional.parent?.remove(remoteAudio.positional); } catch (_) {}
+    remoteAudio = null;
+  }
   window.addEventListener('pointerdown', resume);
   window.addEventListener('keydown', resume);
 
@@ -145,6 +156,65 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
       branch.nextAudioTime += buffer.duration;
       node.onended = () => node.disconnect();
     },
+
+    // --- M1.4 netplay audio -------------------------------------------------
+    //
+    // HOST side: tap a console's audio branch as a MediaStream so the host→client
+    // WebRTC stream can carry the GAME SOUND. canvas.captureStream() is video
+    // only, so before this a watching client saw the host's game in complete
+    // silence. The tap sits after the branch's focus/power gain, i.e. a client
+    // hears exactly what the host hears (a muted/unfocused console streams
+    // silence, which is the honest behaviour).
+    captureStream(consoleId) {
+      const branch = byConsole.get(consoleId);
+      if (!branch || typeof ctx.createMediaStreamDestination !== 'function') return null;
+      if (!branch.netTap) {
+        try {
+          branch.netTap = ctx.createMediaStreamDestination();
+          branch.sink.connect(branch.netTap);
+        } catch (e) {
+          console.warn('[audio] netplay capture failed:', e);
+          branch.netTap = null;
+          return null;
+        }
+      }
+      resume();
+      return branch.netTap?.stream ?? null;
+    },
+
+    // CLIENT side: play the host's incoming audio track through OUR graph,
+    // positioned on the TV showing the stream. Deliberately not the <video>
+    // element's own audio: an unmuted element can be paused outright by the
+    // autoplay policy, which would freeze the VIDEO TEXTURE too. The AudioContext
+    // is already user-gesture resumed, so this always sounds.
+    attachRemoteAudio(stream, sourceObject) {
+      if (!stream || !(stream.getAudioTracks?.().length)) return false;
+      if (remoteAudio && remoteAudio.stream === stream) return true;
+      detachRemote();
+      try {
+        const src = ctx.createMediaStreamSource(stream);
+        const sink = ctx.createGain();
+        src.connect(sink);
+        const positional = new THREE.PositionalAudio(listener);
+        positional.setRefDistance(refDistance);
+        positional.setRolloffFactor(rolloffFactor);
+        positional.setDistanceModel('inverse');
+        positional.setMaxDistance(maxDistance);
+        (sourceObject || defaultSource || listener).add(positional);
+        positional.setNodeSource(sink);
+        remoteAudio = { stream, src, sink, positional };
+        resume();
+        return true;
+      } catch (e) {
+        console.warn('[audio] remote audio attach failed:', e);
+        remoteAudio = null;
+        return false;
+      }
+    },
+
+    detachRemoteAudio: () => detachRemote(),
+    hasRemoteAudio: () => !!remoteAudio,
+
     branches,
     context: ctx,
   };

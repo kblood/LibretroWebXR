@@ -82,12 +82,14 @@ try {
   ok(await waitFor(host, () => window.__net.peerCount() >= 1), 'Host sees ClientA');
   ok(await waitFor(clientA, () => window.__net.peerCount() >= 1), 'ClientA sees Host');
 
-  // Host claims the tv state (becomes authoritative game host).
+  // M1.4: the first peer in is the server-elected host; it publishes what it is
+  // running on the shared `tv` state (a host-only action now).
+  ok(await waitFor(host, () => window.__net.isHost()), "Host is the room's elected host");
   await host.evaluate(() => {
     window.__net.setObjectState('tv', { file: 'roms/test.nes', core: 'nestopia', system: 'nes', title: 'Test' });
   });
-  ok(await waitFor(host, () => window.__net.isHost()), 'Host is now the authoritative tv-state host');
   ok(await waitFor(clientA, () => window.__net.hostId() !== null), 'ClientA resolved the host id');
+  ok((await clientA.evaluate(() => window.__net.isHost())) === false, 'ClientA is a display-only client');
 
   // --- gamepad listing: verify gamepads() returns the default gamepad ---
   const gamepads = await host.evaluate(() => window.__rack.gamepads());

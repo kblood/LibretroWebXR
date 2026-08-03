@@ -4,13 +4,14 @@
 
 import {
   MSG, POSE_LEN, SIGNAL_KINDS, isValidPart, roundPart, makePose, makeJoin, makeHello,
-  makeLeave, makeSignal, makeState, makeInput, makeWire, hostInputTarget, validate, encode, decode,
+  makeLeave, makeSignal, makeState, makeInput, makeWire, makeHost, hostInputTarget, validate, encode, decode,
   buildIceServers,
 } from '../src/net/NetProtocol.js';
 import { PresenceState } from '../src/net/PresenceState.js';
 import { RoomObjects } from '../src/net/RoomObjects.js';
 import { makeHoldKey, isHoldKey, parseHolds } from '../src/net/HoldState.js';
-import { Hub } from '../server/Hub.js';
+import { Hub, HOST_RECLAIM_MS, isHostOwnedKey } from '../server/Hub.js';
+import { FALLBACK_HOST_KEY, claimWins, normaliseClaim, resolveFallbackHost } from '../src/net/HostElection.js';
 
 let passed = 0;
 let failed = 0;
@@ -132,6 +133,216 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   const r2 = hub.connect('room1', 'p2');
   ok(r2.hello.peers.length === 1 && r2.hello.peers[0].id === 'p1', 'second peer sees the first in its roster');
   ok(hub.size('room1') === 2, 'room has two peers');
+}
+
+// === Hub: M1.4 host election — first in hosts, seniority migration ==========
+//
+// The old rule ("whoever last wrote the shared `tv` state is the host") is gone:
+// it flipped the role on every cartridge insert and could elect a peer that does
+// not even have the ROM. The server now elects the LONGEST-PRESENT peer and
+// re-elects only when that peer disconnects.
+{
+  const hub = new Hub();
+  const a = hub.connect('r', 'a');
+  ok(a.hello.host === 'a', 'the first peer in an empty room is elected host');
+  ok(hub.hostOf('r') === 'a', 'hostOf reports the elected host');
+  ok(!a.hostBroadcast, 'nobody to tell about the first election');
+
+  const b = hub.connect('r', 'b');
+  ok(b.hello.host === 'a', 'a later joiner is told the incumbent host, not itself');
+  ok(!b.hostBroadcast, 'a plain join does not re-elect (no HOST broadcast)');
+  const c = hub.connect('r', 'c');
+  ok(c.hello.host === 'a', 'a third joiner also sees the incumbent');
+
+  // An in-room action (writing `tv`) must NOT move the role any more.
+  hub.setState('r', 'c', { key: 'tv', value: { file: 'g.nes', core: 'fceumm' } });
+  ok(hub.hostOf('r') === 'a', 'writing the tv state does NOT make that peer the host');
+
+  // Host leaves → seniority: 'b' joined before 'c', so 'b' takes over.
+  const d = hub.disconnect('r', 'a');
+  ok(d.hostChange && d.hostChange.type === MSG.HOST && d.hostChange.id === 'b',
+    'when the host leaves, the longest-present remaining peer is promoted');
+  ok(hub.hostOf('r') === 'b', 'hostOf reflects the migration');
+  ok(validate(d.hostChange).ok, 'the HOST migration message validates on the wire');
+
+  // A NON-host leaving changes nothing.
+  ok(!hub.disconnect('r', 'c').hostChange, 'a non-host leaving does not re-elect');
+  ok(hub.hostOf('r') === 'b', 'host unchanged after a client leaves');
+}
+
+// === Hub: M1.4 DEFERRED host migration + reclaim across the host's own reload =
+//
+// The app reloads the page for a cross-core cartridge swap, so the host vanishes
+// for a couple of seconds on an ordinary game switch. Promoting a stand-in
+// immediately (what this used to do) meant that stand-in got the role, BOOTED the
+// room's cartridge into its own core, and was demoted ~150ms later when the real
+// host came back — leaving every client running its own extra core. So the room now
+// stays deliberately HOSTLESS for HOST_RECLAIM_MS and only migrates if the host
+// really is gone.
+{
+  const hub = new Hub();
+  hub.connect('r', 'a', { sid: 'sidA', now: 1000 });
+  hub.connect('r', 'b', { sid: 'sidB', now: 1000 });
+  ok(hub.hostOf('r') === 'a', 'a hosts');
+
+  const gone = hub.disconnect('r', 'a', { now: 2000 });          // host reloads
+  ok(!gone.hostChange, 'the host leaving does NOT immediately promote a stand-in');
+  ok(gone.hostGraceMs === HOST_RECLAIM_MS, 'the adapter is told to schedule the reclaim window');
+  ok(hub.hostOf('r') === null, 'the room is deliberately hostless during the window');
+
+  const back = hub.connect('r', 'a2', { sid: 'sidA', now: 4000 }); // same tab returns
+  ok(back.hello.host === 'a2', 'the returning host reclaims the role (same sid, inside the window)');
+  ok(back.hostBroadcast && back.hostBroadcast.id === 'a2', 'the others are told the role is back');
+  ok(hub.hostOf('r') === 'a2', 'hostOf reflects the reclaim');
+  ok(!hub.expireHostGrace('r', { now: 100000 }).hostChange,
+    'a window that was reclaimed is inert when its timer finally fires');
+
+  // The host never comes back → the window expires and seniority applies.
+  const hub2 = new Hub();
+  hub2.connect('r', 'a', { sid: 'sidA', now: 1000 });
+  hub2.connect('r', 'b', { sid: 'sidB', now: 1000 });
+  hub2.connect('r', 'c', { sid: 'sidC', now: 1100 });
+  hub2.disconnect('r', 'a', { now: 2000 });
+  ok(hub2.hostOf('r') === null, 'still hostless right after the host drops');
+  ok(!hub2.expireHostGrace('r', { now: 2000 }).hostChange, 'expiring early is a no-op');
+  const exp = hub2.expireHostGrace('r', { now: 2000 + HOST_RECLAIM_MS + 1 });
+  ok(exp.hostChange && exp.hostChange.id === 'b',
+    'once the window expires the LONGEST-PRESENT remaining peer is promoted (seniority)');
+  ok(hub2.hostOf('r') === 'b', 'hostOf reflects the deferred migration');
+  ok(!hub2.expireHostGrace('r', { now: 999999 }).hostChange, 'expireHostGrace is idempotent');
+
+  // Joining DURING the window neither promotes the joiner nor steals the slot.
+  const hub3 = new Hub();
+  hub3.connect('r', 'a', { sid: 'sidA', now: 0 });
+  hub3.connect('r', 'b', { sid: 'sidB', now: 0 });
+  hub3.disconnect('r', 'a', { now: 0 });
+  const z = hub3.connect('r', 'z', { sid: 'other', now: 10 });
+  ok(z.hello.host === null, 'a joiner during the reclaim window is told there is no host yet');
+  ok(!z.hostBroadcast, 'and no HOST broadcast is produced for it');
+  ok(hub3.hostOf('r') === null, 'a different sid cannot claim the departed host slot');
+  // …and when the window expires, seniority still picks 'b' (present before 'z').
+  ok(hub3.expireHostGrace('r', { now: HOST_RECLAIM_MS + 1 }).hostChange?.id === 'b',
+    'seniority ignores peers that joined during the window');
+
+  // A reconnect AFTER the window is just a normal junior join.
+  const hub4 = new Hub();
+  hub4.connect('r', 'a', { sid: 'sidA', now: 1000 });
+  hub4.connect('r', 'b', { sid: 'sidB', now: 1000 });
+  hub4.disconnect('r', 'a', { now: 2000 });
+  hub4.expireHostGrace('r', { now: 2000 + HOST_RECLAIM_MS + 1 });
+  const late = hub4.connect('r', 'a2', { sid: 'sidA', now: 2000 + 60000 });
+  ok(late.hello.host === 'b', 'a reconnect after the grace window does NOT reclaim');
+  ok(!late.hostBroadcast, 'no HOST broadcast for a late (non-reclaiming) rejoin');
+
+  // The LAST peer leaving takes the window with it: the next arrival hosts.
+  const hub5 = new Hub();
+  hub5.connect('r', 'a', { sid: 'sidA', now: 0 });
+  const solo = hub5.disconnect('r', 'a', { now: 0 });
+  ok(!solo.hostGraceMs, 'no reclaim window when there is nobody left to host for');
+  ok(hub5.connect('r', 'n', { sid: 'sidN', now: 5 }).hello.host === 'n',
+    'the next peer into an emptied room is the host straight away');
+
+  // No sid (a client that cannot identify its tab) → immediate migration, as before.
+  const hub6 = new Hub();
+  hub6.connect('r', 'a', { now: 0 });
+  hub6.connect('r', 'b', { now: 0 });
+  const nosid = hub6.disconnect('r', 'a', { now: 0 });
+  ok(nosid.hostChange && nosid.hostChange.id === 'b',
+    'a host with no sid cannot reclaim, so the role migrates immediately');
+  ok(!nosid.hostGraceMs, 'and no window is scheduled for it');
+}
+
+// === Hub: M1.4 host-OWNED shared keys are server-enforced ===================
+//
+// `tv` / `room` / `shelf:*` describe the room the HOST owns. A client-side check is
+// worthless on its own: an older deployed build still writes `tv` on every local
+// boot, and the host's own convergence path would then boot whatever that client
+// wrote — i.e. any peer could hijack what the room plays.
+{
+  ok(isHostOwnedKey('tv') && isHostOwnedKey('room'), 'tv + room are host-owned');
+  ok(isHostOwnedKey('shelf:local') && isHostOwnedKey('shelf:collections'), 'shelf:* is host-owned');
+  ok(!isHostOwnedKey('prop:lamp') && !isHostOwnedKey('hold:x') && !isHostOwnedKey('gamepad:1'),
+    'per-peer keys are NOT host-owned');
+
+  const hub = new Hub();
+  hub.connect('r', 'host', { sid: 's1', now: 0 });
+  hub.connect('r', 'client', { sid: 's2', now: 0 });
+
+  const good = hub.setState('r', 'host', { key: 'tv', value: { file: 'g.nes', core: 'fceumm' } });
+  ok(good.broadcast && !good.rejected, 'the host may write tv');
+
+  const bad = hub.setState('r', 'client', { key: 'tv', value: { file: 'other.sfc', core: 'snes9x' } });
+  ok(bad.rejected === 'not-host', 'a client writing tv is rejected');
+  ok(!bad.broadcast, 'and nothing is relayed to the room');
+  ok(bad.direct?.to === 'client' && bad.direct?.msg?.value?.file === 'g.nes',
+    'the rejected writer is sent the authoritative value back so it cannot diverge');
+
+  const shelf = hub.setState('r', 'client', { key: 'shelf:local', value: [{ file: 'mine.gb' }] });
+  ok(shelf.rejected === 'not-host', 'a client cannot push its own library onto the room shelf');
+
+  // A per-peer key is still free for anyone.
+  ok(hub.setState('r', 'client', { key: 'prop:lamp', value: { pos: [0, 0, 0] } }).broadcast,
+    'a client may still write its own prop deltas');
+
+  // …and during the reclaim window the ABSENT host still owns them.
+  hub.disconnect('r', 'host', { now: 1000 });
+  ok(hub.hostOf('r') === null, 'hostless during the window');
+  const inWindow = hub.setState('r', 'client', { key: 'tv', value: { file: 'sneaky.gb', core: 'gambatte' }, now: 1500 });
+  ok(inWindow.rejected === 'host-reclaim-window',
+    'a client cannot redefine the room while its host is reloading');
+  ok(inWindow.direct?.msg?.value?.file === 'g.nes', 'and it is corrected back to the real value');
+  // Once the window expires the new host owns them.
+  hub.expireHostGrace('r', { now: 1000 + HOST_RECLAIM_MS + 1 });
+  ok(hub.hostOf('r') === 'client', 'the remaining peer is the host now');
+  ok(hub.setState('r', 'client', { key: 'tv', value: { file: 'mine.gb', core: 'gambatte' } }).broadcast,
+    'the promoted peer may write tv');
+}
+
+// === HostElection: the client-side fallback for a pre-M1.4 room server =======
+//
+// Shipping a client whose boot gate needs a host, against a relay that never names
+// one, would mean nobody may ever host — no game at all for anyone. The peers then
+// elect among themselves over the persisted STATE channel, reproducing the server's
+// seniority rule: the EARLIEST claim by a still-present peer wins.
+{
+  ok(FALLBACK_HOST_KEY === 'hostClaim', 'the fallback claim rides its own state key');
+
+  ok(claimWins({ id: 'b', at: 10 }, { id: 'a', at: 20 }), 'the earlier claim wins');
+  ok(!claimWins({ id: 'b', at: 20 }, { id: 'a', at: 10 }), 'the later claim loses');
+  ok(claimWins({ id: 'a', at: 10 }, { id: 'b', at: 10 }), 'a tie is broken by the smaller id');
+  ok(!claimWins({ id: 'b', at: 10 }, { id: 'a', at: 10 }), 'and the larger id loses that tie');
+
+  ok(normaliseClaim({ id: 'a', at: 5 }).at === 5, 'a well-formed claim normalises');
+  ok(normaliseClaim({ id: 7, at: '5' }).id === '7', 'ids/times are coerced');
+  ok(normaliseClaim(null) === null && normaliseClaim({ at: 1 }) === null, 'a claim without an id is dropped');
+
+  // One peer alone elects itself and announces.
+  const solo = resolveFallbackHost({
+    claims: [{ id: 'a', at: 100 }], presentIds: ['a'], selfId: 'a', now: 100, stored: null,
+  });
+  ok(solo.hostId === 'a', 'a lone peer elects itself');
+  ok(solo.announce && solo.announce.id === 'a', 'and announces the claim so late joiners see it');
+
+  // Two peers: the earlier claim wins for BOTH of them (same answer everywhere).
+  const claims = [{ id: 'a', at: 100 }, { id: 'b', at: 200 }];
+  ok(resolveFallbackHost({ claims, presentIds: ['a', 'b'], selfId: 'a', now: 200, stored: { id: 'a', at: 100 } }).hostId === 'a',
+    'the senior peer sees itself as host');
+  ok(resolveFallbackHost({ claims, presentIds: ['a', 'b'], selfId: 'b', now: 200, stored: { id: 'a', at: 100 } }).hostId === 'a',
+    'the junior peer agrees');
+
+  // A claim by a peer that has LEFT is ignored — that is the migration path.
+  ok(resolveFallbackHost({ claims, presentIds: ['b'], selfId: 'b', now: 300, stored: { id: 'a', at: 100 } }).hostId === 'b',
+    'when the elected fallback host leaves, the earliest REMAINING claim wins');
+
+  // Last-writer-wins can leave a LOSING claim stored; the winner re-announces.
+  const fix = resolveFallbackHost({
+    claims, presentIds: ['a', 'b'], selfId: 'a', now: 200, stored: { id: 'b', at: 200 },
+  });
+  ok(fix.hostId === 'a', 'a stale stored claim does not change who wins');
+  ok(fix.announce && fix.announce.id === 'a', 'the winner re-announces so the channel converges');
+  // A non-winner never announces on someone else's behalf.
+  ok(!resolveFallbackHost({ claims, presentIds: ['a', 'b'], selfId: 'b', now: 200, stored: { id: 'a', at: 100 } }).announce,
+    'a peer that did not win stays quiet');
 }
 
 // === Hub: identify broadcasts a JOIN to others (not self) ==================
@@ -409,6 +620,25 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   ok(pruned.length === 2, 'prune returns two stale peer ids (onPeerLeave fires for each)');
   ok(pruned.includes('stale1') && pruned.includes('stale2'), 'both stale peer ids returned by prune');
   ok(ps.size === 1 && !!ps.get('fresh'), 'fresh peer survives the prune');
+}
+
+// === NetProtocol: HOST message + hello.host (M1.4) ==========================
+{
+  const h = makeHost({ id: 'p7' });
+  ok(h.type === MSG.HOST && h.id === 'p7', 'makeHost builds a HOST message');
+  ok(validate(h).ok, 'HOST validates');
+  ok(!validate({ type: MSG.HOST }).ok, 'HOST without an id is rejected');
+  ok(!validate({ type: MSG.HOST, id: '' }).ok, 'HOST with an empty id is rejected');
+  ok(decode(encode(h)).id === 'p7', 'HOST survives encode → decode');
+
+  ok(makeHello({ selfId: 'a', host: 'a' }).host === 'a', 'hello carries the elected host');
+  ok(makeHello({ selfId: 'a' }).host === null, 'hello.host defaults to null');
+  ok(validate(makeHello({ selfId: 'a', host: 'a' })).ok, 'hello with a host validates');
+
+  // Input routing follows the ELECTED host now, not the tv-state owner.
+  ok(hostInputTarget({ hostId: 'h', selfId: 'c' }) === 'h', 'a client forwards input to the elected host');
+  ok(hostInputTarget({ hostId: 'h', selfId: 'h' }) === null, 'the host never forwards to itself');
+  ok(hostInputTarget({ hostId: null, selfId: 'c' }) === null, 'no host yet → nothing to forward to');
 }
 
 // === buildIceServers: STUN default + optional TURN relay (M0 hardening) =====

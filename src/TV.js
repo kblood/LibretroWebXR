@@ -35,6 +35,9 @@ export class TV {
     stand = true, glow = true } = {}) {
     this.id = id;
     this.sourceCanvas = source;
+    // Set instead of sourceCanvas while a remote host's <video> is on this
+    // screen (see setVideo); the pair is mutually exclusive.
+    this.sourceVideo = null;
     this._active = true;
 
     const group = new THREE.Group();
@@ -104,15 +107,21 @@ export class TV {
   setSource(canvas) {
     if (!canvas || canvas === this.sourceCanvas) return;
     this.sourceCanvas = canvas;
+    this.sourceVideo = null;
     const tex = this._makeTexture(canvas);
     this.material.uniforms.tDiffuse.value = tex;
     if (this.texture) this.texture.dispose();
     this.texture = tex;
   }
 
-  /** Paint a remote host's <video> (WebRTC track) instead of a canvas. */
+  /** Paint a remote host's <video> (WebRTC track) instead of a canvas.
+   * Idempotent per element (like setSource): routeVideo() re-asserts a watching
+   * client's host feed on every local re-route, so without this dedupe each
+   * power-toggle / console-spawn / repatch would build and leak a fresh
+   * VideoTexture for the same stream. */
   setVideo(videoEl) {
-    if (!videoEl) return;
+    if (!videoEl || videoEl === this.sourceVideo) return;
+    this.sourceVideo = videoEl;
     const tex = new THREE.VideoTexture(videoEl);
     tex.minFilter = THREE.LinearFilter;
     tex.magFilter = THREE.LinearFilter;

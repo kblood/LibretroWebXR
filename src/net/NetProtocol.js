@@ -23,6 +23,7 @@ export const MSG = Object.freeze({
   STATE: 'state',   // M0.5 room-object sync: a shared key→value (e.g. the loaded game)
   INPUT: 'input',   // M1 game sync: a remote player's RetroPad button, directed to the host
   WIRE:  'wire',    // M2 transient relay: per-frame ephemera (live drag, pad buttons) — NOT persisted
+  HOST:  'host',    // M1.4 host election: server→clients, "peer <id> is now the room host"
 });
 
 // WebRTC signaling kinds carried inside a SIGNAL message.
@@ -72,14 +73,33 @@ export function makeJoin({ id, nick, color } = {}) {
   return msg;
 }
 
-/** Build a HELLO message (server → a freshly-connected client). */
-export function makeHello({ selfId, room, peers = [] } = {}) {
+/**
+ * Build a HELLO message (server → a freshly-connected client). `host` is the
+ * room's current authoritative host (M1.4) — the peer that has been in the room
+ * longest — so a joiner knows immediately whether IT is the host (first in) or
+ * must behave as a display-only client. Never null in practice (the server
+ * elects the connecting peer when the room was empty).
+ */
+export function makeHello({ selfId, room, peers = [], host = null } = {}) {
   return {
     type: MSG.HELLO,
     selfId: String(selfId),
     room: room == null ? null : String(room),
+    host: host == null ? null : String(host),
     peers: peers.map((p) => ({ id: String(p.id), nick: String(p.nick ?? 'Player'), color: String(p.color ?? '#88aaff') })),
   };
+}
+
+/**
+ * Build a HOST message (M1.4 host election, server → every client in the room).
+ * Announces the room's authoritative host. The server is the sole author: it
+ * elects the longest-present peer and only re-elects when the current host
+ * disconnects (or reclaims its slot after a reload — see server/Hub.js), so the
+ * role is STABLE and never changes as a side effect of an in-room action like
+ * inserting a cartridge.
+ */
+export function makeHost({ id } = {}) {
+  return { type: MSG.HOST, id: id == null ? null : String(id) };
 }
 
 /** Build a LEAVE message body. */
@@ -149,7 +169,8 @@ export function makeWire({ ch, data = null, id } = {}) {
 
 /**
  * M1.1 host-routing decision (pure): who, if anyone, a peer should forward its
- * captured game input to. The host is the owner of the shared `tv` state. Returns
+ * captured game input to. `hostId` is the room's server-elected host (M1.4 —
+ * NOT, as it was until 2026-08-03, "whoever last wrote the `tv` state"). Returns
  * the host id to send to, or null when there is no host yet, or when THIS peer is
  * the host (it drives its own core locally — no self-send). Kept here, pure, so
  * the client/host split is unit-tested rather than buried in main.js wiring.
@@ -201,6 +222,9 @@ export function validate(msg) {
     case MSG.WIRE:
       if (typeof msg.ch !== 'string' || msg.ch === '') return { ok: false, error: 'wire.ch' };
       if (!('data' in msg)) return { ok: false, error: 'wire.data' };
+      return { ok: true };
+    case MSG.HOST:
+      if (typeof msg.id !== 'string' || msg.id === '') return { ok: false, error: 'host.id' };
       return { ok: true };
     default:
       return { ok: false, error: `unknown type: ${msg && msg.type}` };

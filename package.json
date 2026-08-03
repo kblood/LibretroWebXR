@@ -30,6 +30,8 @@
     "smoke-gameinput": "node scripts/smoke-gameinput.mjs",
     "smoke-gamesync": "node scripts/smoke-gamesync.mjs",
     "smoke-video": "node scripts/smoke-video.mjs",
+    "smoke-shared-game": "node scripts/smoke-shared-game.mjs",
+    "smoke-room-inherit": "node scripts/smoke-room-inherit.mjs",
     "smoke-log": "node scripts/smoke-log.mjs",
     "smoke-gamepad-share": "node scripts/smoke-gamepad-share.mjs",
     "smoke-prop-sync": "node scripts/smoke-prop-sync.mjs",

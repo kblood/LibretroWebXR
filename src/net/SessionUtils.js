@@ -30,3 +30,32 @@ export function sanitiseRoom(raw) {
 export function randomRoomSuffix() {
   return Math.random().toString(36).slice(2, 6);
 }
+
+const SID_KEY = 'libretrowebxr.sid';
+let _memSid = null;
+
+/**
+ * A stable per-tab session id, persisted in sessionStorage so it SURVIVES a
+ * page reload but is unique per browser tab/window (two tabs on the same
+ * machine are two distinct players).
+ *
+ * Used only for M1.4 host reclaim: the room server remembers the departing
+ * host's sid for HOST_RECLAIM_MS, so the app's own cross-core `location.reload()`
+ * doesn't hand the host role — and with it the running game — to a peer that has
+ * nothing booted. Falls back to an in-memory id when sessionStorage is
+ * unavailable (private mode, Node tests).
+ *
+ * @returns {string}
+ */
+export function stableSessionId() {
+  try {
+    const s = globalThis.sessionStorage;
+    if (s) {
+      let id = s.getItem(SID_KEY);
+      if (!id) { id = `sid-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`; s.setItem(SID_KEY, id); }
+      return id;
+    }
+  } catch { /* sessionStorage blocked → in-memory fallback below */ }
+  if (!_memSid) _memSid = `sid-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+  return _memSid;
+}

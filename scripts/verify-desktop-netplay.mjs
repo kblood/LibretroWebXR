@@ -13,9 +13,12 @@
 import puppeteer from 'puppeteer-core';
 import { existsSync } from 'node:fs';
 
-const APP = 'http://localhost:5173/desktop.html';
-const WS = 'ws://localhost:8799/';
-const ROOM = `verify-${Date.now()}`;
+const args = Object.fromEntries(process.argv.slice(2).map((a) => {
+  const m = a.match(/^--([^=]+)=?(.*)$/); return m ? [m[1], m[2] || true] : [a, true];
+}));
+const APP = args.app || 'http://localhost:5173/desktop.html';
+const WS = args.ws || 'ws://localhost:8799/';
+const ROOM = args.room || `verify-${Date.now()}`;
 const urlFor = () => `${APP}?server=${encodeURIComponent(WS)}`;
 
 const CHROME = [
@@ -122,11 +125,31 @@ async function openPeer(label) {
   ok(videoInfo.w > 0 && videoInfo.h > 0, 'client received a real WebRTC video track with nonzero dimensions');
 
   // Confirm the video is actually advancing (real frames, not a frozen first frame).
-  const t0 = await client.evaluate(() => document.querySelector('video.host-video').currentTime);
-  await sleep(1000);
-  const t1 = await client.evaluate(() => document.querySelector('video.host-video').currentTime);
-  console.log(`Client video currentTime: ${t0.toFixed(2)} -> ${t1.toFixed(2)}`);
-  ok(t1 > t0, 'client video is actively playing (currentTime advances)');
+  // DECODED FRAMES, not just currentTime: an audio-only stream ticks currentTime
+  // forever with no picture at all, which is how a real freeze hid here once.
+  const quality = () => client.evaluate(() => {
+    const v = document.querySelector('video.host-video');
+    let frames = null;
+    try { frames = v.getVideoPlaybackQuality?.()?.totalVideoFrames ?? null; } catch { /* ok */ }
+    return { time: v.currentTime, frames, w: v.videoWidth };
+  });
+  const q0 = await quality();
+  await sleep(1500);
+  const q1 = await quality();
+  console.log(`Client video: t ${q0.time.toFixed(2)} -> ${q1.time.toFixed(2)}, frames ${q0.frames} -> ${q1.frames}`);
+  ok(q1.time > q0.time, 'client video is actively playing (currentTime advances)');
+  ok(q1.w > 0 && (q1.frames == null || q1.frames > q0.frames),
+    'client video is DECODING new frames (not a frozen or audio-only stream)');
+
+  // The host's game AUDIO rides the same peer connection since M1.4 — before that a
+  // joined client watched a completely mute picture.
+  const audio = await client.evaluate(() => ({
+    receivingAudio: window.__desktop.net_debug()?.video?.receivingAudio?.() ?? null,
+    remote: window.__desktop.audio?.hasRemote?.() ?? null,
+  }));
+  console.log('Client audio:', JSON.stringify(audio));
+  ok(audio.receivingAudio === true, 'client receives the host GAME AUDIO track');
+  ok(audio.remote === true, "the client is playing the host's audio through its own graph");
   await client.screenshot({ path: 'tmp/verify-desktop-client.png' });
 
   console.log(`\n${passed} passed, ${failed} failed`);

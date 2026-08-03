@@ -524,6 +524,35 @@ All three slices live; M1.1/M1.2 smokes pass against `wss://dionysus.dk/ws/`.
   `scripts/smoke-video.mjs` (now 16 — two clients pause while watching, one resumes
   after taking over as host). *A paused watcher also has no game audio — fine, its
   local audio was never synced to the host's displayed frames anyway.*
+- **M1.4 ✅ done (2026-08-03) — the shared-room rewrite. SUPERSEDES the "Host =
+  the `tv`-state owner" rule in M1.1/M1.2 above.** A real two-computer playtest
+  found each machine running its OWN game in the same room: whoever last wrote
+  `tv` became host, so a joiner (who may not even own the ROM) stole the role,
+  and `applyRemoteTv` then booted the ROM locally on both. Now: the **server**
+  elects the host by **seniority** (`server/Hub.js`, `HELLO.host` + `MSG.HOST`);
+  migration happens only when the host LEAVES and is **deferred 15 s
+  (`HOST_RECLAIM_MS`)** so a host reloading its own page reclaims by session id
+  instead of transiently promoting a client; `tv`/`room`/`shelf:*` are
+  **host-owned keys** the Hub refuses from anyone else;
+  `src/net/HostElection.js` is a client-side claim-based fallback for a room
+  server that predates this. A non-host is **display-only**: every boot route is
+  gated on `amRoomHost()` (cart insert, `#rom-input`, `__pickLocalRom`, rack
+  spawn, peripheral arm), it paints the host feed through `routeVideo()`, and it
+  **inherits the host's room + shelf** (`room`, `shelf:collections`,
+  `shelf:local`) instead of building its own. Client actions travel instead of
+  executing locally: `insert` (host resolves it from its own library or
+  `insert-nack`s it) and `peripheral` (the host attaches the libretro device).
+  Game **audio** now rides the same peer connection (`SpatialAudio.captureStream`
+  / `attachRemoteAudio`; `src/desktop/DesktopAudio.js` for desktop.html, which
+  also fixes silent worker cores there). Verified headlessly with real browsers:
+  `scripts/smoke-shared-game.mjs` (45), `scripts/smoke-room-inherit.mjs` (27),
+  `scripts/smoke-video.mjs`, plus `scripts/test-net.mjs` units — each new
+  assertion negative-controlled. Two real bugs the smokes caught and fixed:
+  re-capturing into a FRESH `MediaStream` on a host live-reboot changed the msid,
+  so a client's `ontrack` adopted an **audio-only** stream and the picture froze
+  forever while every metric said "receiving"; and `stopBroadcast()` stopped the
+  borrowed audio-tap track, permanently muting a host that was demoted and
+  promoted again.
 
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
