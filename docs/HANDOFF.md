@@ -583,7 +583,12 @@ All three slices live; M1.1/M1.2 smokes pass against `wss://dionysus.dk/ws/`.
   life — and `scripts/verify-desktop-netplay.mjs` 17/17 (new solo-boot→join→reclaim
   window→promotion phase). See MULTIPLAYER.md's "Runs zero cores is enforced at the
   runtime layer" for the rule and for `window.__rack.mayRun()` /
-  `window.__rack.live()`, the checks to use instead of the header.
+  `window.__rack.live()`, the checks to use instead of the header. One more defect
+  that verification turned up and fixed: promotion replays `restoreRack()` because a
+  client's saved rack is suppressed while it watches — true on the `?session=` path,
+  but a **widget**-joiner's rack was only *paused*, never torn down, so the replay
+  **duplicated every console** (2 came back as 3). `restoreRack()` now no-ops when
+  the rack is already standing.
 
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
