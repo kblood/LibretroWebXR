@@ -821,9 +821,32 @@ See the deferred "harden buildMemoryCards" item below.
 ## Deploying
 
 ```powershell
-npm run deploy                 # build + deploy to /webxr/libretrowebxr2/
+npm run deploy                 # build + FULL deploy to /webxr/libretrowebxr2/  (~1 HOUR)
+npm run build; npm run deploy-app   # code-only refresh of the same folder      (~seconds)
 pwsh scripts/deploy.ps1 -DryRun -SkipBuild   # see remote actions, touch nothing
 ```
+
+- **A full deploy takes about an hour, and almost none of it is the app.** `vite
+  build` copies *all* of `public/` into `dist/`, so `dist/` is ~3.9 GB: 3.7 GB of it
+  is `roms/local` (the **gitignored sideload of the user's commercial** light-gun /
+  disc test wall — see `docs/HEADSET_LIGHTGUN_VALIDATION.md`), 122 MB is `cores/`,
+  and the app itself is ~1 MB. Worth knowing: those ROMs are published to guessable
+  public URLs under `.../libretrowebxr2/roms/local/`. Don't "just skip roms" in a
+  full deploy — it ends in an **atomic swap of the whole folder**, so omitting them
+  *deletes* them from the live site (and the headset test wall is only reachable
+  from the deployed build).
+- **So for a code change use `npm run deploy-app`** (= `deploy.ps1 -SkipCores
+  -AppOnly`): it scp's only `assets/` + the `.html` entry points + `.htaccess`
+  straight into the live folder and leaves `roms/`/`cores/` alone. Not atomic, but
+  vite content-hashes `assets/`, so new bundles land under new names and the `.html`
+  files that reference them are uploaded **last** — the live page never points at a
+  file that isn't there. It refuses to run when the live folder doesn't exist yet.
+- **Never rebuild while a deploy is uploading.** `vite build` empties `dist/` first,
+  so the in-flight `scp` reads a folder being deleted under it and the staged copy is
+  a mix. Symptom: the log sits on `+ roms` forever with `scp` still burning CPU.
+  Build first, then `pwsh scripts/deploy.ps1 -SkipBuild -SkipCores`. Killing a deploy
+  mid-upload is safe (the swap is last, so live is untouched) but orphans a
+  `/var/www/html/webxr/.staging-<name>-<id>` dir worth sweeping occasionally.
 
 - `scripts/deploy.ps1` is **gitignored** (it bakes in the GCloud SSH host/user/key
   path, matching the sibling projects IWSDK/Boligsøgning). Only the credential-free

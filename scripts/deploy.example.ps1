@@ -19,6 +19,16 @@
 .PARAMETER Name   Target subfolder under the remote base (default 'libretrowebxr').
 .PARAMETER SkipCores / SkipBuild / DryRun   As named.
 
+.PARAMETER AppOnly
+  Refresh only the app (assets/ + the .html entry points + .htaccess) directly into
+  the existing live folder — no staging dir, no atomic swap. A full deploy re-uploads
+  everything vite copied out of public/, which for this project means cores/ and any
+  local ROM/disc sideload: gigabytes of scp for a 1 MB code change. -AppOnly is
+  seconds. It refuses to run if the live folder doesn't exist yet (it would produce a
+  deployment with no cores), and it's safe despite not being atomic because vite
+  content-hashes assets/ — new bundles land under new names and the .html files that
+  reference them go last.
+
 .EXAMPLE
   $env:DEPLOY_HOST='example.com'; $env:DEPLOY_USER='me'
   $env:DEPLOY_KEY="$HOME\.ssh\id_ed25519"; $env:DEPLOY_REMOTE_BASE='/var/www/html/webxr'
@@ -29,6 +39,7 @@ param(
   [string]$Name = 'libretrowebxr',
   [switch]$SkipCores,
   [switch]$SkipBuild,
+  [switch]$AppOnly,
   [switch]$DryRun
 )
 
@@ -86,6 +97,25 @@ $id      = ([guid]::NewGuid().ToString().Substring(0, 8))
 $Staging = "$RemoteBase/.staging-$Name-$id"
 $Live    = "$RemoteBase/$Name"
 $Old     = "$Live.old-$id"
+
+if ($AppOnly) {
+  Write-Host "=== app-only refresh $Name -> ${Target}:$Live ===" -ForegroundColor Cyan
+  Invoke-Ssh "test -d '$Live' || { echo 'no live folder yet - run a FULL deploy first' >&2; exit 1; }"
+  $appLast = @('index.html', 'desktop.html', 'headset-test.html')
+  Get-ChildItem -Path $Dist -Force |
+    Where-Object { $_.Name -notin @('roms', 'cores', '.htaccess') -and $_.Name -notin $appLast } |
+    ForEach-Object { Write-Host "    + $($_.Name)"; Invoke-Scp $_.FullName "$Live/" }
+  Write-Host '    + .htaccess (COOP/COEP)'; Invoke-Scp $Htaccess "$Live/.htaccess"
+  foreach ($n in $appLast) {
+    $p = Join-Path $Dist $n
+    if (Test-Path $p) { Write-Host "    + $n"; Invoke-Scp $p "$Live/" }
+  }
+  Write-Host ''
+  Write-Host "Done (app only). Live folder: $Live" -ForegroundColor Green
+  Write-Host '    roms/ and cores/ untouched — run a full deploy to change them.' -ForegroundColor DarkGray
+  if ($DryRun) { Write-Host '    (dry run — nothing changed)' -ForegroundColor Yellow }
+  return
+}
 
 Write-Host "=== deploy $Name -> ${Target}:$Live ===" -ForegroundColor Cyan
 Invoke-Ssh "mkdir -p '$Staging'"
