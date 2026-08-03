@@ -248,6 +248,23 @@ does something else entirely:
   collection inherited through an unfetchable `dropped:` ref, several successive
   room changes, and an in-place room edit with no reload.
 
+### Point the smokes at the DEPLOYED build too — the room server is not in `dist/`
+Every script above takes `--app`/`--ws`, so the whole set runs against production:
+
+```
+node scripts/smoke-shared-game.mjs  --app=https://dionysus.dk/webxr/libretrowebxr2/ --ws=wss://dionysus.dk/ws/
+```
+
+Do it before believing a multiplayer feature is live. `npm run deploy` publishes
+`dist/`, and the room server is a long-running process (`npm run deploy-room`,
+see `server/README.md`) — so the app and the server can drift apart silently, and
+on 2026-08-03 they had, by two months: the live server predated server-side host
+election *and* the `wire()` method that carries `insert`/`insert-nack`/peripheral
+binds. Locally everything passed; against production `smoke-shared-game` was 41/45
+and a migrated watcher stayed frozen at 0 decoded frames indefinitely. A local
+`node server/room-server.mjs` is always current and therefore proves nothing about
+what the headset connects to.
+
 `scripts/test-multiplayer.mjs` (in `npm test`) covers the host-side keycode
 injection (`GameInputMgr.setRemoteButton`) and the controller→logical capture;
 `scripts/test-net.mjs` covers the election/reclaim/host-owned-key rules in

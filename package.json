@@ -40,6 +40,7 @@
     "verify-desktop-netplay": "node scripts/verify-desktop-netplay.mjs",
     "deploy": "pwsh scripts/deploy.ps1",
     "deploy-app": "pwsh scripts/deploy.ps1 -SkipCores -AppOnly",
+    "deploy-room": "pwsh scripts/deploy.ps1 -Room",
     "publish-dos-tools": "pwsh scripts/publish-dos-tools.ps1",
     "dummy-player": "node scripts/dummy-player.mjs",
     "probe-local-rom": "node scripts/probe-local-rom.mjs",

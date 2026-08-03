@@ -17,6 +17,15 @@
   Requires the OpenSSH client on PATH and an SSH key authorized on the host.
 
 .PARAMETER Name   Target subfolder under the remote base (default 'libretrowebxr').
+.PARAMETER Room
+  Deploy the multiplayer ROOM SERVER (a long-running node process) instead of the
+  web app — server/*.mjs + server/Hub.js + src/net/NetProtocol.js into its install
+  dir, then restart its service unit. NOT part of a normal deploy, because the room
+  server isn't a dist/ asset. Fill in $RoomBase/$Unit for your host. Run it whenever
+  server/ or src/net/NetProtocol.js changes: nothing else does, which is how a live
+  room server can end up months behind the app that talks to it while every doc says
+  the feature is deployed.
+
 .PARAMETER SkipCores / SkipBuild / DryRun   As named.
 
 .PARAMETER AppOnly
@@ -40,6 +49,7 @@ param(
   [switch]$SkipCores,
   [switch]$SkipBuild,
   [switch]$AppOnly,
+  [switch]$Room,
   [switch]$DryRun
 )
 
@@ -97,6 +107,40 @@ $id      = ([guid]::NewGuid().ToString().Substring(0, 8))
 $Staging = "$RemoteBase/.staging-$Name-$id"
 $Live    = "$RemoteBase/$Name"
 $Old     = "$Live.old-$id"
+
+# The room server is a long-running process, not a dist/ asset, so a normal deploy
+# never touches it. Keep this step next to the app deploy or it WILL rot: on
+# 2026-08-03 the live one was still the 2026-06-09 Hub.js (no host election, no
+# host-owned state keys, no wire() at all) while the app shipped M1.4 and the docs
+# said multiplayer was deployed. Everything had only ever been verified against a
+# local `node server/room-server.mjs`.
+if ($Room) {
+  $RoomBase = '/opt/libretrowebxr-room'   # <-- your install dir
+  $Unit     = 'libretrowebxr-room'        # <-- your systemd unit
+  Write-Host "=== room server -> ${Target}:$RoomBase ($Unit) ===" -ForegroundColor Cyan
+  # Hub.js imports ../src/net/NetProtocol.js — ship them together or the service
+  # crash-loops on a missing export.
+  $files = @(
+    @{ src = 'server\Hub.js';          dst = "$RoomBase/server/" },
+    @{ src = 'server\room-server.mjs'; dst = "$RoomBase/server/" },
+    @{ src = 'server\log-server.mjs';  dst = "$RoomBase/server/" },
+    @{ src = 'server\package.json';    dst = "$RoomBase/server/" },
+    @{ src = 'src\net\NetProtocol.js'; dst = "$RoomBase/src/net/" }
+  )
+  foreach ($f in $files) { if (-not (Test-Path (Join-Path $RepoRoot $f.src))) { throw "missing $($f.src)" } }
+  $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+  Invoke-Ssh "sudo cp -a '$RoomBase' '$RoomBase.bak-$stamp' && echo 'backup: $RoomBase.bak-$stamp'"
+  foreach ($f in $files) { Write-Host "    + $($f.src)"; Invoke-Scp (Join-Path $RepoRoot $f.src) $f.dst }
+  Invoke-Ssh "cd '$RoomBase/server' && npm install --omit=dev --no-audit --no-fund >/dev/null && echo 'deps ok'"
+  Invoke-Ssh "sudo systemctl restart $Unit"
+  Start-Sleep 3
+  Invoke-Ssh "systemctl is-active $Unit"
+  Invoke-Ssh "journalctl -u $Unit -n 8 --no-pager | tail -8"
+  Write-Host ''
+  Write-Host "Done (room server). Roll back: sudo cp -a $RoomBase.bak-$stamp/. $RoomBase/ && sudo systemctl restart $Unit" -ForegroundColor Green
+  if ($DryRun) { Write-Host '    (dry run — nothing changed)' -ForegroundColor Yellow }
+  return
+}
 
 if ($AppOnly) {
   Write-Host "=== app-only refresh $Name -> ${Target}:$Live ===" -ForegroundColor Cyan

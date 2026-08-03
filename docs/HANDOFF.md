@@ -614,6 +614,33 @@ All three slices live; M1.1/M1.2 smokes pass against `wss://dionysus.dk/ws/`.
   two bug-targeting assertions. Regression-checked `smoke-room-inherit.mjs` (27/27)
   and `smoke-display-only.mjs` (54/54).
 
+- **M1.4c ✅ done (2026-08-03) — the room server in PRODUCTION was two months stale,
+  which is on its own enough to cause the reported playtest failure.** Everything
+  above was verified against a local `node server/room-server.mjs`. Pointing the very
+  same smokes at the **deployed** app instead
+  (`--app=https://dionysus.dk/webxr/libretrowebxr2/ --ws=wss://dionysus.dk/ws/`)
+  put `smoke-shared-game.mjs` at **41/45**, and a diagnostic
+  (`tmp/diag-migration-live.mjs`, a per-second timeline rather than a fixed sample)
+  showed it was not latency: after a host migration the remaining watcher sat at
+  **0 decoded frames / 0×0 for 90 s**, the promoted peer never dropped its dead
+  stream, and promotion happened at **+0.3 s** instead of the designed 15 s
+  `HOST_RECLAIM_MS` — i.e. the loser of the election was already "host". Cause: the
+  live systemd unit had been up 5 days running `Hub.js` **from 2026-06-09** — no
+  `_senior`/host election, no `HOST_RECLAIM_MS`, no `isHostOwnedKey` (so *any* peer
+  could overwrite `tv`/`room`/`shelf:*`), and **no `wire()` method**, meaning the
+  client→host `insert`/`insert-nack`/peripheral channel was dropped on the floor.
+  `npm run deploy` only ever published `dist/`, and the room server isn't in `dist/`,
+  so no MP milestone from M1.0 on had ever actually been live. Fixed by adding
+  `deploy.ps1 -Room` / **`npm run deploy-room`** (backs up, ships
+  `server/**` + `src/net/NetProtocol.js` together, restarts the unit, then re-greps
+  the box so a no-op can't read as success) and running it. **Re-verified against
+  production, app + server:** `smoke-shared-game` 45/45, `smoke-display-only` 54/54,
+  `smoke-room-inherit` 27/27, `smoke-xr-room-adopt` 10/10,
+  `verify-desktop-netplay` 17/17, and the migration timeline now matches localhost
+  (watcher decodes ~30 fps off the new host, promotion at +15.3 s). Lesson worth
+  keeping: **a local room server is not the deployed one** — point the smokes at the
+  real URL before believing an MP feature is live.
+
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
 a boolean). **Move** = grab a prop to reposition (E.1). **Change** = grip-SELECT a
@@ -822,9 +849,22 @@ See the deferred "harden buildMemoryCards" item below.
 
 ```powershell
 npm run deploy                 # build + FULL deploy to /webxr/libretrowebxr2/  (~1 HOUR)
-npm run build; npm run deploy-app   # code-only refresh of the same folder      (~seconds)
+npm run deploy-app             # build + code-only refresh of the same folder   (~seconds)
+npm run deploy-room            # the MULTIPLAYER ROOM SERVER — a separate step!
 pwsh scripts/deploy.ps1 -DryRun -SkipBuild   # see remote actions, touch nothing
 ```
+
+- **`npm run deploy` does NOT deploy the room server.** It publishes `dist/`, and
+  the room server is a long-running node process (systemd `libretrowebxr-room`,
+  `/opt/libretrowebxr-room`), not a static asset. Run **`npm run deploy-room`**
+  whenever `server/**` or `src/net/NetProtocol.js` changes — `Hub.js` imports the
+  protocol file, so they must ship together or the unit crash-loops on a missing
+  export. This is not hypothetical: on 2026-08-03 the live server was found still
+  running the **2026-06-09** `Hub.js` (no host election, no host-owned state keys,
+  no `wire()` — so `insert`/`insert-nack`/peripheral binds were silently dropped in
+  production) while the app shipped M1.4 and these docs said multiplayer was
+  deployed, because every MP milestone had only ever been verified against a *local*
+  `node server/room-server.mjs`. See `server/README.md`.
 
 - **A full deploy takes about an hour, and almost none of it is the app.** `vite
   build` copies *all* of `public/` into `dist/`, so `dist/` is ~3.9 GB: 3.7 GB of it
