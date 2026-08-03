@@ -1521,6 +1521,16 @@ async function restoreRack() {
     logger?.event?.('rack-restore-suppressed', { consoles: saved.consoles.length, hostId: net?.hostId?.() ?? null });
     return;
   }
+  // Nothing to restore when the rack is already standing. This function runs a
+  // SECOND time on promotion (_applyHostRole replays it for a peer whose rack was
+  // suppressed while it watched), but a widget-joiner's rack was only PAUSED, never
+  // torn down — so re-spawning duplicated every console: twice the live cores,
+  // twice the props, twice the load. Found by smoke-display-only's promotion phase,
+  // which saw a 2-console rack come back as 3.
+  if (rackMgr.count() > 1) {
+    logger?.event?.('rack-restore-noop', { live: rackMgr.count(), saved: saved.consoles.length });
+    return;
+  }
   const games = window.__games || [];
   setStatus(`Restoring ${saved.consoles.length} console(s)…`);
   for (const c of saved.consoles) {

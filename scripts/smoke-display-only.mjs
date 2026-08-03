@@ -208,17 +208,18 @@ try {
   ok(ungatedLive.some((r) => r.live), `gate removed ⇒ live consoles reappear ${JSON.stringify(ungatedLive)}`);
   ok((await B.evaluate(() => window.__net.isHost())) === false, 'gate removed: B is STILL not the host (so this was a real double-run)');
   if (SHOTS) await B.screenshot({ path: `${SHOTS}/b-negative-control.png` });
-  // Put the gate back (approximating mayRunLocalCore: B is a connected non-host).
-  await B.evaluate(() => { window.__rackMgr.setAllowRun(() => false); window.__rack.budget(); });
+  // Put the REAL predicate back — window.__rack.mayRun IS mayRunLocalCore, so this
+  // restores the app's own gate rather than a stub, and the promotion phase below
+  // therefore tests that the app's latch really releases.
+  await B.evaluate(() => { window.__rackMgr.setAllowRun(window.__rack.mayRun); window.__rack.budget(); });
   await sleep(2500);
   await assertWatching(B, 'gate restored');
 
   // ── promotion: the host leaves, B is the senior remaining peer ────────────
   console.log('\n--- promotion: A leaves (past the 15s host-reclaim window) ---');
+  const beforePromotion = (await B.evaluate(() => window.__rack.live())).length;
   await A._browser.close();
   browsers.splice(browsers.indexOf(A._browser), 1);
-  // Restore the REAL predicate before promotion so we test the app, not the stub.
-  await B.evaluate(() => { window.__rackMgr.setAllowRun(null); });
   await B.waitForFunction(() => window.__net?.isHost() === true, { timeout: 60000, polling: 1000 });
   await sleep(20000);
   const promoted = await state(B);
@@ -226,8 +227,13 @@ try {
   ok(promoted.isHost === true, 'B was promoted (seniority migration)');
   ok(promoted.mayRun === true, 'promoted: mayRunLocalCore() true again');
   ok(anyStepping(promotedFrames), `promoted: B now really emulates ${JSON.stringify(promotedFrames)}`);
-  ok(promoted.live.some((r) => r.live), `promoted: the rack came back off suspension ${JSON.stringify(promoted.live)}`);
+  ok(promoted.live.every((r) => r.live), `promoted: the rack came back off suspension ${JSON.stringify(promoted.live)}`);
   ok(!promoted.tvs.some((t) => t.video), 'promoted: the TV is back on our own canvas, not a dead feed');
+  // Promotion replays restoreRack() for a peer whose rack was suppressed while it
+  // watched — but a widget-joiner's rack was only PAUSED, never torn down, so the
+  // replay used to DUPLICATE every console (2 consoles came back as 3).
+  ok(promoted.live.length === beforePromotion,
+    `promoted: the rack is not duplicated (${beforePromotion} consoles before, ${promoted.live.length} after)`);
   if (SHOTS) await B.screenshot({ path: `${SHOTS}/b-promoted.png` });
 
   // ── leaving the room ─────────────────────────────────────────────────────
