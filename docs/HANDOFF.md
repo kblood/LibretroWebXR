@@ -472,8 +472,12 @@ button (enable/mute via the same `NetMgr` path); *whether the Quest browser gran
 the mic mid-XR is the open question for the real-headset smoke*. **Still pending:**
 a real **two-headset** smoke test (needs hardware).
 
-**Phase M1 (host-authoritative game sync) — ✅ DONE + DEPLOYED (2026-06-13).**
-All three slices live; M1.1/M1.2 smokes pass against `wss://dionysus.dk/ws/`.
+**Phase M1 (host-authoritative game sync) — slices M1.0–M1.2 done + deployed
+(2026-06-13); the M1.4 shared-room rewrite done + deployed (2026-08-03) except
+M1.4d, which is OPEN.** Read this list newest-first: M1.4 supersedes M1.1/M1.2's
+host rule, and **M1.4d at the end is a live P0** — a host using the header's
+"Load ROM" button still leaves every watcher frozen on the previous game. So
+"multiplayer works" is true for the cartridge path and false for the picker path.
 - **M1.0 ✅ done + DEPLOYED** — remote-input transport: a directed `INPUT`
   message (`NetProtocol.makeInput`) relayed client→host over the room socket
   (`Hub.input`, sender-id stamped); `NetMgr.sendGameInput`/`onGameInput` + a debug
@@ -481,7 +485,8 @@ All three slices live; M1.1/M1.2 smokes pass against `wss://dionysus.dk/ws/`.
   resolves it per-player and feeds its core. Smoke: `scripts/smoke-gameinput.mjs`
   (directed delivery, id-stamping, no broadcast leak), live-verified.
 - **M1.1 ✅ done + DEPLOYED (2026-06-13)** — wired end-to-end. **Host = the `tv`-state
-  owner** (whoever booted the room's game); the routing decision is pure
+  owner** (whoever booted the room's game) — ⚠ **this rule is DEAD, replaced in M1.4
+  below; it is the bug, kept here only as history**; the routing decision is pure
   (`NetProtocol.hostInputTarget`) with `NetMgr.hostId()/isHost()/forwardGameInput()`
   on top. **Client capture:** `GameInputMgr` now emits each *logical* RetroPad
   transition via `onLogicalInput` (pre-keycode, diffed per frame) and main.js
@@ -499,8 +504,9 @@ All three slices live; M1.1/M1.2 smokes pass against `wss://dionysus.dk/ws/`.
   on a peer disconnect mid-press its remote keys can latch on the host —
   `GameInputMgr.clearRemote()` exists but isn't yet wired to a presence-leave.**
 - **M1.2 ✅ done + DEPLOYED (2026-06-13)** — host video stream. `src/net/VideoMgr.js`
-  (a sibling of `VoiceMgr`) is a **host→client** WebRTC subsystem: the host (the
-  `tv`-state owner) captures `#canvas` via `captureStream()` and adds it
+  (a sibling of `VoiceMgr`) is a **host→client** WebRTC subsystem: the host (⚠ read
+  "the `tv`-state owner" here as "the server-elected host" — see M1.4) captures the
+  primary canvas via `captureStream()` and adds it
   **send-only** to a peer connection per other peer (host is the sole offerer, so
   no glare); each client receives the track → a `<video>` → `SceneMgr.
   setScreenVideo()` paints it on the CRT as a `THREE.VideoTexture` (reverting to
@@ -640,6 +646,58 @@ All three slices live; M1.1/M1.2 smokes pass against `wss://dionysus.dk/ws/`.
   (watcher decodes ~30 fps off the new host, promotion at +15.3 s). Lesson worth
   keeping: **a local room server is not the deployed one** — point the smokes at the
   real URL before believing an MP feature is live.
+
+- **M1.4d ❌ OPEN — the HOST's "Load ROM" picker never republishes, so watchers
+  freeze on the previous game. M1.4 as a whole therefore did NOT fully pass
+  verification.** Everything above is real and holds on the **cartridge** path,
+  which is the path every committed smoke drives. An independent adversarial pass
+  went after the *other* way a host starts a game — the header's **Load ROM** button
+  — and it is broken, silently, with every diagnostic green. Reproduced against the
+  **real** `#rom-input` change handler (puppeteer `input.uploadFile`, not the
+  `__pickLocalRom` debug hook): the host ended up on Game Boy Snake (320×240) while
+  the watcher sat on the previous NES Pong at 512×448 — *the retired canvas' size* —
+  decoded frames stuck at 87 for 30 s+, pixel correlation −0.069, and
+  `sendingCount()==1` / `receivingCount()==1` the entire time. That is the exact
+  failure mode `src/net/VideoMgr.js`'s header comment claims to have fixed for the
+  light-gun reboot: fixed there, never fixed here. It is also still the user's
+  originally reported "screens not synced".
+  **Root cause (code-level, re-confirmed by reading all the call sites at
+  `11c86bd`):** `loadCartridge` (`src/main.js` ~6203) is the only boot path that
+  publishes `tv` **and** calls `net.startVideoBroadcast()` after the canvas swap;
+  `src/main.js` contains exactly **two** `setObjectState('tv', …)` sites (that one
+  and the promotion branch ~6751). Both picker paths — the `#rom-input` handler
+  (~7293) and `window.__pickLocalRom` (~3252) — call `bootOnPrimary()` (~6472) and
+  stop, and `bootOnPrimary` live-swaps to a fresh runtime + **fresh canvas** without
+  publishing or re-broadcasting. (Note for anyone re-reading a previous write-up of
+  this: the `startVideoBroadcast()` at ~6597 is inside `rebootPrimaryConsole`, the
+  gun/mouse arm-reboot, **not** `bootOnPrimary` — which is why 4c passes and this
+  doesn't.) `VideoMgr`'s canvas-changed re-capture would handle this fine; it is
+  simply **never called** here, so this is a missing call in `main.js`, not a
+  `VideoMgr` defect — don't go debugging WebRTC. Because `tv` also goes stale, a **late joiner** is shown the wrong title
+  next to the wrong pixels, and a **promoted** host boots whatever `tv` still
+  advertises — observed booting `freeware/lwx-nes-pong.nes` while the departed host
+  had actually been playing a picker-loaded ROM.
+  **Fix:** add the `setObjectState('tv', …)` + `startVideoBroadcast()` pair to both
+  picker paths after the swap, or move it inside `bootOnPrimary` once the new canvas
+  is installed (preferred — it closes the class rather than two instances).
+  **Test gap to close in the same change:** `scripts/smoke-shared-game.mjs` §5b
+  drives the picker **only on the client** (asserting suppression); no committed test
+  ever presses that button on the **host**. §4c's "host live-reboots" uses the
+  gun-arm path, which republishes. Add a host-side picker phase, and negative-control
+  it against the current code so it is seen to go RED.
+  **Two minor items from the same pass** (neither is this bug): both peers spawn at
+  the *same origin*, so a watcher has the remote avatar's head plane planted at its
+  camera occluding most of the TV — hiding `avatar:*` proves the picture behind it is
+  correct, but on a headset this alone reads as "sharing is broken"; and
+  `__rack.live()` reports `live:true` for a **coreless** runtime on a watcher because
+  `ConsoleRuntime.isLive()` is just `!this.client?.paused`
+  (`src/ConsoleRuntime.js:78`) — harmless only because every assertion filters on
+  `r.core && r.live`.
+  **Also still unverified:** a physical-headset pass (no hardware), and this defect
+  against the **deployed** build specifically — it was found on localhost at
+  `11c86bd`, and given M1.4c's own lesson about prod drifting, re-confirm on
+  `dionysus.dk` after fixing. The disc-swap panel's republish behaviour was not
+  checked either and is a plausible third instance of the same class.
 
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
@@ -912,6 +970,18 @@ pwsh scripts/deploy.ps1 -DryRun -SkipBuild   # see remote actions, touch nothing
   held-state in either mode. Don't collapse the gamepad back into the editable-only
   set. Cartridges/cards stay play-only; furniture stays edit-only.
 
+- **One room, one core, and it belongs to the server-elected host.** A non-host peer
+  is *display-only*: it must never boot or run a core, it paints the host's WebRTC
+  feed and forwards input. Enforced at the **runtime** layer, not just at boot gates
+  (`mayRunLocalCore()` → `RackMgr.allowRun` → every `ConsoleRuntime.setCanRun`), so
+  the perf budget / a power switch / a live reboot can't quietly resume a watcher.
+  The host is elected by **seniority** in `server/Hub.js` and migrates only when it
+  actually LEAVES (after `HOST_RECLAIM_MS`, so a reload reclaims instead of promoting
+  someone); `tv`/`room`/`shelf:*` are host-owned keys the Hub refuses from anyone
+  else. Breaking any of this reproduces "each computer plays its own game". The
+  corollary for **every new boot path**: if it starts a game, it must be host-gated
+  *and* must publish `tv` + `startVideoBroadcast()` after its canvas swap — the
+  omission that is M1.4d. See `docs/MULTIPLAYER.md`.
 - **COOP/COEP everywhere.** `crossOriginIsolated` must be `true` or
   `SharedArrayBuffer` vanishes and the threaded cores won't start. Enforced in
   `vite.config.js` (dev) and `deploy/` + `public/.htaccess` (prod).
@@ -1163,7 +1233,12 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
 - **Phase M — IN PROGRESS** — multiplayer (`docs/MULTIPLAYER.md`): **M0 ✅ done +
   DEPLOYED** (presence/avatars/voice/TV sync/held-object ghosts); **M1 ✅ done +
   DEPLOYED** (M1.0 remote-input transport, M1.1 client capture + host injection,
-  M1.2 host video stream + watcher-core pause — all live + smoke-verified).
+  M1.2 host video stream + watcher-core pause — all live + smoke-verified);
+  **M1.4 ✅ shared-room rewrite done + DEPLOYED, app *and* room server** (server-side
+  seniority host election, display-only clients that run zero cores, host-owned
+  room/shelf/`tv`) — **but M1.4d ❌ is OPEN: the host's "Load ROM" picker doesn't
+  republish, so watchers freeze on the previous game. Fix that before calling
+  Phase M's current slice finished.**
   In-app join/leave UI + roster (header widget + in-VR Multiplayer menu) done.
   **Two-headset smoke test still needed (hardware).** **M2** = rollback game sync
   (feasibility spike done: confirmed rewrite, not a slice — keep M1 streaming as
@@ -1307,6 +1382,15 @@ inline. If you're picking up stale-looking doc claims again, check `git log
 **Refreshed 2026-07-29 — the current task list is in `docs/ROADMAP.md` under
 "Open tasks (2026-07-29)". The numbered items below are the older 2026-07-11
 list, kept because most are still accurate app-layer work; item 00 is DONE.**
+
+**⚠ FIRST, ahead of every list below (added 2026-08-03): fix M1.4d.** A host that
+starts a game with the header's **Load ROM** button leaves every other machine
+frozen on the previous game, with a stale room `tv` that also misinforms late
+joiners and misdirects host migration. It is a ~2-line publish/re-broadcast
+omission in two picker paths (details, root cause and the fix in the M1.4d entry
+under Phase M1 above), it reproduces the user's original "screens not synced"
+report, and no committed smoke covers it — so also add a **host-side** picker phase
+to `scripts/smoke-shared-game.mjs` and watch it go RED before the fix.
 
 00. ✅ **DONE (merged 2026-07-27).** ~~**(New, 2026-07-22) Decide whether to merge `n64-jit-plan` to `main`.**~~
     `main` and `n64-jit-plan` were fast-forwarded to the same commit; the PSX,

@@ -16,6 +16,11 @@ nicknames/colors, and **room-object state** (who grabbed which cartridge, TV
 on/off, which game is inserted, lighting). This is the social layer and works for
 *every* core regardless of determinism.
 
+Not all of that state is symmetric: the room layout, the shelves and *which game
+is on the TV* are **owned by the host** and merely mirrored by everyone else — see
+"Host election and the shared room" below. Free-for-all keys (held objects,
+avatars) stay last-writer-wins.
+
 - **Transport options:** Networked-A-Frame (if we adopt A-Frame), **Colyseus**
   (server-authoritative rooms + matchmaking, engine-agnostic — good fit with our
   Three.js code), Croquet/Multisynq (replicated computation), or hand-rolled
@@ -26,11 +31,14 @@ on/off, which game is inserted, lighting). This is the social layer and works fo
 ### Layer 2 — Game sync (the emulator): two viable approaches
 Pick per-game; expose both.
 
-1. **Host-authoritative + video stream (v1, easy).** One peer runs the core
-   authoritatively, collects remote inputs over a WebRTC DataChannel, and
-   streams the TV video to other players. Tolerant of non-deterministic cores,
-   minimal emulator changes. Best for co-op / turn-based / party games; higher
-   latency for non-hosts. This is what EmulatorJS netplay does.
+1. **Host-authoritative + video stream (v1, easy — this is what ships).** One peer
+   runs the core authoritatively, collects remote inputs over the room socket, and
+   streams the TV video (plus game audio) to other players. Tolerant of
+   non-deterministic cores, minimal emulator changes. Best for co-op / turn-based /
+   party games; higher latency for non-hosts. This is what EmulatorJS netplay does.
+   *Which* peer is that host is not a detail — getting it wrong is what broke the
+   first build, so it is specified separately under "Host election and the shared
+   room" below.
 2. **Input-lockstep + rollback (v2, best feel).** Exchange only inputs per
    frame; on divergence, load the last agreed savestate and re-simulate.
    Tiny bandwidth, low latency — how RetroArch/GGPO/EmuVR work. Requires a
@@ -51,10 +59,12 @@ HTTPS + COOP/COEP, which threaded wasm cores need.
   back to host-authoritative streaming for that game.
 
 ## Phasing
-- **M0:** presence only — shared room, avatars, voice. No game sync (everyone
+- **M0 (done):** presence only — shared room, avatars, voice. No game sync (everyone
   watches one player). Immediately fun and validates the room/WebXR netcode.
-- **M1:** host-authoritative game sync (stream + remote input) for 2-player
-  co-op.
+- **M1 (done):** host-authoritative game sync (stream + remote input) for 2-player
+  co-op. **M1.4** then rewrote *who hosts* and *who may run a core* — the section
+  after this one is the current design; M1.1/M1.2's original "host = whoever last
+  wrote the `tv` state" rule is dead.
 - **M2:** rollback game sync for deterministic cores.
 - **M3:** multiple simultaneous games on different TVs; mid-session join;
   VR↔desktop crossplay (all things EmuVR does).
@@ -148,6 +158,59 @@ So the role is a **hard gate on the runtime lifecycle**:
   (**every** entry must then read `live:false`). `window.__desktop.mayRun()` /
   `.paused()` are the desktop equivalents. `scripts/test-rackmgr.mjs` unit-tests
   the gate, including that it fails *open* so solo play can never be bricked.
+
+### ⚠ Known open defect — the HOST's "Load ROM" button doesn't republish (M1.4d)
+
+**This is not fixed. Verification of M1.4 did NOT fully pass, and this is why.**
+The invariants above hold on the *cartridge* path, which is what every smoke drives.
+They do **not** hold when the host starts a game through a **file picker**:
+
+- `loadCartridge` (`src/main.js`, ~line 6203) is the only boot path that publishes
+  `tv` and calls `net.startVideoBroadcast()` *after* the canvas swap has finished.
+  In the whole app there are exactly **two** `setObjectState('tv', …)` call sites in
+  `src/main.js` — that one and the promotion branch (~line 6751).
+- The two picker paths — the real `#rom-input` change handler (~line 7293) and
+  `window.__pickLocalRom` (~line 3252) — call `bootOnPrimary()` and stop.
+  `bootOnPrimary` (~line 6472) live-swaps to a **fresh runtime and a fresh canvas**
+  on a cross-core pick, but it publishes no `tv` and starts no broadcast. (The
+  `startVideoBroadcast()` at ~line 6597 belongs to `rebootPrimaryConsole` — the
+  gun/mouse arm-reboot — not to `bootOnPrimary`.)
+
+So a host that picks a ROM off its own disk keeps streaming the **retired** canvas.
+Note the mechanism precisely, because it is easy to misfile: `VideoMgr`'s
+canvas-changed re-capture is perfectly capable of fixing this, but it is **never
+invoked** on this path — `startBroadcast()` isn't called at all, so its
+`hasLiveVideo && this._sourceCanvas === canvas` early-out
+(`src/net/VideoMgr.js:86`) never even gets a turn. Meanwhile the old
+`captureStream` track stays `readyState:'live'` forever while painting nothing,
+which is why nothing reports an error. The bug is a **missing call in `main.js`**,
+not a defect in `VideoMgr`.
+Symptoms, all reproduced against the real `#rom-input` handler (driven with
+puppeteer `input.uploadFile`, not just the `__pickLocalRom` hook):
+
+- Every watcher **freezes permanently on the previous game** — decoded frames stuck
+  for 30 s+, pixel correlation ≈ 0 against the host, host canvas 320×240 vs the
+  watcher's 512×448 (the retired canvas' size). **`sendingCount()==1` and
+  `receivingCount()==1` throughout**, so every existing diagnostic reports
+  "healthy". This is precisely the failure mode VideoMgr's header comment claims to
+  have fixed for the light-gun reboot — fixed there, still open here.
+- The room's `tv` key keeps naming the **previous** cartridge, so a **late joiner**'s
+  status line / Now Playing says one game while the pixels it receives are another,
+- and on **host migration** the promoted peer boots the game `tv` still advertises,
+  i.e. the wrong one, because that stale key is exactly what the takeover branch
+  reads.
+
+Likely fix: publish `tv` + `startVideoBroadcast()` in both picker paths after the
+swap, or (better, since it closes the whole class) move that pair **inside**
+`bootOnPrimary` once the new canvas is installed.
+
+**Why the smokes stayed green** — worth reading before trusting any of them:
+`smoke-shared-game.mjs` §5b drives `#rom-input` and `__pickLocalRom` **only on the
+CLIENT**, asserting they are *suppressed*. The HOST side of that same button is
+never exercised by any committed test. And §4c ("the host LIVE-REBOOTS its console")
+uses the **gun-arm** path, which routes through `rebootPrimaryConsole`/
+`loadCartridge` and therefore *does* re-broadcast — so it passes while the picker
+path is broken. A fix here must add a **host-side** picker phase to that smoke.
 
 ## Playtesting (M1 host-authoritative is live)
 
@@ -243,6 +306,9 @@ does something else entirely:
   arm), that the client's TV really is painting the host feed and the picture's
   **decoded frame count advances** (including across a host live-reboot), and a
   three-peer migration where the junior peer keeps watching the NEW host.
+  **Gap:** it only ever drives the file picker on the *client* (to prove it's
+  suppressed); the **host** side of "Load ROM" is untested and currently broken —
+  see the open-defect section above.
 - `smoke-room-inherit.mjs` — an authored host room adopted by a bare-URL client,
   host-only local carts on the client's shelf, the `insert-nack` path, a dropped
   collection inherited through an unfetchable `dropped:` ref, several successive
@@ -294,6 +360,23 @@ injection (`GameInputMgr.setRemoteButton`) and the controller→logical capture;
    client is told the host doesn't have it), and the client still runs no core.
 5. Close the host's tab. The client is promoted, boots the room's game itself, and
    a third peer keeps watching — now off the new host.
+6. **Expected to FAIL until M1.4d is fixed:** have the HOST start a game with the
+   header's **Load ROM** button instead of a cart. The watcher stays frozen on the
+   previous game (and a late joiner is told the wrong title). Don't spend a headset
+   session re-diagnosing this — the cause and the fix are in the open-defect section
+   above.
+
+Two cosmetic things that read as "the shared screen is broken" on a headset but
+aren't:
+- **Both peers spawn at the same origin**, so the remote avatar's head/face plane
+  sits *at your camera* and occludes most of the TV. Proven by traversing for
+  `avatar:*` and hiding it — the picture behind it is clean and correct. Spawning
+  joiners at an offset is the real fix; until then, step aside before judging the
+  stream.
+- `window.__rack.live()` reports `live:true` for a **coreless** runtime on a
+  display-only watcher, because `ConsoleRuntime.isLive()` is just
+  `!this.client?.paused` (`src/ConsoleRuntime.js:78`). Harmless today only because
+  every assertion filters on `r.core && r.live` — keep that filter in any new check.
 
 ## References
 - EmuVR netplay: emuvr.net/wiki/Netplay
