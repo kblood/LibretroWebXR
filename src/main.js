@@ -201,6 +201,18 @@ const scene = new SceneMgr({
 // VR. Quest browser otherwise freezes the page's rAF queue during an XR
 // session; see src/XRRafShim.js.
 installXRRafShim(scene.renderer);
+// M1.4: room adoption is deferred while presenting in XR (adopting means a page
+// reload, which would eject the user from immersive — see
+// _maybeAdoptHostRoomLive). Retry the moment the XR session ENDS, otherwise the
+// "leave VR to adopt it" message the user is shown is only actionable if the host
+// happens to publish another room change afterwards: adoption is driven by
+// incoming ROOM state messages, and the host's watcher only republishes on an
+// actual change. Guarded inside (no-op when solo, when we're the host, or when
+// the layouts already match). Declared as a late-bound arrow so this can sit next
+// to the shim rather than after the function it calls.
+scene.renderer?.xr?.addEventListener?.('sessionend', () => {
+  try { _maybeAdoptHostRoomLive(); } catch (e) { console.warn('[main] post-XR room adopt', e); }
+});
 // Reroute the core's audio through THREE.PositionalAudio anchored on the TV.
 // Must happen BEFORE the core ever runs `new AudioContext()` — see
 // src/SpatialAudio.js.
@@ -6832,13 +6844,19 @@ function _maybeAdoptHostRoomLive() {
   const stamp = `${net.room}|${_snapshotKey(hostRoom)}`;
   try {
     if (sessionStorage.getItem(ROOM_ADOPT_KEY) === stamp) return false;
-    sessionStorage.setItem(ROOM_ADOPT_KEY, stamp);
   } catch { /* storage blocked → fall through, the reload is still one-shot-ish */ }
+  // XR check BEFORE claiming the one-shot stamp. Claiming it first made the
+  // deferral permanent: the stamp said "already handled this snapshot", so the
+  // retry this very message tells the user to perform ("leave VR and rejoin")
+  // returned false at the check above and the client stayed in its own room for
+  // the rest of the session. The stamp exists to stop a reload LOOP, and only a
+  // path that actually reloads can create one — so only that path may claim it.
   if (scene.renderer?.xr?.isPresenting) {
-    setStatus("Host's room layout differs — leave VR and rejoin to adopt it");
+    setStatus("Host's room layout differs — leave VR to adopt it");
     logger?.event?.('mp-room-adopt-deferred-xr', {});
     return false;
   }
+  try { sessionStorage.setItem(ROOM_ADOPT_KEY, stamp); } catch { /* as above */ }
   logger?.event?.('mp-room-adopt-live', { props: hostRoom?.props?.length ?? 0 });
   try {
     sessionStorage.setItem(DROP_KEY, JSON.stringify({ kind: 'room', text: JSON.stringify(hostRoom) }));

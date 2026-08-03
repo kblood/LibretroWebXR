@@ -33,6 +33,7 @@
     "smoke-shared-game": "node scripts/smoke-shared-game.mjs",
     "smoke-display-only": "node scripts/smoke-display-only.mjs",
     "smoke-room-inherit": "node scripts/smoke-room-inherit.mjs",
+    "smoke-xr-room-adopt": "node scripts/smoke-xr-room-adopt.mjs",
     "smoke-log": "node scripts/smoke-log.mjs",
     "smoke-gamepad-share": "node scripts/smoke-gamepad-share.mjs",
     "smoke-prop-sync": "node scripts/smoke-prop-sync.mjs",

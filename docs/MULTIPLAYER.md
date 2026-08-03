@@ -198,6 +198,7 @@ node scripts/smoke-video.mjs        --app=http://localhost:<port>/ --ws=ws://loc
 node scripts/smoke-shared-game.mjs  --app=http://localhost:<port>/ --ws=ws://localhost:8797/
 node scripts/smoke-room-inherit.mjs --app=http://localhost:<port>/ --ws=ws://localhost:8797/
 node scripts/smoke-display-only.mjs --app=http://localhost:<port>/ --ws=ws://localhost:8797/
+node scripts/smoke-xr-room-adopt.mjs --app=http://localhost:<port>/ --ws=ws://localhost:8797/
 ```
 
 `smoke-display-only.mjs` is the one that covers a peer which was **already
@@ -208,6 +209,27 @@ distinct frame signatures off each `ConsoleRuntime`'s own canvas, and it
 negative-controls itself in the same run by removing the `allowRun` gate from the
 page and requiring the watcher's cores to come back to life. If that phase ever
 reports no resume, the smoke has gone vacuous.
+
+`smoke-xr-room-adopt.mjs` covers **adoption while the user is in VR**, which used
+to be written off as "only a real headset can test this". Adopting the host's room
+*live* (the header-widget join path — `?session=` instead hands the room over
+before the world is built, and never reaches `_maybeAdoptHostRoomLive`) means
+stashing it and **reloading**, which would eject the user from immersive, so it is
+deferred with *"Host's room layout differs — leave VR to adopt it"*. Two things
+made that message a dead end, both now fixed:
+- The one-shot stamp (`sessionStorage['libretrowebxr.roomAdopted']`, there to stop
+  a reload *loop*) was claimed **before** the XR check, so the deferral consumed
+  the snapshot: leaving VR hit "already handled this snapshot" and the client
+  stayed in its own room for the rest of the session. Only a path that actually
+  reloads may claim the stamp.
+- Nothing retried on XR exit. Adoption is driven by incoming `ROOM` messages and
+  the host's watcher only republishes on a real *change*, so the user could follow
+  the instruction exactly and still see nothing. `src/main.js` now retries on the
+  renderer's `sessionend`.
+
+No headset needed: `isPresenting` is a plain property on three's `WebXRManager`,
+which is an `EventDispatcher`, so the smoke overrides the flag from the page and
+then dispatches `sessionend` — exactly the two things a headset does to the app.
 
 `smoke-shared-game.mjs` / `smoke-room-inherit.mjs` are the ones that defend the
 invariant at the top of this document,

@@ -577,7 +577,7 @@ All three slices live; M1.1/M1.2 smokes pass against `wss://dionysus.dk/ws/`.
   latch in `src/desktop/main.js`, also armed on `connect()`; and the watcher's
   header no longer names a core, which had made `docs/MULTIPLAYER.md`'s own manual
   check cry wolf. Verified: `scripts/test-rackmgr.mjs` (56, incl. the gate failing
-  *open*), `tmp/verify-displayonly.mjs` 53/53 in two real browsers — per-runtime
+  *open*), `scripts/smoke-display-only.mjs` 54/54 in two real browsers — per-runtime
   frame-motion ground truth with the host as positive control and an in-page
   negative control that removes the gate and shows the watcher's cores come back to
   life — and `scripts/verify-desktop-netplay.mjs` 17/17 (new solo-boot→join→reclaim
@@ -589,6 +589,30 @@ All three slices live; M1.1/M1.2 smokes pass against `wss://dionysus.dk/ws/`.
   but a **widget**-joiner's rack was only *paused*, never torn down, so the replay
   **duplicated every console** (2 came back as 3). `restoreRack()` now no-ops when
   the rack is already standing.
+
+- **M1.4b ✅ done (2026-08-03) — the "only a real headset can test this" item was
+  testable after all, and it was broken.** The last carried-over M1.4 caveat was
+  that an XR-presenting client *defers* live room adoption (adopting means a
+  reload, which would eject it from immersive) and shows *"leave VR … to adopt
+  it"*. That deferral could never succeed: `_maybeAdoptHostRoomLive()` claimed its
+  one-shot `sessionStorage` stamp **before** the XR check, so deferring marked the
+  snapshot "already handled" and the recovery the message itself asks for returned
+  `false` — the client stayed in its own room for the rest of the session. And
+  nothing retried on XR exit anyway (adoption is driven by incoming `ROOM`
+  messages; the host's watcher only republishes on a real change), so following the
+  instruction exactly could still do nothing. Fix in `src/main.js`: the XR check
+  moved above the stamp write (only a path that really reloads may claim it), plus
+  a `sessionend` listener on the renderer's XR manager that retries adoption.
+  Verified **without a headset** by `scripts/smoke-xr-room-adopt.mjs`
+  (`npm run smoke-xr-room-adopt`, 10/10): `isPresenting` is a plain property on
+  three's `WebXRManager`, and `WebXRManager` is an `EventDispatcher`, so the page
+  can fake both halves — override the flag, then dispatch `sessionend`. It joins
+  via the **header widget** on purpose; a `?session=` joiner gets the host's room
+  handed to it inside `buildCartridgeWorld` and never reaches this function at all
+  (the first version of this probe passed vacuously for that exact reason).
+  Negative-controlled: with the old ordering restored it goes RED on precisely the
+  two bug-targeting assertions. Regression-checked `smoke-room-inherit.mjs` (27/27)
+  and `smoke-display-only.mjs` (54/54).
 
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
