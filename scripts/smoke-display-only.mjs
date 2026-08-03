@@ -136,6 +136,17 @@ try {
   ok((await A.evaluate(() => window.__net.isHost())) === true, 'A is the elected host');
   ok(anyStepping(await stepping(A, 6)), 'POSITIVE CONTROL: A (host) is stepping frames');
 
+  // The whole smoke reads the gate through window.__rack.mayRun(). If the build
+  // under test predates the gate that helper does not exist, and every later
+  // evaluate() dies with an opaque "is not a function" stack. Say so instead —
+  // this matters when --app points at a DEPLOYED build, which can easily be
+  // older than the working tree.
+  if (!(await A.evaluate(() => typeof window.__rack?.mayRun === 'function'))) {
+    ok(false, 'the build under test exposes __rack.mayRun() — it does NOT, so it '
+      + `predates the display-only gate (M1.4a). Deploy/rebuild ${APP} first.`);
+    throw new Error('build under test predates the display-only gate');
+  }
+
   // ── B: boots solo AND builds a two-console rack, THEN joins ───────────────
   // The rack is what made the secondary-console leak reachable: no committed
   // smoke had one up before joining, so `liveCores(client)===0` passed vacuously.
