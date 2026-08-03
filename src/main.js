@@ -251,6 +251,19 @@ let _hostVideoEl = null;
 // Were we last known to be a display-only client? Drives the "restore what was
 // suppressed while watching" work on promotion (local ROM library + saved rack).
 let _wasDisplayOnly = false;
+// M1.4: LATCHED display-only role. isDisplayOnlyClient() is derived from a LIVE
+// socket, so during a client's reconnect window (or any momentary drop) it reads
+// false — and anything that consults it would then happily start a local core
+// again. The latch makes the role sticky: once the server has told us that someone
+// else hosts this room we run nothing until the server says otherwise (promotion)
+// or we leave. Deliberately NOT set while the role is merely UNDECIDED — a live
+// host whose socket blips must keep emulating (see _applyHostRole's
+// election-pending branch).
+let _displayOnlyLatch = false;
+// The single authority for "may this machine run a local core at all?". Wired
+// into RackMgr (which propagates it to every ConsoleRuntime), so the perf budget,
+// the console power switches and any direct runtime.resume() all obey it.
+function mayRunLocalCore() { return !_displayOnlyLatch && !isDisplayOnlyClient(); }
 
 // Shared-gamepad ghost renderer (non-null only while in a session).
 let ghostGpMgr = null;
@@ -526,12 +539,21 @@ function disconnectFromRoom() {
   // dead) host video and Leave looked like it did nothing.
   _hostVideoEl = null;
   _pendingInsertMeta = null;
+  // Leaving gives us our own machine back: drop the display-only latch (see
+  // mayRunLocalCore) BEFORE resuming, or every resume below is refused by design.
+  // (_wasDisplayOnly is deliberately left set: the local ROM library / saved rack
+  // suppressed while watching are restored by the promotion branch, so clearing it
+  // here would lose that restore if we rejoin and get elected host.)
+  _displayOnlyLatch = false;
   audioRouter?.detachRemoteAudio?.();
   net.disconnect();
   net = null;
   window.__net = null;
   setPrimaryScreen(primaryCanvas());
   client.resume?.();
+  // Bring back any SECONDARY consoles that pauseAll() suspended while we watched
+  // (the budget decides which of them may actually run).
+  rackMgr.applyBudget();
   // Back to a findable solo bucket (not null → the shared 'default') so post-leave
   // solo play stays diagnosable. See Logger.soloSession().
   logger._sessionId = logger.soloSession();
@@ -915,7 +937,12 @@ const cableAdapter = {
 // existing client/#canvas so today's single-console path is console0 of the
 // rack with no behaviour change and no second WebGL context; spawned consoles
 // add more (Phase 3 gives them their own TVs). applyBudget() is a no-op at N=1.
-const rackMgr = new RackMgr({ logger });
+// allowRun: M1.4's "one room, one game" invariant, enforced at the runtime layer.
+// Without it RackMgr.applyBudget() would resume a display-only client's paused
+// core the first time anything re-ran the perf budget (the in-world Auto-pause
+// toggle, or just gazing at a second TV), putting the watcher back to emulating
+// its own copy of the game behind the host's video feed.
+const rackMgr = new RackMgr({ logger, allowRun: mayRunLocalCore });
 const primaryRuntime = new ConsoleRuntime({ id: CONSOLE_ID, adopt: { client, canvas: emuCanvas }, audio: audioRouter });
 rackMgr.add(primaryRuntime);
 rackMgr.setFocus(CONSOLE_ID);
@@ -2989,6 +3016,14 @@ async function buildCartridgeWorld() {
     saved: () => loadRack(),
     autoPause: (on) => { if (on !== undefined) { rackMgr.setBudgetEnabled(on); saveAutoPause(on); rackMgr.applyBudget(); refreshAudioFocus(); } return rackMgr.isBudgetEnabled(); },
     live: () => rackMgr.runtimes().map((r) => ({ id: r.id, core: r.coreName, live: r.isLive() })),
+    // M1.4 ground truth for "one room, one game": may this machine run ANY local
+    // core? false on a display-only client, and then EVERY entry of live() must
+    // read live:false. This is the assertion headless smokes should make — the
+    // desktop header and the TV texture are both indirect.
+    mayRun: () => mayRunLocalCore(),
+    // Force a budget pass (what the Auto-pause button / a gaze shift do). Exposed
+    // so a smoke can prove the budget cannot resurrect a watcher's core.
+    budget: () => rackMgr.applyBudget(),
     // `video: true` means this screen is painting a remote HOST's WebRTC feed
     // (TV.setVideo) rather than a local canvas — the display-only client's whole
     // reason for existing, so headless smokes can assert on it.
@@ -6192,6 +6227,17 @@ window.__loadCartridge = loadCartridge; // debug hook: boot a game via RomResolv
 async function loadCartridgeIntoConsole(consoleId, meta) {
   const runtime = rackMgr.get(consoleId);
   if (!runtime) { setStatus(`no such console ${consoleId}`); return; }
+  // M1.4 client-boot suppression, LAST LINE OF DEFENCE (mirrors loadCartridge).
+  // This is the OTHER function that actually starts a core; a display-only client
+  // running zero cores means secondary consoles too, not just the primary.
+  if (!amRoomHost()) {
+    logger?.event?.('mp-boot-suppressed', {
+      consoleId, file: meta.file, core: meta.core, where: 'loadCartridgeIntoConsole',
+      hostId: net?.hostId?.() ?? null, connected: !!net?.connected,
+    });
+    setStatus('only the room host can boot a game — you are watching the host’s screen');
+    return;
+  }
   setStatus(`loading ${meta.title} on ${consoleId}…`);
   logger?.event?.('boot-attempt', {
     consoleId, file: meta.file, system: meta.system, core: meta.core,
@@ -6584,7 +6630,26 @@ function applyRemoteTv(value) {
 // host's stream as soon as WebRTC delivers it. Until then, say so rather than
 // leaving a stale/black screen with no explanation.
 function _showClientWaiting(tvValue) {
-  try { client?.pause?.(); } catch (e) { console.warn('[main] client pause', e); }
+  if (isDisplayOnlyClient()) {
+    // Latch the role FIRST (mayRunLocalCore), so the pause below can't be undone
+    // by the next perf-budget pass, then stop EVERY console — not just the
+    // primary. A peer that had a multi-console rack up before it joined kept its
+    // SECONDARY cores running behind the host's feed, which contradicts the
+    // "a display-only client runs zero cores" invariant.
+    _displayOnlyLatch = true;
+    rackMgr.pauseAll('display-only-client');
+    // Desktop header: a peer that booted solo and then joined kept reading e.g.
+    // "NES (fceumm)", which is the exact string docs/MULTIPLAYER.md's two-browser
+    // test uses to detect a local double-boot — so the documented check produced a
+    // false alarm on a perfectly healthy watcher. We run no core; say so. What the
+    // ROOM is playing is on the TV, the status line and the Now Playing panel.
+    setSystemLabel(null);
+  } else {
+    // Role still undecided (socket down / election pending). Don't suspend the
+    // rack — we might turn out to be the host — but do stop the primary, which is
+    // the one core a stray boot could have started.
+    try { client?.pause?.(); } catch (e) { console.warn('[main] client pause', e); }
+  }
   const who = net?.presence?.get?.(net.hostId?.())?.nick || 'the host';
   setStatus(tvValue?.title
     ? `Watching ${who}: ${tvValue.title}`
@@ -6616,10 +6681,17 @@ function _applyHostRole({ isHost, hostId, prevHostId } = {}) {
     // Promoted: we are first in, OR the previous host actually LEFT and we are the
     // longest-present remaining peer, OR we reclaimed our own role after our own
     // reload. From here on we own the room layout, the shelf and the one core.
+    // Release the display-only latch BEFORE anything tries to resume: while it is
+    // set every runtime.resume() (and the whole budget) is refused by design.
+    _displayOnlyLatch = false;
     _hostVideoEl = null;                        // our own canvas owns the TV again
     audioRouter?.detachRemoteAudio?.();
     setPrimaryScreen(primaryCanvas());
     try { client?.resume?.(); } catch (_) { /* nothing booted yet */ }
+    // Un-suspend the rack: pauseAll() stopped every console when we became a
+    // watcher, so without this a promoted peer's SECONDARY consoles would stay
+    // frozen forever (the primary is handled by the resume above / a boot below).
+    rackMgr.applyBudget();
     // Force a full re-publish: the dedupe signatures may still hold values from a
     // previous hosting stint (or from before a demotion), and a new host MUST
     // overwrite the departed host's room/shelf rather than assume they match.
@@ -6679,6 +6751,7 @@ function _applyHostRole({ isHost, hostId, prevHostId } = {}) {
     // Demoted / joined as a client: stop streaming, stop emulating, adopt the
     // host's room + shelf if ours differ, and wait for their video.
     _wasDisplayOnly = true;
+    _displayOnlyLatch = true;      // sticky across a later socket blip
     _lastPublishedRoom = '';
     _lastPublishedShelf = '';
     net.stopVideoBroadcast?.();

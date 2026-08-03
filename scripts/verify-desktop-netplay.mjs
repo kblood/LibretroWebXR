@@ -152,6 +152,57 @@ async function openPeer(label) {
   ok(audio.remote === true, "the client is playing the host's audio through its own graph");
   await client.screenshot({ path: 'tmp/verify-desktop-client.png' });
 
+  // --- M1.4 display-only latch: a peer that booted its OWN game before joining --
+  // Up to here the client never booted anything, so "the client isn't emulating"
+  // was trivially true. The real reported failure is the OTHER order: play solo,
+  // THEN join — and then that the latch RELEASES again on promotion (a stuck latch
+  // would leave a promoted peer frozen, which is worse than the original bug).
+  // See src/desktop/main.js's displayOnlyLatch.
+  console.log('\n--- display-only latch (solo boot → join → promotion) ---');
+  await client.evaluate(() => document.getElementById('mp-connect').click());   // leave
+  await client.waitForFunction(() => !window.__desktop.net, { timeout: 10000 });
+  await client.evaluate(() => {
+    const sel = document.getElementById('game-select');
+    const opts = [...sel.options];
+    const idx = opts.findIndex((o) => /NES/i.test(o.textContent));
+    sel.selectedIndex = idx >= 0 ? idx : 1;
+    sel.dispatchEvent(new Event('change'));
+  });
+  await client.waitForFunction(() => window.__desktop.booted(), { timeout: 30000 });
+  await sleep(2500);
+  ok(await client.evaluate(() => window.__desktop.mayRun() && !window.__desktop.paused()),
+    'solo: the ex-client boots and runs its own game (positive control)');
+
+  await client.evaluate((room) => { document.getElementById('mp-room').value = room; }, ROOM);
+  await client.click('#mp-connect');
+  await client.waitForFunction(() => window.__desktop.role() === 'client', { timeout: 20000 });
+  await sleep(2000);
+  const watching = await client.evaluate(() => ({ mayRun: window.__desktop.mayRun(), paused: window.__desktop.paused() }));
+  ok(watching.mayRun === false, 'joined: mayRunLocalCore() false (display-only)');
+  ok(watching.paused === true, 'joined: our own core is STOPPED, not running behind the feed');
+
+  // The host leaves for good. The server holds the room hostless for its reclaim
+  // window (HOST_RECLAIM_MS) and only then promotes the senior remaining peer —
+  // our watcher. Assert BOTH halves: nothing resumes during the hostless window,
+  // and the latch does release on the actual promotion.
+  const hostBrowser = browsers.splice(browsers.indexOf(host.browser()), 1)[0];
+  await hostBrowser.close();
+  await sleep(4000);                             // inside the reclaim window
+  const hostless = await client.evaluate(() => ({
+    role: window.__desktop.role(), hostId: window.__desktop.net?.hostId() ?? null,
+    mayRun: window.__desktop.mayRun(), paused: window.__desktop.paused(),
+  }));
+  console.log(`  client mid-reclaim-window: ${JSON.stringify(hostless)}`);
+  ok(hostless.mayRun === false && hostless.paused === true,
+    'reclaim window: the watcher stays stopped instead of resuming its own copy');
+
+  await client.waitForFunction(() => window.__desktop.role() === 'host', { timeout: 60000, polling: 1000 });
+  await sleep(3000);
+  const promoted = await client.evaluate(() => ({ mayRun: window.__desktop.mayRun(), paused: window.__desktop.paused() }));
+  console.log(`  client after promotion: ${JSON.stringify(promoted)}`);
+  ok(promoted.mayRun === true, 'promoted: the latch released');
+  ok(promoted.paused === false, 'promoted: our core actually runs again (no stuck pause)');
+
   console.log(`\n${passed} passed, ${failed} failed`);
   for (const b of browsers) await b.close();
   process.exit(failed ? 1 : 0);

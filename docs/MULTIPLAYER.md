@@ -112,6 +112,43 @@ also frequently does not even own the ROM, so it cannot be authoritative.
   the HOST attaches the libretro device to the running game. Then the client's
   forwarded aim has somewhere to land.
 
+### "Runs zero cores" is enforced at the runtime layer, not just at the boot gates
+Gating every *boot* path is necessary but not sufficient: a peer may already have
+been playing (even with a whole multi-console rack up) when it joins, and then the
+question is not "may it boot?" but "may it keep running?". Pausing once at join
+time is not enough either, because the **performance budget** re-decides which
+cores run whenever the user toggles *Auto-pause* or simply looks at a different
+TV — and it used to resume everything it found paused, silently handing a watcher
+its own live copy of the host's game behind the video feed. That is the original
+"each computer runs its own game" bug re-entered through a perf path.
+
+So the role is a **hard gate on the runtime lifecycle**:
+- `src/main.js` keeps a **latched** role, `mayRunLocalCore()`. It is latched
+  because `isDisplayOnlyClient()` needs a live socket and therefore reads *false*
+  during a client's reconnect; the latch is set when the server tells us someone
+  else hosts and cleared only by promotion or by leaving the room. It is
+  deliberately **not** set while the role is merely undecided — a live host whose
+  socket blips must keep emulating.
+- `RackMgr` takes that predicate as `allowRun`. `applyBudget()` checks it *first*
+  and, when running is denied, **suspends the whole rack** (`{suspended:true}`)
+  instead of planning anything. `RackMgr.add()` also pushes the predicate into
+  each `ConsoleRuntime` (`setCanRun`), so a **direct** `runtime.resume()` — the
+  in-world console power switch, a live reboot — is refused too and re-asserts the
+  pause.
+- Becoming a client calls `rackMgr.pauseAll()`, i.e. **every** console, not just
+  the primary. A pre-existing rack's secondary consoles are inert scenery for a
+  watcher; promotion (and leaving) runs `applyBudget()` again to bring them back.
+- The desktop client (`src/desktop/main.js`) has the same latch, because its
+  `role()` reports `idle` whenever the socket is down or the room is momentarily
+  hostless, and the idle branch resumes the core — correct for a host mid-blip,
+  wrong for a watcher. The latch is what distinguishes the two, and it is set on
+  `connect()` so the pre-`HELLO` gap can't resume a solo game either.
+- Observable ground truth, for tests and for debugging on a headset:
+  `window.__rack.mayRun()` (false ⇒ display-only) and `window.__rack.live()`
+  (**every** entry must then read `live:false`). `window.__desktop.mayRun()` /
+  `.paused()` are the desktop equivalents. `scripts/test-rackmgr.mjs` unit-tests
+  the gate, including that it fails *open* so solo play can never be bricked.
+
 ## Playtesting (M1 host-authoritative is live)
 
 The current build implements M1: the elected **host** runs the core, streams its
@@ -160,9 +197,20 @@ node scripts/smoke-object-sync.mjs  --app=http://localhost:<port>/ --ws=ws://loc
 node scripts/smoke-video.mjs        --app=http://localhost:<port>/ --ws=ws://localhost:8797/
 node scripts/smoke-shared-game.mjs  --app=http://localhost:<port>/ --ws=ws://localhost:8797/
 node scripts/smoke-room-inherit.mjs --app=http://localhost:<port>/ --ws=ws://localhost:8797/
+node scripts/smoke-display-only.mjs --app=http://localhost:<port>/ --ws=ws://localhost:8797/
 ```
 
-The last two are the ones that defend the invariant at the top of this document,
+`smoke-display-only.mjs` is the one that covers a peer which was **already
+playing** (with a two-console rack up) before it joined, and then re-asserts the
+invariant after every trigger that re-runs the perf budget — the Auto-pause toggle,
+a gaze shift, a console power switch, a bare `applyBudget()`. Its ground truth is
+distinct frame signatures off each `ConsoleRuntime`'s own canvas, and it
+negative-controls itself in the same run by removing the `allowRun` gate from the
+page and requiring the watcher's cores to come back to life. If that phase ever
+reports no resume, the smoke has gone vacuous.
+
+`smoke-shared-game.mjs` / `smoke-room-inherit.mjs` are the ones that defend the
+invariant at the top of this document,
 and they drive the REAL app (`window.__insertCartridge`, the `#rom-input` picker,
 `__addLocalRom`, a dropped `.collection.json`) rather than the transport, because
 a smoke that pokes `setObjectState('tv', …)` directly passes happily while the app
@@ -189,9 +237,18 @@ injection (`GameInputMgr.setRemoteButton`) and the controller→logical capture;
    the second one in should be standing in the FIRST one's room, looking at the
    first one's shelf.
 2. The first peer in is the host. It boots **LWX Pong**; the client's TV shows the
-   host's stream and the client's own status stays `idle` — if the client's header
-   names a core, it booted a game of its own and the shared-game invariant is
-   broken.
+   host's stream, its status line reads `Watching <host>: …`, and its header stays
+   `LibretroWebXR · idle`.
+
+   Don't rely on the header alone — it is only a label, and a peer that had booted
+   a game *before* joining used to keep the old core's name there while behaving
+   perfectly. The authoritative check is in the console:
+   `window.__rack.mayRun()` must be `false`, and **every** entry of
+   `window.__rack.live()` must read `live:false` (secondary rack consoles
+   included). If any console is live on a non-host, the shared-game invariant is
+   broken. Re-check it after toggling *Auto-pause* and after looking at a second
+   TV — those re-run the perf budget, which is how the invariant was broken once
+   before.
 3. Host plays the left paddle; client presses up/down → the right paddle wakes up
    and the client is now player 2. Both see the same game.
 4. Client grabs a cart off the shelf: the game changes **on the host** (or the

@@ -243,6 +243,16 @@ function hostGate(retry = null) {
 // A pick made while the role was still being elected; replayed on promotion.
 let pendingPick = null;
 
+// M1.4: LATCHED display-only role, mirroring src/main.js's _displayOnlyLatch.
+// role() reports 'idle' whenever the socket is down or the room is momentarily
+// hostless (the server's host-reclaim window while the previous host reloads), and
+// the 'idle' branch of onRoleMaybeChanged resumes our core — which for a WATCHER
+// means it starts emulating its own copy of the host's game. Latch the role so it
+// survives those gaps: only an actual promotion (or leaving) lets us run again.
+let displayOnlyLatch = false;
+/** May this machine run its own core right now? */
+function mayRunLocalCore() { return !displayOnlyLatch; }
+
 // Boot the game the room is already playing, on OUR core, after being promoted to
 // host with nothing running. Resolves against our own collection first so the full
 // entry (with its `rom` provenance) is used rather than the bare wire record.
@@ -397,6 +407,13 @@ function flushRemotePlayer(player) {
 function connect() {
   const room = sanitiseRoom(roomInput.value) || `room-${randomRoomSuffix()}`;
   roomInput.value = room;
+  // Assume DISPLAY-ONLY until the server's election says otherwise: between the
+  // socket opening and HELLO landing, role() reports 'idle', and a peer that was
+  // playing solo a moment ago must not have its core resumed into that gap (it
+  // would be a second, divergent instance of whatever the room is already
+  // playing). Promotion clears the latch immediately, so a peer that turns out to
+  // be the host never actually stops.
+  displayOnlyLatch = true;
   const nick = (nickInput.value || '').trim() || 'Player';
   // ?server=ws://host:port overrides the default wss://<host>/ws/ (used in dev,
   // where the room-server runs on its own port without an Apache reverse proxy).
@@ -435,6 +452,7 @@ function connect() {
         // Promoted: first in, the previous host left and we're the most senior
         // remaining peer, or we reclaimed after our own reload. The room's screen
         // is ours now.
+        displayOnlyLatch = false;      // release before anything tries to resume
         audio.detachRemote();
         const queued = pendingPick;
         pendingPick = null;
@@ -494,6 +512,7 @@ function disconnect() {
   connectBtn.textContent = 'Join / Host';
   document.body.classList.remove('mp-connected');
   showCanvas();
+  displayOnlyLatch = false;      // left the room: our machine is ours again
   if (booted) client.resume();
   refreshMpStatus();
   setStatus(booted ? `Playing ${loadedMeta?.title || ''}` : 'Disconnected');
@@ -510,16 +529,25 @@ function onRoleMaybeChanged(tvValue, ownerId) {
     // Drop any pointer capture too: our core is paused, so a captured cursor
     // would be feeding a machine that isn't running.
     if (document.pointerLockElement === canvas) { try { document.exitPointerLock?.(); } catch (_) {} }
+    displayOnlyLatch = true;
     if (booted) client.pause();
     setStatus(`Watching ${tvValue?.title || "host's game"}`);
   } else if (r === 'host') {
+    displayOnlyLatch = false;
     if (booted) client.resume();
     showCanvas();
-  } else {
-    // idle — host left / nobody hosting.
+  } else if (mayRunLocalCore()) {
+    // idle — we are solo, or connected with nobody hosting and we never watched.
     if (booted) client.resume();
     showCanvas();
     setStatus(booted ? `Playing ${loadedMeta?.title || ''}` : 'Connected · load a game to host');
+  } else {
+    // idle-but-latched: we are a WATCHER and the room is only *momentarily*
+    // hostless (socket blip, or the host is reloading inside its reclaim window).
+    // Resuming here would restart the independent-core divergence. Stay stopped
+    // until the server actually names a host again.
+    if (booted) client.pause();
+    setStatus('Waiting for the room host…');
   }
   refreshMpStatus();
 }
@@ -644,6 +672,11 @@ window.__desktop = {
   role,
   booted: () => booted,
   ticks: () => ticks,
+  // M1.4 ground truth: may this machine run its own core? false on a watcher,
+  // INCLUDING while the room is momentarily hostless. `paused` is the observable
+  // consequence — a watcher must read paused:true at all times.
+  mayRun: () => mayRunLocalCore(),
+  paused: () => !!client?.paused,
   // Input-scheme surface for probes: "is raw keyboard live / is a mouse device
   // wired / is the pointer actually captured" are the three things that decide
   // whether a DOS or Amiga boot is controllable at all, and none of them are

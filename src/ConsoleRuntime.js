@@ -39,8 +39,9 @@ export class ConsoleRuntime {
    *                               'audio' event — see EmulatorClient.js — so binding this
    *                               listener unconditionally is harmless for them).
    */
-  constructor({ id, adopt = null, document: doc = (typeof document !== 'undefined' ? document : null), width = 640, height = 480, audio = null } = {}) {
+  constructor({ id, adopt = null, document: doc = (typeof document !== 'undefined' ? document : null), width = 640, height = 480, audio = null, canRun = null } = {}) {
     this.id = id;
+    this._canRun = typeof canRun === 'function' ? canRun : null;
     this.adopted = !!adopt;
     this.coreName = null;
     this.system = null;
@@ -140,8 +141,37 @@ export class ConsoleRuntime {
     this.loaded = true;
   }
 
+  /**
+   * Install the "may this console run at all?" predicate. RackMgr.add() wires
+   * this to its own allowRun gate, so every runtime in the rack inherits it —
+   * see RackMgr.js. Absent predicate = always allowed (solo play, unit tests).
+   */
+  setCanRun(fn) { this._canRun = typeof fn === 'function' ? fn : null; return this; }
+
+  /** Fails OPEN: a throwing/absent predicate must never brick solo play. */
+  runAllowed() {
+    if (!this._canRun) return true;
+    try { return this._canRun(this) !== false; }
+    catch (e) { console.warn('[ConsoleRuntime] canRun threw', e); return true; }
+  }
+
   pause() { try { this.client?.pause?.(); } catch (e) { console.warn('[ConsoleRuntime] pause', e); } }
-  resume() { try { this.client?.resume?.(); } catch (e) { console.warn('[ConsoleRuntime] resume', e); } }
+
+  /**
+   * Start (or restart) this console's main loop — UNLESS running is currently
+   * forbidden (display-only netplay client; see RackMgr's allowRun). A refused
+   * resume re-asserts the pause instead, so a console power switch or a stray
+   * budget pass can't quietly hand a watcher its own live core back.
+   * @returns {boolean} whether the core is now allowed to run.
+   */
+  resume() {
+    if (!this.runAllowed()) {
+      try { this.client?.pause?.(); } catch (_) {}
+      return false;
+    }
+    try { this.client?.resume?.(); } catch (e) { console.warn('[ConsoleRuntime] resume', e); }
+    return true;
+  }
 
   /** Dispatch a synthetic key event to THIS console's core (canvas-targeted). */
   sendInput(eventType, code, key, keyCode, location) {

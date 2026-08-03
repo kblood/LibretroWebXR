@@ -14,7 +14,7 @@
 import { planLive } from './RackBudget.js';
 
 export class RackMgr {
-  constructor({ budget, maxLive, logger } = {}) {
+  constructor({ budget, maxLive, logger, allowRun } = {}) {
     this._runtimes = new Map();   // id -> ConsoleRuntime (or fake in tests)
     this._budgetOpts = {};
     if (budget != null) this._budgetOpts.budget = budget;
@@ -25,13 +25,44 @@ export class RackMgr {
     // stays live (for machines that can run all cores at once). Toggled by the
     // user; the gaze/budget pause is a perf optimisation, not a correctness one.
     this._budgetEnabled = true;
+    // M1.4 HARD gate, orthogonal to the perf budget: may this machine run ANY
+    // local core at all? A display-only netplay client must run zero (see
+    // docs/MULTIPLAYER.md) — it only displays the host's video feed. Without this
+    // the budget was free to *undo* main.js's watcher pause, so a client that had
+    // booted a game before joining silently resumed emulating its own copy behind
+    // the host's picture — i.e. exactly the "each computer runs its own game" bug
+    // this release fixes, re-entered through a perf path.
+    this._allowRun = typeof allowRun === 'function' ? allowRun : null;
   }
 
   /** Enable/disable the perf budget. Disabled = keep every loaded console live. */
   setBudgetEnabled(on) { this._budgetEnabled = on !== false; return this._budgetEnabled; }
   isBudgetEnabled() { return this._budgetEnabled; }
 
-  add(runtime) { this._runtimes.set(runtime.id, runtime); return runtime; }
+  /** Install/replace the "may any core run here?" predicate (see constructor). */
+  setAllowRun(fn) { this._allowRun = typeof fn === 'function' ? fn : null; return this; }
+
+  /**
+   * May a local core run at all right now? Fails OPEN (a throwing/absent
+   * predicate must never brick solo play), but any explicit `false` suspends
+   * the whole rack.
+   */
+  runAllowed() {
+    if (!this._allowRun) return true;
+    try { return this._allowRun() !== false; }
+    catch (e) { console.warn('[RackMgr] allowRun threw', e); return true; }
+  }
+
+  add(runtime) {
+    // Propagate the gate into the runtime itself so a DIRECT `runtime.resume()`
+    // — the console power switch, a live reboot — is refused too, not just the
+    // budget's resumes. add() is the one choke point every runtime passes
+    // through, which is why the wiring lives here rather than at each new
+    // ConsoleRuntime() site.
+    runtime.setCanRun?.(() => this.runAllowed());
+    this._runtimes.set(runtime.id, runtime);
+    return runtime;
+  }
   get(id) { return this._runtimes.get(id) || null; }
   has(id) { return this._runtimes.has(id); }
   ids() { return [...this._runtimes.keys()]; }
@@ -61,6 +92,17 @@ export class RackMgr {
    */
   applyBudget() {
     const loaded = this.runtimes().filter((r) => r.isLoaded?.());
+    // HARD gate first (see _allowRun): when this machine may not run cores the
+    // budget's job is to SUSPEND, never to resume. Covers every loaded runtime
+    // AND any still-booting one, primary and secondary alike.
+    if (!this.runAllowed()) {
+      for (const r of this.runtimes()) if (r.isLive?.()) r.pause();
+      const paused = loaded.map((r) => r.id);
+      this._logger?.event?.('rack-budget', {
+        live: [], paused, liveWeight: 0, focus: this._focusedId, mode: 'suspended',
+      });
+      return { live: [], paused, liveWeight: 0, suspended: true };
+    }
     // Gaze/budget pause only applies with MORE THAN ONE console, and only when
     // the budget is enabled. Otherwise keep everything live (resume any paused).
     if (!this._budgetEnabled || loaded.length <= 1) {
@@ -89,6 +131,24 @@ export class RackMgr {
       live: plan.live, paused: plan.paused, liveWeight: plan.liveWeight, focus: this._focusedId,
     });
     return plan;
+  }
+
+  /**
+   * Pause EVERY runtime unconditionally, ignoring the budget and whether the
+   * runtime reports itself loaded. Used when this machine must run zero cores
+   * (becoming a display-only netplay client). Returns the ids it stopped.
+   *
+   * Deliberately not `loaded`-filtered: a runtime mid-boot isn't "loaded" yet but
+   * its main loop will start, and a paused-then-suspended secondary console must
+   * stay stopped. Returns the ids that were actually live.
+   */
+  pauseAll(reason = null) {
+    const stopped = [];
+    for (const r of this.runtimes()) {
+      if (r.isLive?.()) { r.pause(); stopped.push(r.id); }
+    }
+    this._logger?.event?.('rack-pause-all', { reason, stopped, total: this._runtimes.size });
+    return stopped;
   }
 
   /** Route a synthetic key event to one console's core (canvas-targeted). */

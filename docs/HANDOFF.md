@@ -553,6 +553,37 @@ All three slices live; M1.1/M1.2 smokes pass against `wss://dionysus.dk/ws/`.
   forever while every metric said "receiving"; and `stopBroadcast()` stopped the
   borrowed audio-tap track, permanently muting a host that was demoted and
   promoted again.
+- **M1.4a ✅ done (2026-08-03) — "runs zero cores" moved from the boot gates to the
+  runtime lifecycle.** An independent verification of M1.4 confirmed one residual
+  path that re-created the user's original symptom: gating every *boot* route says
+  nothing about a peer that was **already playing when it joined**, and
+  `RackMgr.applyBudget()` — re-run by the in-world *Auto-pause* toggle and by
+  `updateFocus()` on any gaze shift with ≥2 TVs — resumed whatever it found paused,
+  so `_showClientWaiting()`'s watcher pause was silently undone and the client
+  emulated its own copy of the game behind the host's video feed. Two related
+  defects: only the PRIMARY console was paused (a pre-existing rack's secondary
+  console kept running, contradicting the smoke's own `liveCores===0` assertion,
+  which passed only because no committed smoke had a rack up before joining), and
+  the desktop client's `role()==='idle'` branch resumed a watcher's core whenever
+  the socket blipped or the room was momentarily hostless. Fix: a **latched**
+  `mayRunLocalCore()` in `src/main.js` (latched because `isDisplayOnlyClient()`
+  needs a live socket) wired into `RackMgr` as `allowRun`; `applyBudget()` now
+  **suspends** the rack instead of planning when running is denied;
+  `RackMgr.add()` pushes the predicate into every `ConsoleRuntime`
+  (`setCanRun`/`resume()` refuses + re-asserts the pause) so the console power
+  switch and live reboots obey it too; `rackMgr.pauseAll()` on becoming a client
+  and `applyBudget()` again on promotion/leaving; a last-line-of-defence host gate
+  in `loadCartridgeIntoConsole` (the *other* function that starts a core); the same
+  latch in `src/desktop/main.js`, also armed on `connect()`; and the watcher's
+  header no longer names a core, which had made `docs/MULTIPLAYER.md`'s own manual
+  check cry wolf. Verified: `scripts/test-rackmgr.mjs` (56, incl. the gate failing
+  *open*), `tmp/verify-displayonly.mjs` 53/53 in two real browsers — per-runtime
+  frame-motion ground truth with the host as positive control and an in-page
+  negative control that removes the gate and shows the watcher's cores come back to
+  life — and `scripts/verify-desktop-netplay.mjs` 17/17 (new solo-boot→join→reclaim
+  window→promotion phase). See MULTIPLAYER.md's "Runs zero cores is enforced at the
+  runtime layer" for the rule and for `window.__rack.mayRun()` /
+  `window.__rack.live()`, the checks to use instead of the header.
 
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
