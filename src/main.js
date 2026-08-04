@@ -30,6 +30,7 @@ import { GrabMgr } from './GrabMgr.js';
 import { LocomotionMgr } from './LocomotionMgr.js';
 import { DesktopControls } from './DesktopControls.js';
 import { GameInputMgr } from './GameInputMgr.js';
+import { createTestApi } from './TestApi.js';
 import { installXRRafShim } from './XRRafShim.js';
 import { installSpatialAudio } from './SpatialAudio.js';
 import { createMemoryCard } from './MemoryCard.js';
@@ -47,6 +48,7 @@ import { ConsoleRuntime } from './ConsoleRuntime.js';
 import { computeRouting as routeControllers } from './Routing.js';
 import { NetMgr } from './net/NetMgr.js';
 import { buildIceServers } from './net/NetProtocol.js';
+import { FALLBACK_HOST_KEY } from './net/HostElection.js';
 import { sanitiseRoom, randomRoomSuffix } from './net/SessionUtils.js';
 import { GhostCartMgr } from './GhostCartMgr.js';
 import { GhostGamepadMgr, makeGamepadHoldKey, isGamepadHoldKey, cableIdFromHoldKey } from './GhostGamepadMgr.js';
@@ -354,6 +356,162 @@ const _knownPropPayloads = new Map();
 // Populated in buildCartridgeWorld and updated when local props are added/broadcast.
 // Also used by window.__props debug hook.
 const _syncedProps = new Map();
+
+// ── Automation surface (window.__testApi, see src/TestApi.js) ───────────────
+// The ONE supported way for an external driver (Playwright/Puppeteer, i.e. the
+// Node harness in scripts/lib/mp-harness.mjs) to control this app. Everything
+// below is plumbing so TestApi.js can stay a thin, import-free facade:
+//   _testHooks   — the pieces that only exist as buildCartridgeWorld locals
+//                  (the gun/mouse drivers, the file-picker stand-in, the prop
+//                  static set). Filled in at the end of the build; until then
+//                  the corresponding __testApi methods answer `unsupported`.
+//   _worldReady  — resolved once buildCartridgeWorld has fully finished
+//                  (including resumePendingLoad), which is what
+//                  `__testApi.ready()` awaits.
+const _testHooks = {};
+let _worldReadyResolve = null;
+const _worldReady = new Promise((resolve) => { _worldReadyResolve = resolve; });
+const _needHook = (name, what) => {
+  const fn = _testHooks[name];
+  if (typeof fn !== 'function') throw new Error(`${what} is not built yet — await __testApi.ready() first`);
+  return fn;
+};
+// Resolve one app tick: whatever we drive (a remote button, a prop transform)
+// only reaches the core/room on the next SceneMgr tick, so every mutating
+// __testApi method awaits this instead of guessing with a sleep.
+const _nextAppFrame = () => new Promise((resolve) => {
+  let done = false;
+  const fin = () => { if (!done) { done = true; resolve(true); } };
+  try { requestAnimationFrame(() => requestAnimationFrame(fin)); } catch (_) { /* no rAF */ }
+  setTimeout(fin, 120);          // rAF is throttled in a hidden tab / paused core
+});
+// Convert a screen-relative (u, v) — 0..1 over a TV's visible framebuffer, v
+// down — into the world-space aim point + a muzzle position 1.2 m in front of
+// it, so a test can say "shoot the top-left of the screen" without doing
+// three.js geometry itself. Uses the mesh's own local bounding box, so it works
+// for the curved CRT geometry as well as a flat plane.
+function _tvAimFromUv(tvId, u, v) {
+  const mesh = _needHook('tvMeshFor', 'the light gun')(tvId);
+  if (!mesh) throw new Error(`no TV mesh for "${tvId}"`);
+  mesh.updateMatrixWorld(true);
+  const geom = mesh.geometry;
+  if (!geom.boundingBox) geom.computeBoundingBox();
+  const bb = geom.boundingBox;
+  const local = new THREE.Vector3(
+    bb.min.x + (bb.max.x - bb.min.x) * Math.min(Math.max(u, 0), 1),
+    bb.max.y - (bb.max.y - bb.min.y) * Math.min(Math.max(v, 0), 1),
+    bb.max.z,
+  );
+  const target = mesh.localToWorld(local);
+  const normal = new THREE.Vector3(0, 0, 1)
+    .applyQuaternion(mesh.getWorldQuaternion(new THREE.Quaternion())).normalize();
+  const muzzle = target.clone().add(normal.multiplyScalar(1.2));
+  return {
+    pos: { x: muzzle.x, y: muzzle.y, z: muzzle.z },
+    look: { x: target.x, y: target.y, z: target.z },
+  };
+}
+
+// The facade itself. Installed at module eval (every dep is a lazily-evaluated
+// closure, so nothing here touches a not-yet-initialised binding) which means a
+// driver can `waitForFunction(() => window.__testApi)` and then `ready()`.
+window.__testApi = createTestApi({
+  clientKind: 'vr',
+  ready: () => _worldReady,
+  net: () => net,
+  connectToRoom: (room, nick, color) => connectToRoom(room, nick, color),
+  disconnectFromRoom: () => disconnectFromRoom(),
+  amRoomHost: () => amRoomHost(),
+  mayRunLocalCore: () => mayRunLocalCore(),
+  fallbackHostKey: FALLBACK_HOST_KEY,
+  wireRx: (ch) => (_wireRxLog[ch] ? _wireRxLog[ch].slice() : []),
+  gameInput: () => gameInput,
+  rack: () => rackMgr,
+  rackSpawn: (system, opts) => spawnConsole(system, opts),
+  rackFocus: (id) => { rackMgr.setFocus(id); rackMgr.applyBudget(); refreshAudioFocus(); return rackMgr.focusedId(); },
+  rackPower: (id, on) => { setConsolePower(id, on, consoleObjs.get(id)?.userData?.powerBtn); _broadcastPower('console', id, on); return isConsoleOn(id); },
+  rackReset: (id) => { resetConsole(id); _broadcastReset(id); return true; },
+  tvs: () => scene._tvs,
+  tvSource: (tvId) => cable.sourceOf(tvId),
+  roomDescriptor: () => currentRoom,
+  currentMeta: () => (currentMeta ? { ...currentMeta } : null),
+  nextFrame: _nextAppFrame,
+  props: {
+    entries: () => _syncedProps,
+    // The real Add-menu spawners, so a scripted prop is indistinguishable from
+    // a hand-placed one (same descriptor, same broadcast).
+    add: (type, opts = {}) => {
+      const prop = (type === 'tv')
+        ? _needHook('addTvProp', 'adding a TV')()
+        : _needHook('addProp', 'adding props')(type, opts);
+      if (!prop) return null;
+      const id = prop.id || prop;
+      const rec = _syncedProps.get(id);
+      if (rec && Array.isArray(opts.pos)) rec.object.position.set(opts.pos[0], opts.pos[1], opts.pos[2]);
+      if (rec && opts.texture) rec.prop.texture = opts.texture;
+      if (rec && net) _broadcastPropMove(rec.object);
+      return id;
+    },
+    remove: (propId) => _needHook('removeProp', 'removing props')(propId),
+    // GrabMgr's own release callback: editor snapping + the authoritative
+    // `prop:<id>` broadcast + rack persistence. Exactly what a VR release runs.
+    editRelease: (object) => grabMgr?.onEditRelease?.(object),
+    serialize: (prop, object) => serializePropState(prop, object),
+    isStatic: (propId) => (_testHooks.staticPropIds ? _testHooks.staticPropIds.has(propId) : null),
+    holdKeyFor: (object) => {
+      const cableId = object?.userData?.cableId;
+      if (!cableId) return null;
+      switch (object.userData.kind) {
+        case 'gamepad': return makeGamepadHoldKey(cableId);
+        case 'lightgun': return makeGunHoldKey(cableId);
+        case 'mouse': return makeMouseHoldKey(cableId);
+        default: return null;
+      }
+    },
+  },
+  content: {
+    shelf: () => (window.__games || []),
+    localRoms: () => loadLocalRoms(),
+    insert: (meta, opts) => handleCartridgeInserted(meta, opts),
+    load: (meta) => loadCartridge(meta),
+    pickFile: (name, buf, opts) => _needHook('pickLocalRom', 'the file picker')(name, buf, opts),
+    addToShelf: (meta) => addLocalRomToShelf(meta),
+    // A getter, not a value: this whole deps literal is evaluated at module
+    // eval, well before `const CONSOLE_ID` is initialised (TDZ).
+    get primaryConsoleId() { return CONSOLE_ID; },
+  },
+  gun: {
+    arm: () => armLightGunAndReload(),
+    disarm: () => disarmLightGunAndReload(),
+    state: () => _needHook('gunArmedState', 'the light gun')(),
+    port: (cableId) => _needHook('gunPort', 'the light gun')(cableId),
+    fire: ({ u, v, trigger = true, pos, look, tvId }) => {
+      const drive = _needHook('gunFire', 'the light gun');
+      const aim = (pos && look) ? { pos, look } : _tvAimFromUv(tvId || scene._tvs[0]?.id, u ?? 0.5, v ?? 0.5);
+      const res = drive(aim.pos, aim.look, trigger);
+      if (res !== 'ticked') throw new Error(`light gun refused: ${res}`);
+      return { ...aim, trigger: !!trigger };
+    },
+  },
+  mouse: {
+    arm: () => armMouseAndReload(),
+    disarm: () => disarmMouseAndReload(),
+    state: () => _needHook('mouseArmedState', 'the mouse')(),
+    port: (cableId) => _needHook('mousePort', 'the mouse')(cableId),
+    move: (dx, dy, buttons) => _needHook('moveMouse', 'the mouse')(dx, dy, buttons),
+  },
+  // Legacy hooks this facade supersedes. Listed (not called) so a migrating
+  // script can see at a glance what it should stop reaching for.
+  legacy: {
+    net: '__net', rack: '__rack', rackMgr: '__rackMgr', props: '__props',
+    grab: '__grab', grabMgr: '__grabMgr', gameInput: '__gameInput',
+    insertCartridge: '__insertCartridge', pickLocalRom: '__pickLocalRom',
+    loadCartridge: '__loadCartridge', addLocalRom: '__addLocalRom',
+    armGun: '__armGun', gunFire: '__gunFire', armMouse: '__armMouse',
+    moveMouse: '__moveMouse', wireRx: '__wireRx', room: '__room',
+    scene: '__scene', client: '__client', desktop: '__desktop',
+  },
+});
 
 // TURN/ICE config is fixed from URL params at startup (same as before). We
 // don't expose a UI for it because it's an infrastructure detail; operators
@@ -3814,6 +3972,11 @@ async function buildCartridgeWorld() {
         return true;
       },
     };
+    // Automation surface: the two prop facts that only exist in this session
+    // closure. Solo (never-joined) peers leave them unset, so __testApi reports
+    // `static: null` and refuses props.remove — both are session concepts.
+    _testHooks.staticPropIds = _staticPropIds;
+    _testHooks.removeProp = window.__props.removeProp;
   };
   // ?session= URL auto-join path: net already exists at build → wire now, exactly
   // as before this refactor. The widget-join path wires later via connectToRoom.
@@ -4030,6 +4193,23 @@ async function buildCartridgeWorld() {
   window.__gameInput = gameInput;
   window.__room = room;
 
+  // Hand the automation facade the pieces that only exist as locals of this
+  // function. These are captured function REFERENCES (the same objects the
+  // legacy window.__* hooks above point at), not name lookups, so __testApi
+  // keeps working even if a hook is later renamed or removed.
+  Object.assign(_testHooks, {
+    gunFire: window.__gunFire,
+    gunArmedState: window.__gunArmedState,
+    gunPort: window.__gunLibretroPort,
+    moveMouse: window.__moveMouse,
+    mouseArmedState: window.__mouseArmedState,
+    mousePort: window.__mouseLibretroPort,
+    pickLocalRom: window.__pickLocalRom,
+    addProp,
+    addTvProp,
+    tvMeshFor: (tvId) => scene.getTV(tvId)?.mesh ?? null,
+  });
+
   // FIX 3d: Fire-and-forget load-time re-resolution of imageFile poster props.
   // Blob: URLs die on reload; if a poster has imageFile set, re-resolve it from
   // the granted images folder (if any). Silently skip if the folder isn't granted
@@ -4064,6 +4244,10 @@ async function buildCartridgeWorld() {
 
   // After everything's built, see if we're resuming a cross-system swap.
   await resumePendingLoad();
+
+  // The automation surface is now fully backed (see _testHooks above and the
+  // Object.assign next to window.__room). __testApi.ready() resolves here.
+  _worldReadyResolve(true);
 }
 
 // Portals navigate to another room (a *.room.json URL) when the player walks

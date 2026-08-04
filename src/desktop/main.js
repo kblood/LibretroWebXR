@@ -24,6 +24,8 @@ import { DesktopInput, dispatchToCore } from './DesktopInput.js';
 import { DesktopNet } from './DesktopNet.js';
 import { installDesktopAudio } from './DesktopAudio.js';
 import { sanitiseRoom, randomRoomSuffix } from '../net/SessionUtils.js';
+import { FALLBACK_HOST_KEY } from '../net/HostElection.js';
+import { createTestApi } from '../TestApi.js';
 
 // Audio graph. Installed at module scope, BEFORE any core is fetched, because it
 // works by replacing window.AudioContext (see DesktopAudio.js). Gives this page
@@ -698,6 +700,78 @@ window.__desktop = {
   net_debug: () => net?.debugApi?.() ?? null,
 };
 
+// ── window.__testApi — the SAME automation namespace as the VR build ─────────
+// See docs/TEST_AUTOMATION.md. Deliberately the identical shape so one Node
+// harness drives both clients; the sections this page has no concept of (props,
+// the console rack, in-world peripherals) are simply absent, which makes every
+// method under them answer `unsupported` instead of silently doing nothing. Use
+// `__testApi.supports('rack.list')` rather than sniffing `clientKind`.
+let _dtReadyResolve = null;
+const _dtReady = new Promise((r) => { _dtReadyResolve = r; });
+// Remote-button injection for THIS page's single core. Mirrors GameInputMgr's
+// method names so TestApi's input namespace needs no desktop special-casing;
+// the work is done by the real onRemoteGameInput/flushRemotePlayer path a
+// networked peer's input takes.
+const _dtGameInput = {
+  setRemoteButton: ({ player = 1, btn, down }) => onRemoteGameInput({ player, btn, down }),
+  clearRemote: () => { for (const p of remoteHeld.keys()) flushRemotePlayer(p); },
+  flushReleases: () => { input.releaseAll(); for (const p of remoteHeld.keys()) flushRemotePlayer(p); },
+  currentSystem: () => loadedMeta?.system ?? null,
+  getDebugState: () => ({
+    system: loadedMeta?.system ?? null,
+    remoteHeld: [...remoteHeld.entries()].map(([p, s]) => ({ player: p, held: [...s] })),
+    rawKeyboard: input.rawKeyboard,
+  }),
+};
+window.__testApi = createTestApi({
+  clientKind: 'desktop',
+  ready: () => _dtReady,
+  net: () => net,
+  connectToRoom: (room, nick) => {
+    if (roomInput) roomInput.value = room;
+    if (nick && nickInput) nickInput.value = nick;
+    if (!net) connect();
+    return net;
+  },
+  disconnectFromRoom: () => disconnect(),
+  amRoomHost: () => (!net || net.isHost()),
+  mayRunLocalCore: () => mayRunLocalCore(),
+  fallbackHostKey: FALLBACK_HOST_KEY,
+  gameInput: () => _dtGameInput,
+  // One implicit console. Shaped like a RackMgr so rack.list()/running() work:
+  // "is a core genuinely running here" is exactly as important on this page.
+  rack: () => ({
+    runtimes: () => [{
+      id: 'desktop', coreName: loadedMeta?.core ?? null, system: loadedMeta?.system ?? null,
+      title: loadedMeta?.title ?? null, canvas, client,
+      isLoaded: () => booted, isLive: () => !client?.paused,
+      runAllowed: () => mayRunLocalCore(),
+      sendInput: (t, code, key, kc, loc) => client.sendInput(t, code, key, kc, loc),
+    }],
+    focusedId: () => 'desktop',
+    ids: () => ['desktop'],
+    get: (id) => (id === 'desktop' ? { client, canvas, sendInput: (t, c, k, kc, l) => client.sendInput(t, c, k, kc, l) } : null),
+    applyBudget: () => null,
+  }),
+  // One implicit screen. `kind` answers the question this page's DOM cannot:
+  // are we painting our own canvas, or the host's <video>?
+  tvs: () => [{
+    id: 'screen',
+    get sourceCanvas() { return hostVideoEl ? null : canvas; },
+    get sourceVideo() { return hostVideoEl; },
+    isActive: () => true,
+  }],
+  tvSource: () => 'desktop',
+  currentMeta: () => (loadedMeta ? { ...loadedMeta } : null),
+  content: {
+    shelf: () => games,
+    insert: (meta) => { loadBundled(meta); },
+    load: (meta) => loadBundled(meta),
+    primaryConsoleId: 'desktop',
+  },
+  legacy: { desktop: '__desktop' },
+});
+
 // Auto-fill room from ?session= so a shared link drops you straight in.
 (() => {
   const params = new URLSearchParams(location.search);
@@ -722,7 +796,9 @@ function tick() {
 }
 setInterval(tick, 50); // 20 Hz — ample for the 2 s heartbeat + video reconcile
 
-loadGameList();
+// Resolves __testApi.ready() once the shelf is populated (the automation surface
+// needs content.shelf() to be real before a driver picks a game off it).
+loadGameList().then(() => _dtReadyResolve(true), () => _dtReadyResolve(true));
 
 // Auto-join if a session was provided in the URL.
 (() => {

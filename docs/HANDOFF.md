@@ -923,6 +923,32 @@ real browsers complete it normally. To probe editor/grab state headlessly use
 `window.__editor` / `window.__grab` (both exposed *before* that await on purpose).
 See the deferred "harden buildMemoryCards" item below.
 
+### Driving the app from a script — read `docs/TEST_AUTOMATION.md` first
+
+There is now ONE supported automation surface, `window.__testApi`
+(`src/TestApi.js`, installed identically by the VR and desktop clients), plus a
+Puppeteer harness, `scripts/lib/mp-harness.mjs`, that wraps it into an ergonomic
+multi-browser API. **Do not add another `window.__foo` hook** — that habit
+produced 40+ inconsistent hooks and several vacuously-green tests (checking
+`__client.paused` on a core that never booted; comparing two peers' *default*
+room layouts; trusting WebRTC connection counts over a frozen picture). The API
+deliberately makes the honest evidence channels the easy ones: `rack.running()`
+requires actual frame/pixel motion, `video.progress()` reports decoded-frame
+advance, `tv.sample()` gives a peer-local hash *and* a cross-peer-correlatable
+signature, `tv.profile()` locates a moving sprite.
+
+```powershell
+npm run test:testapi        # Node contract tests for the facade (also in `npm test`)
+# with a room server + dev server up (see docs/TEST_AUTOMATION.md):
+npm run demo-automation -- --app=http://localhost:5199/ --ws=ws://localhost:8797/
+```
+
+`scripts/demo-automation-api.mjs` is the worked example: three peers, 49 checks,
+0 failures — room objects synced BOTH directions, both host and client proved to
+control the one running game *in pixels*, and three negative controls that assert
+the red outcome. The pre-existing `smoke-*`/`probe-*` scripts and legacy hooks are
+untouched and still work; this is additive.
+
 ## Deploying
 
 ```powershell

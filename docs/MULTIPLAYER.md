@@ -398,7 +398,25 @@ aren't:
   `!this.client?.paused` (`src/ConsoleRuntime.js:78`). Harmless today only because
   every assertion filters on `r.core && r.live` — keep that filter in any new check.
 
+### Writing a NEW headless MP test — use the automation API, not new one-off hooks
+
+Everything above predates `window.__testApi` (`src/TestApi.js`) and its Node
+harness (`scripts/lib/mp-harness.mjs`). **New tests should use those** —
+`docs/TEST_AUTOMATION.md` is the reference, and `scripts/demo-automation-api.mjs`
+is the worked three-peer example (49 checks, bidirectional, three negative
+controls). It exists precisely because the scripts listed above each hand-rolled
+their own calls into whatever `window.__*` hook was handy, which is how the
+vacuous-green checks catalogued in this document happened.
+
+In particular the API replaces the traps this file keeps warning about:
+`rack.running()` instead of `__rack.live()`'s `!paused` (the coreless-watcher
+false positive noted just above is *why* it exists), `video.progress()` instead of
+`receivingCount()`, `tv.get().kind` instead of reaching into three.js, and
+`mp.samePicture()` for the host↔watcher pixel correlation `smoke-host-picker.mjs`
+open-codes. The existing scripts still work and were not migrated.
+
 ## References
+- Test automation surface: `docs/TEST_AUTOMATION.md`
 - EmuVR netplay: emuvr.net/wiki/Netplay
 - libretro netplay (design to mirror) + browser gap: docs.libretro.com/development/retroarch/netplay/ , github.com/libretro/RetroArch/issues/7186 , /10851
 - netplayjs (rollback over WebRTC): github.com/rameshvarun/netplayjs
