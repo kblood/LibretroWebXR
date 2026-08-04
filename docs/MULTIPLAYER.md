@@ -159,58 +159,67 @@ So the role is a **hard gate on the runtime lifecycle**:
   `.paused()` are the desktop equivalents. `scripts/test-rackmgr.mjs` unit-tests
   the gate, including that it fails *open* so solo play can never be bricked.
 
-### ⚠ Known open defect — the HOST's "Load ROM" button doesn't republish (M1.4d)
+### ✅ Fixed — the HOST's "Load ROM" button now republishes (M1.4d)
 
-**This is not fixed. Verification of M1.4 did NOT fully pass, and this is why.**
-The invariants above hold on the *cartridge* path, which is what every smoke drives.
-They do **not** hold when the host starts a game through a **file picker**:
+**Fixed 2026-08-04.** Keep the history: this was the reason M1.4 as a whole did not
+fully pass verification, and it was the *last* live cause of the user's original
+"the screens aren't synced".
 
-- `loadCartridge` (`src/main.js`, ~line 6203) is the only boot path that publishes
-  `tv` and calls `net.startVideoBroadcast()` *after* the canvas swap has finished.
-  In the whole app there are exactly **two** `setObjectState('tv', …)` call sites in
-  `src/main.js` — that one and the promotion branch (~line 6751).
-- The two picker paths — the real `#rom-input` change handler (~line 7293) and
-  `window.__pickLocalRom` (~line 3252) — call `bootOnPrimary()` and stop.
-  `bootOnPrimary` (~line 6472) live-swaps to a **fresh runtime and a fresh canvas**
-  on a cross-core pick, but it publishes no `tv` and starts no broadcast. (The
-  `startVideoBroadcast()` at ~line 6597 belongs to `rebootPrimaryConsole` — the
-  gun/mouse arm-reboot — not to `bootOnPrimary`.)
+**What was wrong.** The invariants above held on the *cartridge* path, which is the
+only path the committed smokes drove. They did **not** hold when the host started a
+game through a **file picker**. `loadCartridge` was the only boot path that
+published `tv` **and** called `net.startVideoBroadcast()` after the canvas swap — in
+the whole of `src/main.js` there were exactly **two** `setObjectState('tv', …)`
+sites (that one and the promotion branch). Both picker paths — the real `#rom-input`
+change handler and `window.__pickLocalRom` — called `bootOnPrimary()` and stopped,
+and `bootOnPrimary` live-swaps to a **fresh runtime and a fresh canvas** on a
+cross-core pick while publishing nothing and re-capturing nothing. (The
+`startVideoBroadcast()` a little further down belongs to `rebootPrimaryConsole`, the
+gun/mouse arm-reboot — which is why §4c of the smoke passed while this was broken.)
 
-So a host that picks a ROM off its own disk keeps streaming the **retired** canvas.
-Note the mechanism precisely, because it is easy to misfile: `VideoMgr`'s
-canvas-changed re-capture is perfectly capable of fixing this, but it is **never
-invoked** on this path — `startBroadcast()` isn't called at all, so its
-`hasLiveVideo && this._sourceCanvas === canvas` early-out
-(`src/net/VideoMgr.js:86`) never even gets a turn. Meanwhile the old
-`captureStream` track stays `readyState:'live'` forever while painting nothing,
-which is why nothing reports an error. The bug is a **missing call in `main.js`**,
-not a defect in `VideoMgr`.
-Symptoms, all reproduced against the real `#rom-input` handler (driven with
-puppeteer `input.uploadFile`, not just the `__pickLocalRom` hook):
+Two consequences, both silent:
 
-- Every watcher **freezes permanently on the previous game** — decoded frames stuck
-  for 30 s+, pixel correlation ≈ 0 against the host, host canvas 320×240 vs the
-  watcher's 512×448 (the retired canvas' size). **`sendingCount()==1` and
-  `receivingCount()==1` throughout**, so every existing diagnostic reports
-  "healthy". This is precisely the failure mode VideoMgr's header comment claims to
-  have fixed for the light-gun reboot — fixed there, still open here.
-- The room's `tv` key keeps naming the **previous** cartridge, so a **late joiner**'s
-  status line / Now Playing says one game while the pixels it receives are another,
-- and on **host migration** the promoted peer boots the game `tv` still advertises,
-  i.e. the wrong one, because that stale key is exactly what the takeover branch
-  reads.
+- Every watcher **froze permanently on the previous game** — the retired canvas'
+  `captureStream` track stays `readyState:'live'` forever while painting nothing, so
+  `sendingCount()==1` and `receivingCount()==1` throughout and every existing
+  diagnostic reported "healthy". Worth filing correctly: `VideoMgr`'s canvas-changed
+  re-capture was always capable of handling this, it was simply **never invoked** —
+  the bug was a missing call in `main.js`, not a `VideoMgr` defect.
+- The room's `tv` key kept naming the **previous** game, so a **late joiner** was
+  shown the wrong title next to the wrong pixels, and on **host migration** the
+  promoted peer booted whatever `tv` still advertised, i.e. the wrong game.
 
-Likely fix: publish `tv` + `startVideoBroadcast()` in both picker paths after the
-swap, or (better, since it closes the whole class) move that pair **inside**
-`bootOnPrimary` once the new canvas is installed.
+**The fix** (`src/main.js`): the publish/broadcast pair moved **inside**
+`bootOnPrimary`, which now ends with `publishTvAndBroadcast(meta)` — a new helper
+that, guarded by `amRoomHost()`, does exactly what `loadCartridge` always did:
+`net?.setObjectState('tv', {file, core, system, title})` then
+`net?.startVideoBroadcast()`. It publishes `meta.core`, **not** the booted core
+name, because a light-gun boot may run a different core (SMS → `genesis_plus_gx`)
+while the room must still advertise the cart's own core — that value is what a
+promoted peer re-boots from. Putting it in the callee rather than in the two callers
+closes the whole class: any future primary-boot path re-publishes for free.
+`loadCartridge` is the one caller that opts out, with `publishTv: false`, because it
+owns its own publish under its `echo` flag (an `echo:false` load is *reflecting* a
+remote peer's state and must not bounce a stale value back over a newer overwrite);
+its call site is otherwise untouched. Double-calling would in any case be inert —
+`NetMgr.setObjectState` drops an unchanged value and `VideoMgr.startBroadcast`
+early-outs on an unchanged canvas.
 
-**Why the smokes stayed green** — worth reading before trusting any of them:
-`smoke-shared-game.mjs` §5b drives `#rom-input` and `__pickLocalRom` **only on the
-CLIENT**, asserting they are *suppressed*. The HOST side of that same button is
-never exercised by any committed test. And §4c ("the host LIVE-REBOOTS its console")
-uses the **gun-arm** path, which routes through `rebootPrimaryConsole`/
-`loadCartridge` and therefore *does* re-broadcast — so it passes while the picker
-path is broken. A fix here must add a **host-side** picker phase to that smoke.
+**The test gap that hid it, now closed.** `smoke-shared-game.mjs` §5b drives
+`#rom-input` and `__pickLocalRom` **only on the CLIENT** (asserting they are
+*suppressed*); no committed test ever pressed that button on the **host**. The new
+`scripts/smoke-host-picker.mjs` (`npm run smoke-host-picker`) does, through the real
+`input.uploadFile` and not the debug hook, and covers **both** branches of
+`bootOnPrimary`: a cross-core pick (a shelf NES cart is `fceumm`, a picked bare
+`.nes` detects as `nestopia` → fresh runtime + fresh canvas), a same-core pick (no
+swap, so only the stale-`tv` half shows), and a second cross-core pick to
+`gambatte`. Its evidence channels are deliberately not "nothing threw": the room's
+published `tv` read **on the watcher**, decoded-frame advance on the watcher's
+`<video>`, and a coarse 8×6 luminance **correlation between the watcher's TV pixels
+and the host's live canvas** sampled at the same moment. It was negative-controlled
+against the pre-fix behaviour and seen to go RED — 9 failures, `tv` stuck on the
+first cart, `dFrames:0` at the retired canvas' 512×448, correlation −0.09/−0.32 —
+versus 28/28 green with the fix and correlation ≈0.99.
 
 ## Playtesting (M1 host-authoritative is live)
 
@@ -262,6 +271,7 @@ node scripts/smoke-shared-game.mjs  --app=http://localhost:<port>/ --ws=ws://loc
 node scripts/smoke-room-inherit.mjs --app=http://localhost:<port>/ --ws=ws://localhost:8797/
 node scripts/smoke-display-only.mjs --app=http://localhost:<port>/ --ws=ws://localhost:8797/
 node scripts/smoke-xr-room-adopt.mjs --app=http://localhost:<port>/ --ws=ws://localhost:8797/
+node scripts/smoke-host-picker.mjs  --app=http://localhost:<port>/ --ws=ws://localhost:8797/
 ```
 
 `smoke-display-only.mjs` is the one that covers a peer which was **already
@@ -306,9 +316,16 @@ does something else entirely:
   arm), that the client's TV really is painting the host feed and the picture's
   **decoded frame count advances** (including across a host live-reboot), and a
   three-peer migration where the junior peer keeps watching the NEW host.
-  **Gap:** it only ever drives the file picker on the *client* (to prove it's
-  suppressed); the **host** side of "Load ROM" is untested and currently broken —
-  see the open-defect section above.
+  Note that it only ever drives the file picker on the *client* (to prove it's
+  suppressed) — the **host** side of "Load ROM" lives in `smoke-host-picker.mjs`
+  below, which exists because that gap hid M1.4d for a whole verification round.
+- `smoke-host-picker.mjs` — the HOST pressing "Load ROM" (real `#rom-input`
+  `uploadFile`, not `__pickLocalRom`), for both branches of `bootOnPrimary`
+  (cross-core swap → fresh runtime + canvas, and same-core re-load). Asserts the
+  room's `tv` key as read **on the watcher**, that the watcher's decoded frames keep
+  advancing, and that its TV pixels **correlate** with the host's live canvas at the
+  same moment (≈0.99 when correct, ≈0 when the watcher is stuck on a retired
+  capture). This is the automated form of two-browser manual step 6.
 - `smoke-room-inherit.mjs` — an authored host room adopted by a bare-URL client,
   host-only local carts on the client's shelf, the `insert-nack` path, a dropped
   collection inherited through an unfetchable `dropped:` ref, several successive
@@ -360,11 +377,14 @@ injection (`GameInputMgr.setRemoteButton`) and the controller→logical capture;
    client is told the host doesn't have it), and the client still runs no core.
 5. Close the host's tab. The client is promoted, boots the room's game itself, and
    a third peer keeps watching — now off the new host.
-6. **Expected to FAIL until M1.4d is fixed:** have the HOST start a game with the
-   header's **Load ROM** button instead of a cart. The watcher stays frozen on the
-   previous game (and a late joiner is told the wrong title). Don't spend a headset
-   session re-diagnosing this — the cause and the fix are in the open-defect section
-   above.
+6. Have the HOST start a game with the header's **Load ROM** button instead of a
+   cart. The watcher's picture must follow to the new game, and its Now Playing /
+   status must name it. **This used to fail** (M1.4d: the watcher froze on the
+   previous game forever and a late joiner was told the wrong title) — fixed
+   2026-08-04 by moving the `tv` publish + `startVideoBroadcast()` into
+   `bootOnPrimary`; see the M1.4d section above. It is covered headlessly by
+   `npm run smoke-host-picker`, so this step is now a confirmation on real hardware
+   rather than a known-broken case; if it ever regresses, run that smoke first.
 
 Two cosmetic things that read as "the shared screen is broken" on a headset but
 aren't:

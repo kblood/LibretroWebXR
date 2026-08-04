@@ -6144,7 +6144,9 @@ async function loadCartridge(meta, { echo = true } = {}) {
       file: meta.file, title: meta.title, coreOptions, inputDevices, remapName, systemFiles: core.systemFiles,
       discImage: discImageOverride, contentExt: discImageOverride ? 'iso' : undefined,
     }, content);
-    await bootOnPrimary(meta, { name: coreName, url: core.url, style: core.style }, content, startOptions);
+    // publishTv:false — this function does its own `tv` publish + broadcast below,
+    // gated on `echo` (see the M1.4d note on bootOnPrimary).
+    await bootOnPrimary(meta, { name: coreName, url: core.url, style: core.style }, content, startOptions, { publishTv: false });
     rackMgr.get(CONSOLE_ID)?.noteLoaded(coreName, { system: meta.system, title: meta.title });
     currentCore = coreName;
     currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system, contentId: content?.contentId ?? null };
@@ -6469,7 +6471,45 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
 // swap (e.g. SMS -> genesis_plus_gx for the Light Phaser) — instead of
 // forcing a reload OR letting the mode-switch throw dead-end the caller
 // (P0-3/B2, 2026-07-25 review).
-async function bootOnPrimary(meta, bootCore, content, startOptions) {
+//
+// M1.4d: this helper also OWNS the room-facing side of a primary boot — publish
+// the room's `tv` key and (re)start the host video broadcast once the new canvas
+// is installed. It used to be `loadCartridge`'s job alone, which meant the two
+// file-picker paths (`#rom-input`, `window.__pickLocalRom`) booted a brand-new
+// game while the room still advertised the PREVIOUS one and while every watcher
+// kept receiving the RETIRED canvas' capture — a track that stays
+// `readyState:'live'` forever while painting nothing, so no diagnostic ever
+// reported a fault. Doing it here closes the whole class: any present or future
+// caller that boots the primary re-publishes and re-captures for free.
+//
+// `publishTv:false` is for the ONE caller that must own this itself:
+// `loadCartridge` publishes under its own `echo` flag (an echo:false load is
+// REFLECTING a remote peer's state and must not bounce a stale value back over a
+// newer overwrite) and only after `client.resume()`. Its call is left exactly as
+// it was; note that even if both fired, `NetMgr.setObjectState` drops an
+// unchanged value and `VideoMgr.startBroadcast` early-outs on an unchanged
+// canvas, so a double call is inert rather than harmful.
+async function bootOnPrimary(meta, bootCore, content, startOptions, { publishTv = true } = {}) {
+  const booted = await _bootOnPrimaryCore(meta, bootCore, content, startOptions);
+  if (publishTv) publishTvAndBroadcast(meta);
+  return booted;
+}
+
+// Announce to the room which game is now on the primary console's TV, and point
+// the host video capture at the (possibly brand-new) canvas. Guarded by
+// amRoomHost() — the same condition loadCartridge's publish already runs under
+// (its top-of-function gate), so solo play and a real host behave identically and
+// a display-only client can never publish. Uses meta.core, NOT bootCore.name: a
+// light-gun boot may run a different core (SMS → genesis_plus_gx) but the room
+// must advertise the cart's own core, since that value is what a promoted peer
+// re-boots from on host migration.
+function publishTvAndBroadcast(meta) {
+  if (!amRoomHost()) return;
+  net?.setObjectState('tv', { file: meta.file, core: meta.core, system: meta.system, title: meta.title });
+  net?.startVideoBroadcast();
+}
+
+async function _bootOnPrimaryCore(meta, bootCore, content, startOptions) {
   if (currentCore && currentCore !== bootCore.name) {
     const next = await bootFreshRuntime(CONSOLE_ID, meta, {
       core: { name: bootCore.name, url: bootCore.url, style: bootCore.style },

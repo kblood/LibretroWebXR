@@ -473,11 +473,12 @@ the mic mid-XR is the open question for the real-headset smoke*. **Still pending
 a real **two-headset** smoke test (needs hardware).
 
 **Phase M1 (host-authoritative game sync) — slices M1.0–M1.2 done + deployed
-(2026-06-13); the M1.4 shared-room rewrite done + deployed (2026-08-03) except
-M1.4d, which is OPEN.** Read this list newest-first: M1.4 supersedes M1.1/M1.2's
-host rule, and **M1.4d at the end is a live P0** — a host using the header's
-"Load ROM" button still leaves every watcher frozen on the previous game. So
-"multiplayer works" is true for the cartridge path and false for the picker path.
+(2026-06-13); the M1.4 shared-room rewrite done + deployed (2026-08-03), and its
+last open defect M1.4d fixed 2026-08-04 (not yet deployed).** Read this list
+newest-first: M1.4 supersedes M1.1/M1.2's host rule. "Multiplayer works" now holds
+for the picker path as well as the cartridge path — see the M1.4d entry at the end
+for what was broken and how it is tested; **the fix still needs a deploy + a
+production `smoke-host-picker` run** before production is believed fixed.
 - **M1.0 ✅ done + DEPLOYED** — remote-input transport: a directed `INPUT`
   message (`NetProtocol.makeInput`) relayed client→host over the room socket
   (`Hub.input`, sender-id stamped); `NetMgr.sendGameInput`/`onGameInput` + a debug
@@ -647,9 +648,10 @@ host rule, and **M1.4d at the end is a live P0** — a host using the header's
   keeping: **a local room server is not the deployed one** — point the smokes at the
   real URL before believing an MP feature is live.
 
-- **M1.4d ❌ OPEN — the HOST's "Load ROM" picker never republishes, so watchers
-  freeze on the previous game. M1.4 as a whole therefore did NOT fully pass
-  verification.** Everything above is real and holds on the **cartridge** path,
+- **M1.4d ✅ FIXED 2026-08-04 — the HOST's "Load ROM" picker never republished, so
+  watchers froze on the previous game. This was the reason M1.4 as a whole did not
+  fully pass verification; the diagnosis below is kept because it is what the fix and
+  its regression test are shaped around.** Everything above is real and holds on the **cartridge** path,
   which is the path every committed smoke drives. An independent adversarial pass
   went after the *other* way a host starts a game — the header's **Load ROM** button
   — and it is broken, silently, with every diagnostic green. Reproduced against the
@@ -677,14 +679,30 @@ host rule, and **M1.4d at the end is a live P0** — a host using the header's
   next to the wrong pixels, and a **promoted** host boots whatever `tv` still
   advertises — observed booting `freeware/lwx-nes-pong.nes` while the departed host
   had actually been playing a picker-loaded ROM.
-  **Fix:** add the `setObjectState('tv', …)` + `startVideoBroadcast()` pair to both
-  picker paths after the swap, or move it inside `bootOnPrimary` once the new canvas
-  is installed (preferred — it closes the class rather than two instances).
-  **Test gap to close in the same change:** `scripts/smoke-shared-game.mjs` §5b
-  drives the picker **only on the client** (asserting suppression); no committed test
-  ever presses that button on the **host**. §4c's "host live-reboots" uses the
-  gun-arm path, which republishes. Add a host-side picker phase, and negative-control
-  it against the current code so it is seen to go RED.
+  **Fix as shipped (2026-08-04):** the pair moved **inside** `bootOnPrimary` — it now
+  ends with `publishTvAndBroadcast(meta)`, an `amRoomHost()`-guarded helper doing
+  `setObjectState('tv', {file, core, system, title})` + `startVideoBroadcast()`, so
+  every present and future primary-boot path republishes for free (the class, not two
+  instances). It publishes `meta.core`, not the booted core name, so a light-gun boot
+  (SMS → `genesis_plus_gx`) still advertises the cart's own core — that value is what
+  a promoted peer re-boots from. `loadCartridge` is the single opt-out
+  (`publishTv:false`) because it owns its own publish under its `echo` flag
+  (`echo:false` = reflecting a remote peer's state, must not bounce a stale value
+  back); a double call would be inert anyway (`setObjectState` drops an unchanged
+  value, `startBroadcast` early-outs on an unchanged canvas).
+  **Test gap closed in the same change:** `scripts/smoke-shared-game.mjs` §5b drives
+  the picker **only on the client** (asserting suppression) and §4c's "host
+  live-reboots" uses the gun-arm path, which republishes — so no committed test ever
+  pressed that button on the **host**. New `scripts/smoke-host-picker.mjs`
+  (`npm run smoke-host-picker`) does, via the real `input.uploadFile`, across both
+  `bootOnPrimary` branches (cross-core → fresh runtime/canvas, and same-core), and
+  asserts on the watcher's own view: the room `tv` key, decoded-frame advance, and an
+  8×6 luminance **correlation between the watcher's TV pixels and the host's live
+  canvas**. Negative-controlled by disabling the new call: 9 RED (tv stuck on the
+  first cart, `dFrames:0` at the retired 512×448 canvas, corr −0.09/−0.32) vs **28/28
+  green** with the fix at corr ≈0.99. Regression run alongside it:
+  `smoke-shared-game` 45/45, `smoke-display-only` 54/54, `smoke-room-inherit` 27/27,
+  `npm test` green.
   **Two minor items from the same pass** (neither is this bug): both peers spawn at
   the *same origin*, so a watcher has the remote avatar's head plane planted at its
   camera occluding most of the TV — hiding `avatar:*` proves the picture behind it is
@@ -693,11 +711,13 @@ host rule, and **M1.4d at the end is a live P0** — a host using the header's
   `ConsoleRuntime.isLive()` is just `!this.client?.paused`
   (`src/ConsoleRuntime.js:78`) — harmless only because every assertion filters on
   `r.core && r.live`.
-  **Also still unverified:** a physical-headset pass (no hardware), and this defect
-  against the **deployed** build specifically — it was found on localhost at
-  `11c86bd`, and given M1.4c's own lesson about prod drifting, re-confirm on
-  `dionysus.dk` after fixing. The disc-swap panel's republish behaviour was not
-  checked either and is a plausible third instance of the same class.
+  **Still unverified after the fix:** a physical-headset pass (no hardware), and the
+  fix against the **deployed** build — it was found *and* fixed on localhost (found at
+  `11c86bd`), and given M1.4c's own lesson about prod drifting, deploy and re-run
+  `smoke-host-picker` against `dionysus.dk` before calling it live. The disc-swap
+  panel's republish behaviour was not checked either and is a plausible third instance
+  of the same class (it does not go through `bootOnPrimary`, so the fix above does
+  **not** cover it).
 
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
@@ -981,7 +1001,9 @@ pwsh scripts/deploy.ps1 -DryRun -SkipBuild   # see remote actions, touch nothing
   else. Breaking any of this reproduces "each computer plays its own game". The
   corollary for **every new boot path**: if it starts a game, it must be host-gated
   *and* must publish `tv` + `startVideoBroadcast()` after its canvas swap — the
-  omission that is M1.4d. See `docs/MULTIPLAYER.md`.
+  omission that was M1.4d (fixed 2026-08-04: a primary boot gets that pair for free
+  from `bootOnPrimary`, so honour the corollary by routing through it). See
+  `docs/MULTIPLAYER.md`.
 - **COOP/COEP everywhere.** `crossOriginIsolated` must be `true` or
   `SharedArrayBuffer` vanishes and the threaded cores won't start. Enforced in
   `vite.config.js` (dev) and `deploy/` + `public/.htaccess` (prod).
@@ -1236,9 +1258,10 @@ ROMs. Full spec: `docs/ROOM_AND_COLLECTIONS.md`. In short:
   M1.2 host video stream + watcher-core pause — all live + smoke-verified);
   **M1.4 ✅ shared-room rewrite done + DEPLOYED, app *and* room server** (server-side
   seniority host election, display-only clients that run zero cores, host-owned
-  room/shelf/`tv`) — **but M1.4d ❌ is OPEN: the host's "Load ROM" picker doesn't
-  republish, so watchers freeze on the previous game. Fix that before calling
-  Phase M's current slice finished.**
+  room/shelf/`tv`) — **and M1.4d ✅ fixed 2026-08-04: the host's "Load ROM" picker
+  now republishes `tv` + re-broadcasts (the pair moved into `bootOnPrimary`), covered
+  by `npm run smoke-host-picker`. Deploy + a production run of that smoke is what's
+  left before Phase M's current slice counts as finished.**
   In-app join/leave UI + roster (header widget + in-VR Multiplayer menu) done.
   **Two-headset smoke test still needed (hardware).** **M2** = rollback game sync
   (feasibility spike done: confirmed rewrite, not a slice — keep M1 streaming as
@@ -1383,14 +1406,15 @@ inline. If you're picking up stale-looking doc claims again, check `git log
 "Open tasks (2026-07-29)". The numbered items below are the older 2026-07-11
 list, kept because most are still accurate app-layer work; item 00 is DONE.**
 
-**⚠ FIRST, ahead of every list below (added 2026-08-03): fix M1.4d.** A host that
-starts a game with the header's **Load ROM** button leaves every other machine
-frozen on the previous game, with a stale room `tv` that also misinforms late
-joiners and misdirects host migration. It is a ~2-line publish/re-broadcast
-omission in two picker paths (details, root cause and the fix in the M1.4d entry
-under Phase M1 above), it reproduces the user's original "screens not synced"
-report, and no committed smoke covers it — so also add a **host-side** picker phase
-to `scripts/smoke-shared-game.mjs` and watch it go RED before the fix.
+**✅ M1.4d is FIXED (2026-08-04) — what's left is a DEPLOY.** A host starting a game
+with the header's **Load ROM** button used to leave every other machine frozen on the
+previous game, with a stale room `tv` that also misinformed late joiners and
+misdirected host migration; it reproduced the user's original "screens not synced"
+report. The publish/re-broadcast pair now lives inside `bootOnPrimary`, and
+`scripts/smoke-host-picker.mjs` covers the host side of that button (28/28 green,
+negative-controlled to 9 RED against the old behaviour). **Next action: `npm run
+deploy` (app) and re-run `smoke-host-picker` against `dionysus.dk` — M1.4c's lesson
+is that production is not localhost.**
 
 00. ✅ **DONE (merged 2026-07-27).** ~~**(New, 2026-07-22) Decide whether to merge `n64-jit-plan` to `main`.**~~
     `main` and `n64-jit-plan` were fast-forwarded to the same commit; the PSX,
