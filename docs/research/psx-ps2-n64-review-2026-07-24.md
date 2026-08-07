@@ -951,3 +951,53 @@ gate (broad differential coverage — interrupt-firing, more ROMs, longer
 sessions — clean enough to justify wiring `ci_table`) is not met by one
 20-second boot-window sample against one ROM. `ci_table` wiring has still
 not been attempted. See memory `n64-jit-nj1-spike.md` for the same finding.
+
+## Status update (2026-08-07): P0-2..P0-6 re-verified LIVE; PSX un-gated
+
+This review's own P0 status lines had been read and re-read as documentation
+for two weeks without anyone re-running the probes that back them. They were
+all re-run on 2026-08-07 before acting on them, and the results stand:
+
+| Blocker | Gate re-run 2026-08-07 | Result |
+|---|---|---|
+| P0-2 worker cores unreachable from the real cartridge-insert path | `npm run probe:worker-cartridge-insert` | **18/18** — PSX, N64 *and* DOS each minted a real shelf cart and booted through the literal `handleCartridgeInserted` callback to `{mode:'worker', ready:true}`, no page/console errors |
+| P0-3 one-way runtime mode lock | `npm run probe:mode-switch` | **11/11** — NES → PSX → NES on one page, no dead end either direction |
+| P0-4 worker cores have no audio | `npm run probe:worker-audio-saveram` | **8/8** — primary console's `SpatialAudio` branch actually received pushed buffers (`nextAudioTime` advanced); corroborated per-disc by `probe:psx-realbios` (1.1–1.5M audio frames forwarded per disc) |
+| P0-5 native SaveRAM never persists | `npm run probe:psx-testdisc` (PSX) / `probe:worker-audio-saveram` B4 arm (N64) | **PSX: closed** — memory card read back via the real `client.readSaveRam(1)` path with `games/psx-testdisc`'s save-block magic and a non-zero save count, mid-session *and* after a soft reset. **N64: still no evidence** (0 bytes; `mupen64plus_next` resolves save type from a game DB the homebrew ROM isn't in). The PARTIAL verdict in Part 1 above was always the N64 arm. |
+| P0-6 real disc images will OOM | `npm run probe:psx-timecrisis` | **30/30** on the real 663MB / 34-file Time Crisis CUE+BIN, via both the desktop file-picker upload and the URL-fetched cartridge-insert path — i.e. C1's streaming/Blob-passthrough work (`2199d97`, `89970b9`) holds in the real app |
+
+Also re-run the same day, all from the same clean tree: `probe:psx-realbios`
+**45/45** (Point Blank, Lethal Enforcers I & II, Time Crisis, Policenauts —
+four real commercial discs on a real Sony BIOS, each rendering a *distinct*
+structured picture, with the imported BIOS proven to have reached the core),
+`probe:psx-guncon` **14/14**, `probe:psx-twogun` **23/23**, `probe:psx-core`
+and `npm test` green.
+
+**Action taken:** `experimental: true` removed from `SYSTEMS.psx` *and*
+`CORES.mednafen_psx_hw`. N64 deliberately left gated (its P0-5 arm has no
+positive evidence, Phase D / `ci_table` is open, Quest 3 fps unmeasured). Full
+per-blocker record lives in `src/systems.js` above `SYSTEMS.psx`, summarized in
+`docs/ROADMAP.md` and `docs/HANDOFF.md`.
+
+**Two methodology findings worth more than the verdict:**
+
+1. **Probe runs against a dirty working tree are worthless.**
+   `probe:psx-timecrisis` first read **15/18 then 23/30** (black canvas after
+   ~5s, zero metrics samples, `window.__client` gone mid-run) and
+   `probe:psx-twogun` **11/23** (no metrics at all, every rendering/isolation
+   assertion red). Both were re-run from a `git worktree` at the *same commit*
+   with a clean tree and came back **30/30** and **23/23**. The difference was
+   another session's in-flight uncommitted edits to `src/main.js` /
+   `ConsoleRuntime.js` / `net/*` (the M1.4 display-only/host-election work),
+   which vite serves straight off disk. Per memory `libretrowebxr-concurrent-dev`:
+   check `git status` *before* believing a red probe, and verify from a clean
+   worktree (junction `node_modules`, `public/cores`, `public/roms/local`, `tmp`
+   into it; `npx` will not resolve a junctioned `node_modules`, so run
+   `npm install` inside the worktree or invoke `node node_modules/vite/bin/vite.js`).
+2. **The `experimental` flag was never the safety belt the docs implied.** Its
+   only consumer is `Collection.js:65` — cartridges arriving via a collection
+   JSON. A user's own file-picker / "Load ROM" pick goes through
+   `addLocalRomToShelf` and was *never* filtered, so an un-measured core was
+   always one click away regardless. Keeping PSX gated "pending a Quest 3 fps
+   read" therefore protected nobody; it only dropped PSX carts out of the shelf
+   of users who curate a `local.collection.json` of discs they own.

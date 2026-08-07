@@ -128,10 +128,14 @@ export const CORES = {
   //                          from the core's own build manifest at runtime.
   // .cue/.chd collide with `play`'s exts above — see coreForFile's doc
   // comment for how that's resolved.
-  // experimental: true — see the matching note on SYSTEMS.psx below; this
-  // core is real and headless-verified but not yet reachable from the real
-  // in-VR cartridge-insert path (2026-07-24 review, P0-2), so it's hidden
-  // from the default shelf/manifest UI until Phase B lands.
+  // NO LONGER `experimental` (2026-08-07) — the flag and its former
+  // justification are discharged; see the un-gating record on SYSTEMS.psx
+  // below for the probe-by-probe evidence. It was removed from BOTH this core
+  // entry and the system entry: nothing in the app filters on the CORES-side
+  // marker (Collection.js only reads SYSTEMS[system].experimental), so leaving
+  // it here would have been a stale claim about a core that has since booted
+  // four real commercial discs on a real Sony BIOS. (Contrast CORES.dosbox_pure,
+  // which keeps its marker precisely because no real DOS *game* has run yet.)
   // remapName 'Beetle PSX' — the RA library_name THIS build actually reports.
   // Verified against the compiled artifact, not guessed: the wasm's retro_get_
   // system_info->library_name string is the null-terminated literal
@@ -147,7 +151,7 @@ export const CORES = {
   mednafen_psx_hw:   { url: 'cores/mednafen_psx_jit_libretro.js',    exts: ['chd','cue','m3u','ccd','pbp','exe'], label: 'PlayStation (Beetle PSX + Wasm JIT)', style: 'module', license: 'GPLv2', weight: 3,
     execution: 'worker', requiresThreads: true, contentIo: 'transfer-memfs', multiFile: true,
     companionExtensions: ['bin','img','iso','sub','sbi'], firmwareProfile: 'psx',
-    buildHash: 'beetle-d6caed07-codegen-a5009f7d-jit-dev', experimental: true, remapName: 'Beetle PSX' },
+    buildHash: 'beetle-d6caed07-codegen-a5009f7d-jit-dev', remapName: 'Beetle PSX' },
   // Nintendo 64, via mupen64plus-libretro-nx (GLideN64, GLES3/WebGL2) — see
   // docs/N64_CORE_BUILD.md for the recipe. Phase N0 (interpreter baseline,
   // no dynarec) per docs/research/n64-wasm-jit-plan.md: new_dynarec is
@@ -160,8 +164,10 @@ export const CORES = {
   // exts cover all three N64 ROM byte orders (.z64 big-endian native,
   // .n64 little-endian/byteswapped, .v64 byteswapped-16); the core
   // normalizes byte order internally.
-  // experimental: true — see the matching note on SYSTEMS.n64 below; same
-  // P0-2 reachability gap as PSX above.
+  // experimental: true — see the matching note on SYSTEMS.n64 below. The P0-2
+  // reachability gap this originally cited is shut for N64 too (the
+  // cartridge-insert probe covers mupen64plus_next as well), but N64 keeps the
+  // gate on its own remaining grounds — see SYSTEMS.n64.
   mupen64plus_next:  { url: 'cores/mupen64plus_next_libretro.js',    exts: ['n64','z64','v64'], label: 'Nintendo 64 (Mupen64Plus-Next)', style: 'module', license: 'GPLv2', weight: 3,
     execution: 'worker', requiresThreads: true, contentIo: 'transfer-memfs',
     buildHash: 'mupen64plus-98c1b0d8-n0-interpreter', experimental: true },
@@ -384,22 +390,29 @@ export const SYSTEMS = {
     // libretro's input path and the core builds/boots/renders with it present,
     // but "does a real GunCon2 game's driver actually attach to it" is untested.
     lightgun: { label: 'GunCon2', core: 'play', device: 260, port: 0, coreOptions: {} } },
-  // `experimental: true` (PSX + N64 below, and DOS above) hides a system's
-  // cartridges from the default shelf/manifest UI (see Collection.js's
+  // `experimental: true` (N64 below — no longer PSX, and no longer DOS) hides a
+  // system's cartridges from the default shelf/manifest UI (see Collection.js's
   // parseCollection / loadCollection `experimental` option, gated in main.js
   // on the `?experimental=1` URL param) without removing the system's
-  // registration or its content — the underlying worker-execution cores are
-  // real and headless-verified, but per the 2026-07-24 review (docs/research/
-  // psx-ps2-n64-review-2026-07-24.md, Phase A item A4) worker cores are not
-  // yet reachable from the real in-VR cartridge-insert path (P0-2) and
-  // weren't shippable-clean until the P0-1 gun/mouse regression was fixed —
-  // this flag keeps them out of normal users' hands until Phase B lands, while
-  // staying reachable for testing via the query param. Remove this flag (not
-  // the mechanism — it's generic and cheap to keep) once Phase B ships.
-  // DOS's reason for the same flag is unrelated and simpler: its only core
-  // (virtualxt) isn't present in public/cores/ at all right now — see the
-  // `dos` entry's own comment above for specifics and docs/DOS_CORE_BUILD.md
-  // for the full history.
+  // registration or its content. Originally applied to both PSX and N64 because
+  // per the 2026-07-24 review (docs/research/psx-ps2-n64-review-2026-07-24.md,
+  // Phase A item A4) worker-execution cores were not reachable from the real
+  // in-VR cartridge-insert path (P0-2) and weren't shippable-clean until the
+  // P0-1 gun/mouse regression was fixed.
+  //
+  // WHAT THE FLAG DOES AND DOES NOT PROTECT (measured, 2026-08-07, before
+  // un-gating PSX): the ONLY consumer is Collection.js:65, i.e. cartridges that
+  // arrive through a collection JSON (the default manifest, `?collection=`, a
+  // dropped collection, or a user's own roms/local.collection.json). A user's
+  // own file-picker / "Load ROM" pick goes through addLocalRomToShelf and has
+  // NEVER been filtered by it. So the flag was never a performance or
+  // maturity warning for the paths a curious user actually takes first — it
+  // only penalized people who curate a collection file. Worth knowing before
+  // treating it as a safety belt for anything.
+  //
+  // PSX: flag REMOVED 2026-08-07 — see the un-gating record on SYSTEMS.psx.
+  // DOS: never re-flagged after 2026-08-01 — see the `dos` entry above.
+  // N64: still flagged, on its own grounds — see SYSTEMS.n64 at the bottom.
   // GunCon (Beetle PSX HW / mednafen_psx_hw). Device 260 = SUBCLASS(LIGHTGUN,0) —
   // VERIFIED FROM SOURCE (not guessed), matching this repo's pinned build
   // (public/cores/mednafen_psx_jit_libretro.build.json pins
@@ -468,7 +481,77 @@ export const SYSTEMS = {
   // 12:36 the same day and only restored on 2026-07-29 — this flag read
   // `broken: false` throughout, pointing at a core that could not register a
   // shot. See the lightgun2 comment below for the full incident.
-  psx:       { label: 'PlayStation',        defaultCore: 'mednafen_psx_hw',  cores: ['mednafen_psx_hw'],              exts: ['chd','cue','m3u','ccd','pbp','exe'], aliases: ['psx','ps1','playstation','sony playstation'], thumbnailRepo: 'Sony_-_PlayStation', medium: 'floppy', experimental: true,
+  //
+  // UN-GATED 2026-08-07 — `experimental: true` REMOVED. Every blocker the flag
+  // was justified by (P0-2..P0-6 of the 2026-07-24 review) was re-verified LIVE
+  // on this date rather than taken from the review doc's own status text; the
+  // scores below are from runs made that day, on HEAD, in a clean worktree
+  // (`git worktree` at the then-tip, so another session's in-flight edits to
+  // src/main.js could not contaminate the result — two probes DID initially
+  // read red against the dirty main tree and both went green when re-run
+  // clean, which is worth remembering before trusting any probe run made while
+  // `git status` is dirty):
+  //   P0-2 worker cores unreachable from the real cartridge-insert path —
+  //     `npm run probe:worker-cartridge-insert` 18/18: PSX, N64 and DOS each
+  //     minted a real shelf cart and booted through the literal
+  //     handleCartridgeInserted callback to {mode:'worker', ready:true}.
+  //   P0-3 one-way runtime mode lock — `npm run probe:mode-switch` 11/11
+  //     (NES -> PSX -> NES on one page, no dead end, either direction).
+  //   P0-4 worker cores had no audio — `npm run probe:worker-audio-saveram`
+  //     8/8 with the primary console's SpatialAudio branch actually receiving
+  //     pushed buffers; that probe's header documents two negative controls
+  //     proving the assertion can go red. Corroborated per-disc by
+  //     probe:psx-realbios (audioFrames ~1.1-1.5M per disc).
+  //   P0-5 native SaveRAM never persists — for PSX specifically this is now
+  //     POSITIVELY verified, not merely "partial": `npm run probe:psx-testdisc`
+  //     reads the emulated memory card back through the REAL SaveRAM path
+  //     (client.readSaveRam(1)) and asserts games/psx-testdisc's save block
+  //     magic + a non-zero save count, both mid-session AND after a soft
+  //     reset. (The review's PARTIAL verdict came from N64 EEPROM, where a
+  //     from-scratch homebrew ROM has no save-type database entry — which is
+  //     why N64 keeps its gate and PSX does not.) Honest limit: nothing here
+  //     proves SaveRAM survives a full page reload through SaveRamStore —
+  //     that gap is app-wide, not PSX-specific, so it is not a PSX gate.
+  //   P0-6 real disc images will OOM — fixed by Phase C's C1 streaming work
+  //     (2199d97 + 89970b9) and re-verified against the real 663MB, 34-file
+  //     Time Crisis CUE+BIN: `npm run probe:psx-timecrisis` 30/30 through BOTH
+  //     the desktop file-picker upload and the URL-fetched cartridge-insert
+  //     path (33 companion tracks fetched as Blobs, never materialized on the
+  //     main thread).
+  // Real-user readiness beyond the P0 list, same day, same clean tree:
+  //   `npm run probe:psx-realbios` 45/45 — four REAL commercial discs (Point
+  //     Blank, Lethal Enforcers I & II, Time Crisis, Policenauts) boot on a
+  //     real Sony BIOS, each rendering a DISTINCT structured picture with the
+  //     BIOS confirmed to have reached the core.
+  //   `npm run probe:psx-guncon` 14/14 (aim discrimination: identical trigger
+  //     sequence advances Time Crisis's calibration only when aimed at the
+  //     target) and `npm run probe:psx-twogun` 23/23 (per-port multiport aim,
+  //     two crosshairs in different per-port colours, per-port shot isolation).
+  //   `npm test` green, incl. test-patched-cores (the gun patch is present in
+  //     the artifact actually shipping, checked against the binary).
+  // KNOWN-ROUGH but deliberately NOT gate-worthy (a first-time user should
+  // know these; hiding the carts did not mitigate any of them, since the
+  // file-picker path was never filtered — see the flag note further up):
+  //   * jit.compiled=0 on every run — the Wasm JIT never actually compiles a
+  //     block, so the CPU is interpreted (Lightrec integration still open).
+  //     Desktop throughput is nonetheless ~55fps (2966 frames in 54.1s of
+  //     core uptime, probe:psx-timecrisis metrics).
+  //   * Software renderer; the hardware-GL path (glsm/rhi_lib_gl) is not
+  //     restored.
+  //   * Quest 3 fps has still never been measured for this core. That is the
+  //     top open risk, but it is a "measure it" task, not a gate: the flag
+  //     never hid the picker path a headset user would reach first.
+  //   * Many discs need a real BIOS (with OpenBIOS, e.g. Point Blank renders
+  //     black). The app already says so in plain words — main.js:
+  //     `... needs a BIOS — use "Import BIOS" first, then pick the game again`.
+  //   * Two-gun co-op is proven at the core/per-port level but nobody has
+  //     played a 2P session through a game's own 2P menus.
+  // Note the practical blast radius of this change is small and safe: no PSX
+  // cartridge ships in public/roms/manifest.json, so a first-run visitor sees
+  // no new content. What un-gating fixes is PSX carts declared in a collection
+  // JSON — including a user's own roms/local.collection.json of discs they
+  // own — which were silently dropped from their shelf before.
+  psx:       { label: 'PlayStation',        defaultCore: 'mednafen_psx_hw',  cores: ['mednafen_psx_hw'],              exts: ['chd','cue','m3u','ccd','pbp','exe'], aliases: ['psx','ps1','playstation','sony playstation'], thumbnailRepo: 'Sony_-_PlayStation', medium: 'floppy',
     lightgun: { label: 'GunCon', core: 'mednafen_psx_hw', device: 260, port: 0, broken: false, coreOptions: {
       beetle_psx_gun_input_mode: 'lightgun', beetle_psx_hw_gun_input_mode: 'lightgun',
       beetle_psx_gun_cursor: 'cross', beetle_psx_hw_gun_cursor: 'cross',
@@ -558,6 +641,24 @@ export const SYSTEMS = {
       beetle_psx_gun_input_mode: 'lightgun', beetle_psx_hw_gun_input_mode: 'lightgun',
       beetle_psx_gun_cursor: 'cross', beetle_psx_hw_gun_cursor: 'cross',
     } } },
+  // STILL `experimental: true` (re-examined 2026-08-07, when PSX was un-gated —
+  // this was NOT left flagged by omission). The shared P0-2 reachability
+  // blocker is genuinely shut for N64 too (probe:worker-cartridge-insert boots
+  // mupen64plus_next through the real handleCartridgeInserted path, 18/18
+  // alongside PSX/DOS), and probe:mode-switch covers the worker topology as a
+  // whole. What is NOT settled for N64 specifically:
+  //   * P0-5 has no positive evidence here at all. The N64 arm is the reason
+  //     the review's verdict was PARTIAL: probe:worker-audio-saveram's SaveRAM
+  //     half reports INFO(unmet) (readSaveRam returns 0 bytes) because
+  //     mupen64plus_next resolves save type from a CRC/game-database lookup
+  //     and the shipped homebrew ROM has no entry, so no honest gate can be
+  //     built from that content. PSX cleared the same blocker with a real
+  //     memory-card round trip; N64 has no equivalent yet.
+  //   * Phase D (the JIT `ci_table` wiring / interrupt-shadow work) is owned by
+  //     a separate workstream and still open, and Quest 3 fps is unmeasured.
+  // Deliberately left alone here so this is one decision at a time; revisit
+  // with a save-type-recognized N64 ROM (or a forced core-option override) as
+  // the concrete next step.
   n64:       { label: 'Nintendo 64',        defaultCore: 'mupen64plus_next', cores: ['mupen64plus_next'],             exts: ['n64','z64','v64'], aliases: ['n64','nintendo 64'], thumbnailRepo: 'Nintendo_-_Nintendo_64', medium: 'cartridge', experimental: true },
 };
 

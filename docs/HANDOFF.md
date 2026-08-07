@@ -55,13 +55,23 @@ session" is still true:**
   by Phase C's C1 streaming-content work (`2199d97`, `89970b9` —
   `ContentBundle`'s `STREAM_HASH_THRESHOLD` path; verified against a real
   663 MB PSX disc). **P0-5 (native SaveRAM persistence) is the one still
-  PARTIAL** — `autosave_interval` is wired and the reads are live, but
-  end-to-end persistence is unconfirmed, with one known flush-timing
-  limitation. PSX Phase C (C1–C6) is otherwise 100% complete.
-  `mednafen_psx_hw` and `mupen64plus_next` nevertheless **remain**
-  `experimental: true` in `src/systems.js` (pending a real Quest 3 fps read,
-  among other things); **`dos` is deliberately NOT gated** — see the DOS
-  section in `docs/ROADMAP.md`.
+  PARTIAL** — but only for **N64**: re-verified 2026-08-07, PSX clears it
+  positively (`probe:psx-testdisc` reads the emulated memory card back through
+  the real `client.readSaveRam(1)` path, valid save block mid-session *and*
+  after a soft reset), while the N64 arm still reports 0 bytes because
+  `mupen64plus_next` resolves save type from a game database the shipped
+  homebrew ROM isn't in. PSX Phase C (C1–C6) is otherwise 100% complete.
+  **`mednafen_psx_hw` was UN-GATED 2026-08-07** (`experimental: true` removed
+  from `SYSTEMS.psx` and `CORES.mednafen_psx_hw`) after re-running every cited
+  blocker live from a clean worktree — see the record in `src/systems.js` above
+  `SYSTEMS.psx` and the PSX bullet in `docs/ROADMAP.md`. `mupen64plus_next`
+  **remains** `experimental: true` on its own grounds (no P0-5 evidence, Phase
+  D/`ci_table` open, Quest 3 fps unmeasured); **`dos` is deliberately NOT
+  gated** — see the DOS section in `docs/ROADMAP.md`. Quest 3 fps is still
+  unmeasured for PSX too; that is now tracked as a measurement task rather than
+  a gate, because the flag only ever filtered collection-declared cartridges —
+  the file-picker / "Load ROM" path was never filtered, so the gate protected
+  nobody from a slow core.
 
 **Current focus: real-headset validation.** That is genuinely the largest
 remaining gap — the rack, the keyboard prop, light guns/two-gun co-op, the
@@ -154,8 +164,8 @@ Highlights, newest first:
   branch" wording this bullet used to carry described 2026-07-22; the merge
   landed 2026-07-27, and all three have since been verified playing real
   commercial games). PS2 also ships a real homebrew light-gun game (LWX GunCon
-  Range); PSX and N64 are worker-execution cores and remain
-  `experimental: true` in the shipped UI. PSX links the same Play--CodeGen
+  Range); PSX and N64 are worker-execution cores — **PSX is off the
+  `experimental` gate as of 2026-08-07, N64 is still on it.** PSX links the same Play--CodeGen
   `Jitter_CodeGen_Wasm` backend PS2 pioneered, but the old
   "`psxJitCompiledBlocks: 95` on a real boot" evidence has been retired —
   see the PSX entry below; N64 ships interpreter-only for
@@ -331,15 +341,35 @@ P0-1 (light-gun/mouse forwarders), **P0-2** (worker cores unreachable from the
 real cartridge-insert path), **P0-3** (no mode-switch recovery) and **P0-4** (no
 worker audio) are all **FIXED (2026-07-25, `7455531`)**; **P0-6** (real discs
 OOM) is **FIXED (2026-07-27)** by Phase C's C1 streaming work. **P0-5 (native
-SaveRAM persistence) is PARTIAL** and is the only P0 left. PSX Phase C (C1–C6)
-is 100% complete. `mednafen_psx_hw` (PSX) and `mupen64plus_next` (N64)
-nevertheless **remain** gated behind `?experimental=1` and hidden from the
-default shelf/manifest (`src/systems.js`'s `experimental` flag) — the reasons
-now are the open core-level items (PSX Lightrec JIT, PSX hardware-GL renderer,
-N64 `ci_table` wiring) and the missing real-Quest-3 fps read, not the P0 list.
-The third worker-execution system, **`dos`, is deliberately NOT gated** — its
-two stated grounds for the flag were discharged (see `src/systems.js`'s comment
-on `SYSTEMS.dos` and `docs/ROADMAP.md`'s DOS section).
+SaveRAM persistence) is PARTIAL — for N64 only**; PSX clears it (see below).
+PSX Phase C (C1–C6) is 100% complete.
+
+**PSX is UN-GATED as of 2026-08-07; N64 is still gated.** The status above was
+not taken on trust this time — every cited blocker was re-run live that day, on
+`main`, from a clean `git worktree` (necessary: two PSX probes read RED against
+a working tree dirty with another session's in-flight `src/main.js` edits, and
+both went green from the clean tree at the same commit — never trust a probe run
+made while `git status` is dirty). Scores: **P0-2**
+`probe:worker-cartridge-insert` 18/18 (PSX/N64/DOS each booted through the real
+`handleCartridgeInserted` to `{mode:'worker', ready:true}`); **P0-3**
+`probe:mode-switch` 11/11; **P0-4** `probe:worker-audio-saveram` 8/8 with the
+primary console's `SpatialAudio` branch actually fed (that probe's header
+documents the negative controls that make it falsifiable); **P0-5**
+`probe:psx-testdisc` green on a real `client.readSaveRam(1)` memory-card round
+trip, mid-session and post-soft-reset; **P0-6** `probe:psx-timecrisis` 30/30 on
+the real 663 MB / 34-file disc via both the file-picker and the URL-fetched
+insert path. Beyond the P0 list: `probe:psx-realbios` 45/45 (four real
+commercial discs on a real Sony BIOS, each a distinct structured picture),
+`probe:psx-guncon` 14/14, `probe:psx-twogun` 23/23, `npm test` green.
+Known-rough and left visible rather than hidden: `jit.compiled=0` (CPU
+interpreted, ~55 fps desktop), software renderer, **Quest 3 fps unmeasured**,
+many discs need a real BIOS (the app tells the user), 2P gun co-op unplayed
+through a game's own 2P menus. `mupen64plus_next` (N64) **remains** gated behind
+`?experimental=1` — no positive P0-5 evidence, Phase D / `ci_table` still open,
+Quest 3 fps unmeasured — see the comment above `SYSTEMS.n64`. The third
+worker-execution system, **`dos`, is deliberately NOT gated** — its two stated
+grounds for the flag were discharged (see `src/systems.js`'s comment on
+`SYSTEMS.dos` and `docs/ROADMAP.md`'s DOS section).
 
 - **PS2 (Play!) — merged to `main`, real content boots.** First-ever
   Emscripten build of Play!'s `ui_libretro` wrapper (`docs/PS2_CORE_BUILD.md`

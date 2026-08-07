@@ -52,10 +52,11 @@ This is **not** a greenfield plan; a working app was carried over (see
 - **20 systems** wired (SNES, NES, GB/GBC/GBA, Genesis/SMS/GG/SG-1000/Sega 32X,
   Virtual Boy, PC Engine, Atari 2600, C64, VIC-20, Amiga, **DOS**, **PS2**,
   **PSX**, **N64**) via the `CORES` map / `systems.js`. DOS ships on **DOSBox
-  Pure** and is on the default shelf (see **DOS** below); PSX and N64 still
-  carry `experimental: true` in `systems.js` (hidden from the default shelf
-  unless `?experimental=1`) — see **Mouse peripheral + new systems** below and
-  `docs/HANDOFF.md`'s "PSX / PS2 / N64 core status" for the core-level detail.
+  Pure** and is on the default shelf (see **DOS** below); **PSX was un-gated
+  2026-08-07** and only **N64** still carries `experimental: true` in
+  `systems.js` (hidden from the default shelf unless `?experimental=1`) — see
+  **Mouse peripheral + new systems** below and `docs/HANDOFF.md`'s
+  "PSX / PS2 / N64 core status" for the core-level detail.
 - COOP/COEP for SharedArrayBuffer (`vite.config.js`, `deploy/`), and a puppeteer
   health-check harness (`scripts/debug.js`, `DEBUGGING.md`).
 - Test suite: grows every phase (`npm test`; see `package.json` for the current
@@ -848,12 +849,39 @@ your height" and "turning off a console only seems to pause it."
   shipped). The old assessment
   (`docs/research/psx-n64-feasibility.md`, 2026-06-15 — "PSX marginal, N64 not
   viable") **was wrong about both** once a Wasm-JIT path was actually built
-  rather than only researched; it's kept for history. PSX/N64 remain
-  `experimental: true` pending a real Quest 3 fps read. What's actually left is
-  the core-level list in "Open tasks" below (PSX Lightrec JIT, PSX hardware-GL,
-  N64 JIT `ci_table` wiring) — see `docs/HANDOFF.md`'s
-  "PSX / PS2 / N64 core status" and
+  rather than only researched; it's kept for history. **PSX is off the
+  `experimental` gate as of 2026-08-07** (see below); **N64 remains gated** on
+  its own grounds. What's actually left is the core-level list in "Open tasks"
+  below (PSX Lightrec JIT, PSX hardware-GL, N64 JIT `ci_table` wiring) — see
+  `docs/HANDOFF.md`'s "PSX / PS2 / N64 core status" and
   `docs/research/psx-ps2-n64-review-2026-07-24.md`.
+- **PSX un-gated (2026-08-07).** `experimental: true` removed from `SYSTEMS.psx`
+  (and from `CORES.mednafen_psx_hw`) after re-verifying every blocker the flag
+  cited **live on the day**, not from prior status text — full record in the
+  comment above `SYSTEMS.psx` in `src/systems.js`. Evidence: **P0-2**
+  `probe:worker-cartridge-insert` 18/18 (PSX/N64/DOS through the real
+  `handleCartridgeInserted`); **P0-3** `probe:mode-switch` 11/11; **P0-4**
+  `probe:worker-audio-saveram` 8/8 with the primary console's audio branch
+  actually fed; **P0-5** `probe:psx-testdisc` green — the memory card is read
+  back through the real `client.readSaveRam(1)` path with a valid save block
+  mid-session *and* after a soft reset (the review's PARTIAL verdict was the
+  N64 EEPROM arm, which is why N64 stays gated); **P0-6** fixed by C1 streaming
+  and re-verified by `probe:psx-timecrisis` 30/30 on the real 663MB/34-file
+  disc, both the file-picker and the URL-fetched insert path. Plus
+  `probe:psx-realbios` 45/45 (four real commercial discs on a real Sony BIOS,
+  distinct pictures), `probe:psx-guncon` 14/14, `probe:psx-twogun` 23/23, and a
+  green `npm test`. Still rough, and recorded as such rather than hidden:
+  `jit.compiled=0` (CPU interpreted; ~55fps desktop), software renderer, **Quest
+  3 fps never measured**, many discs need a real BIOS (the app says so), and 2P
+  gun co-op is proven per-port but never played through a game's 2P menus.
+  Blast radius is small: no PSX cart ships in `public/roms/manifest.json`, so
+  this changes nothing for a first-run visitor — what it fixes is PSX carts
+  declared in a collection JSON (e.g. a user's own
+  `roms/local.collection.json`) being silently dropped from their shelf.
+  Caveat worth keeping: two PSX probes first read RED against a working tree
+  dirty with another session's in-flight `src/main.js` edits, and both went
+  green re-run from a clean `git worktree` at the same commit — don't trust a
+  probe run made while `git status` is dirty.
 - PWA install; per-headset storage UX; performance passes on Quest.
 
 ## Open tasks (2026-08-07)
