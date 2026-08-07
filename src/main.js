@@ -38,6 +38,7 @@ import { saveState, loadState, listStates, checkSaveStateCompatibility } from '.
 import { createDebugHud } from './DebugHud.js';
 import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createDiscSwapPanel } from './DiscSwapPanel.js';
+import { tvStateValue, mergeDiscIntoTv, discStatusFromTv } from './net/TvState.js';
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
@@ -433,8 +434,24 @@ window.__testApi = createTestApi({
   rackReset: (id) => { resetConsole(id); _broadcastReset(id); return true; },
   tvs: () => scene._tvs,
   tvSource: (tvId) => cable.sourceOf(tvId),
+  // Multi-disc readout + the real Prev/Next handler, so a test drives the same
+  // code path the in-world buttons do (menuMgr → stepDisc) rather than poking
+  // client.setDisc() behind the app's back.
+  discPanel: () => (discSwapPanel?.userData?.getStatus?.() ?? { visible: false, label: '', index: null, discCount: null, ejected: false, remote: false }),
+  stepDisc: (delta) => stepDisc(delta),
   roomDescriptor: () => currentRoom,
   currentMeta: () => (currentMeta ? { ...currentMeta } : null),
+  // Where the local player stands. `head` is the XR camera while presenting (the
+  // real headset pose) and the flat-screen camera otherwise — the same choice
+  // NetMgr._sampleLocalPose makes for what it broadcasts, so a test comparing our
+  // head against a remote avatar compares like with like.
+  viewpoint: () => {
+    const rig = scene.playerRig;
+    const cam = (scene.renderer?.xr?.isPresenting ? scene.renderer.xr.getCamera() : scene.camera);
+    cam.updateWorldMatrix(true, false);
+    const h = cam.getWorldPosition(new THREE.Vector3());
+    return { rig: [rig.position.x, rig.position.y, rig.position.z], head: [h.x, h.y, h.z] };
+  },
   nextFrame: _nextAppFrame,
   props: {
     entries: () => _syncedProps,
@@ -2300,6 +2317,15 @@ function computeRouting() {
 let debugHud = null;
 let nowPlayingPanel = null; // world-space "Now Playing + Input" panel near the TV
 let discSwapPanel = null;   // world-space multi-disc Prev/Next control, below nowPlayingPanel
+// The primary console's latest DiscControlBridge status, cached because the room's
+// `tv` key has to carry it (see src/net/TvState.js) and discStatus() is async —
+// a boot publishes `tv` synchronously, long before the worker can answer.
+let currentDiscStatus = null;
+// A disc index the ROOM says is current, to re-apply after OUR boot of the room's
+// game. Set only on the one path that boots from remote `tv` state (a promoted
+// host taking over a departed host's game), so it resumes on the disc that was
+// actually in the drive rather than silently restarting at disc 1.
+let _pendingDiscRestore = null;
 let editor = null;       // Phase E.1 in-VR room editor (set in buildCartridgeWorld)
 let currentRoom = null;  // the parsed room descriptor we serialize back on export
 let roomPosters = [];    // Phase E.2: { prop, object } for each poster, for live env edits
@@ -6409,7 +6435,11 @@ async function loadCartridge(meta, { echo = true } = {}) {
       // Make sure our own core is actually running before we broadcast it (we may
       // have been paused while watching a previous host's stream).
       client.resume();
-      net?.setObjectState('tv', { file: meta.file, core: meta.core, system: meta.system, title: meta.title });
+      // tvStateValue also carries the current disc for multi-disc (.m3u) content.
+      // The refreshDiscPanel() above is async, so currentDiscStatus may still be
+      // stale here — whichever of the two finishes second publishes the disc
+      // fields (refreshDiscPanel's own publishDiscState covers the other order).
+      net?.setObjectState('tv', tvStateValue(meta, currentDiscStatus));
       // M1.2: stream our canvas (and its audio) to the room so clients see it on
       // their TV. Safe to call repeatedly — startBroadcast re-captures when the
       // canvas identity changed, which is exactly what a fresh boot does.
@@ -6712,7 +6742,7 @@ async function bootOnPrimary(meta, bootCore, content, startOptions, { publishTv 
 // re-boots from on host migration.
 function publishTvAndBroadcast(meta) {
   if (!amRoomHost()) return;
-  net?.setObjectState('tv', { file: meta.file, core: meta.core, system: meta.system, title: meta.title });
+  net?.setObjectState('tv', tvStateValue(meta, currentDiscStatus));
   net?.startVideoBroadcast();
 }
 
@@ -6877,7 +6907,7 @@ function _updateSpawnedMeta(consoleId, meta) {
 function applyRemoteTv(value) {
   const isHost = amRoomHost();
   if (!value) {                                  // host cleared the TV (no game)
-    if (!isHost) _showClientWaiting(null);
+    if (!isHost) { discSwapPanel?.userData.setStatus(null); _showClientWaiting(null); }
     return;
   }
   if (!value.file || !value.core) return;
@@ -6890,11 +6920,23 @@ function applyRemoteTv(value) {
     title: value.title,
   });
 
-  if (!isHost) { _showClientWaiting(value); return; }
+  if (!isHost) {
+    // Multi-disc: a watcher has no core of its own to ask which disc is loaded,
+    // so the room's `tv` value IS its disc readout. discStatusFromTv returns null
+    // for single-disc content, which is the panel's "hide yourself" signal.
+    discSwapPanel?.userData.setStatus(discStatusFromTv(value));
+    _showClientWaiting(value);
+    return;
+  }
 
   // Host-side convergence only (we are authoritative and not yet running it).
   if (!CORES[value.core]) return;
   if (currentMeta && currentMeta.file === value.file && currentCore === value.core) return;
+  // Set the pending restore ONLY on the branch that actually boots, and only from
+  // a value that names a disc — otherwise a stale index could survive to a later,
+  // unrelated boot. refreshDiscPanel() consumes it once the core is up.
+  const remote = discStatusFromTv(value);
+  _pendingDiscRestore = remote ? remote.index : null;
   handleCartridgeInserted({ file: value.file, core: value.core, system: value.system, title: value.title }, { echo: false });
 }
 
@@ -6995,9 +7037,10 @@ function _applyHostRole({ isHost, hostId, prevHostId } = {}) {
     const queued = _pendingInsertMeta;
     _pendingInsertMeta = null;
     if (currentMeta?.file && currentMeta?.core) {
-      net.setObjectState('tv', {
-        file: currentMeta.file, core: currentMeta.core, system: currentMeta.system, title: currentMeta.title,
-      });
+      // Our own core is authoritative now, so publish the disc IT has in the
+      // drive too — a promoted host that was already mid-game on disc 2 must not
+      // tell the room it is on disc 1.
+      net.setObjectState('tv', tvStateValue(currentMeta, currentDiscStatus));
       net.startVideoBroadcast();
       setStatus(`Hosting ${currentMeta.title || currentMeta.file}`);
       if (queued && queued.file !== currentMeta.file) handleCartridgeInserted(queued);
@@ -7285,9 +7328,32 @@ function handleMemoryCardInserted(card) {
 // call — RuntimeEmulatorClient forwards it to whichever delegate is active,
 // resolving to undefined for a main-thread (non-disc-control) core.
 async function refreshDiscPanel() {
+  // A display-only watcher has NO core to ask — client.discStatus() resolves to
+  // undefined there — so the room's published `tv` state is its only source of
+  // truth for which disc the host has in the drive. Without this branch a
+  // watcher's panel was permanently blank on a multi-disc game.
+  if (net?.connected && !amRoomHost()) {
+    currentDiscStatus = null;
+    discSwapPanel?.userData.setStatus(discStatusFromTv(net.getObjectState('tv')));
+    return;
+  }
   let status = null;
   try { status = (await client.discStatus?.()) || null; } catch (_) { status = null; }
+  // Resume on the disc the ROOM was playing (host takeover — see
+  // _pendingDiscRestore). Consumed on the first boot that can honour it; dropped
+  // as soon as we know this content can't (single-disc / no disc control), so a
+  // stale index can never leak into a later, unrelated boot.
+  const want = _pendingDiscRestore;
+  _pendingDiscRestore = null;
+  if (want != null && status?.supported && status.discCount > 1 && want !== status.index && want < status.discCount) {
+    try {
+      status = await client.setDisc(want);
+      logger?.event?.('disc-resume', { index: status.index, discCount: status.discCount });
+    } catch (e) { console.warn('[main] disc resume failed:', e); }
+  }
+  currentDiscStatus = status;
   discSwapPanel?.userData.setStatus(status);
+  publishDiscState();
 }
 
 async function stepDisc(delta) {
@@ -7297,13 +7363,33 @@ async function stepDisc(delta) {
   const next = (status.index + delta + status.discCount) % status.discCount;
   try {
     const updated = await client.setDisc(next);
+    currentDiscStatus = updated;
     discSwapPanel?.userData.setStatus(updated);
+    // Tell the room which disc is now in the drive. A swap does not re-boot, so
+    // nothing else on this path would have republished `tv` — which is exactly
+    // why the disc index used to be invisible to every other peer.
+    publishDiscState();
     logger?.event?.('disc-swap', { index: updated.index, discCount: updated.discCount });
     setStatus(`Disc ${updated.index + 1}/${updated.discCount}`);
   } catch (e) {
     console.warn('[main] disc swap failed:', e);
     setStatus(`disc swap failed: ${e.message || e}`);
   }
+}
+
+// Patch the disc fields onto the room's existing `tv` value (host only — the same
+// gate publishTvAndBroadcast uses, so a watcher can never publish). Separate from
+// the game-identity publish because the two facts become known at different
+// times: a boot publishes `tv` synchronously, while discStatus() has to cross the
+// worker boundary. Whichever lands second fills in the rest; mergeDiscIntoTv
+// returns null when there is nothing to say, and setObjectState drops an
+// unchanged value anyway, so redundant calls cost nothing.
+function publishDiscState() {
+  if (!net || !amRoomHost()) return false;
+  const next = mergeDiscIntoTv(net.getObjectState('tv'), currentDiscStatus);
+  if (!next) return false;
+  net.setObjectState('tv', next);
+  return true;
 }
 
 // --- Client event wiring -------------------------------------------------

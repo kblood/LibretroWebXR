@@ -125,15 +125,32 @@ export function createDiscSwapPanel({ onPrev, onNext } = {}) {
   // neither the explicit nor sequential disc-control export — showing Prev/
   // Next there would just make every press fail with "does not expose disc
   // control" (Codex review finding, P2 on commit 8552959).
+  let _status = null;
   group.userData.setStatus = (status) => {
     if (!status || !status.supported || !(status.discCount > 1)) {
+      _status = null;
       group.visible = false;
       return;
     }
+    _status = status;
     group.visible = true;
     _label = `${status.index + 1} / ${status.discCount}${status.ejected ? ' (open)' : ''}`;
     redrawStatus();
   };
+
+  // What the panel is CURRENTLY showing — the readable half of the push-only
+  // contract above, so a test can assert on the label a user would read instead
+  // of re-deriving it from whatever it thinks the core should have said. The
+  // `remote` flag (set by src/net/TvState.js's discStatusFromTv) distinguishes
+  // "the room told us this" from "our own core reports this".
+  group.userData.getStatus = () => ({
+    visible: !!group.visible,
+    label: _label,
+    index: _status?.index ?? null,
+    discCount: _status?.discCount ?? null,
+    ejected: !!_status?.ejected,
+    remote: !!_status?.remote,
+  });
 
   group.userData.setVisible = (v) => { group.visible = v; };
 

@@ -237,6 +237,68 @@ console.log('--- the REAL ConsoleRuntime honours the gate ---');
   ok('no predicate = allowed', solo.runAllowed() === true && solo.resume() === true);
 }
 
+// isLive() used to be bare `!this.client?.paused`, which is FALSY on a client
+// that was never started — so a display-only watcher's never-booted primary
+// console reported live:true. That false positive is catalogued in
+// docs/MULTIPLAYER.md and docs/HANDOFF.md (M1.4) as a documented trap that every
+// assertion had to remember to filter around.
+console.log('--- isLive() is false for a runtime that never booted a core ---');
+{
+  // Exactly the display-only-watcher shape: main.js adopts { client, canvas } for
+  // the primary console, then the M1.4 gate means the core is never started.
+  // `paused` is false and `ready` is false, because nothing ever ran.
+  const coreless = { paused: false, ready: false, pause() { this.paused = true; }, resume() { this.paused = false; } };
+  const rt = new ConsoleRuntime({ id: 'console0', adopt: { client: coreless, canvas: {} } });
+
+  ok('no core yet ⇒ hasCore() false', rt.hasCore() === false);
+  ok('no core yet ⇒ isLive() false', rt.isLive() === false);
+  ok('no core yet ⇒ isLoaded() false', rt.isLoaded() === false);
+  // NEGATIVE CONTROL: the old one-liner, evaluated on the same object. If this
+  // ever agrees with isLive(), the fix has been reverted.
+  ok('RED: the pre-fix formula claimed it WAS live', (!coreless.paused) === true);
+  ok('RED: the fix disagrees with the pre-fix formula here', rt.isLive() !== !coreless.paused);
+
+  // Once main.js records the externally-driven boot, it becomes honest again.
+  rt.noteLoaded('fceumm', { system: 'nes', title: 'Pong' });
+  ok('after noteLoaded ⇒ live', rt.isLive() === true);
+  rt.pause();
+  ok('paused after a real boot ⇒ not live', rt.isLive() === false);
+
+  // The adopted primary is also booted directly by main.js via client.start(),
+  // which sets client.ready before noteLoaded() lands — that window must not read
+  // as coreless either.
+  const readyClient = { paused: false, ready: true, pause() { this.paused = true; }, resume() { this.paused = false; } };
+  const adopted = new ConsoleRuntime({ id: 'console1', adopt: { client: readyClient, canvas: {} } });
+  ok('client.ready alone ⇒ hasCore()', adopted.hasCore() === true);
+  ok('client.ready alone ⇒ isLive()', adopted.isLive() === true);
+
+  // A mid-boot runtime (load() entered, not yet resolved) must still be pausable,
+  // or a display-only client's suspend would miss the core that is about to start.
+  const booting = new ConsoleRuntime({ id: 'console2', adopt: { client: { paused: false, ready: false, pause() { this.paused = true; }, resume() {} }, canvas: {} } });
+  booting._started = true;                                   // what load() sets before its await
+  ok('mid-boot ⇒ hasCore()', booting.hasCore() === true);
+  ok('mid-boot ⇒ isLive() (so pauseAll reports it)', booting.isLive() === true);
+}
+
+console.log('--- suspending a rack still stops a coreless / mid-boot runtime ---');
+{
+  // The suspend paths must NOT gate on isLive() now that it can be false for a
+  // runtime whose main loop is about to start: pause() has to be asserted anyway
+  // so the boot comes up stopped.
+  const coreless = { paused: false, ready: false, pause() { this.paused = true; }, resume() { this.paused = false; } };
+  const rack = new RackMgr({ allowRun: () => false });
+  const rt = rack.add(new ConsoleRuntime({ id: 'console0', adopt: { client: coreless, canvas: {} } }));
+  ok('coreless runtime is not live', rt.isLive() === false);
+
+  rack.applyBudget();
+  ok('applyBudget still pre-asserted the pause on a coreless runtime', coreless.paused === true);
+
+  coreless.paused = false;
+  const stopped = rack.pauseAll('display-only-client');
+  ok('pauseAll still pre-asserted the pause', coreless.paused === true);
+  eq('but reports nothing stopped (there was no core running)', stopped, []);
+}
+
 console.log('--- pauseAll stops every runtime regardless of loaded/budget ---');
 {
   const rack = new RackMgr();

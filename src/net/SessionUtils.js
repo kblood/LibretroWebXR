@@ -31,6 +31,52 @@ export function randomRoomSuffix() {
   return Math.random().toString(36).slice(2, 6);
 }
 
+// --- Avatar spawn seats ----------------------------------------------------
+//
+// Every peer used to build its world with the player rig at the SAME room origin
+// (SceneMgr's `playerRig.position.set(0, 0, 1.5)`), and poses go out in world
+// space — so a remote peer's avatar head/visor plane materialised exactly at the
+// watcher's own camera and occluded most of the TV it had just joined to watch.
+// It reads as "the shared screen is broken" on a headset; it was catalogued as a
+// known cosmetic trap in docs/MULTIPLAYER.md and docs/HANDOFF.md (M1.4c) for
+// exactly that reason.
+//
+// The fix is a small deterministic per-seat offset, keyed on join order
+// (seniority = how many peers were already in the room when we arrived, which is
+// also how the server picks the host). Seat 0 — the senior peer / host — keeps
+// the canonical origin, so solo play and every existing single-peer expectation
+// are byte-identical; each later joiner takes the next spot in an alternating
+// left/right arc that fans out in front of the screen.
+//
+// Not a seating algorithm: no collision checks, no furniture awareness, no
+// re-seating when someone leaves. Just "don't stand inside each other by
+// default". Locomotion (src/LocomotionMgr.js) still moves anyone anywhere.
+const SEAT_STEP_X = 0.75;   // m sideways per ring
+const SEAT_STEP_Z = 0.30;   // m backwards per ring (fanning out from the screen)
+const SEAT_RINGS  = 3;      // rings before the pattern wraps (keeps |x| ≤ 2.25 in a 6 m room)
+const SEAT_WRAP_Z = 0.45;   // extra m back per wrap, so seat 1 and seat 7 don't collide
+
+/**
+ * Deterministic spawn offset for the `index`-th peer to join a room, as
+ * `[dx, dy, dz]` metres to ADD to the room's default rig position.
+ *
+ * Seat 0 → `[0, 0, 0]`. Odd seats go left, even seats right, stepping further
+ * out and back every pair. Pure: same index ⇒ same offset, on every peer, so two
+ * clients agree on where everyone stands without exchanging seat assignments.
+ *
+ * @param {number} index  join order / seniority (0 = the room's senior peer)
+ * @returns {[number, number, number]}
+ */
+export function spawnSeatOffset(index) {
+  const i = Number.isFinite(index) && index > 0 ? Math.floor(index) : 0;
+  if (i === 0) return [0, 0, 0];
+  const pair = Math.ceil(i / 2) - 1;             // 0,0,1,1,2,2,…
+  const ring = (pair % SEAT_RINGS) + 1;          // 1..SEAT_RINGS
+  const wrap = Math.floor(pair / SEAT_RINGS);    // how many times the arc wrapped
+  const side = (i % 2 === 1) ? -1 : 1;           // odd → left, even → right
+  return [side * SEAT_STEP_X * ring, 0, SEAT_STEP_Z * ring + wrap * SEAT_WRAP_Z];
+}
+
 const SID_KEY = 'libretrowebxr.sid';
 let _memSid = null;
 

@@ -744,7 +744,12 @@ window.__testApi = createTestApi({
     runtimes: () => [{
       id: 'desktop', coreName: loadedMeta?.core ?? null, system: loadedMeta?.system ?? null,
       title: loadedMeta?.title ?? null, canvas, client,
-      isLoaded: () => booted, isLive: () => !client?.paused,
+      // isLive() mirrors ConsoleRuntime.isLive(): a core must actually have been
+      // booted, not merely be un-paused. `paused` is falsy on a client that never
+      // started, so bare `!client.paused` claimed live:true for a coreless
+      // display-only watcher (see ConsoleRuntime.hasCore's note).
+      isLoaded: () => booted, isLive: () => booted && !client?.paused,
+      hasCore: () => booted,
       runAllowed: () => mayRunLocalCore(),
       sendInput: (t, code, key, kc, loc) => client.sendInput(t, code, key, kc, loc),
     }],

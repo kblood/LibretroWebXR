@@ -186,6 +186,21 @@ export class Peer {
   waitForHostElection(opts) { return this.call('session.waitForHostElection', [opts ?? {}]); }
   becomeHost(opts) { return this.call('session.becomeHost', [opts ?? {}]); }
   peers() { return this.call('session.peers'); }
+  /** This peer's own position + the spawn seat it was given on join. */
+  viewpoint() { return this.call('session.viewpoint'); }
+  /** Remote peers' avatar HEAD positions in world space (`[{id,nick,pos}]`). */
+  avatars() { return this.call('session.avatars'); }
+  /**
+   * Smallest horizontal (XZ) distance in metres from this peer's own head to any
+   * remote avatar's head. `null` when no avatar has a pose yet. A value near 0
+   * means someone is standing inside us — the avatar-occlusion bug.
+   */
+  async nearestAvatarDistance() {
+    const [vp, avs] = await Promise.all([this.viewpoint(), this.avatars()]);
+    const positioned = avs.filter((a) => Array.isArray(a.pos) && a.pos[1] > -5);
+    if (!positioned.length) return null;
+    return Math.min(...positioned.map((a) => Math.hypot(a.pos[0] - vp.head[0], a.pos[2] - vp.head[2])));
+  }
   objectState(key) { return this.call('session.objectState', [key]); }
   setObjectState(key, value) { return this.call('session.setObjectState', [key, value]); }
   wireRx(ch) { return this.call('session.wireRx', [ch]); }
@@ -275,6 +290,10 @@ export class Peer {
 
   // -- tv / pixels --------------------------------------------------------
   tvs() { return this.call('tv.list'); }
+  /** Multi-disc state: `{ panel:{visible,label,index,…}, published:{disc,…} }`. */
+  discState() { return this.call('tv.disc'); }
+  /** Drive the real in-world Prev/Next disc buttons. */
+  stepDisc(delta) { return this.call('tv.step', [delta ?? 1]); }
   tvState(tvId) { return this.call('tv.get', [tvId]); }
   /** `{ hash, sig, kind, w, h, blank }` — see docs for hash vs sig. */
   sampleTv(tvId, opts) { return this.call('tv.sample', [tvId, opts ?? {}]); }

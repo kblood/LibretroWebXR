@@ -7,6 +7,7 @@
 // Wiring (in main.js): one scene tick callback calls sync(presence.peers())
 // then tick(dt). [[src/net/NetMgr.js]] keeps PresenceState fed from the wire.
 
+import * as THREE from 'three';
 import { Avatar } from './Avatar.js';
 
 export class AvatarMgr {
@@ -39,6 +40,24 @@ export class AvatarMgr {
   /** Ease every avatar toward its latest target (call each frame). */
   tick(dtMs) {
     for (const av of this._avatars.values()) av.tick(dtMs);
+  }
+
+  /**
+   * Where every remote avatar's HEAD actually is, in world space, as plain
+   * arrays — the evidence channel for "is a peer's head planted in my face,
+   * occluding the TV" (the spawn-seat fix in SessionUtils.spawnSeatOffset).
+   * Plain numbers, not Object3Ds, so `__testApi` can hand them to a driver
+   * across page.evaluate without a serialiser.
+   * @returns {{id:string, nick:string, pos:number[]}[]}
+   */
+  positions() {
+    const out = [];
+    for (const [id, av] of this._avatars) {
+      av.head.updateWorldMatrix(true, false);
+      const p = av.head.getWorldPosition(new THREE.Vector3());
+      out.push({ id, nick: av.nick, pos: [p.x, p.y, p.z] });
+    }
+    return out;
   }
 
   /** The head Object3D for a peer (for VoiceMgr's positional audio), or null. */

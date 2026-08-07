@@ -348,6 +348,31 @@ export function createTestApi(deps = {}) {
       return { isHost: true, hostId: session.state().hostId, via: 'fallback-claim' };
     },
     peers() { return session.state().peers; },
+    /**
+     * Where THIS peer is standing, plus the spawn seat it was given on join
+     * (see SessionUtils.spawnSeatOffset). `seatIndex` is its join order — 0 for
+     * the room's senior peer, which keeps the canonical origin — and `rig`/`head`
+     * are world-space `[x,y,z]`.
+     *
+     * Pair it with `avatars()` to answer the question a screenshot can't: is a
+     * remote peer's head plane parked at my camera, occluding the TV?
+     */
+    viewpoint() {
+      const n = netOf();
+      const vp = need(deps.viewpoint, 'the player viewpoint')();
+      return {
+        ...vp,
+        seatIndex: n?.spawnSeat?.index ?? null,
+        seatOffset: n?.spawnSeat?.offset ?? null,
+      };
+    },
+    /**
+     * Every REMOTE peer's avatar head in world space: `[{id, nick, pos}]`.
+     * Empty when solo. The honest measurement for avatar occlusion is the
+     * horizontal distance between one of these and `viewpoint().head` — two
+     * peers spawned on the same spot read ~0.
+     */
+    avatars() { return netOf()?.avatars?.positions?.() ?? []; },
     /** Shared room STATE (M0.5 channel). `key` e.g. 'tv', 'room', 'prop:<id>'. */
     objectState(key) { return liveNet().getObjectState?.(key) ?? null; },
     objectEntries() { return liveNet().objects?.entries?.() ?? []; },
@@ -689,9 +714,13 @@ export function createTestApi(deps = {}) {
     system: rt.system ?? null,
     title: rt.title ?? null,
     loaded: !!rt.isLoaded?.(),
-    // `live` is only "not paused". It is NOT proof of a running core — an
-    // unbooted client reads live:true. Use running()/progress() for that.
+    // `live` = a core exists AND its main loop is not paused. It is still NOT
+    // proof that the picture is moving (a wedged core reads live:true) — use
+    // running()/progress() for that. It used to be bare `!paused`, which read
+    // true for a runtime that never booted at all; ConsoleRuntime.isLive() now
+    // requires hasCore(), so a coreless watcher honestly reports live:false.
     live: !!rt.isLive?.(),
+    hasCore: rt.hasCore ? !!rt.hasCore() : null,
     allowed: !!rt.runAllowed?.(),
     canvasId: rt.canvas?.id ?? null,
     frames: rt.client?.frameBridge?.stats?.()?.framesPresented ?? null,
@@ -766,6 +795,30 @@ export function createTestApi(deps = {}) {
   const tv = {
     list() { return TVS().map(tvView); },
     get(tvId) { return tvView(tvOf(tvId)); },
+    /**
+     * Multi-disc (`.m3u`) state as this peer sees it:
+     * `{ panel:{visible,label,index,discCount,ejected,remote}, published }`.
+     *
+     * `panel` is what the in-world DiscSwapPanel is really displaying (its own
+     * getStatus, i.e. the label a user would read), and `published` is the disc
+     * fields on the room's `tv` key. On a watcher `panel.remote` is true, because
+     * a peer with no core of its own can only know the disc from the room state —
+     * which is precisely what used to be missing.
+     */
+    disc() {
+      const panel = need(deps.discPanel, 'the disc-swap panel')();
+      const t = netOf()?.getObjectState?.('tv') ?? null;
+      return {
+        panel,
+        published: t ? { disc: t.disc ?? null, discCount: t.discCount ?? null, ejected: !!t.discEjected } : null,
+      };
+    },
+    /** Step the disc via the real Prev/Next buttons' handler (host-side). */
+    async step(delta = 1) {
+      await need(deps.stepDisc, 'the disc-swap control')(delta);
+      await nextFrame();
+      return tv.disc();
+    },
     /**
      * Sample what is REALLY on the screen: `{ hash, sig, w, h, kind, blank }`.
      * hash → compare against this same peer later ("did it change").

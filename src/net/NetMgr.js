@@ -19,7 +19,7 @@ import { AvatarMgr } from './AvatarMgr.js';
 import { VoiceMgr } from './VoiceMgr.js';
 import { VideoMgr } from './VideoMgr.js';
 import { MSG, makeJoin, makePose, makeSignal, makeState, makeInput, makeWire, hostInputTarget, encode, decode } from './NetProtocol.js';
-import { stableSessionId } from './SessionUtils.js';
+import { stableSessionId, spawnSeatOffset } from './SessionUtils.js';
 import { FALLBACK_HOST_KEY, normaliseClaim, resolveFallbackHost } from './HostElection.js';
 
 // Client-side fallback host election (see [[src/net/HostElection.js]]): how long
@@ -80,6 +80,14 @@ export class NetMgr {
     // list (built via NetProtocol.buildIceServers) is shared by both meshes so
     // peers behind symmetric NAT can relay through TURN.
     this.iceServers = iceServers;
+
+    // Avatar spawn seat (see spawnSeatOffset): where THIS peer stands relative to
+    // the room's default rig position. Assigned on HELLO from our seniority in the
+    // roster; null until then (and for a peer that never connects). `_rigHome` is
+    // the rig position as it was when this NetMgr was built, so re-seating on a
+    // reconnect is absolute and can never accumulate drift.
+    this.spawnSeat = null;
+    this._rigHome = this.scene?.playerRig?.position?.clone?.() ?? null;
 
     this.presence = new PresenceState({ ttlMs: 5000 });
     // M0.5 room-object sync: shared key→value state (the loaded game, etc.).
@@ -391,6 +399,12 @@ export class NetMgr {
         const leftId = (msg.type === MSG.LEAVE) ? msg.id : null;
         this.presence.apply(msg, this._now());
         if (msg.type === MSG.HELLO) {
+          // Take a spawn seat before anything else: presence.apply(HELLO) has just
+          // registered every peer that was ALREADY here (self excluded), so
+          // presence.size is exactly our join order — 0 for the first peer in the
+          // room, 1 for the next, and so on. Without this every peer stands at the
+          // same origin and their avatars occlude each other's TV.
+          this._takeSpawnSeat(this.presence.size);
           // A server that knows about host election ALWAYS sends the key (even as
           // null, e.g. during a departed host's reclaim window). Its total absence
           // means a pre-M1.4 relay → the peers must elect among themselves, or
@@ -451,6 +465,33 @@ export class NetMgr {
     }, delay);
   }
 
+  /**
+   * Move the local player rig onto its spawn seat (see SessionUtils'
+   * spawnSeatOffset). Absolute — always `home + offset`, never `+=` — so a
+   * reconnect that re-seats us cannot accumulate drift, and _clearSpawnSeat()
+   * puts the rig back where it started. No-ops without a rig (Node unit tests
+   * pass a stub scene).
+   *
+   * @param {number} index  join order (0 = first peer in the room)
+   * @returns {{index:number, offset:number[]}|null}
+   */
+  _takeSpawnSeat(index) {
+    const offset = spawnSeatOffset(index);
+    this.spawnSeat = { index: Number.isFinite(index) ? Math.max(0, Math.floor(index)) : 0, offset };
+    const rig = this.scene?.playerRig;
+    if (rig && this._rigHome) {
+      rig.position.set(this._rigHome.x + offset[0], this._rigHome.y + offset[1], this._rigHome.z + offset[2]);
+    }
+    return this.spawnSeat;
+  }
+
+  /** Put the rig back on the room's default spot (leaving the session). */
+  _clearSpawnSeat() {
+    const rig = this.scene?.playerRig;
+    if (rig && this._rigHome && this.spawnSeat) rig.position.copy(this._rigHome);
+    this.spawnSeat = null;
+  }
+
   // Head + both hands as world-space 7-tuples (hands null when not connected).
   _sampleLocalPose() {
     const r = this.scene.renderer;
@@ -508,6 +549,9 @@ export class NetMgr {
     this.video.disable();
     this.avatars.removeAll();
     this.presence.clear();
+    // Give up our spawn seat — solo play belongs at the room's default spot, and a
+    // later re-join re-seats from a clean home instead of stacking offsets.
+    this._clearSpawnSeat();
     // Drop the room's shared state too: leaving means the host's `tv`/`room`
     // snapshot is no longer ours to converge on (a stale copy left here made the
     // post-leave code think it still had to adopt the host's room).
@@ -523,6 +567,13 @@ export class NetMgr {
       avatarCount: () => this.avatars.count,
       peers: () => this.presence.peers().map((p) => ({ id: p.id, nick: p.nick })),
       sampleLocalPose: () => this._sampleLocalPose(),
+      avatarPositions: () => this.avatars.positions(),
+      // Spawn seats (see SessionUtils.spawnSeatOffset). takeSpawnSeat() is here so
+      // a test can force the PRE-FIX world — every peer on seat 0, stacked on the
+      // room origin — and assert that the avatar-occlusion measurement really does
+      // go red there. Nothing in the app calls it.
+      spawnSeat: () => this.spawnSeat,
+      takeSpawnSeat: (index) => this._takeSpawnSeat(index),
       enableVoice: () => this.enableVoice(),
       toggleMute: () => this.voice.toggleMute(),
       voice: this.voice.debugApi(),

@@ -48,6 +48,10 @@ export class ConsoleRuntime {
     this.title = null;
     this.weight = 1;
     this.loaded = false;
+    // True from the moment a core boot is *attempted* (top of load(), or
+    // noteLoaded() for an externally-booted adopted client). Distinct from
+    // `loaded`, which only flips once the boot resolved — see hasCore().
+    this._started = false;
     this._disposed = false;
     this._audio = audio;
 
@@ -74,8 +78,35 @@ export class ConsoleRuntime {
   /** True once a ROM has booted (or, in adopt mode, if the client is ready). */
   isLoaded() { return this.loaded || (this.adopted && !!this.client?.ready); }
 
-  /** Whether the core's main loop is currently running (not paused). */
-  isLive() { return !this.client?.paused; }
+  /**
+   * Whether a core genuinely EXISTS on this runtime — i.e. a boot has at least
+   * been attempted. A freshly-constructed ConsoleRuntime (the display-only
+   * watcher's adopted primary is the important case: main.js builds it, then the
+   * M1.4 gate stops it ever booting) has an EmulatorClient object but no core
+   * and no main loop, so every "is it running" question about it must answer no.
+   *
+   * Three sources, because no single one covers every boot path:
+   *   • `loaded`   — ConsoleRuntime.load() finished, or noteLoaded() recorded an
+   *                  externally-driven boot (main.js's primary console).
+   *   • `_started` — load() was ENTERED but hasn't resolved yet (a mid-boot core
+   *                  whose main loop is about to start still has to be pausable).
+   *   • `client.ready` — the adopted primary is booted directly by main.js via
+   *                  `client.start()`; this covers the window before its
+   *                  noteLoaded() call lands.
+   */
+  hasCore() { return this.loaded || this._started || !!this.client?.ready; }
+
+  /**
+   * Whether the core's main loop is currently running.
+   *
+   * NOT just `!client.paused`: `paused` is falsy on a client that was never
+   * started, so the old one-liner reported `live: true` for a CORELESS runtime —
+   * documented as a live trap in docs/MULTIPLAYER.md and docs/HANDOFF.md (M1.4),
+   * where a display-only watcher's `__rack.live()` claimed its never-booted
+   * primary was running and every test had to remember to filter on `r.core`.
+   * A runtime with no core is not live; requiring hasCore() makes that honest.
+   */
+  isLive() { return this.hasCore() && !this.client?.paused; }
 
   /**
    * Boot a ROM into this console's core. `core` is the systems.js core info
@@ -85,6 +116,9 @@ export class ConsoleRuntime {
    * @param {{system?:string,title?:string,firmware?:object,restoredSaves?:object}} [meta]
    */
   async load(romBuffer, core, meta = {}) {
+    // Marked BEFORE the await: from here on a main loop may start at any moment,
+    // so isLive()/pauseAll() must already treat this runtime as having a core.
+    this._started = true;
     const execution = meta.execution ?? core.execution;
     // Worker-execution cores (PSX/N64) push decoded PCM straight into
     // pushSamples() instead of creating a same-thread AudioContext (see
@@ -134,6 +168,7 @@ export class ConsoleRuntime {
   // drives the primary console's boot directly), record what it loaded so the
   // budget knows this console's real weight/system without load() owning boot.
   noteLoaded(coreName, meta = {}) {
+    this._started = true;
     this.coreName = coreName;
     this.system = meta.system ?? this.system;
     this.title = meta.title ?? this.title;

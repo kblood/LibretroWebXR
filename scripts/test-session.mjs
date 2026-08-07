@@ -2,7 +2,7 @@
 // Run: node scripts/test-session.mjs
 // Exit 0 = all pass, 1 = any failure.
 
-import { sanitiseRoom, randomRoomSuffix } from '../src/net/SessionUtils.js';
+import { sanitiseRoom, randomRoomSuffix, spawnSeatOffset } from '../src/net/SessionUtils.js';
 
 let passed = 0;
 let failed = 0;
@@ -62,6 +62,55 @@ const eq = (name, got, want) => {
   const s2 = randomRoomSuffix();
   // We just check they're valid, not that they differ (flaky for pure randomness).
   ok(typeof s2 === 'string' && s2.length === 4, 'second call also valid');
+}
+
+// === spawnSeatOffset =======================================================
+// The avatar-occlusion fix: every peer used to spawn on the room's origin, so a
+// remote peer's head plane landed at the watcher's own camera and hid the TV.
+{
+  // Seat 0 (the room's senior peer / host) keeps the canonical origin, so solo
+  // play and every single-peer expectation are untouched.
+  eq('seat 0 = no offset', spawnSeatOffset(0), [0, 0, 0]);
+
+  // Defensive: garbage in ⇒ the safe seat, never NaN into a THREE position.
+  eq('negative index → seat 0', spawnSeatOffset(-3), [0, 0, 0]);
+  eq('null → seat 0',           spawnSeatOffset(null), [0, 0, 0]);
+  eq('NaN → seat 0',            spawnSeatOffset(NaN), [0, 0, 0]);
+  eq('undefined → seat 0',      spawnSeatOffset(undefined), [0, 0, 0]);
+  eq('fractional index floors', spawnSeatOffset(1.9), spawnSeatOffset(1));
+
+  // THE POINT OF THE FIX: nobody after seat 0 stands on the origin.
+  for (let i = 1; i <= 12; i++) {
+    const [x, , z] = spawnSeatOffset(i);
+    ok(Math.hypot(x, z) > 0.5, `seat ${i} is at least 0.5 m off the origin (got ${Math.hypot(x, z).toFixed(2)} m)`);
+  }
+
+  // …and no two of the first dozen seats coincide, or two joiners would still
+  // occlude each other.
+  const seen = new Map();
+  for (let i = 0; i <= 12; i++) {
+    const key = spawnSeatOffset(i).map((n) => n.toFixed(3)).join(',');
+    ok(!seen.has(key), `seat ${i} does not collide with seat ${seen.get(key)}`);
+    seen.set(key, i);
+  }
+
+  // Alternating sides, fanning out: odd left, even right.
+  ok(spawnSeatOffset(1)[0] < 0, 'seat 1 goes left');
+  ok(spawnSeatOffset(2)[0] > 0, 'seat 2 goes right');
+  eq('seats 1 and 2 mirror', spawnSeatOffset(1)[0], -spawnSeatOffset(2)[0]);
+  ok(Math.abs(spawnSeatOffset(3)[0]) > Math.abs(spawnSeatOffset(1)[0]), 'seat 3 sits further out than seat 1');
+  ok(spawnSeatOffset(3)[2] > spawnSeatOffset(1)[2], 'later rings stand further back');
+
+  // Pure + deterministic: the same index gives the same seat on every peer, which
+  // is what lets two clients agree on where everyone is without negotiating.
+  eq('deterministic', spawnSeatOffset(5), spawnSeatOffset(5));
+
+  // Stay inside SceneMgr's 6 x 8 m room (rig home is z = 1.5, so |x| < 3 and
+  // z < 2.5 keeps every seat off the walls).
+  for (let i = 0; i <= 24; i++) {
+    const [x, y, z] = spawnSeatOffset(i);
+    ok(Math.abs(x) < 2.6 && z >= 0 && z < 2.4 && y === 0, `seat ${i} stays inside the room (${x}, ${y}, ${z})`);
+  }
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

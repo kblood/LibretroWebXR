@@ -393,17 +393,41 @@ the design changes. `docs/HEADSET_LIGHTGUN_VALIDATION.md` §1.6 points there too
    `npm run smoke-host-picker`, so this step is now a confirmation on real hardware
    rather than a known-broken case; if it ever regresses, run that smoke first.
 
-Two cosmetic things that read as "the shared screen is broken" on a headset but
-aren't:
-- **Both peers spawn at the same origin**, so the remote avatar's head/face plane
-  sits *at your camera* and occludes most of the TV. Proven by traversing for
-  `avatar:*` and hiding it — the picture behind it is clean and correct. Spawning
-  joiners at an offset is the real fix; until then, step aside before judging the
-  stream.
-- `window.__rack.live()` reports `live:true` for a **coreless** runtime on a
-  display-only watcher, because `ConsoleRuntime.isLive()` is just
-  `!this.client?.paused` (`src/ConsoleRuntime.js:78`). Harmless today only because
-  every assertion filters on `r.core && r.live` — keep that filter in any new check.
+Two things that used to read as "the shared screen is broken" on a headset,
+**both fixed 2026-08-07** (`npm run smoke-mp-state`):
+
+- ~~**Both peers spawn at the same origin**~~, so the remote avatar's head/face
+  plane sat *at your camera* and occluded most of the TV. **Fixed:** a joining peer
+  now takes a deterministic spawn seat — `spawnSeatOffset(index)` in
+  `src/net/SessionUtils.js`, applied by `NetMgr._takeSpawnSeat()` on HELLO, where
+  `index` is `presence.size` (i.e. join order / the same seniority the server
+  elects the host by). Seat 0 keeps the canonical origin, so solo play and the
+  host's view are unchanged; later joiners fan out left/right in front of the
+  screen. Measured: host↔watcher head distance **0.16 m before → 0.82–0.94 m
+  after**, with a peer forcibly re-seated to seat 0 as the red control.
+- ~~`window.__rack.live()` reports `live:true` for a **coreless** runtime~~ on a
+  display-only watcher, because `ConsoleRuntime.isLive()` was just
+  `!this.client?.paused` — falsy on a client that never started. **Fixed:**
+  `isLive()` now also requires `hasCore()` (`loaded || _started ||
+  client.ready`), so a never-booted runtime honestly reports `live:false`, and
+  `rack.list()` carries `hasCore` alongside it. The old rule "filter on
+  `r.core && r.live`" is no longer load-bearing, but it is still correct.
+  Note the two rack *suspend* paths (`applyBudget`'s denied branch and
+  `pauseAll`) deliberately no longer gate on `isLive()` — they call `pause()`
+  unconditionally, so a runtime whose core is about to start still gets the
+  paused flag pre-asserted.
+
+One state gap fixed in the same pass:
+
+- **The room's `tv` key now carries the current disc** for multi-disc (`.m3u`)
+  content — `disc` / `discCount` / `discEjected`, shaped by `src/net/TvState.js`.
+  Before this a disc swap (`stepDisc`) never republished anything, so a watcher's
+  disc panel was permanently blank, a late joiner was told the game but not the
+  disc, and a promoted host resumed a multi-CD game at disc 1. A watcher has no
+  core to ask, so `applyRemoteTv` drives its panel straight from the room state
+  (flagged `remote: true`), and a promoted host re-applies the room's index after
+  its own boot via `_pendingDiscRestore`. Plain cartridges publish no disc keys at
+  all, so nothing else on the wire changed.
 
 ### Writing a NEW headless MP test — use the automation API, not new one-off hooks
 
@@ -421,6 +445,14 @@ false positive noted just above is *why* it exists), `video.progress()` instead 
 `receivingCount()`, `tv.get().kind` instead of reaching into three.js, and
 `mp.samePicture()` for the host↔watcher pixel correlation `smoke-host-picker.mjs`
 open-codes. The existing scripts still work and were not migrated.
+
+Added 2026-08-07 for the three fixes above, all through the same facade:
+`session.viewpoint()` (own rig/head + the assigned spawn seat),
+`session.avatars()` (remote avatar HEAD world positions — the honest occlusion
+measurement, paired with the harness's `peer.nearestAvatarDistance()`),
+`tv.disc()` (what the DiscSwapPanel really displays + the disc fields on the
+room's `tv` key) and `tv.step(±1)` (the real in-world Prev/Next handler).
+`rack.list()` entries also gained `hasCore`.
 
 ## References
 - Test automation surface: `docs/TEST_AUTOMATION.md`

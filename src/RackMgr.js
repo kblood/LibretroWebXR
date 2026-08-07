@@ -96,7 +96,13 @@ export class RackMgr {
     // budget's job is to SUSPEND, never to resume. Covers every loaded runtime
     // AND any still-booting one, primary and secondary alike.
     if (!this.runAllowed()) {
-      for (const r of this.runtimes()) if (r.isLive?.()) r.pause();
+      // Unconditional, NOT `if (isLive())`: pause() is idempotent, and a runtime
+      // that has no core yet still needs the paused flag pre-asserted so a boot
+      // that starts a millisecond later comes up stopped (EmulatorClient
+      // re-applies `paused` after start()). isLive() deliberately answers false
+      // for a coreless runtime (see ConsoleRuntime.hasCore), so gating on it here
+      // would have quietly reopened that window.
+      for (const r of this.runtimes()) r.pause?.();
       const paused = loaded.map((r) => r.id);
       this._logger?.event?.('rack-budget', {
         live: [], paused, liveWeight: 0, focus: this._focusedId, mode: 'suspended',
@@ -138,14 +144,19 @@ export class RackMgr {
    * runtime reports itself loaded. Used when this machine must run zero cores
    * (becoming a display-only netplay client). Returns the ids it stopped.
    *
-   * Deliberately not `loaded`-filtered: a runtime mid-boot isn't "loaded" yet but
-   * its main loop will start, and a paused-then-suspended secondary console must
-   * stay stopped. Returns the ids that were actually live.
+   * Deliberately not `loaded`-filtered, and deliberately not isLive()-filtered
+   * either: a runtime mid-boot isn't "loaded" yet but its main loop will start,
+   * and a runtime with no core at all (ConsoleRuntime.hasCore() false ⇒ isLive()
+   * false) still needs the paused flag set so a boot begun a moment later comes
+   * up stopped. pause() is idempotent, so calling it on everything is free.
+   * `stopped` reports only the runtimes that were genuinely live.
    */
   pauseAll(reason = null) {
     const stopped = [];
     for (const r of this.runtimes()) {
-      if (r.isLive?.()) { r.pause(); stopped.push(r.id); }
+      const wasLive = r.isLive?.();
+      r.pause?.();
+      if (wasLive) stopped.push(r.id);
     }
     this._logger?.event?.('rack-pause-all', { reason, stopped, total: this._runtimes.size });
     return stopped;

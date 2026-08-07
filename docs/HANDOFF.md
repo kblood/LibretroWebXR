@@ -775,14 +775,10 @@ M1.4d's fix does *not* cover it — a plausible third instance of that bug class
   green** with the fix at corr ≈0.99. Regression run alongside it:
   `smoke-shared-game` 45/45, `smoke-display-only` 54/54, `smoke-room-inherit` 27/27,
   `npm test` green.
-  **Two minor items from the same pass** (neither is this bug): both peers spawn at
-  the *same origin*, so a watcher has the remote avatar's head plane planted at its
-  camera occluding most of the TV — hiding `avatar:*` proves the picture behind it is
-  correct, but on a headset this alone reads as "sharing is broken"; and
-  `__rack.live()` reports `live:true` for a **coreless** runtime on a watcher because
-  `ConsoleRuntime.isLive()` is just `!this.client?.paused`
-  (`src/ConsoleRuntime.js:78`) — harmless only because every assertion filters on
-  `r.core && r.live`.
+  **Two minor items from the same pass** (neither is this bug), **both fixed
+  2026-08-07** — see the M1.4e entry below: joiners now take a deterministic spawn
+  seat instead of stacking on the room origin, and `ConsoleRuntime.isLive()` now
+  requires a core to exist so a coreless watcher stops reporting `live:true`.
   **✅ Verified against the DEPLOYED build (2026-08-07, `097cc92`).** The fix was
   found *and* fixed on localhost (found at `11c86bd`), so per M1.4c's own lesson it
   was deployed (`npm run deploy-app`) and `smoke-host-picker` re-run against
@@ -791,10 +787,61 @@ M1.4d's fix does *not* cover it — a plausible third instance of that bug class
   `demo-automation-api` 49/49. A second, separate deploy gap surfaced doing this —
   `2967e08` (the `window.__testApi` automation surface) had also never been
   deployed, because the prior app-only deploy predated it.
-  **Still unverified:** a physical-headset pass (no hardware), and the disc-swap
-  panel's republish behaviour, which was never checked and is a plausible third
-  instance of the same class (it does not go through `bootOnPrimary`, so the fix
-  above does **not** cover it).
+  **Still unverified:** a physical-headset pass (no hardware). The disc-swap panel's
+  republish behaviour — flagged here as "a plausible third instance of the same
+  class", and it was — is now fixed and covered; see M1.4e.
+
+**M1.4e — spawn seats, an honest `isLive()`, and the disc index in `tv` (done
+2026-08-07).** Three independent shared-room fixes, all verified by
+`npm run smoke-mp-state` (44/44, three peers) which was **negative-controlled by
+reverting each fix and re-running: 9 RED**.
+
+1. **Joiner spawn seats.** Every peer built its world with `playerRig` at the same
+   room origin, and poses go out in world space, so a remote peer's head/visor plane
+   materialised at the watcher's own camera and hid the TV. `spawnSeatOffset(index)`
+   (`src/net/SessionUtils.js`, pure + unit-tested) gives each peer a small
+   deterministic offset; `NetMgr._takeSpawnSeat()` applies it on HELLO with
+   `index = presence.size`, i.e. join order — the same seniority the server elects
+   the host by, so no seat negotiation is needed. Seat 0 keeps the canonical origin
+   (host view and solo play byte-identical); later seats alternate left/right and fan
+   out. Absolute, never `+=`, and released on `disconnect()`, so a reconnect can't
+   accumulate drift. **Measured:** host↔watcher head distance 0.16 m → 0.82–0.94 m;
+   a peer forced back to seat 0 via the new `__net.takeSpawnSeat(0)` reads 0.08 m,
+   which is the red control.
+2. **`ConsoleRuntime.isLive()` is honest.** It was `!this.client?.paused`, and
+   `paused` is falsy on a client that never started — so a display-only watcher's
+   never-booted primary reported `live:true` (the trap this file and
+   `docs/MULTIPLAYER.md` both warned about). It now requires `hasCore()`
+   (`loaded || _started || client.ready`; `_started` is set at the *top* of `load()`
+   so a mid-boot core still counts). `rack.list()` gained `hasCore`, and
+   `src/desktop/main.js`'s shim was fixed the same way. **Care point:** the two rack
+   *suspend* paths (`applyBudget`'s denied branch, `pauseAll`) no longer gate on
+   `isLive()` — they call the idempotent `pause()` unconditionally, so a runtime
+   whose main loop is about to start still gets `paused` pre-asserted. Losing that
+   would silently reopen the "watcher boots its own core" window.
+3. **The room's `tv` key carries the disc.** For multi-disc (`.m3u`) content the
+   published value was only `{file, core, system, title}`, and a disc swap doesn't
+   re-boot, so nothing ever republished: a watcher's panel was blank (it has no core
+   to ask), a late joiner learnt the game but not the disc, and a promoted host
+   resumed at disc 1. `src/net/TvState.js` (pure + unit-tested) shapes
+   `disc`/`discCount`/`discEjected`; `publishDiscState()` patches them onto the
+   already-published value, since the boot publishes `tv` synchronously while
+   `discStatus()` has to cross the worker boundary — whichever lands second fills in
+   the rest. `applyRemoteTv` drives a watcher's panel straight from room state
+   (`remote: true`), and `_pendingDiscRestore` re-applies the room's index after a
+   promoted host's own boot. A plain cartridge publishes no disc keys, so nothing
+   else on the wire moved. **Simulated core, deliberately:** as with
+   `probe-discswap-panel.mjs`, the host's live `__client.discStatus/setDisc` are
+   patched to answer like a 3-disc core; everything above that (stepDisc,
+   publishDiscState, the STATE broadcast, the watcher's real unpatched panel) is
+   production code. A real end-to-end pass needs a bootable multi-CD PSX image +
+   BIOS and is still **not** done.
+
+New `__testApi` surface for the above: `session.viewpoint()`, `session.avatars()`,
+`tv.disc()`, `tv.step()`, plus `rack.list().hasCore` and the harness's
+`peer.nearestAvatarDistance()`. **Not deployed** — localhost only so far; per
+M1.4c's own lesson, run `smoke-mp-state` against `dionysus.dk` before calling it
+live.
 
 **In-VR editor — three modes (done).** The old flat E.1/E.2/E.3 menu is now a
 **Play / Move / Change / Add** selector (`RoomEditor` carries a `_mode` enum, not
