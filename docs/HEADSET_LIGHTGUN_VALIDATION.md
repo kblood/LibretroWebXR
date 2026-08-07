@@ -11,6 +11,11 @@ Background on how the loop works lives in
 [`src/LightGun.js`](../src/LightGun.js) (the prop) and
 [`src/LightGunMgr.js`](../src/LightGunMgr.js) (the per-frame aim → `sendLightgun`).
 
+**Solo only.** Two-headset / shared-room checks are a separate checklist —
+[`public/headset-test.html`](../public/headset-test.html) **Part B** (live at
+`…/libretrowebxr2/headset-test.html#part-b`). See §1.6 for what it covers and for
+the two places the gun crosses into multiplayer.
+
 ---
 
 ## 1. Setup
@@ -112,6 +117,45 @@ Two cautions carried over from the headless work:
 - A green log line proves the *app* dispatched the event. Whether the *core*
   registered the hit is only visible on screen — which is why step 2 uses a game
   whose hit feedback you can recognise instantly.
+
+---
+
+## 1.6 Multiplayer is validated by a DIFFERENT checklist — don't redo it here
+
+Everything in this document is **single-headset, solo**. The hardware checks for a
+shared room live in the tappable in-headset checklist
+**[`public/headset-test.html`](../public/headset-test.html) → "Part B — Two
+headsets"**, deployed at:
+
+```
+https://dionysus.dk/webxr/libretrowebxr2/headset-test.html#part-b
+```
+
+Open that on the Quest instead of reading this section as a spec. It is
+step-by-step, tap-to-tick, and it covers: stable host election (first peer in
+hosts, and keeps it), the room + shelf a joiner inherits from the host, a
+watcher's cart insert / **Load ROM** / console-spawn being refused or forwarded
+rather than booting locally, the host's own **Load ROM** re-syncing every watcher
+(the M1.4d fix), and host **migration** after the real host leaves — including the
+deliberate ~15 s reclaim gap. It also carries a **"NOT a bug"** box (the remote
+avatar's head occluding your TV; a coreless watcher console still labelled
+"live") — read it before filing anything from a multiplayer session.
+
+The design behind those steps is [`docs/MULTIPLAYER.md`](MULTIPLAYER.md) ("Host
+election and the shared room (M1.4)" + its two-browser test sequence); the history
+is the `M1.4*` entries in [`docs/HANDOFF.md`](HANDOFF.md).
+
+**Where the gun does cross over into multiplayer** (test it in the *other*
+checklist, not this one):
+
+- A **display-only watcher grabbing the gun does not arm its own core** — it sends
+  the host a `peripheral` request, the **host** reboots with the gun attached and
+  re-streams (`_forwardPeripheralArm` → `_hostApplyPeripheralWire` in
+  `src/main.js`). So the §2b "arm reload ends the XR session" wrinkle happens on
+  the **host's** headset, not the watcher's.
+- A watcher's **aim and trigger are forwarded per frame** (`sendWire('gun', {…u,
+  v, trigger, port})`), so a watcher shoots at the host's game through the video
+  feed. That leg has no automated coverage and no headset run either.
 
 ---
 

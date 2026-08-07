@@ -65,6 +65,9 @@
   .pill.m1 { background: #3a2456; color: #cf9cff; }
   .pill.new { background: #5e3a24; color: #ffc79c; }
   .pill.opt { background: #333; color: #aaa; }
+  .pill.nb  { background: #4a3a10; color: #ffd77a; }
+  .box.nobug { border-style: solid; border-color: #6e5a20; background: #1e1a0c; }
+  .box.nobug h3 { color: #ffd060; }
   .bar {
     position: fixed; left: 0; right: 0; bottom: 0; background: #16162c;
     border-top: 1px solid #2a2a48; padding: 12px 20px; text-align: center;
@@ -83,9 +86,10 @@
   <h1>LibretroWebXR — Headset Smoke Test</h1>
   <p class="lead">The manual VR checks that <strong>can't be scripted headlessly</strong>:
   the raycast menus, that the Quest exposes one gamepad per controller, in-VR voice
-  (mic grant mid-XR), and two-headset networked multiplayer (presence, voice, shared
-  TV, held-object ghosts, host-authoritative input + video). Tap a step to mark it
-  done — progress is saved on this device.</p>
+  (mic grant mid-XR), and two-headset networked multiplayer (presence, voice, one
+  shared game streamed from a stable host, held-object ghosts, host-authoritative
+  input, host migration). Tap a step to mark it done — progress is saved on this
+  device.</p>
 
   <div class="box">
     <h3>Open these</h3>
@@ -97,9 +101,15 @@
       handy for a spotter at a PC joining the tester's room:<br>
       <a class="url" href="./desktop.html">https://dionysus.dk/webxr/libretrowebxr2/desktop.html &nbsp;↩ desktop build</a></p>
     <p><strong>Two headsets (Part B)</strong> — both open the <em>same room</em>,
-      different names:<br>
-      <span class="url">https://dionysus.dk/webxr/libretrowebxr2/?session=ROOM&amp;nick=Alice</span><br>
-      <span class="url">https://dionysus.dk/webxr/libretrowebxr2/?session=ROOM&amp;nick=Bob</span></p>
+      different names. <strong>Order matters now:</strong> open <em>Alice</em> first, let her
+      room finish loading, <em>then</em> open Bob. The first peer in is the host for the
+      whole session.<br>
+      <span class="url">https://dionysus.dk/webxr/libretrowebxr2/?session=ROOM&amp;nick=Alice &nbsp;← open FIRST (host)</span><br>
+      <span class="url">https://dionysus.dk/webxr/libretrowebxr2/?session=ROOM&amp;nick=Bob &nbsp;← open SECOND (watcher)</span></p>
+    <p class="note">Tip: also join the <strong>desktop build</strong> above as a third peer
+      (same <code>?session=ROOM</code>). It is the only screen that spells the role out in
+      words — its MP badge reads <code>● Hosting · N watching</code> or
+      <code>● Watching host</code> — and it makes the migration step in Part B testable.</p>
     <p class="note">Optional: <code>&amp;color=%23ff8866</code> picks your avatar colour.
       For a cross-network test add <code>&amp;turn=turn:dionysus.dk:3478&amp;turnUser=USER&amp;turnCred=PASS</code>
       (needs the coturn server provisioned first).</p>
@@ -143,19 +153,56 @@
     to the controllers or the cord/patch system. That's the next phase, and it's gated on
     this result.</p>
 
-  <h2>Part B — Two headsets <span class="pill m0">M0</span> <span class="pill m1">M1</span></h2>
-  <p class="lead">Both headsets open the <strong>same</strong> <code>?session=ROOM</code> URL (with different
-    <code>nick</code>). For the basic test put both on the <strong>same Wi-Fi</strong> (STUN covers that;
-    TURN is only for the cross-network case below).</p>
+  <h2 id="part-b">Part B — Two headsets <span class="pill m0">M0</span> <span class="pill m1">M1.4</span></h2>
+  <p class="lead"><strong>One room = one game = one host.</strong> The <em>server</em> picks the
+    host: whoever joined first, and they keep it. Everyone else is
+    <strong>display-only</strong> — they never boot a core, their TV is a live video of the
+    host's screen, and their button presses travel to the host's game. So "Bob started his
+    own game" is now a <em>bug</em>, not a feature. Both headsets on the
+    <strong>same Wi-Fi</strong> (STUN covers that; TURN is only for the cross-network case
+    below).</p>
   <ol class="checks">
+    <li><strong>Join in order.</strong> <span class="pill m1">M1.4</span> Alice opens the room URL and waits for her room to load. <em>Then</em> Bob opens his. Both tap <em>Enter VR</em>. <span class="note">Alice is the host from now on — nothing Bob does can take the role.</span></li>
     <li><strong>Presence.</strong> <span class="pill m0">M0</span> Each of you sees the other as an avatar — floating head + two hands + a nameplate. Move your head and hands; the other sees it track.</li>
-    <li><strong>In-VR voice + mic grant.</strong> <span class="pill new">NEW</span> On <em>each</em> headset: Menu → <strong>Voice: Off</strong>. Approve the Quest microphone prompt. The label flips to <em>Voice: On</em>. Talk — you hear each other, and the voice is <strong>spatial</strong> (quieter as you walk apart, panned by direction). Click Voice again → <em>Voice: Muted</em>. <span class="pass">The key new check: does the Quest browser grant the mic during an XR session?</span></li>
-    <li><strong>Shared TV.</strong> <span class="pill m0">M0</span> One player boots a game (grip cart → console). <strong>Both</strong> TVs converge on that game.</li>
+    <li><strong>Confirm the roles.</strong> <span class="pill m1">M1.4</span> There is <em>no</em> "you are the host" badge inside VR. Read it on a flat screen instead — three ways, any one is enough:
+      <br>• the <strong>desktop peer</strong>'s MP badge spells it out: <code>● Hosting · 1 watching</code> vs <code>● Watching host</code>;
+      <br>• on <strong>Bob's own page</strong> (take the headset off, or before you tap Enter VR) the header status line reads <code>Watching Alice — …</code>, and his title stays <code>LibretroWebXR · idle</code> — no core name;
+      <br>• Alice's page never says "watching" anything.
+      <span class="pass">Alice = host, Bob = watcher is the precondition for every step below. If it came out backwards, both of you leave the room and redo step 1 in order.</span></li>
+    <li><strong>Room + shelf inherited.</strong> <span class="pill m1">M1.4</span> Bob is standing in <strong>Alice's</strong> room, looking at <strong>Alice's</strong> shelf — same layout, same posters, same games — even though Bob has no local ROMs of his own. Games only Alice owns still appear on Bob's shelf. <span class="note">Also check both in-VR: Menu → <strong>Multiplayer</strong> → the status line reads <code>ROOM (2p)</code> on both headsets.</span></li>
+    <li><strong>Host boots — shared TV + audio.</strong> <span class="pill m1">M1.2</span> <strong>Alice</strong> grips a cart → console. Alice's TV boots it; Bob's TV shows <strong>Alice's actual frames</strong> (a live video of her screen, not a second copy), and Bob <em>hears</em> Alice's game audio too.</li>
+    <li><strong>Now Playing panel — the in-VR readout.</strong> <span class="pill new">NEW</span> Look at the small <strong>Now Playing</strong> panel under Bob's TV: it names <em>Alice's</em> system, core and title. <span class="pass">That is how you confirm from inside the headset that Bob is mirroring the room's game.</span></li>
     <li><strong>Held-object ghost.</strong> <span class="pill m0">M0</span> One player grips a cartridge and holds it. The other sees a translucent <strong>ghost cartridge in that player's hand</strong>.</li>
-    <li><strong>Host video stream.</strong> <span class="pill m1">M1.2</span> After the host boots, the other player's TV shows the <strong>host's actual gameplay frames</strong> (a live video of the host's screen), not a separate copy.</li>
-    <li><strong>Host-authoritative input.</strong> <span class="pill m1">M1.1</span> The non-host holds their gamepad and presses buttons → it drives the <strong>host's</strong> game. Both TVs show the host's game reacting to the remote player.</li>
-    <li><strong>Watcher core pauses / resumes.</strong> <span class="pill new">NEW</span> While watching, the non-host runs no game of its own (its TV just mirrors the host). To confirm the resume path: the non-host boots their <em>own</em> game (grip a different cart → console) → they <strong>take over as host</strong>, their core resumes, and the first player now watches them.</li>
+    <li><strong>In-VR voice + mic grant.</strong> <span class="pill new">NEW</span> On <em>each</em> headset: Menu → <strong>Voice: Off</strong>. Approve the Quest microphone prompt. The label flips to <em>Voice: On</em>. Talk — you hear each other, and the voice is <strong>spatial</strong> (quieter as you walk apart, panned by direction). Click Voice again → <em>Voice: Muted</em>. <span class="pass">The key new check: does the Quest browser grant the mic during an XR session?</span></li>
+    <li><strong>Watcher input drives the host's game.</strong> <span class="pill m1">M1.1</span> <strong>Bob</strong> holds his gamepad and presses buttons → <strong>Alice's</strong> game reacts. Both TVs show the same reaction at the same time (Bob is player 2).</li>
+    <li><strong>Watcher's cart insert is FORWARDED, not booted.</strong> <span class="pill m1">M1.4</span> <strong>Bob</strong> grips a <em>different</em> cart off the shelf and drops it on his console. Correct: the game changes on <strong>Alice's</strong> screen — and therefore on both TVs, because Bob is still just watching her. Also correct: nothing changes, because Alice doesn't have that ROM (her refusal is a message on Bob's flat status line). <span class="pass">Report as a BUG only if Bob's TV ends up showing a <em>different game from Alice's</em> — that is the old broken behaviour.</span></li>
+    <li><strong>Watcher's "Load ROM" is refused.</strong> <span class="pill m1">M1.4</span> Bob leaves VR for a moment, presses the header's <strong>Load ROM</strong> and picks any local file. Correct: it is <em>refused</em> — <em>"Only the room host picks the game"</em> — and Bob's TV keeps showing Alice's game. Nothing of Bob's boots.</li>
+    <li><strong>Watcher can't spawn a console.</strong> <span class="pill m1">M1.4</span> Bob, in VR: Menu → <strong>Add</strong> → <em>Spawn Console</em>. Correct: no new console appears with a game running in it (the request is refused because it would start a second core). Alice doing the same <em>does</em> work.</li>
+    <li><strong>Host uses "Load ROM" — watchers must follow.</strong> <span class="pill m1">M1.4d</span> <strong>Alice</strong> (not Bob) presses the header's <strong>Load ROM</strong> and picks a game for a <em>different system</em> than the cart she booted. Within a second or two: Bob's TV switches to the new game and Bob's <strong>Now Playing</strong> panel names it. <span class="pass">This used to fail — the watcher froze on the previous game forever. If it fails again, say so loudly; it is a regression, not a new discovery.</span></li>
+    <li><strong>Watcher asks for a peripheral.</strong> <span class="pill opt">OPTIONAL</span> Bob grabs the <strong>light gun</strong> (or mouse). Correct: <em>Alice's</em> core reboots with the device attached and re-streams — Bob's picture comes back after her reload, and Bob's aim then drives Alice's game. Bob's own machine never boots anything.</li>
+    <li><strong>Host migration — Alice LEAVES.</strong> <span class="pill m1">M1.4</span> Alice closes her tab (really quit — don't just take the headset off). Expect a <strong>~15 second gap</strong> where Bob's picture freezes or goes blank: that pause is deliberate (a host who is only <em>reloading</em> gets to reclaim the role). Then Bob is promoted, <strong>boots the room's game himself</strong>, and his TV goes live off his own core. If the desktop peer is in the room, it keeps watching — now off Bob. <span class="pass">Note the delay you actually saw; much longer than ~15 s is worth reporting.</span></li>
+    <li><strong>Host reload reclaims.</strong> <span class="pill opt">OPTIONAL</span> Rejoin with Alice first again. This time Alice <em>reloads</em> her page and is back within 15 s. Correct: Alice is still the host, Bob never gets promoted, and there is never a moment where both are running a game.</li>
   </ol>
+
+  <div class="box nobug">
+    <h3>Two things that look broken and are NOT <span class="pill nb">NOT A BUG</span></h3>
+    <p><strong>1. The other player's face is planted in your TV.</strong> Both peers currently
+      spawn at the <em>same spot</em>, so on a watcher the remote avatar's head plane hangs
+      right at your camera and hides most of the screen — it reads exactly like "the shared
+      picture is broken". <strong>Step back a metre or two (or sideways) and look again</strong>
+      before judging the stream. The picture behind it is correct; spawning joiners at an
+      offset is a known to-do.</p>
+    <p><strong>2. A watcher's console can still read as "live".</strong> The in-app rack /
+      console status can say a console is live on a display-only watcher even though
+      <em>no core is running</em> — the label only means "not paused", and a watcher's
+      console is coreless. It is a diagnostic wording quirk, not a double-boot.
+      <strong>How to tell a real double-boot apart:</strong> a real one shows a
+      <em>different picture from the host's</em> on the watcher's TV, and the watcher's
+      Now Playing panel names a different game. Same picture + same title = healthy, whatever
+      the "live" label says. (For a spotter at a PC console: <code>__testApi.rack.running()</code>
+      is the trustworthy check — every entry must be <code>running:false</code> on a watcher —
+      not <code>__rack.live()</code>.)</p>
+  </div>
 
   <h2>Optional / advanced</h2>
   <ol class="checks">
@@ -165,10 +212,13 @@
 
   <h2>What to report back</h2>
   <p class="lead">For each failed step: which one, what you saw vs expected. Also note the
-    <strong>headset model + browser version</strong>. Two things are the current open questions:
+    <strong>headset model + browser version</strong>. The current open questions:
     (1) the <strong>Part C rack smoothness</strong> at <code>?rack=3</code> and <code>?rack=2</code>
-    — the perf gate for the multi-console plan; and (2) <strong>whether the mic grant worked
-    mid-XR</strong> (step B2). A screen recording of any glitch helps a lot.</p>
+    — the perf gate for the multi-console plan; (2) <strong>whether the mic grant worked
+    mid-XR</strong> (the Voice step); and (3) Part B's two never-tested-on-hardware steps —
+    the <strong>host's Load ROM sync</strong> and the <strong>host migration delay</strong>.
+    Read the <em>NOT a bug</em> box before filing anything from Part B. A screen recording of
+    any glitch helps a lot.</p>
 </main>
 
 <div class="bar">

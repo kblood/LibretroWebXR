@@ -354,6 +354,13 @@ injection (`GameInputMgr.setRemoteButton`) and the controller→logical capture;
 `server/Hub.js` and `src/net/HostElection.js` as pure units.
 
 ### On-headset / two-browser test
+
+On real hardware, don't work from this list — use the tappable in-headset version,
+`public/headset-test.html` **"Part B — Two headsets"**
+(`…/libretrowebxr2/headset-test.html#part-b`), which is these same steps written for
+someone wearing a Quest, plus the "NOT a bug" box below. Keep the two in sync when
+the design changes. `docs/HEADSET_LIGHTGUN_VALIDATION.md` §1.6 points there too.
+
 1. Host and client open the same URL with `?session=<room>` (e.g.
    `…/?session=pongtest`). They should see each other's avatars (presence), and
    the second one in should be standing in the FIRST one's room, looking at the
