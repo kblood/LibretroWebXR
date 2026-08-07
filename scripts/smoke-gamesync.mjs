@@ -70,7 +70,11 @@ try {
   const host = await openPeer('Host');
   const client = await openPeer('Client');
   const bystander = await openPeer('Bystander');
-  ok(true, 'three peers connected');
+  // Was `ok(true, ...)` — a literal that could only ever be green (the real
+  // gate was openPeer() above throwing into the outer catch). Read each peer's
+  // NetMgr instead, so the named check owns its own verdict.
+  ok((await Promise.all([host, client, bystander].map((p) => p.evaluate(() => !!window.__net?.connected())))).every(Boolean),
+     'three peers connected');
   ok(await waitFor(client, () => window.__net.peerCount() >= 2), 'client sees the others');
 
   const hostId = await host.evaluate(() => window.__net.selfId());

@@ -130,8 +130,10 @@ console.log('--- two held, different consoles → each drives own seat');
   ok('c0 player = 1',                e0?.player    === 1);
   ok('c1 drives console1',           e1?.consoleId === 'console1');
   ok('c1 player = 1 (its own seat)', e1?.player    === 1);
-  // The key assertion: c1 must NOT be routed to console0
-  ok('c1 does NOT drive console0',   e1?.consoleId !== 'console0');
+  // The key assertion: c1 must NOT be routed to console0. `e1?.consoleId !==
+  // 'console0'` also passed when c1 was routed NOWHERE (e1 undefined), so the
+  // check needed a presence guard to mean anything.
+  ok('c1 does NOT drive console0',   !!e1 && e1.consoleId !== 'console0');
   ok('both hand=holding',            r.every(e => e.hand === 'holding'));
 }
 
@@ -199,7 +201,8 @@ console.log('--- two held, same console different players');
   const e1 = r.find(e => e.ctrl === c1);
   ok('c0 player=1',   e0?.player === 1);
   ok('c1 player=2',   e1?.player === 2);
-  ok('same console',  e0?.consoleId === e1?.consoleId);
+  // undefined === undefined passed when neither entry existed; require both.
+  ok('same console',  !!e0?.consoleId && e0.consoleId === e1?.consoleId);
 }
 
 // ---------------------------------------------------------------------------

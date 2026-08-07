@@ -188,17 +188,27 @@ const eq = (got, want, msg) => {
   const logger = new Logger({ sessionId: 'ring' });
   logger.init({ serverUrl: '' });
   logger._buf = [];
-  // Fill just past the ring limit (2000) without triggering a flush
+  // AUDIT FIX (probe/test vacuity sweep): this block used to perform the
+  // eviction ITSELF —
+  //     if (logger._buf.length >= RING_MAX) logger._buf.shift();
+  //     logger._buf.push(e);
+  // — so both assertions below were guaranteed by the test's own loop and
+  // stayed green with Logger's ring eviction deleted outright. Entries now go
+  // in through the REAL path (Logger._push, which owns the shift()), with only
+  // _scheduleFlush() stubbed out so no timer/fetch is involved. Deleting the
+  // `if (this._buf.length >= RING_MAX) this._buf.shift()` line in src/Logger.js
+  // now takes this from 2/2 to 0/2.
   const RING_MAX = 2000;
-  for (let i = 0; i < RING_MAX + 10; i++) {
-    // Bypass scheduleFiush to avoid the timer
-    const e = { level: 'log', ts: Date.now(), msg: String(i) };
-    if (logger._buf.length >= RING_MAX) logger._buf.shift();
-    logger._buf.push(e);
-  }
+  logger._scheduleFlush = () => {};      // the only part we don't want here
+  for (let i = 0; i < RING_MAX + 10; i++) logger._push('log', [String(i)]);
   ok(logger._buf.length === RING_MAX, 'Logger ring: buffer never exceeds RING_MAX');
-  ok(logger._buf[logger._buf.length - 1].msg === String(RING_MAX + 9),
+  ok(logger._buf[logger._buf.length - 1]?.msg === String(RING_MAX + 9),
     'Logger ring: newest entry is at tail after eviction');
+  // Non-vacuity: the OLDEST survivor must be entry #10, not #0 — i.e. exactly
+  // the first 10 were evicted. A no-op ring (buffer grows unbounded) fails the
+  // length check above; a ring that dropped from the wrong end fails this one.
+  ok(logger._buf[0]?.msg === '10',
+    'Logger ring: oldest survivor is the 11th entry (front was evicted)');
 }
 
 // ─── Done ─────────────────────────────────────────────────────────────────────

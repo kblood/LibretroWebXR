@@ -75,7 +75,11 @@ try {
   const host = await openPeer('Host');
   const client = await openPeer('Client');
   const cleo = await openPeer('Cleo');
-  ok(true, 'three peers connected to the room server');
+  // Was `ok(true, ...)` — a literal that could only ever be green (the real
+  // gate was openPeer() above throwing into the outer catch). Read each peer's
+  // NetMgr instead, so the named check owns its own verdict.
+  ok((await Promise.all([host, client, cleo].map((p) => p.evaluate(() => !!window.__net?.connected())))).every(Boolean),
+     'three peers connected to the room server');
   ok(await waitFor(host, () => window.__net.peerCount() >= 2), 'host sees both clients');
 
   // M1.4: the first peer in is already the host — no tv write needed to earn it.

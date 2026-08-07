@@ -71,7 +71,11 @@ async function waitFor(page, fn, ms = 12000) {
 try {
   const a = await openPeer('Ava');
   const b = await openPeer('Ben');
-  ok(true, 'both peers connected to the room server');
+  // Was `ok(true, ...)` — a literal that could only ever be green (the real
+  // gate was the waitForFunction/openPeer above throwing into the outer catch).
+  // Read each peer's NetMgr instead, so the named check owns its own verdict.
+  ok((await Promise.all([a, b].map((p) => p.evaluate(() => !!window.__net?.connected())))).every(Boolean),
+     'both peers connected to the room server');
 
   // Each should see the other in the roster (presence working).
   ok(await waitFor(a, () => window.__net.peerCount() >= 1), 'Ava sees Ben in the roster');

@@ -118,7 +118,11 @@ console.log('--- T2: two consoles, same button, isolated per-console state ---')
   const c1downs = find(dispatch.log, e => e.type === 'keydown' && e.consoleId === 'console1');
   ok('T2: keydown fired for console0', c0downs.length > 0);
   ok('T2: keydown fired for console1', c1downs.length > 0);
-  ok('T2: both consoles got a code', c0downs[0]?.code === c1downs[0]?.code); // same logical btn → same code
+  // `c0downs[0]?.code === c1downs[0]?.code` was undefined === undefined when
+  // NEITHER console got a keydown — green in exactly the broken case. Require
+  // both codes to exist before comparing them.
+  ok('T2: both consoles got a code',
+     !!c0downs[0]?.code && c0downs[0].code === c1downs[0]?.code); // same logical btn → same code
   ok('T2: no keyups yet', find(dispatch.log, e => e.type === 'keyup').length === 0);
 
   // Drop ctrlB's routing (console1 no longer routed). console0 stays pressed.

@@ -941,26 +941,91 @@ list is blocked on multiplayer any more. See **Phase M / M1.4** above.
     on a control; two were deliberately left un-gated rather than ship
     unvalidated checks. See `DEBUGGING.md`'s new section. **Standing rule: a
     check is not evidence until you have seen it go red.**
-14. **Register 7 orphaned probe scripts** in `package.json` (`probe-autopause`,
-    `probe-feedback`, `probe-focus`, `probe-multitv`, `probe-persist`,
-    `probe-pong-boot`, `probe-repatch`) — **still unregistered as of
-    2026-08-07** (re-checked against `package.json`). Note the audit in item 13
-    *rewrote* all seven so they can now actually fail; they just remain
-    unreachable via `npm run`, so nothing runs them.
+14. ~~**Register 7 orphaned probe scripts** in `package.json`.~~ ✅ **DONE
+    (2026-08-07).** All seven are now `probe:autopause`, `probe:feedback`,
+    `probe:focus`, `probe:multitv`, `probe:persist`, `probe:pong-boot`,
+    `probe:repatch`. Every one was run once on registration to check it hadn't
+    bitrotted while unreachable — none had: 10/10, 7/7, 9/9, 10/10,
+    ALL-PASSED, 5/5, 9/9 respectively. `probe:autopause` and `probe:multitv`
+    spawn their own vite (ports 5217/5196); the other five want a dev server
+    already up — `probe:pong-boot` on **5176**, the rest on 5173 (pass a URL as
+    argv[2] to point elsewhere).
 15. **`probe:psx-twogun` flakiness** back-to-back with another PSX probe (one
     observed 11/23 with the core never starting; passes cleanly on a re-run).
-16. **`window.__gunFire` hazard** — it swaps in a one-gun list, so under the
-    new binding sweep it releases any other gun's port for that tick. Harmless
-    today; a trap for any future two-gun headless test.
+16. ~~**`window.__gunFire` hazard**~~ ✅ **DONE (2026-08-07).** The hazard was
+    the one-gun list itself, so it was fixed at the source rather than routed
+    around: `main.js`'s new `_driveGunTick()` **unions** the fired gun into the
+    genuinely-held set instead of replacing it, so the binding sweep no longer
+    sees the other guns as "stopped driving". Both `window.__gunFire` (kept —
+    external tooling may still call it) and `__testApi.gun.fire()` go through
+    it. All four in-repo call sites (`probe:lightgun`, `probe:ps2-guncon`,
+    `probe:ps2-cue-support`, `probe:ps2-timecrisis2`) now use
+    `__testApi.gun.fire()`, which also **strengthened** them: the legacy hook
+    returned the string `'no-gun'` when there was no gun, so their "does not
+    throw" checks were green with the gun absent; the facade throws instead.
+    `probe:lightgun` re-verified 9/9 after the migration.
+
+**Vacuous-assertion audit, round 2 (2026-08-07)**
+
+Item 13's audit covered the 17 probes in commit `5158335`. A second, static
+(read-only) pass over 23 of the scripts it did *not* touch — the oldest tier of
+`scripts/smoke-*.mjs` and `scripts/test-*.mjs` — found more of the same class.
+Ten sites were fixed and are listed here only so the same ground isn't re-walked:
+`test-logger`'s ring-buffer block (it performed the `shift()` **itself**, so it
+was green with Logger's eviction deleted — now driven through `Logger._push()`
+and validated red, 2/2 → 0/2, plus a new front-eviction check), `test-c64`'s
+`keyAt` unoccupied-cell check (accepted `null` **or** any string, i.e. keyAt's
+entire return domain — validated red against a greedy hit-test), `test-c64`'s
+`ev?.location === undefined`, `test-gameinput`'s `undefined === undefined` code
+comparison, two `test-routing` optional-chain comparisons, `smoke-gameinput`'s
+`[].every()` anti-spoof check, `smoke-held`'s `>= 1` under an "exactly one"
+label, and eight `ok(true, …)` literals across the smoke family.
+
+**Still open (deliberately not attempted — each needs a real rewrite, not a
+one-liner):**
+
+17. **`probe-media` shelf assertions (5 checks).** `probe-media.mjs:244-252`
+    filters `c64ShelfCarts`/`snesShelfCarts` out of an `allGrabbables` set that
+    already contains the carts the probe itself injected at steps 1 and 3, and
+    both assertions carry a `count === 0 ||` escape hatch — so shelf minting can
+    be entirely broken and stay green. `:205-208`'s `>= 1` thresholds are
+    likewise guaranteed by the probe's own side effects, and `:224-231`'s four
+    "grab dispatch" / "insert axis" checks are byte-identical predicates to
+    `:95-96`, `:103-104` and `:146` while invoking no GrabMgr code at all. Fix:
+    snapshot the grabbable set *before* step 1 and assert only on pre-existing
+    objects.
+18. **`probe-local-rom` Part 4 (`:208-226`).** Claims to prove that special
+    characters in filenames don't corrupt OPFS keys, but `RomResolver.js:70-73`
+    builds the key purely from the sha1 — `meta.file` never enters it, so no
+    filename-escaping bug can turn this red. It is a duplicate of the Part 1
+    sha1 round-trip. Either assert on the actual OPFS key (enumerate the
+    directory) or drop the claim. Related dead scaffolding at `:177-178`:
+    `requestsBefore` reads `window.__romFetchLog`, which **nothing in the repo
+    ever writes** — the intended in-page fetch-delta check was never
+    implemented; only the Node-side `page.on('request')` listener is real.
+19. **Negative-only "nothing happened" checks.** `smoke-gameinput:84`
+    ("bystander received nothing"), `smoke-mp-sync:113-115` ("WIRE messages are
+    NOT persisted"), `test-multiplayer:128` and `:249`, and the "no
+    `roms/<file>` network request" checks in `probe-local-rom:246` /
+    `probe-local-rom-persist:231` all pass hardest when the mechanism under
+    test is *completely dead* — the same shape as the severed-`sendInput()`
+    failure item 13 found in `probe:psx-timecrisis`. Each needs a positive
+    companion arm in the same run.
+20. **Config-pinning masquerading as behaviour.** `test-rackbudget:15-16`
+    restates `DEFAULT_RACK_BUDGET`/`DEFAULT_MAX_LIVE` from source;
+    `test-session:64` re-checks shape instead of distinctness, so
+    `randomRoomSuffix()` returning a constant is green; `test-routing:175-180`
+    contributes zero assertions if `r` is empty. Low value, low risk — batch
+    these whenever one of those files is next touched.
 
 **Multiplayer / worker-core loose ends (small, post-M1.4)**
-17. **Disc-swap panel republish.** The M1.4d fix put
+21. **Disc-swap panel republish.** The M1.4d fix put
     `setObjectState('tv',…)` + `startVideoBroadcast()` inside `bootOnPrimary`,
     so every primary-boot path gets it for free — but the disc-swap panel does
     **not** go through `bootOnPrimary`, so it's a plausible third instance of
     that bug class and has never been checked. Cheap to test with the
     `smoke-host-picker` pattern.
-18. **P0-5 — native SaveRAM persistence is PARTIAL.** The last open P0 from
+22. **P0-5 — native SaveRAM persistence is PARTIAL.** The last open P0 from
     `docs/research/psx-ps2-n64-review-2026-07-24.md`: `autosave_interval` is
     wired and `flushSaveRam`/`readSaveRam` do live reads, but end-to-end
     persistence across a reload is unconfirmed and one flush-timing limitation

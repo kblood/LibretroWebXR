@@ -45,7 +45,11 @@ try {
 
   // Wait for the app's own NetMgr to connect to the room server.
   await page.waitForFunction(() => window.__net && window.__net.connected(), { timeout: 10000 });
-  ok(true, 'app NetMgr connected to the room server');
+  // Was `ok(true, ...)` — a literal that could only ever be green (the real
+  // gate was the waitForFunction/openPeer above throwing into the outer catch).
+  // Read each peer's NetMgr instead, so the named check owns its own verdict.
+  ok(await page.evaluate(() => !!window.__net?.connected()),
+     'app NetMgr connected to the room server');
 
   // Inject a second peer from inside the page (browser-native WebSocket, raw
   // protocol JSON — server stamps the id), join the same room, send one pose.

@@ -61,7 +61,9 @@ async function waitFor(page, fn, ms = 8000, ...evalArgs) {
 try {
   const a = await openPeer('Ava');
   const b = await openPeer('Ben');
-  ok(true, 'both peers connected');
+  // Was `ok(true, ...)` — a literal, always green. Ask both NetMgrs instead.
+  ok((await Promise.all([a, b].map((p) => p.evaluate(() => !!window.__net?.connected())))).every(Boolean),
+     'both peers connected');
   ok(await waitFor(a, () => window.__net.peerCount() >= 1), 'Ava sees Ben');
   ok(await waitFor(b, () => window.__net.peerCount() >= 1), 'Ben sees Ava');
 
@@ -77,7 +79,9 @@ try {
   await a.evaluate(([f, id]) => window.__net.setObjectState('hold:' + f, { holder: id, hand: 'left' }), [file, aId]);
 
   ok(await waitFor(b, (f) => window.__ghost.has(f), 8000, file), 'Ben shows a ghost for the cart Ava holds');
-  ok(await b.evaluate(() => window.__ghost.count() >= 1), 'Ben has exactly the one ghost');
+  // The label says "exactly the one" but the predicate said ">= 1", which the
+  // preceding has(file) check had already proved. Assert what the label claims.
+  ok(await b.evaluate(() => window.__ghost.count() === 1), 'Ben has exactly the one ghost');
   ok(await waitFor(b, () => window.__ghost.hidden() >= 1), 'Ben hid his local copy of the held cart');
   ok(!(await a.evaluate(() => window.__ghost.count() > 0)), 'Ava shows no ghost for her own held cart');
 

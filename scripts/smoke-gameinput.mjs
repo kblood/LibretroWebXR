@@ -58,7 +58,11 @@ try {
   const host = await openPeer('Host');
   const client = await openPeer('Client');
   const bystander = await openPeer('Bystander');
-  ok(true, 'three peers connected');
+  // Was `ok(true, ...)` — a literal that inflated the pass count and could only
+  // ever be green. Ask each peer's NetMgr whether it is really connected.
+  ok((await Promise.all([host, client, bystander].map((p) => p.evaluate(() => !!window.__net?.connected()))))
+       .every(Boolean),
+     'three peers connected');
   ok(await waitFor(client, () => window.__net.peerCount() >= 2), 'client sees the others');
 
   const hostId = await host.evaluate(() => window.__net.selfId());
@@ -74,7 +78,10 @@ try {
   ok(await waitFor(host, () => window.__net.recvInputs().length >= 3), 'host received the input frames');
 
   const recv = await host.evaluate(() => window.__net.recvInputs());
-  ok(recv.every((e) => e.from === clientId), 'every input is stamped with the client id (anti-spoof)');
+  // `[].every(...)` is true, so a dead relay passed this anti-spoof check
+  // hardest of all. Require the three frames to actually be there first.
+  ok(recv.length >= 3 && recv.every((e) => e.from === clientId),
+     'every input is stamped with the client id (anti-spoof)');
   ok(recv.some((e) => e.player === 2 && e.btn === 'faceA' && e.down === true), 'press A delivered intact');
   ok(recv.some((e) => e.player === 2 && e.btn === 'Up' && e.down === true), 'press Up delivered intact');
   ok(recv.some((e) => e.player === 2 && e.btn === 'faceA' && e.down === false), 'release A delivered intact');

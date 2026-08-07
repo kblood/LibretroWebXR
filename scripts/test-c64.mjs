@@ -73,7 +73,9 @@ for (const k of C64_KEYS) {
   eq('keyEventFor(a).code',    ev?.code,    'KeyA');
   eq('keyEventFor(a).key',     ev?.key,     'a');
   eq('keyEventFor(a).keyCode', ev?.keyCode, 65);
-  ok('keyEventFor(a) no location (non-modifier)', ev?.location === undefined);
+  // `ev?.location` would also read undefined when ev is null — i.e. the check
+  // passed hardest in the broken case. Require the event to exist too.
+  ok('keyEventFor(a) no location (non-modifier)', ev !== null && ev.location === undefined);
 }
 
 {
@@ -232,10 +234,12 @@ ok('keyAt(0.5, 1.1)  → null', keyAt(0.5, 1.1)  === null);
   const u = (16 + 0.5) / COLS;
   const v = (0 + 0.5) / ROWS;
   // col 16 row 0 has no key defined; expect null.
-  ok('keyAt unoccupied cell → null or valid key',
-     // We accept null OR a valid key id (in case a key was placed there later).
-     keyAt(u, v) === null || typeof keyAt(u, v) === 'string'
-  );
+  // AUDIT FIX (vacuity sweep): this used to be
+  //   keyAt(u, v) === null || typeof keyAt(u, v) === 'string'
+  // which covered keyAt()'s ENTIRE return domain (null or a string id) and so
+  // could never go red — a keyAt() that answered every cell with a key was as
+  // green as the real one. Assert the value the comment actually expects.
+  ok('keyAt unoccupied cell → null', keyAt(u, v) === null);
 }
 
 // ---- Function keys ---------------------------------------------------------
