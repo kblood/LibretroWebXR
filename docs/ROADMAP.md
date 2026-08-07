@@ -49,11 +49,13 @@ This is **not** a greenfield plan; a working app was carried over (see
   thumbnail gallery.
 - **Placement preview + snapping** (`Placement`): new props clamp to room bounds
   and snap to floor or nearest wall; ghost preview in Move mode.
-- **17 systems** wired (SNES, NES, GB/GBC/GBA, Genesis/SMS/GG/SG-1000/Sega 32X,
-  Virtual Boy, PC Engine, Atari 2600, C64, VIC-20, Amiga) via the `CORES` map /
-  `systems.js`; DOS (VirtualXT) is registered (`experimental: true` — hidden
-  from the default shelf, no working core) — see **Mouse peripheral + new
-  systems** and **DOS / VirtualXT** below.
+- **20 systems** wired (SNES, NES, GB/GBC/GBA, Genesis/SMS/GG/SG-1000/Sega 32X,
+  Virtual Boy, PC Engine, Atari 2600, C64, VIC-20, Amiga, **DOS**, **PS2**,
+  **PSX**, **N64**) via the `CORES` map / `systems.js`. DOS ships on **DOSBox
+  Pure** and is on the default shelf (see **DOS** below); PSX and N64 still
+  carry `experimental: true` in `systems.js` (hidden from the default shelf
+  unless `?experimental=1`) — see **Mouse peripheral + new systems** below and
+  `docs/HANDOFF.md`'s "PSX / PS2 / N64 core status" for the core-level detail.
 - COOP/COEP for SharedArrayBuffer (`vite.config.js`, `deploy/`), and a puppeteer
   health-check harness (`scripts/debug.js`, `DEBUGGING.md`).
 - Test suite: grows every phase (`npm test`; see `package.json` for the current
@@ -546,6 +548,63 @@ remote INPUT, held-object). CLI: `--session/--url/--nick/--color/--move`.
     so this always launches headed Chrome windows; confirms the host's canvas
     renders real frames and the client's `<video>` receives and plays a live
     (not frozen) WebRTC stream. 8/8 passing.
+  - **M1.4 — one room, one game: server-elected host + display-only clients.
+    ✅ done + DEPLOYED (2026-08-03 → 2026-08-07, `b4a62bb`..`097cc92`).**
+    A real two-computer playtest found each machine running its *own* game in
+    the same room — the M1.1/M1.2 rule "host = whoever owns the `tv` key" meant
+    a joiner (who may not even own the ROM) stole the role, and `applyRemoteTv`
+    then booted locally on both. **That rule is dead.** Full design:
+    `docs/MULTIPLAYER.md` "Host election and the shared room (M1.4)"; the
+    session-by-session narrative is in `docs/HANDOFF.md`'s Phase M1 list.
+    - **Server-elected host by seniority** (`server/Hub.js`, `HELLO.host` +
+      `MSG.HOST`). Migration happens only when the host actually LEAVES, and is
+      deferred 15 s (`HOST_RECLAIM_MS`) so a host reloading its own page
+      reclaims by session id instead of transiently promoting a client.
+      `tv`/`room`/`shelf:*` are **host-owned keys** the Hub refuses from anyone
+      else. `src/net/HostElection.js` is a client-side fallback for an older
+      room server.
+    - **A non-host is display-only:** every boot route is gated on
+      `amRoomHost()`, it paints the host's WebRTC feed, and it **inherits the
+      host's room + shelf** instead of building its own. Client actions travel
+      instead of executing locally (`insert` / `insert-nack`, `peripheral`), and
+      game **audio** now rides the same peer connection
+      (`SpatialAudio.captureStream`, `src/desktop/DesktopAudio.js`).
+    - **M1.4a — "runs zero cores" enforced at the runtime layer**, not just at
+      the boot gates: a latched `mayRunLocalCore()` → `RackMgr.allowRun` →
+      every `ConsoleRuntime.setCanRun`, so the perf budget, a power switch or a
+      live reboot can't quietly resume a watcher. This is now a hard invariant
+      (see `docs/HANDOFF.md` "Hard invariants").
+    - **M1.4b — an XR-presenting client can actually adopt the host's room**
+      after leaving VR (`e959e7c`); the deferral path used to claim its
+      one-shot stamp before the XR check and could never succeed.
+    - **M1.4c — the room server is a SEPARATE deploy, and production was two
+      months stale.** `npm run deploy` only ever published `dist/`, so the live
+      systemd unit was still running the **2026-06-09** `Hub.js` — no host
+      election, no host-owned keys, no `wire()` — meaning **no MP milestone
+      from M1.0 on had ever actually been live**. Added `deploy.ps1 -Room` /
+      **`npm run deploy-room`** (plus `npm run deploy-app` for a seconds-long
+      code-only refresh instead of a ~1 h 3.9 GB full deploy).
+    - **M1.4d — the host's header "Load ROM" picker never republished**, so
+      watchers froze on the previous game and `tv` went stale (misinforming
+      late joiners and misdirecting migration). Fixed by moving the
+      `setObjectState('tv', …)` + `startVideoBroadcast()` pair **inside**
+      `bootOnPrimary` (`597a1dd`), so every present and future primary-boot
+      path republishes for free.
+    - **Verified against PRODUCTION, app *and* room server (2026-08-07):**
+      `smoke-host-picker` 28/28, `smoke-shared-game` 45/45,
+      `smoke-display-only` 54/54, `demo-automation-api` 49/49 — run against
+      `https://dionysus.dk/webxr/libretrowebxr2/` + `wss://dionysus.dk/ws/`,
+      not localhost. `smoke-room-inherit` 27/27, `smoke-xr-room-adopt` 10/10
+      and `verify-desktop-netplay` 17/17 were live-verified at M1.4c. Every new
+      assertion was negative-controlled.
+    - **Also landed alongside:** `window.__testApi` (`src/TestApi.js`) + the
+      Puppeteer harness `scripts/lib/mp-harness.mjs` — the *one* supported
+      automation surface, replacing the habit of adding another `window.__foo`
+      hook. Read `docs/TEST_AUTOMATION.md` before writing a new MP test.
+    - **Still open:** a physical two-headset pass (no hardware), and the
+      **disc-swap panel's** republish behaviour — it doesn't go through
+      `bootOnPrimary`, so the M1.4d fix does *not* cover it and it's a
+      plausible third instance of the same class.
 - **M2:** rollback game sync for deterministic cores (adapt netplayjs +
   `SaveState`). **⚠ Feasibility spike DONE (2026-06-13):
   `docs/research/M2-rollback-feasibility.md`.** Confirmed: a genuine rewrite, not
@@ -680,8 +739,8 @@ light-gun architecture (cord/plug into a console port, net-synced binding via
 - **SG-1000** and **Sega 32X** also joined the system list (via `gearsystem`
   and `picodrive` respectively) as part of the same content-aware core-loading
   pass that added Amiga.
-- **Desktop pointer-lock bug fixed (2026-07-11, `a778b44`, pushed not
-  deployed).** `MouseMgr.attachDesktop()`'s click listener called
+- **Desktop pointer-lock bug fixed (2026-07-11, `a778b44`; deployed
+  2026-08-07).** `MouseMgr.attachDesktop()`'s click listener called
   `requestPointerLock()` on any canvas click regardless of system/wiring —
   fixed with a `getWired()` gate + `releaseDesktopLock()` on a non-mouse boot.
   Same-shaped arming-leak bug as the light gun's (`window.__mouseArmed` sticky
@@ -709,22 +768,48 @@ light-gun architecture (cord/plug into a console port, net-synced binding via
   collection) — verified structurally only, same caveat as Amiga before its
   own follow-up authoring work.
 
-## DOS / VirtualXT  ⚠ registered, experimental, no working core
-A `virtualxt` core entry + `dos` system exist in `systems.js` (MPL-2.0,
-floppy/keyboard-capable), and `docs/DOS_CORE_BUILD.md` documents the build
-recipe — but as of 2026-07-29 `virtualxt_libretro.wasm` is **absent from
-`public/cores/` and 404s on the live deploy** (a prior buildbot binary that
-was tested here did boot-trap under emscripten, but that binary is gone now —
-today's failure is a missing-core fetch error, not the trap; see
-`docs/DOS_CORE_BUILD.md`'s "Current real status"). Neither state is
-shippable. `dos` now carries `experimental: true` in `systems.js` (same
-mechanism as PSX/N64: hides it from the default shelf without deleting the
-registration) so it is never offered to real users. This is a parked spike,
-not a regression: `fetch-cores` doesn't hard-fail on it (`virtualxt` isn't in
-the CUSTOM_CORES hard-error list, so a missing buildbot core is just a
-"missing in source" warning), so it costs nothing to leave registered for
-whenever a working core (buildbot fix, or a from-scratch DOSBox Pure build —
-see `docs/DOS_CORE_BUILD.md`'s chosen plan) lands.
+## DOS  ✅ shipped on DOSBox Pure (2026-08-01/02)
+DOS is a real, working, **on-the-default-shelf** system. Full build + debugging
+writeup: `docs/DOS_CORE_BUILD.md` (its "Current real status" section at the top
+supersedes everything below it about VirtualXT).
+- **`dosbox_pure` is `SYSTEMS.dos.defaultCore`** and ships in `public/cores/`
+  (`dosbox_pure_libretro.{js,wasm,worker.js}`, GPLv2, built from scratch in
+  WSL2 — pthreads + GLES3, `execution: 'worker'`,
+  `contentIo: 'transfer-memfs'`). Verified live on the deploy.
+- **The black screen was a generic Emscripten bug, not a DOSBox one.** Three
+  layered causes; the actual root cause was `EM_TIMING_SETIMMEDIATE`: inside a
+  Worker, Emscripten's polyfill `postMessage`s `{target:"setimmediate"}`
+  *outward* to whoever created the worker, expecting stock shell.html JS to
+  relay it back. This app hosts the whole runtime in its own custom worker
+  (`src/runtime/EmulatorWorkerRuntime.js`), so the loop stopped ticking forever
+  after the first resume while the frame pump kept presenting a stale black
+  buffer — "steady frame count, zero video, zero errors". Fixed at the
+  RetroArch source level (`platform_emscripten.c`, `EM_TIMING_SETTIMEOUT`
+  under `#if defined(HAVE_THREADS)`); **that patch lives only in the shared WSL2
+  checkout and must be re-applied for any future `HAVE_THREADS=1` rebuild.**
+  Two real prior bugs (worker-protocol foreign-message handling,
+  `dosbox_pure_voodoo_perf` HW-render bypass) were necessary but not sufficient.
+- **`dos` deliberately does NOT carry `experimental: true`** (2026-08-01) — both
+  original grounds were discharged, not assumed: the worker cart-insert gap
+  (P0-2) is shut for the whole worker topology
+  (`npm run probe:worker-cartridge-insert`, 12/12), and it's verified booting
+  the real 256 MB DOS-TOOLS release disk, not just a synthetic FreeDOS floppy.
+  Dropping the flag is what lets a `dos` cartridge survive `parseCollection` and
+  appear on the shelf without `?experimental=1`. `CORES.dosbox_pure` keeps its
+  own `experimental` marker, but nothing filters on it.
+- **Desktop controls + mouse (2026-08-02, `de7fb78`).** Raw keyboard capture,
+  mouse capture and a system picker on `desktop.html`; `SYSTEMS.dos.mouse`
+  descriptor; `vhd`/`ima` extensions. This also fixed a **worker-execution
+  `sendMouse` silent no-op that was missing everywhere**, not just on desktop.
+- **DOS Tools Disk published** — `npm run publish-dos-tools` uploads the
+  `C:\LLM\DOS` disk images to `dionysus.dk/webxr/dos-tools/`; it's on the shelf
+  and verified on both the VR and desktop paths.
+- `virtualxt` (MPL-2.0) stays registered as a secondary `dos` core, but
+  `virtualxt_libretro.wasm` is still absent from `public/cores/` and 404s live.
+  That's harmless — `fetch-cores` treats a missing buildbot core as a warning,
+  not a hard error — and it's a parked spike, not a blocker, now that DOSBox
+  Pure works. **Remaining:** no real commercial DOS *game* has been run yet, and
+  the in-VR keyboard/mouse feel is headset-unverified like the rest.
 
 ## Comfort/UX fixes — duck + real power-off  ✅ shipped (2026-07-10)
 User feedback on the just-deployed build: "you need a way to duck or set
@@ -753,26 +838,47 @@ your height" and "turning off a console only seems to pause it."
 - Documented open prop package schema (model + `prop.json`) — vs EmuVR's
   Discord-gated UGC kit.
 - Community gallery of room/collection URLs.
-- BIOS-needing systems (PSX/N64) via fetched cores; user-supplied BIOS UX.
-  **Feasibility assessed 2026-06-15 (`docs/research/psx-n64-feasibility.md`):**
-  the no-JIT wasm runtime (same wall as Amiga/Amiberry) makes **PSX marginal —
-  gate on a `pcsx_rearmed` perf spike, HLE BIOS default** — and **N64 not viable**
-  on a standalone Quest 3 (slideshow; skip unless wanted as a non-playable demo).
+- ~~BIOS-needing systems (PSX/N64) via fetched cores; user-supplied BIOS UX.~~
+  **✅ no longer a feasibility question — superseded 2026-07-17..07-29.** PSX
+  (Beetle PSX HW + Lightrec), PS2 (Play!) and N64 (mupen64plus_next) are all
+  real, from-scratch-built, headless-verified worker cores on `main`, and all
+  three have been verified playing **real commercial games**; PSX additionally
+  boots 4 real discs on a real Sony BIOS (`npm run probe:psx-realbios`).
+  `src/FirmwareStore.js` is the user-supplied-BIOS UX (IndexedDB, never
+  shipped). The old assessment
+  (`docs/research/psx-n64-feasibility.md`, 2026-06-15 — "PSX marginal, N64 not
+  viable") **was wrong about both** once a Wasm-JIT path was actually built
+  rather than only researched; it's kept for history. PSX/N64 remain
+  `experimental: true` pending a real Quest 3 fps read. What's actually left is
+  the core-level list in "Open tasks" below (PSX Lightrec JIT, PSX hardware-GL,
+  N64 JIT `ci_table` wiring) — see `docs/HANDOFF.md`'s
+  "PSX / PS2 / N64 core status" and
+  `docs/research/psx-ps2-n64-review-2026-07-24.md`.
 - PWA install; per-headset storage UX; performance passes on Quest.
 
-## Open tasks (2026-07-29)
+## Open tasks (2026-08-07)
 
 Current work list, highest value first. Everything above this section is
 shipped; this is what is actually left. See `docs/HANDOFF.md` for context on
 the artifact-integrity items.
 
+**The multiplayer work is done and live.** The M1.4 shared-room rewrite
+(server-elected host, display-only clients, host-owned room/shelf, seniority
+migration, and the M1.4d Load-ROM republish fix) is shipped, deployed — **app
+*and* room server** — and re-verified against production, so nothing on this
+list is blocked on multiplayer any more. See **Phase M / M1.4** above.
+
 **Ship what's built**
-1. **Deploy.** A long tail of committed-but-undeployed work is sitting on
-   `main` — the desktop pointer-lock fix, gun/mouse disarm, SNES/C64 mouse,
-   distance-grab, gun-aim-align, and now the PSX gun restore + two-gun. Run
-   `npm run deploy` and confirm the live build actually carries the patched
-   cores (`grep -c rwebinput_set_lightgun` on the deployed glue, not just
-   locally).
+1. ~~**Deploy** the long tail of committed-but-undeployed work.~~ ✅ **DONE
+   (2026-08-07, `097cc92`).** Verified live rather than assumed: the deployed
+   `index.html` references exactly the local `dist/` asset bundles, and every
+   deployed core `.js` glue is **md5-identical to the local `public/cores/`
+   artifact** and carries the `rwebinput_set_lightgun` export (checked
+   `nestopia`, `snes9x`, `genesis_plus_gx`, `mednafen_psx_jit`, `play`,
+   `mupen64plus_next`, `dosbox_pure`). Note the two separate deploy targets:
+   `npm run deploy-app` for code, **`npm run deploy-room` for the room
+   server** — the latter is not in `dist/` and was two months stale in
+   production until 2026-08-03 (M1.4c).
 2. **Real-headset validation.** The single biggest gap across the whole
    project: the rack, the keyboard prop, light guns and two-gun co-op are all
    headless-verified only. `docs/HEADSET_LIGHTGUN_VALIDATION.md` is the
@@ -801,27 +907,64 @@ the artifact-integrity items.
 8. **PSX Lightrec JIT** — `jit.compiled=0` on every probe. Real leads exist
    (map-lookup timing); see the Lightrec/GL investigation notes.
 9. **PSX hardware-GL renderer** — the `rhi_lib_gl.c` vs `glsm.c` shim gap.
-10. **N64 Phase D** — owned by a *different* concurrent session; check before
-    touching.
+10. **N64 Phase D** (the JIT's COP0/interrupt verification and broader
+    differential coverage before any `ci_table` wiring). This was previously
+    listed as "owned by a *different* concurrent session; check before
+    touching" — **that session is dormant, so treat it as unowned and pickable.**
+    Verified 2026-08-07: the `n64-jit-plan-shadow-check` branch's last commit is
+    **2026-07-22**, its worktree (`C:/LLM/n64-jit-plan-shadow-check-wt`) still
+    holds two uncommitted `scripts/cores/n64-jit-spike/vr4300_jit_bridge.*`
+    edits, and `n64-jit-plan` itself is now **0 commits ahead of / 60 behind
+    `main`**. Re-check `git log` before starting anyway
+    ([[libretrowebxr-concurrent-dev]]), but don't defer to a phantom owner.
+    Reminder from `docs/HANDOFF.md`: the Play!-CodeGen `CONDITION_GE`/`AE` fix
+    this phase depends on exists **only in the WSL2 vendored checkout** and must
+    be re-applied (or properly forked/pinned) for any N64 JIT rebuild.
 11. **Atari 2600** — `stella2014` is the last "classic"-style core and renders
     0 draw calls; fix is shipping a `module`-style Stella build.
-12. **DOS / VirtualXT** — registered (`experimental: true`), no working core:
-    `virtualxt_libretro.wasm` is absent from `public/cores/`/404s live; see
-    `docs/DOS_CORE_BUILD.md` for the chosen next step (DOSBox Pure, PUAE-style
-    build).
+12. ~~**DOS / VirtualXT** — no working core.~~ ✅ **DONE (2026-08-01/02).** DOS
+    ships on **DOSBox Pure**, is off the `experimental` gate and on the default
+    shelf — see the **DOS** section above and `docs/DOS_CORE_BUILD.md`. Left
+    over: no real commercial DOS *game* has been run yet, and `virtualxt`
+    remains a parked, core-less secondary registration.
 
 **Test/tooling hygiene**
-13. **Audit remaining probe assertions against negative controls.** Two were
-    found proving nothing on 2026-07-29; there is no reason to assume they
-    were the only two.
+13. ~~**Audit remaining probe assertions against negative controls.**~~ ✅
+    **DONE (2026-07-29, `5158335`).** All **17** probes were audited by building
+    a negative control for each — breaking the feature the probe names, then
+    checking it goes red. **Only 2 did; seven had no assertions at all** and
+    exited 0 unconditionally. The worst offenders were the ones cited as
+    evidence in docs and commit messages (`probe:psx-timecrisis` scored 30/30
+    with `sendInput()` a no-op; `probe:psx-realbios` passed all 44 with the
+    firmware never threaded to the core). 15 were rewritten to within-run
+    *relative* checks and each validated **both** green on the real repo and red
+    on a control; two were deliberately left un-gated rather than ship
+    unvalidated checks. See `DEBUGGING.md`'s new section. **Standing rule: a
+    check is not evidence until you have seen it go red.**
 14. **Register 7 orphaned probe scripts** in `package.json` (`probe-autopause`,
     `probe-feedback`, `probe-focus`, `probe-multitv`, `probe-persist`,
-    `probe-pong-boot`, `probe-repatch`) — committed but unreachable.
+    `probe-pong-boot`, `probe-repatch`) — **still unregistered as of
+    2026-08-07** (re-checked against `package.json`). Note the audit in item 13
+    *rewrote* all seven so they can now actually fail; they just remain
+    unreachable via `npm run`, so nothing runs them.
 15. **`probe:psx-twogun` flakiness** back-to-back with another PSX probe (one
     observed 11/23 with the core never starting; passes cleanly on a re-run).
 16. **`window.__gunFire` hazard** — it swaps in a one-gun list, so under the
     new binding sweep it releases any other gun's port for that tick. Harmless
     today; a trap for any future two-gun headless test.
+
+**Multiplayer / worker-core loose ends (small, post-M1.4)**
+17. **Disc-swap panel republish.** The M1.4d fix put
+    `setObjectState('tv',…)` + `startVideoBroadcast()` inside `bootOnPrimary`,
+    so every primary-boot path gets it for free — but the disc-swap panel does
+    **not** go through `bootOnPrimary`, so it's a plausible third instance of
+    that bug class and has never been checked. Cheap to test with the
+    `smoke-host-picker` pattern.
+18. **P0-5 — native SaveRAM persistence is PARTIAL.** The last open P0 from
+    `docs/research/psx-ps2-n64-review-2026-07-24.md`: `autosave_interval` is
+    wired and `flushSaveRam`/`readSaveRam` do live reads, but end-to-end
+    persistence across a reload is unconfirmed and one flush-timing limitation
+    is known/accepted. Needs content with a recognized save type to settle.
 
 ## Parked (user-deferred, low priority)
 - ✅ **Controller cords + spawnable screens — done**, superseded by the
