@@ -161,6 +161,22 @@ the wrong abstraction.
 are converted to a world muzzle pose + aim point for you (`{pos, look}` is still
 accepted for aim-geometry tests). One real `LightGunMgr` tick per call.
 
+**Use this, not `window.__gunFire`** (2026-08-07). Two reasons, both of which bit
+real probes:
+
+* `__gunFire` *returns* `'no-gun'` when there is no gun — it doesn't throw — so
+  the four probes that wrapped it in `try/catch` and asserted "the call didn't
+  throw" were green with the gun entirely absent. `gun.fire()` throws on any
+  refusal, so the same assertion now means something. Those four
+  (`probe:lightgun`, `probe:ps2-guncon`, `probe:ps2-cue-support`,
+  `probe:ps2-timecrisis2`) were migrated when this was found.
+* `__gunFire` used to hand `LightGunMgr.tick()` a **one-gun** active list, which
+  the two-gun port-binding sweep correctly reads as "every other gun stopped
+  driving" and so released their libretro ports for that tick (ROADMAP item 16).
+  Both entry points now share `main.js`'s `_driveGunTick()`, which **unions** the
+  fired gun into the held set instead — so this is fixed for `__gunFire` too, but
+  the facade is still the supported surface.
+
 `mouse.arm() / disarm() / state() / port() / move(dx, dy, buttons)`.
 
 ### `content` — ROMs and carts

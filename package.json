@@ -72,7 +72,14 @@
     "probe:psx-guncon": "node scripts/probe-psx-guncon.js",
     "probe:psx-twogun": "node scripts/probe-psx-twogun.js",
     "measure:n64-fps": "node scripts/measure-n64-fps.js",
-    "probe:psx-realbios": "node scripts/probe-psx-realbios.js"
+    "probe:psx-realbios": "node scripts/probe-psx-realbios.js",
+    "probe:autopause": "node scripts/probe-autopause.mjs",
+    "probe:feedback": "node scripts/probe-feedback.mjs",
+    "probe:focus": "node scripts/probe-focus.mjs",
+    "probe:multitv": "node scripts/probe-multitv.mjs",
+    "probe:persist": "node scripts/probe-persist.mjs",
+    "probe:pong-boot": "node scripts/probe-pong-boot.mjs",
+    "probe:repatch": "node scripts/probe-repatch.mjs"
   },
   "devDependencies": {
     "jsnes": "^2.1.0",

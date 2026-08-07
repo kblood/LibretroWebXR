@@ -175,7 +175,7 @@ try {
   const ready = await page.waitForFunction(
     () => !!window.__client && typeof window.__insertCartridge === 'function'
        && typeof window.__armGun === 'function' && typeof window.__gunArmedState === 'function'
-       && typeof window.__gunFire === 'function',
+       && typeof window.__testApi?.gun?.fire === 'function',
     { timeout: 30000 },
   ).then(() => true).catch(() => false);
   ok('app booted with cartridge-insert/gun-test hooks ready', ready);
@@ -313,26 +313,26 @@ try {
      `state=${JSON.stringify(armState)}`);
   ok('armed system is ps2', armState.system === 'ps2', `system=${armState.system}`);
 
-  const fireOnScreen = await withTimeout(page.evaluate(() => {
-    try { const r = window.__gunFire({ x: 0, y: 1.2, z: -1 }, { x: 0, y: 1.2, z: -2 }, true); return { ok: true, result: r }; }
+  const fireOnScreen = await withTimeout(page.evaluate(async () => {
+    try { const r = await window.__testApi.gun.fire({ pos: { x: 0, y: 1.2, z: -1 }, look: { x: 0, y: 1.2, z: -2 }, trigger: true }); return { ok: true, result: r }; }
     catch (e) { return { ok: false, reason: String(e?.message || e) }; }
   }), 15000, 'gunFire-on');
   ok('on-screen gun fire (trigger held) does not throw against the .cue-booted disc',
-     fireOnScreen.ok && fireOnScreen.v?.ok, fireOnScreen.ok ? (fireOnScreen.v?.reason || `result=${fireOnScreen.v?.result}`) : `TIMED OUT (${fireOnScreen.label})`);
+     fireOnScreen.ok && fireOnScreen.v?.ok, fireOnScreen.ok ? (fireOnScreen.v?.reason || `result=${JSON.stringify(fireOnScreen.v?.result)}`) : `TIMED OUT (${fireOnScreen.label})`);
 
-  const fireRelease = await withTimeout(page.evaluate(() => {
-    try { const r = window.__gunFire({ x: 0, y: 1.2, z: -1 }, { x: 0, y: 1.2, z: -2 }, false); return { ok: true, result: r }; }
+  const fireRelease = await withTimeout(page.evaluate(async () => {
+    try { const r = await window.__testApi.gun.fire({ pos: { x: 0, y: 1.2, z: -1 }, look: { x: 0, y: 1.2, z: -2 }, trigger: false }); return { ok: true, result: r }; }
     catch (e) { return { ok: false, reason: String(e?.message || e) }; }
   }), 15000, 'gunFire-release');
   ok('trigger release does not throw',
-     fireRelease.ok && fireRelease.v?.ok, fireRelease.ok ? (fireRelease.v?.reason || `result=${fireRelease.v?.result}`) : `TIMED OUT (${fireRelease.label})`);
+     fireRelease.ok && fireRelease.v?.ok, fireRelease.ok ? (fireRelease.v?.reason || `result=${JSON.stringify(fireRelease.v?.result)}`) : `TIMED OUT (${fireRelease.label})`);
 
-  const fireOffScreen = await withTimeout(page.evaluate(() => {
-    try { const r = window.__gunFire({ x: 500, y: 500, z: 500 }, { x: 501, y: 500, z: 500 }, true); return { ok: true, result: r }; }
+  const fireOffScreen = await withTimeout(page.evaluate(async () => {
+    try { const r = await window.__testApi.gun.fire({ pos: { x: 500, y: 500, z: 500 }, look: { x: 501, y: 500, z: 500 }, trigger: true }); return { ok: true, result: r }; }
     catch (e) { return { ok: false, reason: String(e?.message || e) }; }
   }), 15000, 'gunFire-offscreen');
   ok('off-screen gun fire does not throw',
-     fireOffScreen.ok && fireOffScreen.v?.ok, fireOffScreen.ok ? (fireOffScreen.v?.reason || `result=${fireOffScreen.v?.result}`) : `TIMED OUT (${fireOffScreen.label})`);
+     fireOffScreen.ok && fireOffScreen.v?.ok, fireOffScreen.ok ? (fireOffScreen.v?.reason || `result=${JSON.stringify(fireOffScreen.v?.result)}`) : `TIMED OUT (${fireOffScreen.label})`);
   await sleep(300);
 
   await captureNamed('probe-ps2-cue-support-06-after-gun.png', 0);

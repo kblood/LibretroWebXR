@@ -22,7 +22,7 @@
 //   3. Arms the light gun via the real in-app hook (window.__armGun — the
 //      exact function the in-VR gun-grab handler calls) — a LIVE reboot that
 //      reconnects the NES Zapper on the console's port.
-//   4. Fires the gun via window.__gunFire, which injects a fake XR controller
+//   4. Fires the gun via __testApi.gun.fire(), which injects a fake XR controller
 //      and runs ONE real LightGunMgr.tick() — the exact per-frame path
 //      (LightGunMgr.js:126/132) that calls client.sendLightgun(...). Fires
 //      both an on-screen shot and an off-screen (reload) shot, since P0-1
@@ -113,7 +113,7 @@ try {
   const ready = await page.waitForFunction(
     () => !!window.__client && typeof window.__pickLocalRom === 'function'
        && typeof window.__armGun === 'function' && typeof window.__gunArmedState === 'function'
-       && typeof window.__gunFire === 'function',
+       && typeof window.__testApi?.gun?.fire === 'function',
     { timeout: 30000 },
   ).then(() => true).catch(() => false);
   ok('app booted with gun-test hooks ready', ready);
@@ -143,34 +143,34 @@ try {
      `state=${JSON.stringify(armState)}`);
 
   // --- Step 3: fire the gun through the REAL per-frame call chain ---
-  // window.__gunFire injects a fake XR controller and runs ONE real
+  // __testApi.gun.fire() injects a fake XR controller and runs ONE real
   // LightGunMgr.tick(), which calls client.sendLightgun(...) exactly like the
   // production render loop does (scene.addTickCallback in main.js).
-  const fireOnScreen = await page.evaluate(() => {
+  const fireOnScreen = await page.evaluate(async () => {
     try {
-      const r = window.__gunFire({ x: 0, y: 1.2, z: -1 }, { x: 0, y: 1.2, z: -2 }, true);
+      const r = await window.__testApi.gun.fire({ pos: { x: 0, y: 1.2, z: -1 }, look: { x: 0, y: 1.2, z: -2 }, trigger: true });
       return { ok: true, result: r };
     } catch (e) { return { ok: false, reason: String(e?.message || e) }; }
   });
-  ok('on-screen gun fire (trigger held) does not throw', fireOnScreen.ok, fireOnScreen.reason || `result=${fireOnScreen.result}`);
+  ok('on-screen gun fire (trigger held) does not throw', fireOnScreen.ok, fireOnScreen.reason || `result=${JSON.stringify(fireOnScreen.result)}`);
 
-  const fireRelease = await page.evaluate(() => {
+  const fireRelease = await page.evaluate(async () => {
     try {
-      const r = window.__gunFire({ x: 0, y: 1.2, z: -1 }, { x: 0, y: 1.2, z: -2 }, false);
+      const r = await window.__testApi.gun.fire({ pos: { x: 0, y: 1.2, z: -1 }, look: { x: 0, y: 1.2, z: -2 }, trigger: false });
       return { ok: true, result: r };
     } catch (e) { return { ok: false, reason: String(e?.message || e) }; }
   });
-  ok('trigger release does not throw', fireRelease.ok, fireRelease.reason || `result=${fireRelease.result}`);
+  ok('trigger release does not throw', fireRelease.ok, fireRelease.reason || `result=${JSON.stringify(fireRelease.result)}`);
 
-  const fireOffScreen = await page.evaluate(() => {
+  const fireOffScreen = await page.evaluate(async () => {
     try {
       // Way outside any TV geometry — the off-screen/reload call site
       // (LightGunMgr.js:132), the OTHER call to client.sendLightgun().
-      const r = window.__gunFire({ x: 500, y: 500, z: 500 }, { x: 501, y: 500, z: 500 }, true);
+      const r = await window.__testApi.gun.fire({ pos: { x: 500, y: 500, z: 500 }, look: { x: 501, y: 500, z: 500 }, trigger: true });
       return { ok: true, result: r };
     } catch (e) { return { ok: false, reason: String(e?.message || e) }; }
   });
-  ok('off-screen (reload) gun fire does not throw', fireOffScreen.ok, fireOffScreen.reason || `result=${fireOffScreen.result}`);
+  ok('off-screen (reload) gun fire does not throw', fireOffScreen.ok, fireOffScreen.reason || `result=${JSON.stringify(fireOffScreen.result)}`);
   await sleep(300);
 
   // --- Step 4: the actual regression assertions ---

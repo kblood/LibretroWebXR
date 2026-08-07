@@ -3161,19 +3161,39 @@ async function buildCartridgeWorld() {
     if (!obj || !lightGunMgr?._portForGun) return null;
     return lightGunMgr._portForGun(obj);
   };
-  window.__gunFire = (pos, look, trigger) => {
-    if (!lightGunObj || !lightGunMgr) return 'no-gun';
-    lightGunObj.position.set(pos.x, pos.y, pos.z);
+  // Aim `gun` at `look` from `pos` and run ONE real LightGunMgr.tick(), so the
+  // shot travels the production per-frame chain (raycast → sendLightgun) rather
+  // than a test-only shortcut. Backs both window.__gunFire (legacy) and
+  // __testApi.gun.fire().
+  //
+  // The active-gun list is UNIONED, not REPLACED. The old version handed tick()
+  // a one-gun list, which the two-gun port-binding sweep added in LightGunMgr
+  // legitimately reads as "every other gun stopped driving" and so hands their
+  // libretro ports back for that tick (ROADMAP item 16). Keeping the genuinely
+  // held guns in the set — only substituting a fake XR controller for the gun
+  // being fired, since headless has no real inputSource — means firing gun A
+  // can no longer knock gun B out of its seat.
+  const _driveGunTick = (gun, pos, look, trigger) => {
+    if (!gun || !lightGunMgr) return 'no-gun';
+    gun.position.set(pos.x, pos.y, pos.z);
     // Barrel is local -Z; Object3D.lookAt points +Z at the target for non-cameras,
     // so look at the mirrored point to aim the muzzle at `look`.
-    lightGunObj.lookAt(new THREE.Vector3(2 * pos.x - look.x, 2 * pos.y - look.y, 2 * pos.z - look.z));
-    lightGunObj.updateMatrixWorld(true);
+    gun.lookAt(new THREE.Vector3(2 * pos.x - look.x, 2 * pos.y - look.y, 2 * pos.z - look.z));
+    gun.updateMatrixWorld(true);
     const fakeCtrl = { userData: { inputSource: { gamepad: { buttons: [{ pressed: !!trigger }] } } } };
     const saved = lightGunMgr._getActiveGuns;
-    lightGunMgr._getActiveGuns = () => [{ gun: lightGunObj, controller: fakeCtrl }];
+    lightGunMgr._getActiveGuns = () => {
+      const held = (saved?.() || []).filter((e) => e?.gun && e.gun !== gun);
+      return [...held, { gun, controller: fakeCtrl }];
+    };
     try { lightGunMgr.tick(0.016); } finally { lightGunMgr._getActiveGuns = saved; }
     return 'ticked';
   };
+  // Legacy hook. Superseded by __testApi.gun.fire() (docs/TEST_AUTOMATION.md);
+  // kept because external tooling outside this repo may still call it. Both go
+  // through _driveGunTick, so neither carries the one-gun-list hazard any more.
+  window.__gunFire = (pos, look, trigger) => _driveGunTick(lightGunObj, pos, look, trigger);
+  _testHooks.gunFire = (pos, look, trigger) => _driveGunTick(lightGunObj, pos, look, trigger);
   // Keyboard debug hooks — exposed here (before buildMemoryCards await) so
   // headless probes can reach them even when the later stall is slow.
   window.__kbd        = c64kbd;
@@ -4198,7 +4218,10 @@ async function buildCartridgeWorld() {
   // legacy window.__* hooks above point at), not name lookups, so __testApi
   // keeps working even if a hook is later renamed or removed.
   Object.assign(_testHooks, {
-    gunFire: window.__gunFire,
+    // NOTE: gunFire is deliberately NOT re-captured from window.__gunFire here.
+    // It was wired straight to _driveGunTick when the gun was built, so the
+    // __testApi path stays on the internal driver even if external tooling
+    // reassigns the legacy window hook.
     gunArmedState: window.__gunArmedState,
     gunPort: window.__gunLibretroPort,
     moveMouse: window.__moveMouse,

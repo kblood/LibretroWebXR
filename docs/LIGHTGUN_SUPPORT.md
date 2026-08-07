@@ -728,3 +728,13 @@ cleared for later loads even when disarmed mid-curated-game).
 `__forceCoreOptions`, `__forceRemapName`, `__forceCfgExtra`, `__forceExtraFiles`); the
 gun integration adds `__lightGun`, `__lightGunMgr`, `__gunTargets`, `__gunFire`,
 `__armGun`, `__disarmGun`, `__gunArmedState` for headless verification.
+
+**Prefer `__testApi.gun.fire()` over `window.__gunFire`** (2026-08-07). The
+legacy hook is kept working — external tooling may still call it — but it
+*returns* the string `'no-gun'` when no gun exists, so a probe that only checks
+"the call didn't throw" stays green with the gun missing. The facade
+(`docs/TEST_AUTOMATION.md`) throws instead, takes ergonomic `{u, v}` screen
+coordinates as well as `{pos, look}` world vectors, and awaits a real app frame.
+Both now share `_driveGunTick()`, which unions the fired gun into the held set
+rather than substituting a one-gun list, so firing gun A can no longer make the
+two-gun port-binding sweep release gun B's libretro port for that tick.
