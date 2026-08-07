@@ -1432,15 +1432,19 @@ inline. If you're picking up stale-looking doc claims again, check `git log
 "Open tasks (2026-07-29)". The numbered items below are the older 2026-07-11
 list, kept because most are still accurate app-layer work; item 00 is DONE.**
 
-**✅ M1.4d is FIXED (2026-08-04) — what's left is a DEPLOY.** A host starting a game
-with the header's **Load ROM** button used to leave every other machine frozen on the
-previous game, with a stale room `tv` that also misinformed late joiners and
-misdirected host migration; it reproduced the user's original "screens not synced"
-report. The publish/re-broadcast pair now lives inside `bootOnPrimary`, and
-`scripts/smoke-host-picker.mjs` covers the host side of that button (28/28 green,
-negative-controlled to 9 RED against the old behaviour). **Next action: `npm run
-deploy` (app) and re-run `smoke-host-picker` against `dionysus.dk` — M1.4c's lesson
-is that production is not localhost.**
+**✅ M1.4d is FIXED AND DEPLOYED (2026-08-07) — re-verified live, not just claimed.**
+A host starting a game with the header's **Load ROM** button used to leave every
+other machine frozen on the previous game, with a stale room `tv` that also
+misinformed late joiners and misdirected host migration; it reproduced the user's
+original "screens not synced" report. The publish/re-broadcast pair now lives inside
+`bootOnPrimary`. Commit `2967e08` (the `window.__testApi` automation surface itself)
+had ALSO been sitting undeployed — the prior app-only deploy predated it — so this
+was a second, separate deploy gap, not just M1.4d's. Both are now closed: `npm run
+deploy-app` was run, then the full MP smoke set re-run against
+`https://dionysus.dk/webxr/libretrowebxr2/` + `wss://dionysus.dk/ws/` (not
+localhost — M1.4c's own lesson): `smoke-host-picker` 28/28, `smoke-shared-game`
+45/45, `smoke-display-only` 54/54, `demo-automation-api` 49/49 — all green against
+the LIVE production server. Nothing is believed-but-unverified as of this entry.
 
 00. ✅ **DONE (merged 2026-07-27).** ~~**(New, 2026-07-22) Decide whether to merge `n64-jit-plan` to `main`.**~~
     `main` and `n64-jit-plan` were fast-forwarded to the same commit; the PSX,
