@@ -440,9 +440,20 @@ function forwardInput(payload) {
     moduleInstance.webxrInputEvent(payload);
     return;
   }
+  // RetroArch's rwebinput registers keydown/keyup on "#canvas", which Emscripten's
+  // compiled findEventTarget() resolves DIRECTLY to Module["canvas"] — the same
+  // resolution forwardLightgun's canvas dispatch below relies on and documents.
+  // Dispatching ONLY to the duck-typed `inputTarget` shim (as this used to) means
+  // rwebinput's real key handler — which lives on `canvas`, never on the shim —
+  // never sees the event, so raw-keyboard passthrough silently never reached the
+  // core for any worker-hosted keyboard-class system. DOS is the first one built
+  // on the worker-runtime split (Amiga/C64 predate it and use EmulatorClient.js's
+  // direct canvas dispatch instead), which is why this was never caught before.
+  const { eventType, code, key, keyCode, location } = payload;
+  try { canvas?.dispatchEvent(realEvent(eventType, { code, key, keyCode, location })); } catch (_) {}
   let defaultPrevented = false;
   inputTarget?.dispatchEvent({
-    type: payload.eventType,
+    type: eventType,
     ...payload,
     bubbles: true,
     cancelable: true,

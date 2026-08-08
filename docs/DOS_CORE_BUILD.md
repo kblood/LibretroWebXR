@@ -1,5 +1,73 @@
 # DOS support — status & build notes
 
+## Upstream refresh (2026-08-08 — task #10, core still working, read this first)
+
+Routine "update to newer upstream source" pass. Two upstreams matter for this
+core: the `dosbox-pure` fork (EmulatorJS) and the shared `~/amiga-build/RetroArch`
+checkout (frontend it links against).
+
+- **`dosbox-pure` fork: unchanged.** `DOSBOX_PURE_COMMIT` stays
+  `ef363f86d7ce7ff632064d969b891be2932dd767` — that fork's `main` branch had
+  not moved since the prior build; `git fetch && git rev-parse origin/main`
+  on the WSL2 checkout confirmed it's still the tip. Nothing to bump.
+- **RetroArch: bumped.** `RETROARCH_COMMIT` moved from `058f49992707c9ca90ae6c5acc50425a829e6bbb`
+  (2026-06-14) to `1825596b1a9072998d5caa5cedb4d4da8b98c6cb` (2026-08-08,
+  upstream `master` HEAD at the time) — about 2215 commits. This checkout is
+  **shared** with the Amiga/PS2/PSX/N64 core builds and carries five locally
+  patched files (`Makefile.emscripten`, `frontend/drivers/platform_emscripten.c`
+  — the LWX fix this doc exists to protect — `gfx/drivers/gl2.c`,
+  `gfx/drivers/gl3.c`, `input/drivers/rwebinput_input.c`). Before touching the
+  live checkout, the exact same diff was test-applied (`git apply --check`)
+  against a disposable `git worktree` of `origin/master` to confirm it would
+  merge cleanly without risking the other cores' patches. It did. The real
+  update was then done on the live checkout, under the `build.sh` concurrency
+  lock, as `git stash` → `git merge --ff-only origin/master` → `git stash pop`
+  — git reported clean auto-merges on all four touched files (the fifth,
+  `rwebinput_input.c`, had zero upstream changes in that range), zero
+  conflict markers anywhere.
+- **LWX patch: confirmed intact, no reapplication needed.** All three
+  `LWX:` comment sites in `platform_emscripten.c` (`thread_main()`,
+  `platform_emscripten_enter_fake_block()`,
+  `platform_emscripten_set_main_loop_interval()`) survived the merge
+  verbatim — checked by grep immediately after the stash pop, before
+  building anything.
+- **Build:** `scripts/cores/dos/build.sh FORCE_RELINK=1` (detached via
+  `nohup setsid ... & disown`, per the script's own recommendation). The
+  `dosbox-pure` core-compile step was a no-op (source unchanged, `make`
+  found nothing to redo), but the RetroArch link step genuinely recompiled
+  roughly 230 changed frontend source files before producing new
+  `.js`/`.wasm` output — confirmed by reading the actual build log, not
+  assumed from a fast wall-clock time (the whole link finished in ~15s on
+  this box with `-j32`, most of the 2-month upstream diff falling outside
+  files this specific link configuration touches).
+- **Installed:** new artifacts copied from `~/dosbox-build/stage/latest/`
+  into `public/cores/dosbox_pure_libretro.{js,wasm,worker.js}` (gitignored,
+  as always). `worker.js` is byte-identical to the prior build (it's a tiny,
+  version-independent pthread bootstrap stub) — `.js`/`.wasm` both changed
+  size and hash, consistent with a real relink against new frontend source.
+- **Verified:** `scripts/probe-dos-core.js` **PASSED** (crossOriginIsolated,
+  3 frames presented, non-black samples, `errorLogCount: 0`, no worker
+  errors) on the no-content internal-shell boot path. Additionally re-ran
+  the real-disk boot this doc's 2026-08-01 entry below describes
+  (`freedos-boot.img`, verbose `-v`) via an ad-hoc screenshot script and got
+  the same bar this doc has always required: a fully legible **DOSBOX PURE
+  START MENU** with the FreeDOS file listing rendered crisply, not just
+  non-black pixels. That ad-hoc run's stricter log-level assertions (which
+  `scripts/probe-dos-core.js` doesn't exercise on the verbose/content boot
+  path) flagged several **pre-existing, benign** warnings unrelated to this
+  update — headless-Chrome wheel/pointerlock callback creation failures, no
+  MIDI hardware, an empty-core-path playlist push — generic frontend/
+  environment messages, not a regression from the RetroArch bump.
+- **`public/cores/dosbox_pure_libretro.build.json`** regenerated with the
+  real new pins and sha256/byte counts computed from the actual installed
+  files (per the 2026-08-01 lesson below about stale manifests silently
+  claiming the wrong identity — this was checked, not assumed).
+- **Not done, by design:** no deploy. `npm run deploy`/`deploy-app` were
+  deliberately NOT run — `public/cores/` is gitignored, so an app-only
+  deploy would skip the new binaries entirely, and a full deploy is a
+  bigger, separate action. **A full deploy is still needed to make this
+  build live.**
+
 ## Current real status (2026-08-01 — RESOLVED, read this before anything below, supersedes everything about VirtualXT)
 
 **DOSBox Pure genuinely renders now.** Installed, wired into `src/systems.js`
