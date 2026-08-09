@@ -246,6 +246,18 @@ export class WorkerEmulatorClient extends EventTarget {
 
   _fatal(message) {
     console.error('[WorkerEmulatorClient]', message);
+    // A worker 'error'/'messageerror' means no RESPONSE is ever coming for
+    // whatever request is in flight (most commonly 'start'). Without this,
+    // the only signal was this CustomEvent — which loadCartridge() doesn't
+    // await, only the request promise does — so a crashed worker left
+    // callers hanging for the full requestTimeoutMs (60s default) with zero
+    // visible feedback before the existing error UI (placeholder + status)
+    // ever got a chance to run. Same reject-all-pending pattern stop() uses.
+    for (const { reject, timer } of this._pending.values()) {
+      clearTimeout(timer);
+      reject(new Error(message));
+    }
+    this._pending.clear();
     this.dispatchEvent(new CustomEvent('error', { detail: message }));
   }
 }
