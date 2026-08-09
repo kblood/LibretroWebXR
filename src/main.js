@@ -168,6 +168,16 @@ let currentMeta = null;
 // boot) can re-resolve and reload the SAME game. Unlike currentMeta this keeps
 // the rom-resolution fields (rom.source / sha1). null until a game loads.
 let _lastLoadedMeta = null;
+// Bumped once per loadCartridge() call, on the PRIMARY console specifically.
+// Picking a second cartridge before the first's fetch/boot has finished used
+// to let BOTH resolve+boot independently — whichever finished LAST won,
+// regardless of which was requested last, so a big/slow ROM picked FIRST
+// could clobber a small/fast one picked afterward once its own fetch finally
+// caught up (observed: DOS Tools booted, then a still-resolving PS2 disc
+// picked moments earlier finished and replaced it — "two games booting on
+// top of each other"). loadCartridge captures its own generation and bails
+// after every await that could have been outlived by a newer call.
+let _primaryLoadGeneration = 0;
 let _lightgunArmedConsole = false;  // primary console booted with the gun device
 let _mouseArmedConsole = false;     // primary console booted with the mouse device
 // Two-gun (co-op) state: the ordered libretro gun PORTs the active two-gun config
@@ -6306,6 +6316,11 @@ async function loadCartridge(meta, { echo = true } = {}) {
     return;
   }
   setStatus(`loading ${meta.title}…`);
+  // See _primaryLoadGeneration's declaration: whichever loadCartridge() call
+  // is newest at the moment each check runs wins; any older call still
+  // resolving a slow fetch quietly gives up instead of booting over it.
+  const myLoadGen = ++_primaryLoadGeneration;
+  const supersededByNewerLoad = () => myLoadGen !== _primaryLoadGeneration;
   // Boot telemetry (diagnoses headset boot failures): how the ROM resolves +
   // whether the OPFS cache is even available on this device, logged BEFORE the
   // attempt so a crash/hang still leaves a breadcrumb. See [[src/RomResolver.js]].
@@ -6317,6 +6332,13 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // RomResolver (Phase R.2) turns the entry into bytes from url / local
     // folder / picker / OPFS cache, per its rom.source (default: url).
     let buf = await resolveRom(meta);
+    // A newer loadCartridge() call already won the primary console while
+    // this one's fetch was still in flight — stop here, before touching any
+    // shared boot state, so this stale request can never clobber it.
+    if (supersededByNewerLoad()) {
+      logger?.event?.('load-superseded', { file: meta.file, system: meta.system, where: 'resolveRom' });
+      return;
+    }
     // Light-gun wiring: when this load is gun-enabled (the game is flagged, or a
     // gun has been armed for this session), boot the gun's (patched) core with the
     // peripheral assigned to its port — the device only connects at boot, so it
@@ -6377,6 +6399,12 @@ async function loadCartridge(meta, { echo = true } = {}) {
       file: meta.file, title: meta.title, coreOptions, inputDevices, remapName, systemFiles: core.systemFiles,
       discImage: discImageOverride, contentExt: discImageOverride ? 'iso' : undefined,
     }, content);
+    // Last check before this call actually touches the primary console (new
+    // canvas, rackMgr add/remove, currentCore) — see the resolveRom check above.
+    if (supersededByNewerLoad()) {
+      logger?.event?.('load-superseded', { file: meta.file, system: meta.system, where: 'pre-boot' });
+      return;
+    }
     // publishTv:false — this function does its own `tv` publish + broadcast below,
     // gated on `echo` (see the M1.4d note on bootOnPrimary).
     await bootOnPrimary(meta, { name: coreName, url: core.url, style: core.style }, content, startOptions, { publishTv: false });
