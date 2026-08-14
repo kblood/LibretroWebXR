@@ -1,4 +1,3 @@
-#requires -Version 5
 <#
 .SYNOPSIS
   EXAMPLE deploy script — build LibretroWebXR and publish dist/ to a static host.
@@ -8,11 +7,26 @@
   connection details, OR set the DEPLOY_* env vars below and run this as-is.
   Contains NO real hosts, users, or key paths — never commit those.
 
-  Flow: npm run fetch-cores → npm run build → per-item scp of dist/ into a staging
-  dir on the remote → atomic `mv` staging→live (keeps a `.old` until success).
+  Flow: npm run fetch-cores → npm run build → check-dist (publishing gate) →
+  per-item scp of dist/ into a staging dir on the remote → atomic `mv` staging→live
+  (keeps a `.old` until success). The gate is mandatory: `node scripts/check-dist.mjs`
+  exits nonzero on anything unpublishable or oversized in dist/ (*.bak, credentials,
+  node_modules, scratch output, non-allowlisted paths/types) and this script throws
+  before the first scp. It REPORTS rather than refuses public/roms/local/, the
+  private sideload, which ships on purpose — see that file's header; `--strict`
+  turns it into a refusal for a genuinely public release.
+  roms/freeware/ is not blanket-allowed either: a ROM there must be an allowlisted
+  title (FREEWARE_ALLOW in check-dist.mjs, or referenced from a tracked
+  public/roms/*.json) and under the per-ROM size ceiling. The same check also runs
+  inside the vite build (on the RESOLVED build.outDir, so `--outDir` is covered)
+  and as npm `postbuild`; the three are independent on purpose.
   public/.htaccess is uploaded explicitly because `scp dist/*` skips the dotfile,
   and its COOP/COEP headers are what make crossOriginIsolated (→ SharedArrayBuffer
   → the threaded libretro cores) work.
+
+  NOTE ON REMOVAL: only the FULL path (staging dir + atomic swap) can take
+  already-published content OFF the server. -AppOnly is additive and cannot.
+  See .PARAMETER AppOnly.
 
   Requires the OpenSSH client on PATH and an SSH key authorized on the host.
 
@@ -31,18 +45,40 @@
 .PARAMETER AppOnly
   Refresh only the app (assets/ + the .html entry points + .htaccess) directly into
   the existing live folder — no staging dir, no atomic swap. A full deploy re-uploads
-  everything vite copied out of public/, which for this project means cores/ and any
-  local ROM/disc sideload: gigabytes of scp for a 1 MB code change. -AppOnly is
-  seconds. It refuses to run if the live folder doesn't exist yet (it would produce a
+  everything vite copied out of public/, which for this project means cores/ (~122 MB)
+  and the free ROM set: minutes of scp for a 1 MB code change. -AppOnly is
+  seconds. It is a SPEED optimisation, never a safety control — check-dist.mjs runs
+  on every path, including this one, but a green check only ever describes the NEW
+  upload. It refuses to run if the live folder doesn't exist yet (it would produce a
   deployment with no cores), and it's safe despite not being atomic because vite
   content-hashes assets/ — new bundles land under new names and the .html files that
   reference them go last.
+
+  ####################################################################
+  #  -AppOnly CANNOT UN-PUBLISH ANYTHING. IT IS ADDITIVE, ONLY.      #
+  #                                                                  #
+  #  It skips roms/ and cores/ and never deletes a remote file. If   #
+  #  something private is ALREADY on the server, -AppOnly will not   #
+  #  remove it however thoroughly you fixed the build first: a green #
+  #  check-dist here only proves the NEW upload is clean.            #
+  #                                                                  #
+  #  TO TAKE PUBLISHED CONTENT DOWN, either run a FULL deploy (this  #
+  #  script without -AppOnly: it uploads to a staging dir and `mv`s  #
+  #  it over the live folder, so anything absent from dist/ is gone) #
+  #  or delete the path by hand over ssh. Then confirm with a real   #
+  #  request — a 404 is the proof, not a successful deploy.          #
+  ####################################################################
 
 .EXAMPLE
   $env:DEPLOY_HOST='example.com'; $env:DEPLOY_USER='me'
   $env:DEPLOY_KEY="$HOME\.ssh\id_ed25519"; $env:DEPLOY_REMOTE_BASE='/var/www/html/webxr'
   pwsh scripts/deploy.example.ps1 -Name libretrowebxr
 #>
+
+# NOTE: #requires must come AFTER the comment-based help block. With it above,
+# PowerShell parses NO comment-based help at all and `Get-Help` on this script
+# prints only the syntax line — verified against the pre-change file.
+#requires -Version 5
 [CmdletBinding()]
 param(
   [string]$Name = 'libretrowebxr',
@@ -142,8 +178,28 @@ if ($Room) {
   return
 }
 
+# --- publishing gate (runs before ANY dist/ upload) --------------------------
+# vite copies the WHOLE of public/ into dist/ and .gitignore has no say in a
+# build, so whatever sits under public/ ends up staged for public upload by the
+# loops below. This is the independent check on what that actually is: backups,
+# credentials, VCS/dependency dirs, scratch output, unlisted ROMs under
+# roms/freeware/ and anything over the size budgets are refused. public/roms/local/
+# is REPORTED, not refused — it ships deliberately (see check-dist.mjs's header).
+# Runs for -AppOnly too (that path uploads dist/ items as well) and in -DryRun
+# (local + read-only). Placed after the -Room early return: the room server is
+# not a dist/ asset.
+$Guard = Join-Path $PSScriptRoot 'check-dist.mjs'
+if (-not (Test-Path $Guard)) { throw "missing scripts/check-dist.mjs - refusing to upload an unchecked dist/" }
+Write-Host '=== check-dist (publishing gate) ===' -ForegroundColor Cyan
+node $Guard $Dist
+if ($LASTEXITCODE -ne 0) {
+  throw "check-dist FAILED (exit $LASTEXITCODE) - ABORTED before uploading anything. See the violations above; rebuild with 'npm run build'. Do NOT delete anything under public/."
+}
+
 if ($AppOnly) {
   Write-Host "=== app-only refresh $Name -> ${Target}:$Live ===" -ForegroundColor Cyan
+  Write-Host '    -AppOnly is ADDITIVE: it uploads assets/ + .html + .htaccess and deletes NOTHING.' -ForegroundColor Yellow
+  Write-Host '    It cannot un-publish roms/ or cores/ content an earlier deploy put on the server.' -ForegroundColor Yellow
   Invoke-Ssh "test -d '$Live' || { echo 'no live folder yet - run a FULL deploy first' >&2; exit 1; }"
   $appLast = @('index.html', 'desktop.html', 'headset-test.html')
   Get-ChildItem -Path $Dist -Force |
@@ -157,6 +213,9 @@ if ($AppOnly) {
   Write-Host ''
   Write-Host "Done (app only). Live folder: $Live" -ForegroundColor Green
   Write-Host '    roms/ and cores/ untouched — run a full deploy to change them.' -ForegroundColor DarkGray
+  Write-Host '    NOTHING WAS REMOVED FROM THE SERVER. -AppOnly is additive and cannot un-publish' -ForegroundColor Yellow
+  Write-Host '    what an earlier deploy put there — use a FULL deploy (staging + atomic swap), or' -ForegroundColor Yellow
+  Write-Host "      ssh <host> `"rm -rf $Live/<path>`"   # then curl the URL and confirm a 404" -ForegroundColor Yellow
   if ($DryRun) { Write-Host '    (dry run — nothing changed)' -ForegroundColor Yellow }
   return
 }

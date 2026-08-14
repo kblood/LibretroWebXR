@@ -41,6 +41,12 @@ export class SceneMgr {
     this.sourceCanvas = sourceCanvas;
     this.onControllerButton = onControllerButton || (() => {});
     this._tickCallbacks = [];
+    // How many slots in _tickCallbacks are TOMBSTONES (null) rather than live
+    // callbacks. removeTickCallback() nulls a slot instead of splicing so the
+    // render loop can walk the live array by index without copying it every
+    // frame; the loop compacts afterwards, only on the frames where something
+    // was actually removed. See _render / _compactTickCallbacks.
+    this._tickRemovals = 0;
 
     this._initRenderer();
     this._initScene();
@@ -414,8 +420,56 @@ export class SceneMgr {
 
   // Register a per-frame tick callback. Used by LocomotionMgr and GrabMgr
   // for thumbstick polling and hover-target ray-casting.
+  //
+  // Returns a disposer that unregisters it again (§5.3 of the 2026-08 review:
+  // "SceneMgr has no tick deregistration"). Anything registered for a SCOPED
+  // lifetime — a room session's `net`-dereferencing callbacks, a rebuilt world —
+  // must be able to unregister, or it keeps running forever after its scope is
+  // gone (and, for the net callbacks, throws once per frame; see main.js's
+  // disconnectFromRoom).
   addTickCallback(fn) {
+    if (typeof fn !== 'function') return () => {};
     this._tickCallbacks.push(fn);
+    return () => this.removeTickCallback(fn);
+  }
+
+  /**
+   * Unregister a callback previously passed to addTickCallback. Removes only the
+   * first matching registration (so a fn added twice stays live until removed
+   * twice, symmetric with the array). Returns true when one was removed.
+   *
+   * TOMBSTONES, not splice: this can be called from INSIDE the tick loop (the
+   * in-VR menu's Leave button runs from menuMgr.tick(), and Leave deregisters
+   * the room-session ticks), and splicing the live array mid-iteration silently
+   * skips the next callback for that frame. Nulling the slot keeps every other
+   * index stable, which is what lets _render walk the array directly instead of
+   * copying it 72-90 times a second (~26 callbacks per copy on a Quest).
+   */
+  removeTickCallback(fn) {
+    const i = this._tickCallbacks.indexOf(fn);
+    if (i < 0) return false;
+    this._tickCallbacks[i] = null;
+    this._tickRemovals++;
+    return true;
+  }
+
+  /** How many tick callbacks are currently registered (probe/diagnostic hook). */
+  tickCallbackCount() { return this._tickCallbacks.length - this._tickRemovals; }
+
+  /**
+   * Drop the tombstones removeTickCallback() left behind. Called from _render
+   * only on frames where a removal actually happened, so the steady state costs
+   * nothing; doing it after the loop (never during) is what makes the
+   * index-walk safe against a callback that removes callbacks.
+   */
+  _compactTickCallbacks() {
+    const cbs = this._tickCallbacks;
+    let write = 0;
+    for (let read = 0; read < cbs.length; read++) {
+      if (cbs[read]) cbs[write++] = cbs[read];
+    }
+    cbs.length = write;
+    this._tickRemovals = 0;
   }
 
   _addResizeHandler() {
@@ -454,9 +508,25 @@ export class SceneMgr {
     // callback is stale.
     const dtMs = performance.now() - (this._lastTick || performance.now());
     this._lastTick = performance.now();
-    for (const fn of this._tickCallbacks) {
+    // Walk the LIVE array by index — no per-frame copy. This is the hottest
+    // loop in the app (72-90 Hz on a Quest, ~26 callbacks), so it must not
+    // allocate. A callback may deregister (or register) callbacks while we're
+    // inside here — the in-VR menu's Leave button runs from menuMgr.tick(), and
+    // Leave calls removeTickCallback — so:
+    //   • removal leaves a TOMBSTONE (null) instead of splicing, keeping every
+    //     later index valid for the rest of this frame; skip it (a callback
+    //     removed earlier THIS frame must not still run),
+    //   • `n` is snapshotted up front, so a callback registered mid-frame first
+    //     runs on the NEXT frame (identical to the old .slice() behaviour),
+    //   • compaction happens after the loop, only when something was removed.
+    const cbs = this._tickCallbacks;
+    const n = cbs.length;
+    for (let i = 0; i < n; i++) {
+      const fn = cbs[i];
+      if (!fn) continue;
       try { fn(dtMs); } catch (e) { console.warn('[SceneMgr tick]', e); }
     }
+    if (this._tickRemovals) this._compactTickCallbacks();
 
     this.renderer.render(this.scene, this.camera);
   }

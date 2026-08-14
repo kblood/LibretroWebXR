@@ -332,7 +332,9 @@ export class DesktopNet {
     ws.addEventListener('close', () => {
       const wasConnected = this._connected;
       this._connected = false;
-      this.video.stopBroadcast();
+      // The socket is gone: tear the capture down locally, but don't pretend to
+      // announce a 'bye' that could not possibly be delivered.
+      this.video.stopBroadcast({ announce: false });
       if (!this._closing) {
         this._setHost(null);
         if (wasConnected || this._reconnectTries) this._scheduleReconnect();
@@ -355,7 +357,9 @@ export class DesktopNet {
       // old fallback claims are meaningless. Shared object state is replayed.
       this.presence.clear();
       this._fallbackClaims.clear();
-      this.video.disable();
+      // Connection genuinely lost (this path only runs after an UNEXPECTED
+      // close): teardown yes, byes no — they could never reach a peer.
+      this.video.disable({ announce: false });
       this.connect();
     }, delay);
   }
@@ -392,12 +396,18 @@ export class DesktopNet {
     this._closing = true;
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     this._clearFallbackTimer();
+    // ANNOUNCE BEFORE CLOSING — see the same note in NetMgr.disconnect(). The
+    // VideoMgr send closure above is gated on `_connected && ws`, so tearing the
+    // video down after the socket was closed made its teardown 'bye' inert and a
+    // leaving host froze every client's picture until ICE consent expired.
+    // Synchronous sends only: the leave is not delayed, and close() runs strictly
+    // after them so there is no send-after-close race.
+    this.video.disable();   // → one 'bye' per client we were streaming to
     try { this.ws?.close(); } catch { /* already closing */ }
     this._connected = false;
     this._setHost(null, { silent: true });
     this._serverElects = false;
     this._fallbackClaims.clear();
-    this.video.disable();
     this.presence.clear();
     this.objects.clear();
     this._lastRosterSig = '';

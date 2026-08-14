@@ -373,7 +373,11 @@ const HAND = [0.2, 1.2, -1.5, 0, 0, 0, 1];
   const offer = makeSignal({ to: 'b', kind: 'offer', data: { sdp: 'v=0...', type: 'offer' } });
   ok(offer.type === MSG.SIGNAL && offer.to === 'b' && offer.kind === 'offer', 'makeSignal builds an offer');
   ok(validate(offer).ok, 'SIGNAL validates');
-  ok(SIGNAL_KINDS.includes('ice') && SIGNAL_KINDS.length === 3, 'three signal kinds');
+  // 'bye' joined offer/answer/ice on 2026-08-14: VideoMgr always sent it, but the
+  // validator rejected it, so host video teardown never crossed the wire
+  // (CLAUDE_REVIEW §5.2 / CODEX_REVIEW COR-1). Assert the exact set, not a count,
+  // so both a dropped kind and a smuggled-in one fail here.
+  ok(SIGNAL_KINDS.join(',') === 'offer,answer,ice,bye', 'four signal kinds, in contract order');
   ok(!validate({ type: MSG.SIGNAL, to: 'b', kind: 'bogus', data: {} }).ok, 'bad signal kind rejected');
   ok(!validate({ type: MSG.SIGNAL, kind: 'offer', data: {} }).ok, 'signal without `to` rejected');
   ok(!validate({ type: MSG.SIGNAL, to: 'b', kind: 'offer' }).ok, 'signal without data rejected');

@@ -27,7 +27,15 @@ export const MSG = Object.freeze({
 });
 
 // WebRTC signaling kinds carried inside a SIGNAL message.
-export const SIGNAL_KINDS = Object.freeze(['offer', 'answer', 'ice']);
+//
+// 'bye' (M1.2 video teardown) is NOT a negotiation step: it's the host telling a
+// client "I have stopped broadcasting — drop this connection now" so the client
+// reverts its TV immediately instead of waiting ~30 s for ICE consent to expire.
+// It was missing from this list until 2026-08-14, which made every bye fail
+// validate() at BOTH ends (the client's own encode/decode and the server's
+// decode() in room-server.mjs) — so VideoMgr.stopBroadcast() emitted a message
+// that never crossed the wire and VideoMgr's bye handler was dead code.
+export const SIGNAL_KINDS = Object.freeze(['offer', 'answer', 'ice', 'bye']);
 
 // A pose part (head / left hand / right hand) is either null (not tracked —
 // e.g. a controller that isn't connected) or [px,py,pz, qx,qy,qz,qw]:
@@ -208,6 +216,13 @@ export function validate(msg) {
       if (!SIGNAL_KINDS.includes(msg.kind)) return { ok: false, error: 'signal.kind' };
       if (msg.data == null || typeof msg.data !== 'object') return { ok: false, error: 'signal.data' };
       if (msg.channel != null && msg.channel !== 'voice' && msg.channel !== 'video') return { ok: false, error: 'signal.channel' };
+      // 'bye' belongs to the M1.2 host→client VIDEO connection only. Keeping it
+      // off the voice channel is deliberate: [[src/net/VoiceMgr.js]] handleSignal
+      // has no bye branch, and its fallthrough would _ensurePeer() a connection
+      // for any peer that sent one. Widening SIGNAL_KINDS must not widen what the
+      // voice mesh can be made to do. (If voice ever needs a teardown message,
+      // add the branch there first, then relax this check.)
+      if (msg.kind === 'bye' && msg.channel !== 'video') return { ok: false, error: 'signal.bye.channel' };
       return { ok: true };
     case MSG.STATE:
       if (typeof msg.key !== 'string' || msg.key === '') return { ok: false, error: 'state.key' };

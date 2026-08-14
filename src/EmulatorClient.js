@@ -107,6 +107,79 @@ class DiscImageDevice {
   isDone() { return true; }
 }
 
+// ---- per-launch BOOT CONFIGURATION (CLAUDE_REVIEW §5.4 / CODEX_REVIEW COR-4) --
+//
+// These four options are consumed exactly ONCE per core, by
+// _writeRetroArchConfig() + _provisionSystemFiles(), immediately before
+// callMain(). RetroArch parses retroarch.cfg / the per-core .rmp / the core
+// options file at startup and connects controller-port devices while loading
+// content; nothing re-reads them afterwards. So they are not "current settings"
+// that can drift — they are part of the loaded core's IDENTITY:
+//
+//   coreOptions   core-option overrides (gun read path, PUAE kickstart, …)
+//   inputDevices  controller-port device overrides (Zapper / Super Scope /
+//                 Justifier / Light Phaser / mouse / Four Score)
+//   remapName     the RA library name of the .rmp that CONNECTS those devices
+//   systemFiles   BIOS/firmware provisioned into the system dir before boot
+//
+// Two rules follow, and both were broken before:
+//
+//  1. REPLACE, never merge. start() used to write each field only when the
+//     incoming value was non-empty, so a gun game's devices survived into the
+//     next plain game on the same core ("sticky peripheral").
+//  2. A same-core content hot swap is only legitimate when this configuration is
+//     UNCHANGED. The hot-swap branch returns before _writeRetroArchConfig(), so
+//     a changed configuration could never take effect — the old behaviour was to
+//     boot the new game with the OLD game's peripherals, silently. There is no
+//     way to apply it to the already-running core (see BootConfigChangeError),
+//     so start() now refuses instead, and callers ask first — via
+//     ConsoleRuntime.js's clientNeedsFreshBoot(), which reads `bootConfig` below.
+function normalizeBootMap(value) {
+  return (value && typeof value === 'object' && Object.keys(value).length) ? value : null;
+}
+
+/**
+ * Canonical (key-order independent) signature of the per-launch boot
+ * configuration in `opts`. Two starts with the same signature can share one
+ * loaded core; two with different signatures cannot. Normalizes undefined /
+ * null / `{}` / `[]` to the same "nothing requested" value, so an absent field
+ * and an empty one never look like a change.
+ */
+export function bootConfigSignature(opts = {}) {
+  const stable = (v) => {
+    if (v === undefined || v === null) return null;
+    if (typeof v !== 'object') return v;
+    if (Array.isArray(v)) return v.map(stable);
+    return Object.keys(v).sort().reduce((acc, k) => { acc[k] = stable(v[k]); return acc; }, {});
+  };
+  const files = Array.isArray(opts.systemFiles) && opts.systemFiles.length ? opts.systemFiles : null;
+  return JSON.stringify({
+    coreOptions:  stable(normalizeBootMap(opts.coreOptions)),
+    inputDevices: stable(normalizeBootMap(opts.inputDevices)),
+    remapName:    opts.remapName || null,
+    systemFiles:  stable(files),
+  });
+}
+
+// Thrown by start() instead of silently hot-swapping content into a core whose
+// boot configuration no longer matches what was asked for. Structured (like
+// RuntimeModeSwitchError) so a caller can recover deliberately: the recovery is
+// a FRESH core — build a new EmulatorClient/ConsoleRuntime and boot into that
+// (main.js's bootFreshRuntime). Callers that can recover should ask
+// clientNeedsFreshBoot() / ConsoleRuntime.needsFreshBoot() BEFORE calling
+// start(); this throw is the backstop that makes the failure loud instead of
+// "the gun UI is armed but the core sees a pad".
+export class BootConfigChangeError extends Error {
+  constructor(coreName, from, to) {
+    super(`boot configuration changed for the loaded "${coreName}" core — controller-port devices, core options, remaps and BIOS are read once, at core boot, so this needs a FRESH core (reload the page, or boot into a new runtime). See BootConfigChangeError.`);
+    this.name = 'BootConfigChangeError';
+    this.code = 'BOOT_CONFIG_CHANGED';
+    this.coreName = coreName;
+    this.from = from;
+    this.to = to;
+  }
+}
+
 export class EmulatorClient extends EventTarget {
   constructor({
     coreUrl = 'cores/snes9x_libretro.js',
@@ -185,9 +258,35 @@ export class EmulatorClient extends EventTarget {
     // can't express two pointers on one canvas. Resolved lazily; false = absent
     // (single-mouse DOM fallback), null = not looked up yet.
     this._webmouseSet = null;
+    // Signature (bootConfigSignature) of the per-launch boot configuration the
+    // LOADED core was actually started with. Null until a core is loaded. This
+    // is the live value — it is written where the boot happens, so nothing can
+    // hold a stale shadow copy of it.
+    this._bootConfig = null;
   }
 
+  /**
+   * The bootConfigSignature() of the LOADED core's launch, or null when no core
+   * is loaded yet. This is what makes "can the running core serve this boot?"
+   * answerable from outside: compare it with bootConfigSignature(newOptions).
+   * ConsoleRuntime.js's clientNeedsFreshBoot() is the one place that does, for
+   * BOTH the primary console and the rack.
+   *
+   * A property rather than a `needsFreshBoot()` method on purpose: it is state,
+   * not an action — and scripts/test-runtime-facade.mjs requires every public
+   * EmulatorClient *method* to have a RuntimeEmulatorClient forwarder, which
+   * this task is not allowed to add (that file belongs to another agent).
+   */
+  get bootConfig() { return this._coreLoaded ? this._bootConfig : null; }
+
   async start(emuCanvas, romBuffer, opts = {}) {
+    // Checked BEFORE anything is mutated: a start we cannot honour must leave
+    // this client exactly as it was, still running the previous game, so the
+    // caller can recover onto a fresh runtime (see BootConfigChangeError).
+    const nextBootConfig = bootConfigSignature(opts);
+    if (this._coreLoaded && nextBootConfig !== this._bootConfig) {
+      throw new BootConfigChangeError(this.coreName, this._bootConfig, nextBootConfig);
+    }
     this.emuCanvas = emuCanvas;
     // Pin the content path BEFORE _loadCore (which bakes it into Module.arguments)
     // and before _writeRom — so extension-sensitive cores (e.g. PUAE) see e.g.
@@ -201,10 +300,20 @@ export class EmulatorClient extends EventTarget {
     this._discImage = opts.discImage !== undefined
       ? !!opts.discImage
       : (coreForLoad === 'play' && DISC_IMAGE_EXTS.has(extForLoad));
-    if (opts.coreOptions && Object.keys(opts.coreOptions).length) this._coreOptions = opts.coreOptions;
-    if (opts.inputDevices && Object.keys(opts.inputDevices).length) this._inputDevices = opts.inputDevices;
-    if (opts.remapName) this._remapName = opts.remapName;
-    if (opts.systemFiles && opts.systemFiles.length) this._systemFiles = opts.systemFiles;
+    // REPLACE, never merge (see the BOOT CONFIGURATION note above): what this
+    // launch asks for is the whole truth. Previously each of these was only
+    // overwritten when the incoming value was non-empty, so a light-gun game's
+    // devices/options/remap stuck to the client and were re-applied to the NEXT
+    // (plain) game booted on it. Every one of these four is normalized to null
+    // when absent/empty, matching bootConfigSignature.
+    this._coreOptions = normalizeBootMap(opts.coreOptions);
+    this._inputDevices = normalizeBootMap(opts.inputDevices);
+    this._remapName = opts.remapName || null;
+    this._systemFiles = (Array.isArray(opts.systemFiles) && opts.systemFiles.length) ? opts.systemFiles : null;
+    // The configuration this core is (about to be) running with. Set here, on
+    // the one path that can reach _writeRetroArchConfig, so `bootConfig` (and
+    // therefore clientNeedsFreshBoot) always reflects what the live core got.
+    this._bootConfig = nextBootConfig;
     if (!this._coreLoaded) {
       if (opts.coreUrl) this.coreUrl = opts.coreUrl;
       if (opts.coreName) this.coreName = opts.coreName;
@@ -219,6 +328,11 @@ export class EmulatorClient extends EventTarget {
       this._coreLoaded = true;
     } else {
       // Subsequent calls (same core, different ROM): reset and swap rom.bin.
+      // This returns BEFORE _writeRetroArchConfig()/_provisionSystemFiles(), so
+      // it can only ever be correct when the boot configuration is unchanged —
+      // which the guard at the top of start() now guarantees (a changed one
+      // throws BootConfigChangeError there instead of arriving here and
+      // silently keeping the previous game's peripherals).
       this._writeRom(romBuffer);
       this._getModule()._cmd_reset?.();
       this._applyPauseState();

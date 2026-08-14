@@ -21,7 +21,36 @@
 // maxLive cap is what bounds live contexts.
 
 import { RuntimeEmulatorClient } from './RuntimeEmulatorClient.js';
+import { bootConfigSignature } from './EmulatorClient.js';
 import { coreWeight } from './systems.js';
+
+/**
+ * Would starting `startOptions` on `client` need a brand-new core (a fresh
+ * client + canvas), rather than the cheap same-core content hot swap?
+ *
+ * TRUE when the core itself differs, or when any per-launch boot configuration
+ * field does — controller-port devices, core options, remap, BIOS. RetroArch
+ * reads all of those exactly once, at core boot, so a change to any of them
+ * cannot be applied to a core that is already running (see the BOOT
+ * CONFIGURATION note in EmulatorClient.js). FALSE before the first boot and for
+ * a plain content swap with identical configuration — the common case the
+ * hot-swap path exists to make fast.
+ *
+ * ONE definition, used by BOTH consoles: the rack path via
+ * ConsoleRuntime.needsFreshBoot() below, and main.js's primary path, which
+ * drives its adopted client's start() directly. The PRIMARY console's client is
+ * a RuntimeEmulatorClient facade that forwards start() to a delegate, so unwrap
+ * it — the delegate is what actually loaded a core and holds its identity. A
+ * client with no `bootConfig` at all (WorkerEmulatorClient) needs no fresh boot:
+ * it tears its worker down and restarts it for EVERY content swap, so a changed
+ * boot configuration is always re-applied there anyway.
+ */
+export function clientNeedsFreshBoot(client, startOptions = {}) {
+  const core = client?.delegate ?? client;
+  if (typeof core?.bootConfig !== 'string') return false;
+  if (startOptions.coreName && core.coreName && startOptions.coreName !== core.coreName) return true;
+  return bootConfigSignature(startOptions) !== core.bootConfig;
+}
 
 export class ConsoleRuntime {
   /**
@@ -109,26 +138,17 @@ export class ConsoleRuntime {
   isLive() { return this.hasCore() && !this.client?.paused; }
 
   /**
-   * Boot a ROM into this console's core. `core` is the systems.js core info
-   * ({ name, url, style }); `meta` carries system/title for labelling.
-   * @param {ArrayBuffer|ContentBundle} romBuffer
+   * The exact options object load() hands to client.start(), built in ONE place
+   * so needsFreshBoot() below asks its question about the very same values the
+   * boot would use. (Before this existed, the rack path built its options inline
+   * and simply omitted the peripheral fields — a light-gun cartridge dropped on
+   * a secondary console got no gun device at all, and a same-core swap kept the
+   * previous game's devices. See main.js's loadCartridgeIntoConsole.)
    * @param {{name:string,url:string,style:string}} core
-   * @param {{system?:string,title?:string,firmware?:object,restoredSaves?:object}} [meta]
+   * @param {object} meta
    */
-  async load(romBuffer, core, meta = {}) {
-    // Marked BEFORE the await: from here on a main loop may start at any moment,
-    // so isLive()/pauseAll() must already treat this runtime as having a core.
-    this._started = true;
-    const execution = meta.execution ?? core.execution;
-    // Worker-execution cores (PSX/N64) push decoded PCM straight into
-    // pushSamples() instead of creating a same-thread AudioContext (see
-    // SpatialAudio.js's ensureBranch doc comment) — register the branch before
-    // the core can possibly emit its first sample. Consumes whatever `expect()`
-    // the caller queued just before this call (the established pattern every
-    // spawn/swap site already follows for main-thread cores); harmless no-op
-    // for a main-thread boot (B3, 2026-07-25 review).
-    if (execution === 'worker') this._audio?.ensureBranch?.(this.id);
-    await this.client.start(this.canvas, romBuffer, {
+  startOptions(core, meta = {}) {
+    return {
       coreUrl: core.url, coreName: core.name, moduleStyle: core.style,
       contentExt: meta.contentExt,
       // Light-gun / port-device wiring (LightGunMgr supplies these when a gun is
@@ -137,13 +157,18 @@ export class ConsoleRuntime {
       // file that connects the device at boot. All optional — plain games omit them.
       coreOptions: meta.coreOptions ?? core.coreOptions,
       inputDevices: meta.inputDevices,
-      remapName: meta.remapName,
+      // `?? core.remapName`: the remap FILE is what actually connects an
+      // inputDevices port override at boot, so a core that declares its own RA
+      // library name must keep it when the caller supplies no peripheral-specific
+      // one — otherwise EmulatorClient warns "inputDevices set without remapName"
+      // and the device silently never connects.
+      remapName: meta.remapName ?? core.remapName,
       // Per-core BIOS/Kickstart (e.g. PUAE Amiga). meta wins when the caller
       // strips `core` to {name,url,style}; else read it off the full core entry.
       systemFiles: meta.systemFiles ?? core.systemFiles,
       // Execution topology (RuntimeEmulatorClient): absent/'main' for every
       // core except the worker-execution ones (PSX/N64 — see systems.js).
-      execution,
+      execution: meta.execution ?? core.execution,
       requiresThreads: meta.requiresThreads ?? core.requiresThreads,
       coreBuildHash: meta.buildHash ?? core.buildHash,
       // Worker-mode BIOS + restored native SaveRAM (B1, 2026-07-25 review): both
@@ -155,7 +180,47 @@ export class ConsoleRuntime {
       // pure enough to unit-test with fakes (see RackMgr.js's doc comment).
       firmware: meta.firmware,
       restoredSaves: meta.restoredSaves,
-    });
+    };
+  }
+
+  /**
+   * Whether booting `core`+`meta` HERE needs a brand-new ConsoleRuntime rather
+   * than load()'s in-place swap — because the core differs, or because the boot
+   * configuration does (peripherals/core options/remap/BIOS are read once, at
+   * core boot; see EmulatorClient's BOOT CONFIGURATION note). load() would throw
+   * BootConfigChangeError in that case; callers that can stand up a fresh
+   * runtime (main.js's bootFreshRuntime) ask this first and do so instead.
+   */
+  needsFreshBoot(core, meta = {}) {
+    if (!this.hasCore()) return false;
+    if (this.coreName && core?.name && this.coreName !== core.name) return true;
+    return clientNeedsFreshBoot(this.client, this.startOptions(core, meta));
+  }
+
+  /**
+   * Boot a ROM into this console's core. `core` is the systems.js core info
+   * ({ name, url, style }); `meta` carries system/title for labelling plus the
+   * per-launch boot configuration (see startOptions above). THROWS
+   * BootConfigChangeError when that configuration differs from what the loaded
+   * core booted with — ask needsFreshBoot() first if you can recover.
+   * @param {ArrayBuffer|ContentBundle} romBuffer
+   * @param {{name:string,url:string,style:string}} core
+   * @param {{system?:string,title?:string,firmware?:object,restoredSaves?:object}} [meta]
+   */
+  async load(romBuffer, core, meta = {}) {
+    // Marked BEFORE the await: from here on a main loop may start at any moment,
+    // so isLive()/pauseAll() must already treat this runtime as having a core.
+    this._started = true;
+    const options = this.startOptions(core, meta);
+    // Worker-execution cores (PSX/N64) push decoded PCM straight into
+    // pushSamples() instead of creating a same-thread AudioContext (see
+    // SpatialAudio.js's ensureBranch doc comment) — register the branch before
+    // the core can possibly emit its first sample. Consumes whatever `expect()`
+    // the caller queued just before this call (the established pattern every
+    // spawn/swap site already follows for main-thread cores); harmless no-op
+    // for a main-thread boot (B3, 2026-07-25 review).
+    if (options.execution === 'worker') this._audio?.ensureBranch?.(this.id);
+    await this.client.start(this.canvas, romBuffer, options);
     this.coreName = core.name;
     this.system = meta.system ?? null;
     this.title = meta.title ?? null;

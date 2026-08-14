@@ -93,8 +93,21 @@ export class VoiceMgr {
     return entry;
   }
 
+  // Kinds the voice mesh actually negotiates with. NetProtocol.SIGNAL_KINDS is
+  // wider than this (it also carries the M1.2 video teardown 'bye'), and this
+  // class must not depend on a validator somewhere else staying correct: an
+  // unhandled kind used to fall through to _ensurePeer() below, so a single
+  // stray 'bye' — a mis-routed one, a peer on an older/newer build, a relay that
+  // stopped enforcing bye's video-only rule — would have opened a whole
+  // RTCPeerConnection (and published our mic to it) for nothing.
+  static NEGOTIATION_KINDS = Object.freeze(['offer', 'answer', 'ice']);
+
   async handleSignal(msg) {
     if (!this.enabled || !msg.from) return;
+    // 'bye' is the video layer's teardown message ([[src/net/VideoMgr.js]]); the
+    // voice mesh has no such concept — a peer leaving is handled by syncPeers()
+    // from the roster. Explicitly ignored, not silently fallen through.
+    if (!VoiceMgr.NEGOTIATION_KINDS.includes(msg.kind)) return;
     const entry = this._pcs.get(msg.from) || this._ensurePeer(msg.from, false);
     const pc = entry.pc;
     try {

@@ -153,7 +153,17 @@ export class VideoMgr {
     return true;
   }
 
-  stopBroadcast() {
+  /**
+   * Stop capturing and drop every sender connection.
+   *
+   * `announce` distinguishes a CLEAN stop (the socket is still open — tell each
+   * client with a 'bye' so it reverts immediately instead of waiting ~30 s for
+   * ICE consent to expire) from a CONNECTION LOST stop (the socket is already
+   * gone — the byes cannot possibly reach anyone, so don't even try). Callers
+   * that hold the socket decide; see NetMgr.disconnect() vs the ws 'close'
+   * handler / _scheduleReconnect().
+   */
+  stopBroadcast({ announce = true } = {}) {
     // Only the canvas-capture VIDEO tracks are ours to stop. The audio track is
     // borrowed from the app's audio graph (a cached MediaStreamAudioDestinationNode
     // tap), and a stopped track can never be restarted — stopping it here silenced
@@ -167,7 +177,9 @@ export class VideoMgr {
     for (const id of [...this._pcs.keys()]) {
       const entry = this._pcs.get(id);
       if (!entry?.initiator) continue;
-      try { this.send({ to: id, kind: 'bye', data: { epoch: entry.epoch } }); } catch { /* ok */ }
+      if (announce) {
+        try { this.send({ to: id, kind: 'bye', data: { epoch: entry.epoch } }); } catch { /* ok */ }
+      }
       this._closePeer(id);
     }
   }
@@ -330,10 +342,35 @@ export class VideoMgr {
     return pending;
   }
 
+  /**
+   * The host told us it stopped broadcasting (stopBroadcast's 'bye'). Revert the
+   * TV now rather than waiting ~30 s for ICE consent to expire.
+   *
+   * Never executed before 2026-08-14 — 'bye' wasn't in SIGNAL_KINDS, so the
+   * message was dropped by validate() at both ends. Two guards it needs now that
+   * it can actually run:
+   *   • RECEIVE side only. A bye means "I have stopped sending to you". Acting on
+   *     our own SENDER entry would let any client tear down the host's outbound
+   *     PC just by sending a bye — update() rebuilds it on the next tick, so it
+   *     would be a peer-triggered reconnect flap, not a clean stop.
+   *   • Epoch-matched, exactly like the offer path. The bye carries the epoch of
+   *     the host PC it belongs to; if we have since rebuilt against a NEWER offer
+   *     epoch, this bye is about a connection that no longer exists on our side
+   *     and honouring it would kill a live picture. Epoch 0/absent means a sender
+   *     that doesn't stamp epochs — honour it unconditionally.
+   */
+  _handleBye(msg) {
+    const entry = this._pcs.get(msg.from);
+    if (!entry || entry.initiator) return;
+    const epoch = Number(msg.data?.epoch) || 0;
+    if (epoch && entry.remoteEpoch != null && entry.remoteEpoch !== epoch) return;
+    this._closePeer(msg.from);
+  }
+
   async handleSignal(msg) {
     if (!msg.from) return;
     if (msg.kind === 'bye') {              // host stopped broadcasting, cleanly
-      this._closePeer(msg.from);
+      this._handleBye(msg);
       return;
     }
     let entry = this._pcs.get(msg.from);
@@ -431,9 +468,26 @@ export class VideoMgr {
     if (wasReceiving) this.onHostVideoEnded(peerId); // client reverts to local TV
   }
 
-  disable() {
+  /**
+   * Tear the whole video layer down (leaving the room, or re-opening the socket).
+   *
+   * stopBroadcast FIRST: it is the only thing that sends the teardown 'bye' to
+   * each client, and it can only send to peers that still have an entry. The
+   * old order closed every PC first, so leaving the room (or turning video off)
+   * silently dropped the connection and every client sat on a frozen picture
+   * until ICE consent expired — the same symptom as the missing SIGNAL_KIND.
+   *
+   * That internal reorder alone was INERT on the real path, though: the owner
+   * (NetMgr / DesktopNet) closed the socket BEFORE calling us, and its send
+   * closure is gated on `_connected && ws`, so every bye was swallowed anyway.
+   * The owner now announces before it closes — and passes `announce:false` on
+   * the paths where the socket is genuinely already gone (unexpected close →
+   * reconnect), where the local teardown must still happen but no message can
+   * ever reach a peer.
+   */
+  disable({ announce = true } = {}) {
+    this.stopBroadcast({ announce });
     for (const id of [...this._pcs.keys()]) this._closePeer(id);
-    this.stopBroadcast();
     this._lastHostId = null;
   }
 

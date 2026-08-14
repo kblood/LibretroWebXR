@@ -436,7 +436,10 @@ export class NetMgr {
     ws.addEventListener('close', () => {
       const wasConnected = this._connected;
       this._connected = false;
-      this.video.stopBroadcast();
+      // CONNECTION LOST (or our own close, already announced above): the socket
+      // is gone, so a 'bye' cannot reach anyone — tear the capture down locally
+      // and don't pretend to announce it.
+      this.video.stopBroadcast({ announce: false });
       if (!this._closing) {
         this._setHost(null);
         if (wasConnected || this._reconnectTries) this._scheduleReconnect();
@@ -460,7 +463,11 @@ export class NetMgr {
       this.avatars.removeAll();
       this.presence.clear();
       this._fallbackClaims.clear();
-      this.video.disable();
+      // The old socket is genuinely gone here (this path only runs after an
+      // UNEXPECTED close), so the local teardown must still happen but the byes
+      // cannot be sent — that is correct, not a regression. `announce:false`
+      // says so explicitly instead of leaning on the send gate to swallow them.
+      this.video.disable({ announce: false });
       this.connect();
     }, delay);
   }
@@ -540,13 +547,25 @@ export class NetMgr {
     this._closing = true;
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     this._clearFallbackTimer();
+    // ANNOUNCE BEFORE CLOSING. Everything whose teardown has to REACH the other
+    // peers must run while the socket is still open and `_connected` is still
+    // true, because the send closures handed to VoiceMgr/VideoMgr above are gated
+    // on exactly that pair. Closing first made VideoMgr.disable()'s teardown
+    // 'bye' inert on this path — the internal "stopBroadcast first" ordering
+    // inside disable() cannot help when the gate is already shut — so a HOST that
+    // left the room left every client sitting on a frozen picture until ICE
+    // consent expired (~30 s), the exact symptom the bye exists to prevent.
+    //
+    // Nothing here awaits: these are synchronous ws.send() calls, so leaving is
+    // not delayed, and there is no send-after-close race because close() happens
+    // strictly after them (the close frame is queued behind the data frames).
+    this.voice.disable();
+    this.video.disable();   // → one 'bye' per client we were streaming to
     try { this.ws?.close(); } catch { /* already closing */ }
     this._connected = false;
     this._setHost(null, { silent: true });
     this._serverElects = false;
     this._fallbackClaims.clear();
-    this.voice.disable();
-    this.video.disable();
     this.avatars.removeAll();
     this.presence.clear();
     // Give up our spawn seat — solo play belongs at the room's default spot, and a

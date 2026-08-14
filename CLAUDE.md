@@ -35,6 +35,32 @@ Get-NetTCPConnection -LocalPort 8787 -State Listen | ForEach-Object { Stop-Proce
 
 ## Dev servers
 
-- `npm run dev` — vite (:5173)
+- `npm run dev` — vite (:5173), **loopback only**
 - `cd server && npm start` — room-server (:8787); `PORT=` to change
 - `npm run deploy` — `pwsh scripts/deploy.ps1`
+
+**Testing on a real Quest?** The dev/preview server binds `127.0.0.1` by default
+(the vite dev-server advisories need a `0.0.0.0` bind on Windows). Opt in:
+
+```powershell
+$env:LAN=1; npm run dev        # then: Remove-Item Env:LAN
+```
+
+## Tests
+
+- `npm test` — pure-logic tier: no browser, no server, no ports. This is the CI gate.
+- `npm run test:servers` — spawns the room/log servers on 8891-8897 and drives
+  them over real sockets. Kept out of `npm test` on purpose.
+- `scripts/probe-*` / `scripts/smoke-*` — need real Chrome and/or a running
+  room-server and fetched cores. Opt-in, never in CI.
+
+## ⛔ `public/roms/local/` ships on purpose
+
+It is the user's private, gitignored ROM sideload, and the build/deploy
+**publishes it** to dionysus.dk — that is the only practical way to test light
+guns on a headset. A guard that strips it has been added and reverted **twice**
+(`0df8aeb` → `b192911`, and again 2026-08-14). Both whole-repo reviews rank
+"deploy can publish the private ROM library" as their #1 critical finding; for
+this project that recommendation is wrong. `scripts/check-dist.mjs` reports the
+private tree on every build and only refuses it under `--strict`, which is for a
+genuinely public release. Read that file's header before changing anything here.

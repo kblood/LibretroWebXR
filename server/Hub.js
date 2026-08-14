@@ -38,13 +38,280 @@ export function isHostOwnedKey(key) {
   return key === 'tv' || key === 'room' || (typeof key === 'string' && key.startsWith('shelf:'));
 }
 
+// ---------------------------------------------------------------------------
+// Admission limits (CLAUDE_REVIEW §4.4 / CODEX_REVIEW SEC-3)
+//
+// The room server is deployed PUBLICLY (dionysus.dk) and rooms are joinable by
+// name, so `Hub.setState`'s per-room `Map` used to be unbounded memory owned by
+// anyone who could open a socket: `validate()` only checks `typeof key ===
+// 'string'` and `'value' in msg`, and every accepted key is persisted for the
+// life of the room AND replayed to every future joiner.
+//
+// The numbers below are deliberately far above what the shipped client sends.
+// Measured against this tree:
+//   • the biggest real STATE value is the host's `shelf:collections` (inlined
+//     dropped collections, boxart lists stripped — 12,502 B / 290 nodes with
+//     every collection in this tree inlined at once, of which the biggest single
+//     one is `public/roms/local/local.collection.json` at 9,603 B on the wire for
+//     18 games) and `room` (a serialized room snapshot; the committed room
+//     descriptors are 1.0-1.4 kB / 69-93 nodes). 256 KiB is ~21x the largest real
+//     one — room for a ~490-game inlined collection at the ~533 B per game this
+//     tree's collections actually serialize to.
+//   • a live room's key set is `tv`, `room`, `shelf:collections`, `shelf:local`,
+//     one `prop:<id>` per room prop, one `hold:`/`gamepad:`/`gun:`/`mouse:` key
+//     per held peripheral and one `power:` key per console — order tens, not
+//     hundreds, even for a full patchable rack. 512 keys per peer / 4096 per
+//     room is >10x that.
+// Every one is env-tunable so a deployment can tighten or loosen without a code
+// change; a Hub can also be constructed with explicit `limits` (used by
+// scripts/test-room-limits.mjs so the test doesn't have to allocate 256 KiB).
+//
+// ---------------------------------------------------------------------------
+// WHY THE PER-AXIS CAPS ABOVE ARE NOT ENOUGH — the aggregate budget
+// ---------------------------------------------------------------------------
+// Each cap above is individually defensible and they are JOINTLY MEANINGLESS,
+// because nothing multiplied them out. MEASURED against the shipped defaults
+// before this budget existed (scripts/test-room-limits.mjs section 0, one
+// socket, 512 x 250 KiB STATE writes into one room):
+//
+//     rssBefore 56.9 MiB → rssAfter 212.7 MiB, corrections to client 0,
+//     server refusal log lines 0.
+//
+// Nothing refused anything, because 512 keys x 256 KiB is 128 MiB PER SOCKET and
+// every individual write was inside every individual cap. Multiplied out that
+// was 256 sockets x 128 MiB ≈ 32 GiB, or per room 4096 keys x 256 KiB = 1 GiB
+// x 128 rooms = 128 GiB. So three AGGREGATE budgets are enforced on every
+// write, on top of the per-axis caps:
+//
+//   stateBytesPerPeer  1 MiB   what ONE peer may hold in ONE room
+//   stateBytesPerRoom  2 MiB   what a whole room may hold, across all peers
+//   stateBytesTotal   64 MiB   what this PROCESS may hold, across all rooms
+//
+// ---------------------------------------------------------------------------
+// WHY A BYTE COUNT IS NOT THE ACCOUNTING UNIT — the structural budget
+// ---------------------------------------------------------------------------
+// The first version of those three budgets counted `JSON.stringify(value).length`
+// and nothing else. It worked (508 of 512 writes refused, RSS flat) and it was
+// still ~20x optimistic, because THE DEFENDER PICKED THE UNIT AND THE ATTACKER
+// PICKS THE SHAPE. Retained heap is not paid per character, it is paid per
+// allocated OBJECT, and JSON's cheapest heap object is three characters wide:
+//
+//     `[{},{},{},…]`   3 chars per V8 JSObject
+//     `[[],[],[],…]`   3 chars per V8 JSArray
+//
+// MEASURED (scripts/test-room-limits.mjs section 0b, 64 sockets in 64 rooms
+// filling the entire 64 MiB byte budget, every per-axis and every aggregate cap
+// honoured, ZERO refusals): arrays of empty objects took the server from
+// 57.4 MiB to 1515.3 MiB — a 22.78x heap multiplier, ~1.5 GB, where the same
+// harness with one plain string blob is 1.24x. So the honest ceiling of a
+// byte-only budget was not "336 MiB, fits a 1 GB VPS" but "~1.5 GB, does not".
+//
+// The fix is to account for what is actually allocated. Two things now bound a
+// value's SHAPE, not just its length:
+//
+//   stateValueNodes  8192   JSON nodes in ONE value — one per container and
+//                           one per array element / object property, counted by
+//                           measureValue()
+//   stateValueDepth    16   nesting levels in ONE value
+//
+// …and every accepted value is charged against the three aggregate budgets in
+// ACCOUNTED BYTES, not raw characters:
+//
+//   cost = JSON.stringify(value).length + nodes x stateNodeCostBytes   (128)
+//
+// 128 B/node is measured, not guessed: parsing 1,000,000-node values of each
+// shape and reading RSS gives 121 B per empty object, 68 B per empty array,
+// 110 B per `"k123":1` property and 15 B per number element.
+//
+// LIMIT OF THE UNIT — an accounted byte is NOT a hard upper bound on a resident
+// byte, and an earlier version of this comment claimed it was. Two known gaps,
+// both measured:
+//
+//   1. UTF-16. `JSON.stringify(value).length` counts code UNITS, but V8 stores
+//      any string containing a code point > U+00FF as a TWO-BYTE string. Filling
+//      the pool to 63.8 MiB accounted with 256 KiB values retains 64.2 MiB live
+//      heap of ASCII (1.01x) but 128.2 MiB of U+4E2D (2.01x) — same code path,
+//      one character swapped. Latin-1 (e.g. U+00E9) is NOT the attack; CJK and
+//      emoji are. Charging 2 bytes/char would fix it and would also halve every
+//      legitimate budget, so the cost is documented rather than paid.
+//   2. Inbound parse churn. decode() JSON.parse()s a frame BEFORE setState()
+//      can refuse it, so REFUSED values are never accounted yet are briefly
+//      resident. 32 sockets sending 900 kB `[{},{},…]` frames (all refused,
+//      zero retained) peak the relay at ~354 MiB RSS before settling back to
+//      ~58 MiB. Bounded by ROOM_MAX_PAYLOAD x concurrent frames, not by the
+//      structural cap.
+//
+// Worst case, multiplied out (see server/README.md for the same table):
+//
+//   per peer   1 MiB x 256 sockets (ROOM_MAX_SOCKETS)      = 256 MiB
+//   per room   2 MiB x 128 rooms   (ROOM_MAX_ROOMS)        = 256 MiB
+//   global                                                 =  64 MiB  ← binds
+//
+// The global budget is the binding one, so retained STATE can never cost more
+// than 64 MiB accounted no matter how the sockets/rooms are arranged.
+//
+// MEASURED MULTIPLIERS, worst-first, all against the real relay on shipped
+// defaults with RSS read externally (never the process's self-report):
+//
+//     two-byte strings (U+4E2D), whole pool     2.30x   ← worst found
+//     one-byte strings (ASCII),  whole pool     2.15x
+//     values just under the node cap            1.36-1.47x
+//     arrays of empty objects / empty arrays    2.4-2.5x
+//     the same attacks with node cost disabled  23-36x  ← what this replaced
+//
+// Do NOT read 2.30x as proven-final: it is the worst over the shapes ANYONE HAS
+// TRIED, which is exactly the caveat the previous version of this comment failed
+// to state and was then caught by. Treat it as a floor on the true worst case.
+//
+// So the ceiling, taking 2.30x on a completely full pool (64 x 2.30 ≈ 147 MiB):
+//
+//   ~57 MiB baseline + ~147 MiB state + 32 MiB outbound  ≈  236 MiB steady
+//   + inbound parse churn of refused frames              ≈  ~354 MiB transient
+//
+// (outbound is bounded separately in room-server.mjs by
+// ROOM_MAX_BUFFERED_TOTAL_BYTES). That still fits a 1 GB VPS, which is the
+// operational conclusion that matters — but the number is 236/354, not the
+// 183 an earlier version of this comment asserted.
+//
+// And they stay far above REAL traffic — MEASURED against this tree, not
+// estimated (scripts/test-room-limits.mjs section 4c asserts it, from the real
+// files). A host holds `tv` (~200 B), `room` (1,318 B / 93 nodes / depth 7 for
+// the biggest committed descriptor — the deepest real value there is),
+// `shelf:collections` (12,502 B / 290 nodes / depth 6 with EVERY collection in
+// this tree inlined at once) and `shelf:local`, plus tens of
+// `prop:`/`hold:`/`gamepad:`/`power:` keys at ~120 B and ~19 nodes each. That
+// whole set is 34 keys, 19,289 raw characters and 869 nodes = 130,521 B
+// ACCOUNTED — 12.4% of the 1 MiB per-peer budget. A 4-player room is that host
+// plus three clients holding a handful of `hold:`/`prop:` keys, well under
+// 200 kB accounted against 2 MiB; 128 such rooms — every room this server will
+// create — is ~16 MiB accounted against the 64 MiB pool.
+//
+// The structural caps have more room still: the biggest real value in the tree
+// is 290 nodes at depth 6 against caps of 8192 and 16, and the largest value
+// the 256 KiB byte cap admits at all — a ~490-game inlined collection — is
+// ~4,800 nodes, so for collection-shaped data the BYTE cap still binds first
+// and the node cap never fires on anything legitimate.
+//
+// What the node charge DOES cost a legitimate host: that maxed ~490-game
+// collection is ~880 kB accounted (256 kB raw + ~4,800 nodes x 128), so ONE
+// fits the 1 MiB per-peer budget where the byte-only accounting fitted two.
+// Nothing in this tree is within 15x of that.
+//
+// The per-room budget is also deliberately kept BELOW room-server.mjs's
+// ROOM_MAX_BUFFERED_BYTES (4 MiB): a late joiner is sent the room's whole state
+// map in one go, so a room that could legally hold more state than a socket may
+// buffer would evict its own legitimate late joiners as "slow clients".
+const envInt = (name, def) => {
+  const v = Number.parseInt(process.env?.[name] ?? '', 10);
+  return Number.isFinite(v) && v > 0 ? v : def;
+};
+// Same, but 0 is a real setting rather than "unset". Only ROOM_STATE_NODE_COST_BYTES
+// needs it: 0 turns the structural charge off, which is exactly the pre-fix
+// byte-only accounting and is what scripts/test-room-limits.mjs uses as the
+// negative control that proves the charge is what bounds the heap.
+const envIntZeroOk = (name, def) => {
+  const v = Number.parseInt(process.env?.[name] ?? '', 10);
+  return Number.isFinite(v) && v >= 0 ? v : def;
+};
+
+export const HUB_LIMITS = Object.freeze({
+  /** Max characters in a STATE key. Real keys are `prop:<uuid>`-shaped (~45). */
+  stateKeyLen: envInt('ROOM_MAX_STATE_KEY_LEN', 128),
+  /** Max JSON characters in one STATE value (see the measurement note above). */
+  stateValueBytes: envInt('ROOM_MAX_STATE_VALUE_BYTES', 256 * 1024),
+  /** STRUCTURAL: max JSON nodes in one value (one per container / leaf). */
+  stateValueNodes: envInt('ROOM_MAX_STATE_VALUE_NODES', 8192),
+  /** STRUCTURAL: max nesting levels in one value (real room descriptors: 7). */
+  stateValueDepth: envInt('ROOM_MAX_STATE_VALUE_DEPTH', 16),
+  /** Accounted bytes charged per JSON node, on top of the serialized length. */
+  stateNodeCostBytes: envIntZeroOk('ROOM_STATE_NODE_COST_BYTES', 128),
+  /** Max distinct STATE keys one peer may own in one room. */
+  stateKeysPerPeer: envInt('ROOM_MAX_STATE_KEYS_PER_PEER', 512),
+  /** Max distinct STATE keys in one room, across all peers. */
+  stateKeysPerRoom: envInt('ROOM_MAX_STATE_KEYS_PER_ROOM', 4096),
+  /** AGGREGATE: max ACCOUNTED bytes one peer may hold in one room. */
+  stateBytesPerPeer: envInt('ROOM_MAX_STATE_BYTES_PER_PEER', 1024 * 1024),
+  /** AGGREGATE: max ACCOUNTED bytes one room may hold, across all peers. */
+  stateBytesPerRoom: envInt('ROOM_MAX_STATE_BYTES_PER_ROOM', 2 * 1024 * 1024),
+  /** AGGREGATE: max ACCOUNTED bytes this whole process may hold, all rooms. */
+  stateBytesTotal: envInt('ROOM_MAX_STATE_BYTES_TOTAL', 64 * 1024 * 1024),
+  /** Max characters kept from a JOIN nick / color (the rest is truncated). */
+  nickLen: envInt('ROOM_MAX_NICK_LEN', 64),
+  colorLen: envInt('ROOM_MAX_COLOR_LEN', 32),
+});
+
+/**
+ * Walk a JSON-shaped value and report { nodes, depth, over }.
+ *
+ * `nodes` counts every JSON VALUE the parsed result retains — each container and
+ * each primitive leaf, i.e. one per array element and one per object property.
+ * `over` is 'nodes' or 'depth' when the corresponding cap was passed, else null.
+ *
+ * Object KEYS are deliberately NOT counted separately. A property's own overhead
+ * (the key string, the dictionary slot) is paid for twice already: by the key's
+ * characters in the byte count, and by the 128 B charged for the property's
+ * VALUE node. Measured, that is still an over-estimate — an object of 8,192
+ * `"k123":1` properties costs 110 B per property resident against 128 B charged
+ * — while counting keys as well would charge structured real traffic (a game
+ * descriptor is 4 short properties) roughly twice what it costs.
+ *
+ * ITERATIVE, and it bails the moment the node cap is provably exceeded. Both
+ * matter, because the value is attacker-shaped: recursion here would turn a
+ * 100k-deep array into a RangeError inside the relay's message handler, and
+ * walking to the end of a 131,072-element array before deciding to refuse it
+ * would hand the attacker the CPU cost he was refused the memory for. The
+ * pending stack is included in the bail test (`nodes + pending`), so the check
+ * fires while expanding a wide container rather than after it.
+ *
+ * Cycles cannot reach here — setState() JSON.stringify()s the value first and
+ * refuses what throws — and with a finite `maxNodes` (setState always passes
+ * one) even a cyclic value terminates: `over` trips long before the walk could
+ * loop forever.
+ */
+export function measureValue(value, { maxNodes = Infinity, maxDepth = Infinity } = {}) {
+  let nodes = 0;
+  let depth = 0;
+  const vals = [value];
+  const depths = [1];
+  while (vals.length) {
+    const v = vals.pop();
+    const d = depths.pop();
+    nodes++;
+    if (d > depth) depth = d;
+    if (depth > maxDepth) return { nodes, depth, over: 'depth' };
+    if (nodes > maxNodes) return { nodes, depth, over: 'nodes' };
+    if (v === null || typeof v !== 'object') continue;
+    if (Array.isArray(v)) {
+      for (let i = 0; i < v.length; i++) {
+        vals.push(v[i]); depths.push(d + 1);
+        if (nodes + vals.length > maxNodes) return { nodes: nodes + vals.length, depth, over: 'nodes' };
+      }
+    } else {
+      for (const k of Object.keys(v)) {
+        vals.push(v[k]); depths.push(d + 1);
+        if (nodes + vals.length > maxNodes) return { nodes: nodes + vals.length, depth, over: 'nodes' };
+      }
+    }
+  }
+  return { nodes, depth, over: null };
+}
+
 export class Hub {
-  constructor() {
+  constructor({ limits = {} } = {}) {
     this.rooms = new Map();      // roomId -> Map(peerId -> { id, nick, color, sid, seq })
-    this.roomState = new Map();  // roomId -> Map(key -> { value, id })  (M0.5)
+    this.roomState = new Map();  // roomId -> Map(key -> { value, id, bytes, nodes, cost })  (M0.5)
     this.roomHosts = new Map();  // roomId -> peerId  (M1.4 — the elected host)
     this.hostGrace = new Map();  // roomId -> { sid, at }  (reclaim window, M1.4)
+    // Aggregate accounting (see HUB_LIMITS). The unit is ACCOUNTED BYTES —
+    // serialized characters PLUS stateNodeCostBytes per JSON node — not raw
+    // characters; `cost`, never `bytes`, is what the budgets compare. Maintained
+    // INCREMENTALLY by _setEntry/_delEntry so a write is O(1) rather than a scan
+    // of a 4096-key room; every mutation of a roomState map must go through
+    // those two.
+    this.roomCost = new Map();  // roomId -> total accounted bytes held by the room
+    this.peerOwn = new Map();   // roomId -> Map(peerId -> { keys, cost })
     this._seq = 0;               // monotonic join counter → seniority ordering
+    this.limits = { ...HUB_LIMITS, ...limits };
   }
 
   _room(roomId) {
@@ -55,6 +322,90 @@ export class Hub {
   _state(roomId) {
     if (!this.roomState.has(roomId)) this.roomState.set(roomId, new Map());
     return this.roomState.get(roomId);
+  }
+
+  // --- aggregate accounting ------------------------------------------------
+  // Kept incremental (not recomputed by scanning) so the caps cost nothing at
+  // write time, and funnelled through these three helpers so the totals cannot
+  // drift away from roomState — the one failure mode an incremental counter has.
+
+  /** This peer's { keys, cost } tally in this room, created on demand. */
+  _own(roomId, peerId) {
+    let m = this.peerOwn.get(roomId);
+    if (!m) { m = new Map(); this.peerOwn.set(roomId, m); }
+    let o = m.get(peerId);
+    if (!o) { o = { keys: 0, cost: 0 }; m.set(peerId, o); }
+    return o;
+  }
+
+  /** A peer's current tally WITHOUT creating one (read path). */
+  _ownRO(roomId, peerId) {
+    return this.peerOwn.get(roomId)?.get(peerId) || { keys: 0, cost: 0 };
+  }
+
+  /** Write `key` = entry, moving the cost/key tallies off any previous owner. */
+  _setEntry(roomId, key, entry) {
+    const state = this._state(roomId);
+    const prev = state.get(key);
+    if (prev) {
+      const po = this._own(roomId, prev.id);
+      po.keys--; po.cost -= prev.cost;
+      if (po.keys <= 0 && po.cost <= 0) this.peerOwn.get(roomId)?.delete(prev.id);
+    }
+    state.set(key, entry);
+    const o = this._own(roomId, entry.id);
+    o.keys++; o.cost += entry.cost;
+    this.roomCost.set(roomId, Math.max(0, (this.roomCost.get(roomId) || 0) - (prev ? prev.cost : 0) + entry.cost));
+  }
+
+  /** Clear `key`, releasing its cost back to the peer/room/global budgets. */
+  _delEntry(roomId, key) {
+    const state = this.roomState.get(roomId);
+    const prev = state?.get(key);
+    if (!prev) return false;
+    state.delete(key);
+    const po = this._own(roomId, prev.id);
+    po.keys--; po.cost -= prev.cost;
+    if (po.keys <= 0 && po.cost <= 0) this.peerOwn.get(roomId)?.delete(prev.id);
+    this.roomCost.set(roomId, Math.max(0, (this.roomCost.get(roomId) || 0) - prev.cost));
+    return true;
+  }
+
+  /** Whole-room teardown: drop the state map AND its accounting together. */
+  _dropRoomState(roomId) {
+    this.roomState.delete(roomId);
+    this.roomCost.delete(roomId);
+    this.peerOwn.delete(roomId);
+  }
+
+  /** Total ACCOUNTED bytes of STATE this process is holding, across all rooms. */
+  totalStateCost() {
+    let n = 0;
+    for (const b of this.roomCost.values()) n += b;
+    return n;
+  }
+
+  /** Cost/key usage snapshot for a room (diagnostics + tests). */
+  usage(roomId) {
+    let rawBytes = 0, nodes = 0;
+    for (const s of this.roomState.get(roomId)?.values() || []) { rawBytes += s.bytes; nodes += s.nodes; }
+    return {
+      roomCost: this.roomCost.get(roomId) || 0,   // accounted bytes (what the budgets use)
+      roomBytes: rawBytes,                        // raw serialized characters
+      roomNodes: nodes,
+      roomKeys: this.roomState.get(roomId)?.size || 0,
+      totalCost: this.totalStateCost(),
+    };
+  }
+
+  /**
+   * The authoritative current value of `key`, addressed back to the peer whose
+   * write was refused, so its optimistic local copy re-converges instead of
+   * silently diverging. Same shape the host-owned-key rejection already used.
+   */
+  _correction(state, key, peerId) {
+    const cur = state.get(key);
+    return { to: peerId, msg: makeState({ key, value: cur ? cur.value : null, id: cur ? cur.id : peerId }) };
   }
 
   /**
@@ -155,8 +506,11 @@ export class Hub {
     const room = this.rooms.get(roomId);
     const p = room?.get(peerId);
     if (!p) return {};
-    if (typeof nick === 'string') p.nick = nick;
-    if (typeof color === 'string') p.color = color;
+    // Truncate rather than reject: an over-long nick is cosmetic abuse, not an
+    // attack on the room, and dropping the JOIN would leave the peer nameless
+    // for everyone else. NetProtocol.validate() has no length bound of its own.
+    if (typeof nick === 'string') p.nick = nick.slice(0, this.limits.nickLen);
+    if (typeof color === 'string') p.color = color.slice(0, this.limits.colorLen);
     return { broadcast: { msg: makeJoin({ id: peerId, nick: p.nick, color: p.color }), exclude: peerId } };
   }
 
@@ -197,7 +551,67 @@ export class Hub {
   setState(roomId, peerId, { key, value, now = Date.now() } = {}) {
     const room = this.rooms.get(roomId);
     if (!room || !room.has(peerId) || typeof key !== 'string' || key === '') return {};
+    // --- admission limits (see HUB_LIMITS) --------------------------------
+    // An over-long key is dropped outright and NOT echoed back: the correction
+    // message would just carry the abusive key straight back onto the wire.
+    if (key.length > this.limits.stateKeyLen) return { rejected: 'key-too-long' };
     const state = this._state(roomId);
+    // A `null` value CLEARS a key — always allowed (it frees memory, and a peer
+    // that is over its key OR byte budget must still be able to release what it
+    // holds; a budget you cannot climb back out of is a self-inflicted DoS).
+    let bytes = 0, nodes = 0, cost = 0;
+    if (value != null) {
+      try { bytes = JSON.stringify(value)?.length ?? 0; }
+      catch { return { rejected: 'value-unserializable' }; }   // cycles / BigInt
+      if (bytes > this.limits.stateValueBytes) {
+        return { rejected: 'value-too-large', direct: this._correction(state, key, peerId) };
+      }
+      // --- STRUCTURAL cap. Byte length is not a proxy for retained heap: an
+      // array of empty objects is 3 characters per V8 allocation, so a value
+      // inside every byte cap can still buy ~20x the heap a string of the same
+      // length does (measured: 22.78x, ~1.5 GB across a full byte budget).
+      // Bound the SHAPE too, then charge the nodes into the aggregate budgets
+      // below so the process-wide ceiling is a memory number and not a
+      // character count.
+      const shape = measureValue(value, {
+        maxNodes: this.limits.stateValueNodes,
+        maxDepth: this.limits.stateValueDepth,
+      });
+      if (shape.over === 'depth') {
+        return { rejected: 'value-too-deep', direct: this._correction(state, key, peerId) };
+      }
+      if (shape.over === 'nodes') {
+        return { rejected: 'value-too-complex', direct: this._correction(state, key, peerId) };
+      }
+      nodes = shape.nodes;
+      cost = bytes + nodes * this.limits.stateNodeCostBytes;
+      if (!state.has(key)) {
+        // Only a NEW key can grow the room; overwriting an existing one cannot.
+        if (state.size >= this.limits.stateKeysPerRoom) {
+          return { rejected: 'room-key-limit', direct: this._correction(state, key, peerId) };
+        }
+        if (this._ownRO(roomId, peerId).keys >= this.limits.stateKeysPerPeer) {
+          return { rejected: 'peer-key-limit', direct: this._correction(state, key, peerId) };
+        }
+      }
+      // --- AGGREGATE budgets (the cap the per-axis ones didn't add up to), in
+      // ACCOUNTED bytes = serialized characters + stateNodeCostBytes per node.
+      // Computed as "what the totals WOULD BE after this write": an overwrite
+      // releases the previous value's cost first, so replacing a 200 kB value
+      // with a 1 kB one is always allowed even at the ceiling.
+      const prev = state.get(key);
+      const prevCost = prev ? prev.cost : 0;
+      const prevMine = prev && prev.id === peerId ? prev.cost : 0;
+      if (this._ownRO(roomId, peerId).cost - prevMine + cost > this.limits.stateBytesPerPeer) {
+        return { rejected: 'peer-byte-limit', direct: this._correction(state, key, peerId) };
+      }
+      if ((this.roomCost.get(roomId) || 0) - prevCost + cost > this.limits.stateBytesPerRoom) {
+        return { rejected: 'room-byte-limit', direct: this._correction(state, key, peerId) };
+      }
+      if (this.totalStateCost() - prevCost + cost > this.limits.stateBytesTotal) {
+        return { rejected: 'server-byte-limit', direct: this._correction(state, key, peerId) };
+      }
+    }
     if (isHostOwnedKey(key)) {
       const host = this.hostOf(roomId);
       // A room in its reclaim window has NO host on purpose. Accepting host-owned
@@ -220,8 +634,8 @@ export class Hub {
         };
       }
     }
-    if (value == null) state.delete(key);
-    else state.set(key, { value, id: peerId });
+    if (value == null) this._delEntry(roomId, key);
+    else this._setEntry(roomId, key, { value, id: peerId, bytes, nodes, cost });
     return { broadcast: { msg: makeState({ key, value: value ?? null, id: peerId }), exclude: peerId } };
   }
 
@@ -269,14 +683,14 @@ export class Hub {
         //   hold:*    — held carts/gamepads (can't stay in a gone player's hand)
         //   gamepad:* — dynamically-spawned gamepads (abandoned pads would pile up)
         if (s.id === peerId && (key.startsWith('hold:') || key.startsWith('gamepad:'))) {
-          state.delete(key);
+          this._delEntry(roomId, key);   // NOT state.delete — keeps the byte tallies honest
           stateClears.push(makeState({ key, value: null, id: peerId }));
         }
       }
     }
     if (room.size === 0) {
       this.rooms.delete(roomId);
-      this.roomState.delete(roomId);
+      this._dropRoomState(roomId);
       this.roomHosts.delete(roomId);
       this.hostGrace.delete(roomId);   // nobody left to host for; next in is host
     }
@@ -331,6 +745,44 @@ export class Hub {
   peerIds(roomId) {
     const room = this.rooms.get(roomId);
     return room ? [...room.keys()] : [];
+  }
+
+  /**
+   * Drop every trace of a room that has no peers left, plus reclaim windows and
+   * state maps whose room is gone. disconnect() already tears an emptied room
+   * down, so in normal operation this finds nothing — it exists because a leaked
+   * room is unbounded memory that is replayed to the next joiner, and one missed
+   * teardown path (an exception between `room.delete()` and the size check, a
+   * future code path that creates a room without a socket) would otherwise
+   * accumulate silently for the process's whole lifetime. Returns how many rooms
+   * and orphan records it removed. Safe to call on a timer.
+   */
+  sweepEmptyRooms({ now = Date.now() } = {}) {
+    let rooms = 0, orphans = 0;
+    for (const [roomId, peers] of [...this.rooms]) {
+      if (peers.size > 0) continue;
+      this.rooms.delete(roomId);
+      this._dropRoomState(roomId);
+      this.roomHosts.delete(roomId);
+      this.hostGrace.delete(roomId);
+      rooms++;
+    }
+    for (const map of [this.roomState, this.roomHosts]) {
+      for (const roomId of [...map.keys()]) if (!this.rooms.has(roomId)) { map.delete(roomId); orphans++; }
+    }
+    // The aggregate cost tallies are not "orphan records" in their own right —
+    // they are the accounting FOR roomState, so they follow it silently rather
+    // than being counted twice in the swept total. Dropping them matters: a
+    // leaked roomCost entry is a permanent tax on the global budget, which
+    // would slowly starve every future room of its write budget.
+    for (const map of [this.roomCost, this.peerOwn]) {
+      for (const roomId of [...map.keys()]) if (!this.roomState.has(roomId)) map.delete(roomId);
+    }
+    // An elapsed reclaim window for a room nobody ever came back to.
+    for (const [roomId, grace] of [...this.hostGrace]) {
+      if (!this.rooms.has(roomId) || now - grace.at > HOST_RECLAIM_MS * 4) { this.hostGrace.delete(roomId); orphans++; }
+    }
+    return { rooms, orphans };
   }
 
   roomCount() { return this.rooms.size; }

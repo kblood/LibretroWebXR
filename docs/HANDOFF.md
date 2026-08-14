@@ -1,7 +1,11 @@
 # Handoff
 
 Single orientation doc for picking this project up cold. Last updated
-**2026-08-07** (doc-accuracy pass: reconciled against real git/live state —
+**2026-08-14** — see the first bullet under "Highlights, newest first" below:
+the two root-level review docs (`CLAUDE_REVIEW.md`, `CODEX_REVIEW.md`) landed
+and a round of P0 fixes from them is in flight across several parallel
+sessions, so treat any finding in those docs as possibly already fixed.
+Previously updated **2026-08-07** (doc-accuracy pass: reconciled against real git/live state —
 the M1.4 multiplayer rewrite, the DOS core, and the deploy status below had
 all drifted). Read "Core-artifact integrity + PSX two-gun (2026-07-29)" a
 little further down regardless; it changes how you should treat any
@@ -87,6 +91,70 @@ targets: `npm run deploy-app` (or the ~1 h full `npm run deploy`) for the app,
 and **`npm run deploy-room` for the multiplayer room server**, which is not in
 `dist/` and was silently two months stale in production until 2026-08-03.
 Highlights, newest first:
+- **Two independent architecture/code reviews landed, and a P0 round is IN
+  FLIGHT (2026-08-14, reviews committed as `e5314e5`).** `CLAUDE_REVIEW.md` and
+  `CODEX_REVIEW.md` at the repo root are full findings with `file:line`
+  references — read the section you need instead of re-deriving it. Both
+  independently flag the same top items: **no CI**, `src/main.js` at ~8k lines
+  and ~190 top-level bindings, the room-server and log-server sharing one
+  process (one takes the other down), unbounded `public/` copy at build time
+  putting private ROMs across the deploy boundary, and **docs that drift from
+  executable behaviour**. Several agents are working these in parallel in this
+  same tree, so **re-check `git status` / `git log` before assuming a finding is
+  still open** ([[libretrowebxr-concurrent-dev]]).
+  Landed in this round so far:
+  - **CI exists now** — `.github/workflows/ci.yml` (CLAUDE_REVIEW §6 item 4 /
+    CODEX_REVIEW TST-1). Pinned Node 24.7.0, `npm ci` → `npm test` →
+    `npm run build`, plus a second job doing a locked `npm ci` in `server/` and
+    a `node --check` parse gate on the four server modules. Scope is deliberate:
+    the whole `npm test` chain is pure logic (verified — nothing in it imports
+    `ws`/`node:net`/`node:http`/`node:child_process`/`puppeteer-core` or binds a
+    port), so it runs on a clean hosted runner; every `probe-*`/`smoke-*` script
+    is excluded because it needs real Chrome, a running room/log server, or
+    gitignored cores under `public/cores/`. **Do not add a browser tier without
+    also supplying the browser** — a vacuously-green gate is worse than none.
+    CODEX_REVIEW TST-1 tiers 3–5 (real ws pair, two-browser room, production
+    header smoke) remain open. `package.json` still has **no `engines` field**;
+    the Node pin currently lives only in the workflow, so bump both together.
+  - **README de-drifted** — it claimed "17 systems" and that DOS had "no working
+    core", and never mentioned PSX/PS2/N64. Grounded in `src/systems.js` by
+    executing it, not by copying a doc: **20 systems, 19 un-gated, `n64` the
+    only remaining `experimental: true`**. The Atari 2600 `stella2014`
+    zero-draw-call gap is now stated in the README too.
+  - **There is a publishing gate now — but `roms/local/` still ships, on
+    purpose (2026-08-14).** `scripts/check-dist.mjs` is a new guard that runs in
+    three independent places: (1) `vite.config.js` turns `copyPublicDir` **off**
+    and copies `public/` itself through a deny filter, resolving the **real**
+    `build.outDir` (config file *and* `--outDir`), then runs the guard on that
+    directory and **fails the build** on a violation; (2) npm `postbuild` checks
+    `./dist`; (3) `scripts/deploy.ps1` re-runs it on the exact tree it is about
+    to upload, **before the first `scp`**. Any one of the three can be deleted
+    without opening a hole. What it refuses: `*.bak` (it caught the 8 pre-patch
+    core backups that were shipping), credentials, `node_modules`/`.git`,
+    scratch output, symlinks, non-allowlisted types, and ROMs under
+    `roms/freeware/` that are not an allowlisted title. Full table in
+    **README.md → "Building & publishing"**.
+  - **⚠ DO NOT ADD A `roms/local/` STRIP GUARD. It has been reverted twice.**
+    Both reviews rank "`npm run deploy` can publish the private ROM library" as
+    their single **critical** finding (`CLAUDE_REVIEW.md` §4.7,
+    `CODEX_REVIEW.md` SEC-1). For this project that recommendation is **wrong**,
+    and acting on it is now a repeated mistake: a `stripLocalRoms` plugin was
+    added 2026-06-24 (`0df8aeb`) and reverted (`b192911`) once the user
+    corrected the intent, then added again on 2026-08-14 from the reviews and
+    reverted again. The copyright constraint is about the **git repo**, not the
+    deploy — `.gitignore` keeps the tree out of git, and dionysus.dk is the
+    user's own box. Publishing it there is the **only practical way to test
+    light guns on a real Quest** (real HTTPS = WebXR secure context, no
+    `adb reverse`), and the redistributable light-gun game universe is
+    essentially empty, which is why this project authors its own CC0 galleries.
+    Asked directly on 2026-08-14: *"Its just some test roms. Hard to make sure
+    lightguns work without real lightgun games. Its temporary."* The guard
+    therefore **reports** the private tree (path + size) on every build and only
+    refuses it under `--strict` / `CHECK_DIST_STRICT=1`, which is for a
+    genuinely public release. Stripping it also strips
+    `roms/local/amiga/kick*.A500`, which `src/systems.js:78` points PUAE's
+    `systemFiles` at, so deployed Amiga silently falls back to AROS and real
+    KS1.3 floppy titles stop booting.
 - **M1.4 — one room, one game (2026-08-03 → 2026-08-07, `b4a62bb`..`097cc92`,
   DEPLOYED + verified against production).** The big multiplayer rewrite: the
   **server** elects the host by seniority, a non-host is **display-only** (runs
@@ -1068,7 +1136,12 @@ cd C:\LLM\LibretroWebXR
 npm install
 npm run fetch-cores     # copies cores into public/cores/ (gitignored). Auto-finds
                         # them in the old scratch workspace; else see the script.
-npm run dev             # http://localhost:5173  (Vite sets COOP/COEP)
+npm run dev             # http://127.0.0.1:5173  (Vite sets COOP/COEP)
+                        # LOOPBACK ONLY since 2026-08-14. A Quest on the LAN
+                        # cannot reach it unless you opt in:
+                        #   $env:LAN=1; npm run dev   (then: Remove-Item Env:LAN)
+                        # Same for `npm run preview`. See README → "Testing on a
+                        # real headset: LAN=1" for why the default flipped.
 npm test                # 4593 pure-logic assertions across 33 suites + 26
                         # node:test cases, 0 failing (measured 2026-08-07):
                         # collection/room/serializer/env-editor/prop-creator/

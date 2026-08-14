@@ -21,6 +21,13 @@
     "make-vb-demo": "node scripts/make-vb-demo.mjs",
     "test": "node scripts/test-collection.mjs && node scripts/test-multiplayer.mjs && node scripts/test-net.mjs && node scripts/test-logger.mjs && node scripts/test-c64.mjs && node scripts/test-keyboard.mjs && node scripts/test-systems.mjs && node scripts/test-placement.mjs && node scripts/test-session.mjs && node scripts/test-tvstate.mjs && node scripts/test-imagelibrary.mjs && node scripts/test-cord.mjs && node scripts/test-patchbay.mjs && node scripts/test-rackbudget.mjs && node scripts/test-rackmgr.mjs && node scripts/test-snap.mjs && node scripts/test-rackpersistence.mjs && node scripts/test-routing.mjs && node scripts/test-controller-portswitch.mjs && node scripts/test-gameinput.mjs && node scripts/test-romresolver.mjs && node scripts/test-gamepad-share.mjs && node scripts/test-gamepad-sync.mjs && node scripts/test-gun-sync.mjs && node scripts/test-lightgun-share.mjs && node scripts/test-grabmgr-lightgun.mjs && node scripts/test-mouse-sync.mjs && node scripts/test-mousemgr.mjs && node scripts/test-mousemgr-pointerlock.mjs && node scripts/test-prop-sync.mjs && node scripts/test-localromlibrary.mjs && node scripts/test-media.mjs && node scripts/test-runtime-facade.mjs && node scripts/test-testapi.mjs && node scripts/test-patched-cores.mjs && npm run test:node",
     "test:node": "node --test test/psx-foundations.test.js test/runtime.test.js test/disc-identity.test.js",
+    "test:servers": "node scripts/test-net-signal.mjs && node scripts/test-log-server.mjs && node scripts/test-room-limits.mjs",
+    "test:net-signal": "node scripts/test-net-signal.mjs",
+    "test:log-server": "node scripts/test-log-server.mjs",
+    "test:room-limits": "node scripts/test-room-limits.mjs",
+    "check-dist": "node scripts/check-dist.mjs",
+    "postbuild": "node scripts/check-dist.mjs",
+    "probe:hotswap": "node scripts/probe-hotswap-config.mjs",
     "debug": "node scripts/debug.js",
     "smoke-room": "node server/smoke.mjs",
     "smoke-presence": "node scripts/smoke-presence.mjs",
@@ -82,10 +89,14 @@
     "probe:pong-boot": "node scripts/probe-pong-boot.mjs",
     "probe:repatch": "node scripts/probe-repatch.mjs"
   },
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "devDependencies": {
     "jsnes": "^2.1.0",
     "puppeteer-core": "^25.0.2",
-    "vite": "^7.0.0"
+    "vite": "^7.3.5",
+    "ws": "^8.18.0"
   },
   "dependencies": {
     "three": "^0.179.0"

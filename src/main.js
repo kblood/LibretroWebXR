@@ -45,7 +45,7 @@ import { MenuMgr } from './MenuMgr.js';
 import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, twoGunForSystem, libretroGunPortFor, twoGunPortsForSystem, isMouseCapable, mouseLoadConfig, isTwoMouseCapable, libretroMousePortFor, twoMousePortsForSystem, fourScoreLoadConfig, extOf, pickPrimaryFile } from './systems.js';
 import { Patchbay } from './Patchbay.js';
 import { RackMgr } from './RackMgr.js';
-import { ConsoleRuntime } from './ConsoleRuntime.js';
+import { ConsoleRuntime, clientNeedsFreshBoot } from './ConsoleRuntime.js';
 import { computeRouting as routeControllers } from './Routing.js';
 import { NetMgr } from './net/NetMgr.js';
 import { buildIceServers } from './net/NetProtocol.js';
@@ -329,6 +329,53 @@ let _peerMouseCounter = 0;
 // than before this change.
 let _wireNetSession = () => {};
 let _netSessionWired = false;
+
+// --- Room-session tick callbacks (§5.1/§5.3 of the 2026-08 review) ----------
+//
+// The per-frame callbacks _wireNetSession registers dereference the module-level
+// `net` (net.presence / net.objects). disconnectFromRoom() sets `net = null`, and
+// SceneMgr had no removal API — so after Leave all four ran every frame and threw
+// every frame, ~4 caught exceptions + 4 console.warn per rendered frame forever.
+//
+// Register them through _addNetTickCallback instead of scene.addTickCallback:
+//   • each is wrapped in a `if (!net) return` guard (defence in depth — the
+//     callback bodies carry the same guard),
+//   • the whole set is DETACHED from SceneMgr on leave (the real fix) and
+//     re-attached on the next join.
+// Re-attaching (rather than re-wiring) keeps the existing _netSessionWired
+// semantics exactly as they were: the managers are still built once per world
+// build, so rejoin behaviour is unchanged apart from the ticks running again.
+const _netTickCallbacks = [];
+let _netTicksDetached = false;
+
+function _addNetTickCallback(fn) {
+  const guarded = (dt) => { if (!net) return; fn(dt); };
+  _netTickCallbacks.push(guarded);
+  if (!_netTicksDetached) scene.addTickCallback(guarded);
+  return guarded;
+}
+
+/** Leave: hand every room-session tick callback back to SceneMgr. */
+function _detachNetTickCallbacks() {
+  if (_netTicksDetached) return;
+  _netTicksDetached = true;
+  for (const fn of _netTickCallbacks) scene.removeTickCallback?.(fn);
+}
+
+/** Join: re-register them (no-op on the first join, where they were never detached). */
+function _attachNetTickCallbacks() {
+  if (!_netTicksDetached) return;
+  _netTicksDetached = false;
+  for (const fn of _netTickCallbacks) scene.addTickCallback(fn);
+}
+
+// Probe hook (see scripts/probe-hotswap-config.mjs): how many session ticks exist
+// and whether they're currently attached to the render loop.
+window.__netTicks = () => ({
+  registered: _netTickCallbacks.length,
+  attached: !_netTicksDetached,
+  sceneTicks: scene?.tickCallbackCount?.() ?? null,
+});
 
 // Prop room-layout sync: reconciler installed once buildCartridgeWorld sets up
 // the editor and built.placed. No-op stub until then.
@@ -717,6 +764,10 @@ function connectToRoom(room, nick, color) {
   // the world is already built, so _wireNetSession is the real closure → this is
   // what actually wires ghosts + the _reconcile* functions for a widget-joiner.
   _wireNetSession();
+  // Re-attach the session tick callbacks a previous Leave detached. No-op on a
+  // first join (_wireNetSession registers them already attached); on a rejoin it
+  // is what brings ghost/gamepad/gun/mouse hold sync back to life.
+  _attachNetTickCallbacks();
 
   // Tag logger entries with this session for the /logs viewer.
   logger._sessionId = room;
@@ -746,6 +797,10 @@ function disconnectFromRoom() {
   net.disconnect();
   net = null;
   window.__net = null;
+  // The four ghost-hold tick callbacks belong to the session we just ended: with
+  // `net` null they can only throw, once per callback per frame, forever (§5.1).
+  // Hand them back to SceneMgr — the next join re-attaches them.
+  _detachNetTickCallbacks();
   setPrimaryScreen(primaryCanvas());
   client.resume?.();
   // Bring back any SECONDARY consoles that pauseAll() suspended while we watched
@@ -1594,17 +1649,31 @@ async function spawnConsole(system, opts = {}) {
   const tvX = Math.max(bounds.minX + TV_HALF_W, Math.min(bounds.maxX - TV_HALF_W, slot.x));
   const tv = scene.addTV({ id: tvId, position: [tvX, 1.5, -3.6] });
   audioRouter.expect(consoleId, tv.group);
-  // CORES entries are keyed by name and carry no `name` field; ConsoleRuntime
-  // wants { name, url, style }, so graft the key on.
-  const spawnCoreInfo = { ...core, name: meta.core };
+  // Peripheral wiring, resolved by the SAME helper every other boot path uses:
+  // a light-gun / mouse / Four Score game spawned onto a NEW rack console gets
+  // its device declared at boot exactly as it would on console0 (this path used
+  // to pass none of the three, so it never got one). `spawnCore` may differ from
+  // meta.core for a gun boot (SMS → genesis_plus_gx). CORES entries are keyed by
+  // name and carry no `name` field; ConsoleRuntime wants { name, url, style }.
+  const spawnDev = resolveBootPeripherals(meta);
+  const spawnCore = spawnDev.core;
+  const spawnCoreInfo = { ...spawnCore, name: spawnDev.coreName };
   // B1 (2026-07-25 review): worker-execution cores need their content wrapped
   // (stable contentId for SaveRAM keying) and their BIOS/restored-SaveRAM
   // resolved, same as the primary console's boot paths — a spawned rack
   // console previously got neither.
-  const spawnContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, spawnCoreInfo, meta) : buf;
-  const spawnStart = await buildStartOptions(spawnCoreInfo, { file: meta.file, title: meta.title }, spawnContent);
+  const spawnContent = spawnCore.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, spawnCoreInfo, meta) : buf;
+  const spawnStart = await buildStartOptions(spawnCoreInfo, {
+    file: meta.file, title: meta.title,
+    coreOptions: spawnDev.coreOptions, inputDevices: spawnDev.inputDevices,
+    remapName: spawnDev.remapName, systemFiles: spawnCore.systemFiles,
+  }, spawnContent);
+  logLightgunBoot('spawnConsole', meta, spawnDev.gun, { consoleId });
   await runtime.load(spawnContent, spawnCoreInfo, {
     system: meta.system, title: meta.title,
+    coreOptions: spawnStart.coreOptions, inputDevices: spawnStart.inputDevices,
+    remapName: spawnStart.remapName, systemFiles: spawnStart.systemFiles,
+    execution: spawnStart.execution, requiresThreads: spawnStart.requiresThreads,
     firmware: spawnStart.firmware, restoredSaves: spawnStart.restoredSaves,
   });
   rackMgr.add(runtime);
@@ -3550,7 +3619,11 @@ async function buildCartridgeWorld() {
     _netSessionWired = true;
     const getCartByObjId = (objId) => cartridges.find((c) => c.userData.file === objId) || null;
     const ghostMgr = new GhostCartMgr({ avatars: net.avatars, getCartByObjId });
-    scene.addTickCallback(() => {
+    // Session-scoped: detached from the render loop on Leave (see
+    // _addNetTickCallback). The `!net` guard is defence in depth for the frame
+    // in which the session goes away.
+    _addNetTickCallback(() => {
+      if (!net) return;
       const presentIds = new Set(net.presence.peers().map((p) => p.id));
       ghostMgr.sync(parseHolds(net.objects.entries(), { selfId: net.presence.selfId, presentIds }));
     });
@@ -3564,7 +3637,8 @@ async function buildCartridgeWorld() {
     // lock the local gamepad from being grabbed while it's held remotely.
     // Uses the `hold:gp:<cableId>` STATE namespace (same Hub auto-clear as cart holds).
     ghostGpMgr = new GhostGamepadMgr({ avatars: net.avatars, gamepadObjs: _gamepadObjs });
-    scene.addTickCallback(() => {
+    _addNetTickCallback(() => {
+      if (!net) return;
       const presentIds = new Set(net.presence.peers().map((p) => p.id));
       // Filter entries to only gamepad holds (hold:gp:*) and parse them.
       const gpEntries = net.objects.entries().filter(([k]) => isGamepadHoldKey(k));
@@ -3588,7 +3662,8 @@ async function buildCartridgeWorld() {
     // `hold:gun:<cableId>` STATE namespace (same Hub auto-clear as cart/gamepad
     // holds). Mirrors the gamepad wiring immediately above.
     ghostGunMgr = new GhostLightGunMgr({ avatars: net.avatars, lightGunObjs: _lightGunObjsById });
-    scene.addTickCallback(() => {
+    _addNetTickCallback(() => {
+      if (!net) return;
       const presentIds = new Set(net.presence.peers().map((p) => p.id));
       const gunEntries = net.objects.entries().filter(([k]) => isGunHoldKey(k));
       // Remap objId from 'gun:<cableId>' to just '<cableId>' for GhostLightGunMgr.
@@ -3609,7 +3684,8 @@ async function buildCartridgeWorld() {
     // the `hold:mouse:<cableId>` STATE namespace (same Hub auto-clear as
     // cart/gamepad/gun holds).
     ghostMouseMgr = new GhostMouseMgr({ avatars: net.avatars, mouseObjs: _mouseObjsById });
-    scene.addTickCallback(() => {
+    _addNetTickCallback(() => {
+      if (!net) return;
       const presentIds = new Set(net.presence.peers().map((p) => p.id));
       const mouseEntries = net.objects.entries().filter(([k]) => isMouseHoldKey(k));
       // Remap objId from 'mouse:<cableId>' to just '<cableId>' for GhostMouseMgr.
@@ -6297,6 +6373,64 @@ async function resolvePs2DiscCue(meta, cueBuf) {
   return { buf: await res.arrayBuffer(), track, trackPath: track };
 }
 
+/**
+ * Resolve the PERIPHERAL-driven part of a boot: which core to actually run, and
+ * the three per-launch fields RetroArch only ever reads at core boot
+ * (coreOptions / inputDevices / remapName — see EmulatorClient's BOOT
+ * CONFIGURATION note).
+ *
+ * ONE resolver, used by the PRIMARY path (loadCartridge) and the SECONDARY/rack
+ * paths (loadCartridgeIntoConsole, swapConsoleCore) alike. Before this, only the
+ * primary console resolved peripherals at all: a light-gun or mouse cartridge
+ * dropped on a rack console booted with no device whatsoever, even though light
+ * guns on secondary consoles are a shipped feature (docs/LIGHTGUN_SUPPORT.md).
+ * Sharing the resolver is what makes "which console did I drop it on" stop
+ * mattering — and stops the two copies drifting the next time a peripheral is
+ * added.
+ *
+ * @param {object} meta cartridge meta ({ system, core, lightgun?, mouse?, … })
+ * @returns {{gun:object|null, mouse:object|null, fourScore:object|null,
+ *            coreName:string, core:object, coreOptions:object|undefined,
+ *            inputDevices:object|undefined, remapName:string|undefined}}
+ */
+function resolveBootPeripherals(meta) {
+  // Light-gun wiring: when this load is gun-enabled (the game is flagged, or a
+  // gun has been armed for this session), boot the gun's (patched) core with the
+  // peripheral assigned to its port — the device only connects at boot, so it
+  // must be present in the client.start() options. lightgunLoadConfig picks the
+  // gun core, which may differ from meta.core (e.g. SMS → genesis_plus_gx).
+  // Two-gun co-op: a twoGun-flagged game on a two-gun-capable system seats TWO
+  // gun devices (Justifier 516/772 on ports 1+2) so each VR gun drives its own
+  // per-port aim slot; otherwise a single gun on one port (proven path).
+  const twoGun = _twoGunActiveFor(meta);
+  const gun = (meta.lightgun || window.__lightgunArmed)
+    ? lightgunLoadConfig(meta.system, { twoGun, allowBroken: window.__allowBrokenLightgun })
+    : null;
+  const coreName = gun?.core || meta.core;
+  const core = CORES[coreName];
+  if (!core) throw new Error(`no core registered as "${coreName}"`);
+  // NES Four Score: when this is an (un-gunned) NES/fceumm boot, connect players
+  // 3+4 as gamepads so fceumm enables its Four Score multitap and the ROM can
+  // read P3/P4 over the serial protocol. No-op (null) for nestopia, non-NES
+  // systems, and gun boots — those keep their exact prior wiring.
+  const fourScore = gun ? null : fourScoreLoadConfig(meta.system, coreName);
+  // Mouse wiring: when this load is mouse-enabled (game flagged, or a mouse was
+  // armed this session by grabbing the prop) on a mouse-capable system, connect
+  // the libretro MOUSE device on its port(s). A twoMouse-flagged game on a
+  // two-mouse-capable system (Amiga) seats a mouse on BOTH ports (split-pointer
+  // 2-player); otherwise one mouse on port 0. Mutually exclusive with the gun
+  // (Amiga has no light gun), so this only applies on non-gun boots.
+  const wantMouse = !gun && isMouseCapable(meta.system) && (meta.mouse || window.__mouseArmed);
+  const twoMouse = wantMouse && !!meta.twoMouse && isTwoMouseCapable(meta.system);
+  const mouse = wantMouse ? mouseLoadConfig(meta.system, { twoMouse }) : null;
+  return {
+    gun, mouse, fourScore, coreName, core,
+    coreOptions: gun ? { ...(core.coreOptions || {}), ...gun.coreOptions } : core.coreOptions,
+    inputDevices: gun?.inputDevices ?? mouse?.inputDevices ?? fourScore?.inputDevices,
+    remapName: gun?.remapName ?? mouse?.remapName ?? fourScore?.remapName ?? core.remapName,
+  };
+}
+
 async function loadCartridge(meta, { echo = true } = {}) {
   // M1.4 client-boot suppression, LAST LINE OF DEFENCE. Every intentional path
   // into a boot is gated upstream (handleCartridgeInserted, the ROM picker,
@@ -6339,36 +6473,10 @@ async function loadCartridge(meta, { echo = true } = {}) {
       logger?.event?.('load-superseded', { file: meta.file, system: meta.system, where: 'resolveRom' });
       return;
     }
-    // Light-gun wiring: when this load is gun-enabled (the game is flagged, or a
-    // gun has been armed for this session), boot the gun's (patched) core with the
-    // peripheral assigned to its port — the device only connects at boot, so it
-    // must be present in this client.start(). lightgunLoadConfig picks the gun
-    // core, which may differ from meta.core (e.g. SMS → genesis_plus_gx).
-    // Two-gun co-op: a twoGun-flagged game on a two-gun-capable system seats TWO
-    // gun devices (Justifier 516/772 on ports 1+2) so each VR gun drives its own
-    // per-port aim slot; otherwise a single gun on one port (proven path).
-    const twoGun = _twoGunActiveFor(meta);
-    const gun = (meta.lightgun || window.__lightgunArmed) ? lightgunLoadConfig(meta.system, { twoGun, allowBroken: window.__allowBrokenLightgun }) : null;
-    const coreName = gun?.core || meta.core;
-    const core = CORES[coreName];
-    if (!core) throw new Error(`no core registered as "${coreName}"`);
-    const coreOptions = gun ? { ...(core.coreOptions || {}), ...gun.coreOptions } : core.coreOptions;
-    // NES Four Score: when this is an (un-gunned) NES/fceumm boot, connect
-    // players 3+4 as gamepads so fceumm enables its Four Score multitap and the
-    // ROM can read P3/P4 over the serial protocol. No-op (null) for nestopia,
-    // non-NES systems, and gun boots — those keep their exact prior wiring.
-    const fourScore = gun ? null : fourScoreLoadConfig(meta.system, coreName);
-    // Mouse wiring: when this load is mouse-enabled (game flagged, or a mouse was
-    // armed this session by grabbing the prop) on a mouse-capable system, connect
-    // the libretro MOUSE device on its port(s). A twoMouse-flagged game on a
-    // two-mouse-capable system (Amiga) seats a mouse on BOTH ports (split-pointer
-    // 2-player); otherwise one mouse on port 0. Mutually exclusive with the gun
-    // (Amiga has no light gun), so this only applies on non-gun boots.
-    const wantMouse = !gun && isMouseCapable(meta.system) && (meta.mouse || window.__mouseArmed);
-    const twoMouse = wantMouse && !!meta.twoMouse && isTwoMouseCapable(meta.system);
-    const mouse = wantMouse ? mouseLoadConfig(meta.system, { twoMouse }) : null;
-    const inputDevices = gun?.inputDevices ?? mouse?.inputDevices ?? fourScore?.inputDevices;
-    const remapName = gun?.remapName ?? mouse?.remapName ?? fourScore?.remapName ?? core.remapName;
+    // Peripheral wiring (light gun / mouse / Four Score) + the core those imply,
+    // resolved by the SAME helper every console path uses — see
+    // resolveBootPeripherals above.
+    const { gun, mouse, fourScore, coreName, core, coreOptions, inputDevices, remapName } = resolveBootPeripherals(meta);
     // PS2 (`play`) .cue resolution — see resolvePs2DiscCue's doc comment above.
     // Runs before the rom-resolved log below so that log (and every downstream
     // consumer of `buf`) reflects the real resolved disc track, not the tiny
@@ -6532,7 +6640,20 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
     consoleId, file: meta.file, system: meta.system, core: meta.core,
     plan: resolutionPlan(meta), opfs: opfsSupported(),
   });
-  if (runtime.coreName && runtime.coreName !== meta.core) {
+  // The core this cart will actually run on may not be meta.core: a light-gun
+  // boot picks the gun's (patched) core (SMS → genesis_plus_gx). Compare against
+  // THAT, or an armed gun on an SMS cart would take the "same core" branch below
+  // and try to hot-swap a different core into the running one.
+  let bootPeripherals;
+  try {
+    bootPeripherals = resolveBootPeripherals(meta);
+  } catch (e) {
+    const msg = String(e?.message || e);
+    setStatus(`error: ${msg}`);
+    logger?.event?.('boot-error', { consoleId, file: meta.file, system: meta.system, core: meta.core, error: msg });
+    return;
+  }
+  if (runtime.coreName && runtime.coreName !== bootPeripherals.coreName) {
     // Option B — a secondary console CAN change cores: the old core can't unload,
     // so swapConsoleCore() builds a fresh runtime for the new core in its own
     // canvas and retires the old one, leaving every OTHER console's game running
@@ -6551,10 +6672,9 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
   }
   try {
     let buf = await resolveRom(meta);
-    const core = CORES[meta.core];
-    if (!core) throw new Error(`no core registered as "${meta.core}"`);
+    const { gun, mouse, fourScore, coreName, core, coreOptions, inputDevices, remapName } = bootPeripherals;
     // CORES entries carry no `name`; ConsoleRuntime.load wants { name, url, style }.
-    const intoCoreInfo = { ...core, name: meta.core };
+    const intoCoreInfo = { ...core, name: coreName };
     // PS2 (`play`) .cue resolution — same real-disc-on-a-secondary-console gap
     // this fixes as the primary loadCartridge path; see resolvePs2DiscCue's
     // doc comment above. Without this, a .cue dropped on a secondary console
@@ -6562,7 +6682,7 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
     // bytes (Play! never even round-trips the extension, so it wasn't an
     // error — just dead-quiet garbage content).
     let intoContentExt;
-    if (meta.core === 'play' && extOf(meta.file) === 'cue') {
+    if (coreName === 'play' && extOf(meta.file) === 'cue') {
       const resolved = await resolvePs2DiscCue(meta, buf);
       buf = resolved.buf;
       intoContentExt = 'iso';
@@ -6570,16 +6690,53 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
       logger?.event?.('ps2-cue-resolved', detail);
       window.__lastPs2CueResolve = detail;
     }
-    logger?.event?.('rom-resolved', { consoleId, file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url });
+    logger?.event?.('rom-resolved', {
+      consoleId, file: meta.file, bytes: buf?.byteLength ?? 0, coreUrl: core.url,
+      lightgun: !!gun, twoGun: !!(gun && gun.guns?.length > 1),
+      mouse: !!mouse, twoMouse: !!(mouse && mouse.mice?.length > 1), fourScore: !!fourScore,
+    });
+    logLightgunBoot('loadCartridgeIntoConsole', meta, gun, { consoleId });
+    if (mouse) logger?.event?.('mouse-boot', { where: 'loadCartridgeIntoConsole', consoleId, system: meta.system, inputDevices: mouse.inputDevices, mice: mouse.mice, remapName: mouse.remapName });
     // B1 (2026-07-25 review): worker-execution content wrapping + BIOS/restored-
     // SaveRAM resolution, same as every other boot path.
     const intoContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, intoCoreInfo, meta) : buf;
-    const intoStart = await buildStartOptions(intoCoreInfo, { file: meta.file, title: meta.title, contentExt: intoContentExt }, intoContent);
-    await runtime.load(intoContent, intoCoreInfo, {
-      system: meta.system, title: meta.title,
+    const intoStart = await buildStartOptions(intoCoreInfo, {
+      file: meta.file, title: meta.title, contentExt: intoContentExt,
+      coreOptions, inputDevices, remapName, systemFiles: core.systemFiles,
+    }, intoContent);
+    // The per-launch boot configuration this console must run with. Identical in
+    // shape to what the primary console's buildStartOptions produces — a light
+    // gun / mouse / Four Score dropped on a rack console now declares its device
+    // exactly the way it does on console0 (before this, these three fields were
+    // simply not passed here at all, so the device never connected).
+    const intoMeta = {
+      system: meta.system, title: meta.title, contentExt: intoContentExt,
+      coreOptions: intoStart.coreOptions, inputDevices: intoStart.inputDevices, remapName: intoStart.remapName,
+      systemFiles: intoStart.systemFiles,
+      execution: intoStart.execution, requiresThreads: intoStart.requiresThreads,
       firmware: intoStart.firmware, restoredSaves: intoStart.restoredSaves,
-      contentExt: intoContentExt,
-    });
+    };
+    // Same rule as the primary console (see _bootOnPrimaryCore): the loaded core
+    // can serve this boot only if its boot configuration is unchanged. When it
+    // isn't — the gun/mouse cartridge case — stand up a FRESH runtime for this
+    // console instead of hot-swapping content into a core whose peripherals were
+    // fixed at its own boot. The decision is the client's (its `bootConfig`), so
+    // both consoles inherit one rule rather than each re-deriving it.
+    if (runtime.needsFreshBoot(intoCoreInfo, intoMeta)) {
+      logger?.event?.('console-bootconfig-reboot', {
+        consoleId, core: coreName, title: meta.title,
+        lightgun: !!gun, mouse: !!mouse, fourScore: !!fourScore,
+      });
+      await bootFreshRuntime(consoleId, meta, {
+        core: intoCoreInfo, romBuffer: intoContent, contentExt: intoContentExt,
+        coreOptions: intoStart.coreOptions, inputDevices: intoStart.inputDevices, remapName: intoStart.remapName,
+        systemFiles: intoStart.systemFiles,
+        execution: intoStart.execution, requiresThreads: intoStart.requiresThreads,
+        firmware: intoStart.firmware, restoredSaves: intoStart.restoredSaves,
+      });
+    } else {
+      await runtime.load(intoContent, intoCoreInfo, intoMeta);
+    }
     // Repaint via the patch graph (idempotent) so this console's TV samples its
     // canvas and no other TV is touched — the fix for "game showed on both screens".
     // Loading into a console implies it's on — keep power state + switch in sync.
@@ -6624,20 +6781,21 @@ function tvForConsole(consoleId) {
 // never reaches here: it owns #canvas + the room/net host role and keeps the
 // whole-page reload path in handleCartridgeInserted.
 async function swapConsoleCore(consoleId, meta) {
-  const core = CORES[meta.core];
-  if (!core) throw new Error(`no core registered as "${meta.core}"`);
+  // Same resolver as every other boot path: the gun/mouse/Four Score devices AND
+  // the core they imply (a gun boot may run a different core than meta.core).
+  // Previously this path resolved ONLY the Four Score, so a light-gun or mouse
+  // cartridge that landed here — a cross-core drop onto a rack console — booted
+  // with no peripheral device at all.
+  const { gun, mouse, coreName, core, coreOptions, inputDevices, remapName } = resolveBootPeripherals(meta);
   let buf = await resolveRom(meta);
-  // NES Four Score on a secondary console: same fceumm-only P3/P4 gamepad wiring
-  // as the primary path. null (no-op) for nestopia / non-NES boots.
-  const fourScore = fourScoreLoadConfig(meta.system, meta.core);
-  const swapCoreInfo = { ...core, name: meta.core };
+  const swapCoreInfo = { ...core, name: coreName };
   // PS2 (`play`) .cue resolution — same real-disc-on-a-secondary-console gap
   // this fixes as the primary loadCartridge path; see resolvePs2DiscCue's
   // doc comment above (a core-swap onto `play` is the OTHER way a secondary
   // console can end up with a .cue, alongside loadCartridgeIntoConsole's
   // same-core path).
   let swapContentExt;
-  if (meta.core === 'play' && extOf(meta.file) === 'cue') {
+  if (coreName === 'play' && extOf(meta.file) === 'cue') {
     const resolved = await resolvePs2DiscCue(meta, buf);
     buf = resolved.buf;
     swapContentExt = 'iso';
@@ -6648,11 +6806,19 @@ async function swapConsoleCore(consoleId, meta) {
   // B1 (2026-07-25 review): worker-execution content wrapping + BIOS/restored-
   // SaveRAM resolution, same as every other boot path.
   const swapContent = core.execution === 'worker' ? await wrapWorkerContent(meta.file, buf, swapCoreInfo, meta) : buf;
-  const swapStart = await buildStartOptions(swapCoreInfo, { file: meta.file, title: meta.title, contentExt: swapContentExt }, swapContent);
+  const swapStart = await buildStartOptions(swapCoreInfo, {
+    file: meta.file, title: meta.title, contentExt: swapContentExt,
+    coreOptions, inputDevices, remapName, systemFiles: core.systemFiles,
+  }, swapContent);
+  logLightgunBoot('swapConsoleCore', meta, gun, { consoleId });
+  if (mouse) logger?.event?.('mouse-boot', { where: 'swapConsoleCore', consoleId, system: meta.system, inputDevices: mouse.inputDevices, mice: mouse.mice, remapName: mouse.remapName });
   await bootFreshRuntime(consoleId, meta, {
     core: swapCoreInfo, romBuffer: swapContent, contentExt: swapContentExt,
-    inputDevices: fourScore?.inputDevices,
-    remapName: fourScore?.remapName ?? core.remapName,
+    coreOptions: swapStart.coreOptions,
+    inputDevices: swapStart.inputDevices,
+    remapName: swapStart.remapName,
+    systemFiles: swapStart.systemFiles,
+    execution: swapStart.execution, requiresThreads: swapStart.requiresThreads,
     firmware: swapStart.firmware, restoredSaves: swapStart.restoredSaves,
   });
   // Persist so a later reload restores the game now on this console.
@@ -6774,11 +6940,51 @@ function publishTvAndBroadcast(meta) {
   net?.startVideoBroadcast();
 }
 
+// --- Boot-time configuration is part of the runtime's IDENTITY --------------
+//
+// §5.4 / COR-4 of the 2026-08 review, the most user-visible bug found: a
+// libretro peripheral (light gun, mouse, Four Score multitap), a core-option set
+// and a remap file attach ONLY at a fresh core boot — EmulatorClient consumes
+// them in _writeRetroArchConfig(), which its same-core hot-swap branch returns
+// before ever reaching. So inserting a Super Scope game while a plain snes9x
+// game is already running kept the OLD game's devices: main.js armed the gun UI
+// while the core saw a plain pad. The reverse direction was just as wrong —
+// EmulatorClient only overwrote _inputDevices/_coreOptions/_remapName when the
+// incoming value was non-empty, so a gun game's devices stuck around into the
+// next plain game.
+//
+// The fix lives in EmulatorClient now (it REPLACES those fields rather than
+// merging them, remembers the configuration its live core booted with, and
+// exposes it as `bootConfig`) — so BOTH consoles inherit it and no call site owns
+// a shadow copy that can drift. What is left here is the recovery: when the
+// client says the loaded core can't serve this boot, take the same live
+// fresh-runtime path a core change already takes (a brand-new client → nothing
+// stale can survive). An unchanged boot configuration — the common plain-game →
+// plain-game swap — still takes the fast in-place hot swap, so the performance
+// win that path exists for is untouched.
+//
+// Why a fresh runtime and not "apply the new config to the running core": there
+// is nothing to apply it to. RetroArch parses retroarch.cfg, the per-core .rmp
+// and the core-options file once, during callMain, and connects controller-port
+// devices while loading content; rewriting those files afterwards changes
+// nothing (see docs/LIGHTGUN_SUPPORT.md — the device only connects at boot).
+// The cost is real and known: dispose() only pauses + detaches, so the retired
+// core's Wasm heap lingers (CODEX_REVIEW COR-5). Both reviews sanctioned that
+// trade; the mitigation is to take it ONLY when the configuration genuinely
+// changed, which is exactly what clientNeedsFreshBoot() decides.
 async function _bootOnPrimaryCore(meta, bootCore, content, startOptions) {
-  if (currentCore && currentCore !== bootCore.name) {
+  // Ask the LIVE client (not a bookkeeping copy) whether it can serve this boot.
+  // `currentCore` still gates it: before the first boot there is no core to be
+  // stale, and the normal path below writes the config itself.
+  const bootConfigChanged = clientNeedsFreshBoot(client, startOptions);
+  if (currentCore && (currentCore !== bootCore.name || bootConfigChanged)) {
     const next = await bootFreshRuntime(CONSOLE_ID, meta, {
       core: { name: bootCore.name, url: bootCore.url, style: bootCore.style },
       romBuffer: content,
+      // Carry the caller's extension override (PS2 .cue → the resolved track's
+      // 'iso'); bootFreshRuntime otherwise derives it from meta.file, which for
+      // a cue is the cue sheet, not the disc.
+      contentExt: startOptions.contentExt,
       coreOptions: startOptions.coreOptions,
       inputDevices: startOptions.inputDevices,
       remapName: startOptions.remapName,
@@ -6852,7 +7058,7 @@ async function rebootPrimaryConsole(meta, gun, mouse = null) {
   const startOptions = await buildStartOptions(coreInfo, { file: meta.file, title: meta.title }, content);
   logLightgunBoot('arm-reboot', meta, gun, { live: true });
   if (mouse) logger?.event?.('mouse-boot', { where: 'arm-reboot', system: meta.system, inputDevices: mouse.inputDevices, mice: mouse.mice, remapName: mouse.remapName, live: true });
-  const next = await bootFreshRuntime(CONSOLE_ID, meta, {
+  const bootOpts = {
     core: coreInfo,
     romBuffer: content,
     coreOptions,
@@ -6863,7 +7069,11 @@ async function rebootPrimaryConsole(meta, gun, mouse = null) {
     requiresThreads: startOptions.requiresThreads,
     firmware: startOptions.firmware,
     restoredSaves: startOptions.restoredSaves,
-  });
+  };
+  // The fresh runtime's client records the configuration it booted with itself
+  // (EmulatorClient._bootConfig), so there is nothing to keep in sync here — the
+  // next cartridge insert asks that client directly via clientNeedsFreshBoot().
+  const next = await bootFreshRuntime(CONSOLE_ID, meta, bootOpts);
   // Re-point the singleton-bound consumers (keyboard / desktop pad / reset / save
   // states / host-video pause-resume) at the new runtime's client, and wire its
   // ready/error handlers (the old client's listeners don't carry over).
