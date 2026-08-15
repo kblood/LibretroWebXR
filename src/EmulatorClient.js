@@ -18,7 +18,7 @@
 //   - The core drives its own rAF loop (`emscripten_set_main_loop`).
 //   - Three.js samples `emuCanvas` as a CanvasTexture for the TV mesh.
 
-import { RETROARCH_CFG, RETROARCH_CFG_DIR, RETROARCH_CFG_PATH } from './RetroArchConfig.js';
+import { RETROARCH_CFG, RETROARCH_CFG_DIR, RETROARCH_CFG_PATH, RETROARCH_SYSTEM_DIR } from './RetroArchConfig.js';
 
 const ROM_VFS_DIR = '/rom';
 // Single-file whole-disc extensions Play!'s Js_DiscImageDeviceStream bridge can
@@ -66,10 +66,12 @@ const STATE_DIR = '/home/web_user/retroarch/userdata/states';
 const STATE_PATH = STATE_DIR + '/rom.state';
 // RetroArch system directory — where cores look for BIOS / firmware. Some cores
 // (notably PUAE/Amiga) need a real boot ROM (Kickstart) here to run actual games
-// instead of a built-in replacement. We set it EXPLICITLY (RA otherwise derives a
-// default) and provision any opts.systemFiles into it before callMain. Empty for
-// cores that need nothing — identical to the prior unset/empty-default behaviour.
-const SYSTEM_DIR = '/home/web_user/retroarch/system';
+// instead of a built-in replacement, and opts.systemFiles is provisioned into it
+// before callMain. It comes from RetroArchConfig, which is what actually publishes
+// it to RetroArch: this file used to declare its own path (without `userdata/`)
+// and append a second `system_directory` line, which RetroArch ignored — see the
+// RETROARCH_SYSTEM_DIR comment for the whole failure. Never restate the literal.
+const SYSTEM_DIR = RETROARCH_SYSTEM_DIR;
 // `-c PATH` explicitly tells RA which config file to load. RA's default
 // search order is $XDG_CONFIG_HOME/retroarch/, $HOME/.config/retroarch/,
 // and $HOME/.retroarch.cfg — none of which is /home/web_user/retroarch/
@@ -79,6 +81,31 @@ const SYSTEM_DIR = '/home/web_user/retroarch/system';
 // the webretro key (h/g/space) AND the RA stock key (x/z/RShift) for each
 // logical button so the controller works even if no cfg is honoured.
 const RA_CFG_PATH = '/home/web_user/retroarch/userdata/retroarch.cfg';
+
+// Cores whose light gun is really UAE's LIGHT PEN, which needs RELATIVE mouse
+// motion on top of the absolute aim. Only PUAE (Amiga) is in this club.
+//
+// WHY (traced through libretro-uae, 2026-08-15 — the Trojan Phazer would
+// otherwise look alive and do nothing):
+//   • The aim we send through the LIGHTGUN ids reaches the core fine, and
+//     libretro-mapper's retro_ui_get_pointer_state draws PUAE's own crosshair
+//     from it — so the gun LOOKS connected, and the statusbar even prints "L1".
+//   • But the emulated beam latch is elsewhere: custom.c only fires the light-pen
+//     trigger from lightpen_cx/cy, which drawing.c computes in lightpen_update()
+//     — and draw_frame_extras() calls that ONLY `if (lightpen_active)`.
+//   • lightpen_active is set exclusively by an INPUTEVENT_LIGHTPEN_HORIZ/VERT
+//     event (inputdevice.c handle_input_event case 5/6). On a light-pen port UAE
+//     binds those events to the port's MOUSE AXES, so nothing but real relative
+//     mouse motion arms it. An absolute aim alone leaves it disarmed forever:
+//     lightpen_cx/cy stay -1 and no shot ever reaches the game.
+//   • The trigger has the same shape: PUAE reads the Phazer trigger from
+//     RETRO_DEVICE_MOUSE left (libretro-mapper, gated on puae_physicalmouse) and
+//     DISCARDS the LIGHTGUN trigger id (retro_lightpen_update keeps only x/y).
+// Verified on the real thing: Trojan Skeet Shoot (1991) sits on "FIRE AT TARGET
+// TO CALIBRATE GUN" forever with the aim alone, and calibrates on the first shot
+// once ±1px of motion rides along (tmp/probe-amiga-fire.mjs, whole-screen diff
+// 0 px → 33 596 px).
+const LIGHTPEN_MOTION_CORES = new Set(['puae']);
 
 // Play!'s Emscripten build routes EVERY optical-disc-image file open
 // (Source/Js_DiscImageDeviceStream.cpp, under __EMSCRIPTEN__) through this
@@ -263,6 +290,20 @@ export class EmulatorClient extends EventTarget {
     // is the live value — it is written where the boot happens, so nothing can
     // hold a stale shadow copy of it.
     this._bootConfig = null;
+    // Sign of the next light-pen nudge (see LIGHTPEN_MOTION_CORES). It alternates
+    // so a gun held perfectly still still emits motion every tick without the
+    // emulated pointer drifting one way forever.
+    this._lightpenNudge = 1;
+  }
+
+  // ±1px of relative motion, alternating, for the cores in LIGHTPEN_MOTION_CORES.
+  // Deliberately NOT the gun's real frame-to-frame delta: a gun resting on target
+  // — or a remote peer's aim arriving unchanged — has a delta of exactly 0, which
+  // is the one case UAE's beam latch cannot be armed from, and that is precisely
+  // when the player is about to pull the trigger.
+  _nextLightpenNudge() {
+    this._lightpenNudge = -this._lightpenNudge;
+    return this._lightpenNudge;
   }
 
   /**
@@ -517,6 +558,15 @@ export class EmulatorClient extends EventTarget {
         this._gunDown = false;
       }
       try { this._webgunSet(port, px, py, buttons); } catch (e) { /* core gone */ }
+      // PUAE only: the per-port setter drives the LIGHTGUN ids, and this core
+      // takes neither its beam latch nor its trigger from those (see
+      // LIGHTPEN_MOTION_CORES). Relative motion + the trigger as mouse-left have
+      // to go through the shared mouse. Position is irrelevant on this path —
+      // PUAE takes the aim from the latched per-port light-gun state, so
+      // sendMouse's centre-anchored mousemove cannot pull the aim off target.
+      if (LIGHTPEN_MOTION_CORES.has(this.coreName)) {
+        this.sendMouse(this._nextLightpenNudge(), 0, trigger ? (offscreen ? 2 : 1) : 0);
+      }
       return;
     }
 
@@ -528,7 +578,19 @@ export class EmulatorClient extends EventTarget {
     const clientX = rect.left + u * rect.width;
     const clientY = rect.top + v * rect.height;
     const base = { clientX, clientY, bubbles: true, cancelable: true, view: window };
-    canvas.dispatchEvent(new MouseEvent('mousemove', base));
+    const move = new MouseEvent('mousemove', base);
+    // PUAE only: carry relative motion on the aim event itself. The event is
+    // already at the right client coords, so unlike sendMouse's centre-anchored
+    // mousemove it cannot disturb the aim. MouseEvent's constructor ignores
+    // movementX/Y (they are read-only accessors), hence defineProperty — the
+    // same trick sendMouse uses.
+    if (LIGHTPEN_MOTION_CORES.has(this.coreName)) {
+      try {
+        Object.defineProperty(move, 'movementX', { value: this._nextLightpenNudge() });
+        Object.defineProperty(move, 'movementY', { value: 0 });
+      } catch (_) { /* locked down: the gun still aims, the beam just won't arm */ }
+    }
+    canvas.dispatchEvent(move);
     if (trigger && !this._gunDown) {
       // Off-screen shots use the right button (offscreen_shot_mbtn = 2); an
       // on-screen shot uses the left/trigger button (1). DOM button: 0 = left,
@@ -777,9 +839,10 @@ export class EmulatorClient extends EventTarget {
     // When the core needs non-default options, point RA at an explicit
     // single-file core-options path and write the requested key/values there.
     let cfg = RETROARCH_CFG;
-    // Point cores at an explicit system dir so _provisionSystemFiles() (a BIOS /
-    // Kickstart) is found. Harmless for cores that need nothing (empty dir).
-    cfg += `system_directory = "${SYSTEM_DIR}"\n`;
+    // NOTE: no `system_directory` line here. RETROARCH_CFG already carries it,
+    // and RetroArch keeps the FIRST occurrence of a duplicated key — an appended
+    // second one is inert, which is exactly how BIOS provisioning was silently
+    // broken until 2026-08-15 (see RETROARCH_SYSTEM_DIR's comment).
     if (this._coreOptions) {
       cfg += `core_options_path = "${CORE_OPTIONS_PATH}"\n`;
       const body = Object.entries(this._coreOptions)

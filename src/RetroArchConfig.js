@@ -85,6 +85,26 @@ const NUL_KEYS = 'input_ai_service = "nul"\ninput_ai_service_axis = "nul"\ninput
 // the sorting off puts RA's real paths back where the worker runtime looks
 // (2026-07-26; found while root-causing the psx-testdisc rendering gap —
 // this is why docs/PSX_TESTDISC.md recorded readSaveRam(1) === null).
+// The ONE system/BIOS directory. Declared here, next to the cfg line that
+// publishes it to RetroArch, and exported so nothing has to restate the literal.
+//
+// It used to be restated: EmulatorClient carried its own SYSTEM_DIR =
+// '/home/web_user/retroarch/system' (no `userdata/`), wrote BIOS/Kickstart files
+// there, and appended a SECOND `system_directory` line pointing at it. RetroArch
+// keeps the FIRST occurrence of a duplicated key, so the appended line was inert
+// and every file provisioned through `systemFiles` landed in a directory no core
+// ever read — silently, because a core with no BIOS just falls back (PUAE boots
+// its built-in AROS instead of the user's real Kickstart). Found 2026-08-15 when
+// a WHDLoad game stopped with "DOS-Error #205 on reading
+// devs:kickstarts/kick34005.a500": PUAE copies Kickstarts into its WHDLoad helper
+// from retro_system_directory, which was the userdata path, while the ROM had
+// been written to the other one. The worker runtime
+// (src/runtime/EmulatorWorkerRuntime.js) had always used the userdata path, which
+// is why worker-core BIOS provisioning (the PSX real-BIOS probe) worked and the
+// main-thread path did not. scripts/test-retroarch-config.mjs now pins that the
+// two agree and that the key is written exactly once.
+export const RETROARCH_SYSTEM_DIR = '/home/web_user/retroarch/userdata/system';
+
 const EXTRA_CONFIG = `sort_savefiles_enable = "false"
 sort_savestates_enable = "false"
 sort_savefiles_by_content_enable = "false"
@@ -94,7 +114,7 @@ notification_show_remap_load = "false"
 menu_mouse_enable = "true"
 menu_pointer_enable = "true"
 pause_nonactive = "false"
-system_directory = "/home/web_user/retroarch/userdata/system"
+system_directory = "${RETROARCH_SYSTEM_DIR}"
 savefile_directory = "/home/web_user/retroarch/userdata/saves"
 savestate_directory = "/home/web_user/retroarch/userdata/states"
 block_sram_overwrite = "true"

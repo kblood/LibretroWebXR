@@ -44,12 +44,19 @@
 // than gun state, and the positive half would prove nothing. The control boot
 // must show zero crosshair pixels at every aim and zero trigger response.
 //
-// Content is a BLANK double-density floppy and puae_kickstart 'aros' (PUAE's
-// built-in AROS replacement ROM), so this probe needs nothing from the private,
-// gitignored public/roms/local tree and runs on a clean clone that has fetched
-// cores. There is no Amiga light-gun game on hand to shoot at — when one turns
-// up, an in-game hit test belongs here as a further step, the way
-// scripts/probe-psx-guncon.js asserts a real calibration screen advancing.
+// The core sections' content is a BLANK double-density floppy and
+// puae_kickstart 'aros' (PUAE's built-in AROS replacement ROM), so they need
+// nothing from the private, gitignored public/roms/local tree and run on a clean
+// clone that has fetched cores.
+//
+// THE CROSSHAIR IS NOT THE BEAM — see the "Real Trojan Phazer game" section at
+// the bottom. PUAE's crosshair is drawn by the FRONTEND half of the core and
+// says nothing about whether the emulated light pen ever fires; a real gun game
+// is the only thing that can tell those apart, and when one finally turned up
+// (2026-08-15) it showed the aim was reaching the core and the beam was not.
+// The cause was app-side and is fixed in src/EmulatorClient.js
+// (LIGHTPEN_MOTION_CORES): UAE arms its beam latch only on relative mouse
+// motion. That final section runs only where the private sideload exists.
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -367,6 +374,191 @@ ok('device: the core labels port 1 as a light gun ("L1"), not a joypad ("J1")',
        files.opts ? files.opts.replace(/\n/g, ' | ').slice(0, 300) : String(files.opts));
     ok('app path: no page errors', errs.length === 0, errs.join(' | '));
   }
+  await page.close();
+}
+
+// --- Real Trojan Phazer game: an in-game HIT TEST ----------------------------
+// Everything above proves the core sees the gun. It cannot prove a GAME does:
+// PUAE's crosshair is drawn by the frontend half (libretro-mapper), entirely
+// independently of the emulated light-pen beam, so a gun can look perfectly
+// alive and still put nothing on the Amiga's LPEN input. That gap was real —
+// see LIGHTPEN_MOTION_CORES in src/EmulatorClient.js — and only a real gun game
+// catches it.
+//
+// The game (Trojan Skeet Shoot, 1991) is part of the user's private, gitignored
+// public/roms/local sideload, so this section SKIPS when the file is absent and
+// the probe still passes on a clean clone.
+//
+// The hit test is the MENU, not the calibration screen: calibration takes the
+// first shot wherever it lands (that is what it is for), while the menu only
+// reacts when a shot lands on one of its three bullseyes. That gives a negative
+// control on the same screen of the same boot — shoot empty space, nothing may
+// move; shoot the bullseye, the game must start.
+const GAME_LHA = resolve(ROOT, 'public/roms/local/amiga/SkeetShoot_v1.1_2231.lha');
+const KICKSTARTS = ['kick34005.A500', 'kick40068.A1200']
+  .map((n) => resolve(ROOT, 'public/roms/local/amiga', n));
+if (!existsSync(GAME_LHA) || KICKSTARTS.some((p) => !existsSync(p))) {
+  info('game: SKIPPED — no private Trojan Phazer sideload here (public/roms/local/amiga)');
+} else {
+  const page = await browser.newPage();
+  const errs = [];
+  page.on('pageerror', (e) => errs.push(String(e.message)));
+  await page.goto(BASE, { waitUntil: 'load', timeout: 30000 });
+  const started = await page.evaluate(async (gunCfg) => {
+    const { EmulatorClient } = await import('/src/EmulatorClient.js');
+    const canvas = document.createElement('canvas');
+    canvas.id = 'amiga'; canvas.width = 720; canvas.height = 540;
+    canvas.style.position = 'fixed'; canvas.style.left = '0'; canvas.style.top = '0'; canvas.style.zIndex = '99999';
+    document.body.appendChild(canvas);
+    const buf = await (await fetch('roms/local/amiga/SkeetShoot_v1.1_2231.lha')).arrayBuffer();
+    const client = new EmulatorClient({ coreUrl: 'cores/puae_libretro.js', coreName: 'puae', moduleStyle: 'module' });
+    window.__amiga = client;
+    return await new Promise((res) => {
+      client.addEventListener('ready', () => res('ready'), { once: true });
+      client.addEventListener('error', (e) => res('error:' + (e.detail || '')), { once: true });
+      client.start(canvas, buf, {
+        contentExt: 'lha', ...gunCfg,
+        coreOptions: { ...gunCfg.coreOptions, puae_kickstart: 'Automatic' },
+        systemFiles: [
+          { name: 'kick34005.A500', url: 'roms/local/amiga/kick34005.A500' },
+          { name: 'kick40068.A1200', url: 'roms/local/amiga/kick40068.A1200' },
+        ],
+      }).catch((e) => res('throw:' + e.message));
+      setTimeout(() => res('timeout-start'), 30000);
+    });
+  }, { inputDevices: cfg.inputDevices, remapName: cfg.remapName, coreOptions: cfg.coreOptions });
+  ok('game: the private Trojan Phazer .lha boots on the gun config from SYSTEMS.amiga.lightgun',
+     started === 'ready', started);
+
+  // WHDLoad unpacks, copies the Kickstart and boots the game from an emulated
+  // hard disk: far slower than the AROS floppy boot the rest of this probe uses.
+  const GAME_BOOT_MS = Number(process.env.GAME_BOOT_MS ?? 78000);
+  await sleep(GAME_BOOT_MS);
+
+  const aimOnly = (u, v, ms) => page.evaluate(async (u, v, ms) => {
+    const c = window.__amiga;
+    const t0 = performance.now();
+    while (performance.now() - t0 < ms) { c.sendLightgun(u, v, false); await new Promise((r) => setTimeout(r, 25)); }
+  }, u, v, ms);
+  // `port` null = the shared DOM path, a number = the multiport path VR uses.
+  const fire = (u, v, holdMs = 500, port = null) => page.evaluate(async (u, v, holdMs, port) => {
+    const c = window.__amiga;
+    for (let i = 0; i < 20; i++) { c.sendLightgun(u, v, false, port); await new Promise((r) => setTimeout(r, 25)); }
+    const t0 = performance.now();
+    while (performance.now() - t0 < holdMs) { c.sendLightgun(u, v, true, port); await new Promise((r) => setTimeout(r, 25)); }
+    for (let i = 0; i < 12; i++) { c.sendLightgun(u, v, false, port); await new Promise((r) => setTimeout(r, 25)); }
+  }, u, v, holdMs, port);
+  const gshot = async (name) => { const el = await page.$('#amiga'); if (el) await el.screenshot({ path: resolve(SHOT_DIR, `amiga-game-${name}.png`) }); };
+  // Whole-screen pixel fingerprint, statusbar excluded (its clock ticks by itself).
+  const frame = async () => {
+    const el = await page.$('#amiga');
+    const b64 = await el.screenshot({ encoding: 'base64' });
+    return await page.evaluate(async (b64) => {
+      const img = await new Promise((res, rej) => {
+        const im = new Image();
+        im.onload = () => res(im); im.onerror = () => rej(new Error('decode'));
+        im.src = 'data:image/png;base64,' + b64;
+      });
+      const W = img.width, H = img.height, BAR = 40;
+      const t = document.createElement('canvas'); t.width = W; t.height = H;
+      const ctx = t.getContext('2d'); ctx.drawImage(img, 0, 0);
+      const px = ctx.getImageData(0, 0, W, H - BAR).data;
+      // Two screen classifiers, measured off real captures of this game, so an
+      // assertion can say WHICH screen it reached instead of just "it changed":
+      //   sky     ~108 000 in gameplay, 0 on every menu screen
+      //   magenta ~ 18 000 on the HIGH SCORES attract screen, 0 on the menu
+      let sky = 0, magenta = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        if (px[i] < 130 && px[i + 1] > 120 && px[i + 2] > 200) sky++;
+        if (px[i] > 150 && px[i + 2] > 120 && px[i + 1] < 100) magenta++;
+      }
+      return { W, H, sky, magenta, px: Array.from(px) };
+    }, b64);
+  };
+  const changedPixels = (a, b) => {
+    let n = 0;
+    for (let i = 0; i < a.px.length; i += 4) {
+      if (Math.abs(a.px[i] - b.px[i]) > 40 || Math.abs(a.px[i + 1] - b.px[i + 1]) > 40
+       || Math.abs(a.px[i + 2] - b.px[i + 2]) > 40) n++;
+    }
+    return n;
+  };
+
+  await gshot('1-calibration');
+  const calib = await frame();
+
+  // CONTROL, before anything else: hold the same aim on the same target with the
+  // trigger RELEASED. This is exactly what the crosshair sections above measure,
+  // and it must move nothing — the crosshair alone is not evidence that the
+  // emulated light pen fires. (Measured: 0 px.)
+  await aimOnly(0.493, 0.465, 1500);
+  const aimed = await frame();
+  const aimDelta = changedPixels(aimed, calib);
+  ok('game: aiming at the calibration target WITHOUT the trigger changes nothing',
+     aimDelta < 500, `${aimDelta} px changed`);
+
+  // The calibration screen ("FIRE AT TARGET TO CALIBRATE GUN") waits forever for
+  // a shot, so this is the assertion that fails if the light-pen beam never arms
+  // — the crosshair tracked perfectly through this exact screen for the whole
+  // session that led to LIGHTPEN_MOTION_CORES, and the game never moved.
+  await fire(0.493, 0.465);          // the bullseye, measured off amiga-game-1
+  await sleep(2500);
+  const menu = await frame();
+  const calibDelta = changedPixels(menu, aimed);
+  await gshot('2-menu');
+  ok('game: a shot at the calibration target advances it to the menu (the emulated light pen fires)',
+     calibDelta > 5000 && menu.sky === 0 && menu.magenta === 0,
+     `${calibDelta} px changed, sky=${menu.sky} magenta=${menu.magenta}`);
+
+  // POSITIONAL control, on the menu (the calibration screen cannot serve: it
+  // takes the first shot wherever it lands — that is what calibrating IS, and
+  // measuring it showed a corner shot advancing the screen by 33 684 px).
+  //
+  // Deliberately quick and in this order: the menu flips to its HIGH SCORES
+  // attract screen on its own after ~10 s, which is a screen change no gun
+  // caused. If that happens first the control cannot be read, so it is reported
+  // and skipped rather than failed, and the trigger is used to leave that screen
+  // (it prompts "PULL TRIGGER") before the positive half.
+  // (0.88, 0.86): the empty band BELOW the menu list. Not merely "not on a
+  // bullseye" — measured, the game takes a whole menu ROW, so a shot level with
+  // an entry selects it wherever it lands horizontally (a shot at 0.65,0.28 came
+  // back as "VIEW HIGH SCORE SCREEN", which is how this control found its own
+  // first version to be wrong).
+  await fire(0.88, 0.86, 350);
+  const afterMiss = await frame();
+  const missDelta = changedPixels(afterMiss, menu);
+  await gshot('3-after-miss');
+  if (afterMiss.magenta > 5000) {
+    info('game: positional control SKIPPED — the attract screen took over first', `magenta=${afterMiss.magenta}`);
+    await fire(0.5, 0.5, 350);       // "PULL TRIGGER" — back to the menu
+    await sleep(2000);
+  } else {
+    ok('game: a shot at EMPTY space on the menu changes nothing (the hit test is positional)',
+       missDelta < 500, `${missDelta} px changed`);
+  }
+
+  // ...and the same trigger on a menu bullseye starts the game. Asserted on the
+  // gameplay screen's own signature (a skyful of blue) rather than on "something
+  // changed", so the attract screen cannot pass for a started game.
+  //
+  // This shot goes through the MULTIPORT path (a port argument), which is the one
+  // LightGunMgr.tick actually uses in VR — everything above it drove the shared
+  // DOM path. Both halves of sendLightgun therefore get exercised on a real game
+  // in one boot.
+  //
+  // fire() holds the new aim for ~500 ms before pulling: the emulated beam only
+  // reports a position after the frame it was set in, so a trigger sent in the
+  // SAME tick as a big aim move registers at the PREVIOUS position. Measured, not
+  // guessed — firing instantly at "START GAME" from the calibration target
+  // selected the menu row that sits where the calibration target was. Real aiming
+  // is continuous, so this only bites synthetic input.
+  await fire(0.208, 0.670, 400, 0);  // "START GAME", third bullseye
+  await sleep(5000);
+  const playing = await frame();
+  await gshot('4-started');
+  ok('game: a shot ON the "START GAME" bullseye starts the game itself',
+     playing.sky > 20000, `sky=${playing.sky} magenta=${playing.magenta}, ${changedPixels(playing, afterMiss)} px changed`);
+  ok('game: no page errors', errs.length === 0, errs.join(' | '));
   await page.close();
 }
 

@@ -8,8 +8,9 @@ trigger, and the in-game light-gun registers the hit. Built on the proven core
 fix (patched `rwebinput`, `docs/patches/rwebinput-lightgun.diff`). Covers NES
 Zapper, SNES Super Scope, SNES Justifier (2-gun co-op), Genesis Menacer, SMS
 Light Phaser, PSX GunCon, PS2 GunCon2 and — since 2026-08-15 — the Amiga Trojan
-Phazer (`npm run probe:amiga-lightgun`; see the Amiga note under the device
-table, its trigger does not travel the usual path) — including simultaneous
+Phazer, verified in a real gun game (`npm run probe:amiga-lightgun`; see the
+Amiga note under the device table — neither its trigger nor its beam travels the
+usual path) — including simultaneous
 two-gun co-op (own port per gun) and
 live core-switch reboot without a page reload. Verified headlessly through the
 real scene + load paths and with real ROMs (see `docs/LIGHTGUN_SUPPORT.md`
@@ -352,10 +353,40 @@ assumptions.** Read from libretro-uae source, then measured:
   its position in a captured frame is the core's own reading of the gun — which
   is what makes it usable as ground truth in the probe (three aim points tracked
   to within a few pixels, gone on an off-screen aim, absent entirely in a
-  negative-control boot with no gun seated).
+  negative-control boot with no gun seated). **But the crosshair is NOT the
+  beam** — see below.
 
-No Amiga light-gun *game* is on hand, so the in-game hit test that
-`probe-psx-guncon.js` does with a real disc is still open for this system.
+**The beam needs MOUSE MOTION, not just an aim (fixed 2026-08-15).** The gun
+above passed every measurement and still could not shoot anything in a real
+game: Trojan Skeet Shoot sat on "FIRE AT TARGET TO CALIBRATE GUN" with the
+crosshair tracking perfectly. The two halves of PUAE are further apart than the
+trigger split suggests:
+
+* the crosshair comes from the **frontend** half (`libretro-mapper.c`), which
+  reads the LIGHTGUN ids directly — it says the aim arrived, nothing more;
+* the emulated light pen only fires from `lightpen_cx/cy`, which `drawing.c`
+  computes in `lightpen_update()` — and `draw_frame_extras()` calls that **only
+  `if (lightpen_active)`**;
+* `lightpen_active` is set exclusively by an `INPUTEVENT_LIGHTPEN_HORIZ/VERT`
+  event (`inputdevice.c`), and on a light-pen port UAE binds those events to the
+  port's **mouse axes**. Only real *relative* mouse motion arms it. An absolute
+  aim alone leaves it disarmed forever.
+
+The fix is app-side and one line of behaviour: `LIGHTPEN_MOTION_CORES` in
+`src/EmulatorClient.js` makes every gun update on this core carry ±1 px of
+relative motion (alternating, so nothing drifts) — on the DOM path by attaching
+`movementX` to the aim event itself, on the multiport path via `sendMouse`,
+which also carries the trigger as mouse-left there. Nothing about the core
+changed; the relinked build was fine all along.
+
+**In-game hit test: DONE (2026-08-15).** The user's private sideload turned out
+to contain three Trojan Phazer titles (Skeet Shoot, West Phaser, Orbital
+Destroyer). `npm run probe:amiga-lightgun` now ends with a real game section,
+skipped automatically where `public/roms/local/amiga/` is absent: aiming at the
+calibration target with the trigger released changes nothing, a shot at it
+advances the game, a shot at empty menu space changes nothing, and a shot on the
+"START GAME" bullseye reaches gameplay (asserted on the gameplay screen's own
+signature, not on "something changed", so the attract screen cannot pass for it).
 
 **Co-op caveat — RESOLVED (2026-06-21):** the stock `rwebinput` has a single mouse,
 so two guns on the **same** console would share one aim point. The **multiport patch**
