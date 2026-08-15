@@ -11,6 +11,9 @@
 
 import assert from 'node:assert/strict';
 import { createTestApi, correlate, TestApiError, TEST_API_VERSION } from '../src/TestApi.js';
+// Imported ONLY so the frame-counter fake below can be pinned to the real class
+// (see 'the FrameBridge fake matches the real accessor').
+import { FrameBridge } from '../src/runtime/FrameBridge.js';
 
 let passed = 0;
 const test = async (name, fn) => {
@@ -43,7 +46,7 @@ function fakeRuntime(id, { loaded = true, paused = false, frames = 0 } = {}) {
     id, coreName: 'fceumm', system: 'nes', title: 'Test',
     isLoaded: () => loaded, isLive: () => !paused, runAllowed: () => true,
     canvas: null,
-    client: { frameBridge: { stats: () => ({ framesPresented: frames }) } },
+    client: { frameBridge: { snapshot: () => ({ framesPresented: frames }) } },
     sendInput: () => true,
   };
 }
@@ -148,6 +151,20 @@ await test('becomeHost() is a no-op when we already are the host', async () => {
   assert.equal(res.value.via, 'already-host');
 });
 
+await test('the FrameBridge fake matches the real accessor', () => {
+  // This fake used to expose `stats()`, and TestApi read `stats()` — so the pair
+  // agreed with each other and with nothing that ships. The real class has only
+  // snapshot(), so every worker-hosted runtime reported frames:null and
+  // rack.running() could never observe motion on the one path that HAS a frame
+  // counter. Two green tests, zero coverage. Pin them together.
+  assert.equal(typeof FrameBridge.prototype.snapshot, 'function', 'FrameBridge exposes snapshot()');
+  assert.equal(FrameBridge.prototype.stats, undefined, 'and no stats() — the name the fake invented');
+  const fb = fakeRuntime('console0', { frames: 3 }).client.frameBridge;
+  assert.equal(typeof fb.snapshot, 'function', 'so the fake exposes snapshot() as well');
+  assert.equal(fb.stats, undefined, 'and only that');
+  assert.equal(fb.snapshot().framesPresented, 3, 'returning the same shape the real one does');
+});
+
 await test('rack.running() requires MOTION, not just !paused', async () => {
   // A loaded, unpaused console whose frame counter never moves is NOT running.
   // This is the exact false positive (`window.__client.paused === false`) that
@@ -168,7 +185,7 @@ await test('rack.running() requires MOTION, not just !paused', async () => {
 await test('rack.running() reports running when frames advance', async () => {
   let frames = 0;
   const live = fakeRuntime('console0');
-  live.client = { frameBridge: { stats: () => ({ framesPresented: frames }) } };
+  live.client = { frameBridge: { snapshot: () => ({ framesPresented: frames }) } };
   const api = createTestApi({ clientKind: 'vr', rack: () => ({ runtimes: () => [live] }) });
   const p = api.call('rack.running', [{ ms: 40 }]);
   setTimeout(() => { frames = 12; }, 10);

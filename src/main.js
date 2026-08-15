@@ -17,6 +17,7 @@ import { DesktopGamepad } from './DesktopGamepad.js';
 import { BindingsUI } from './BindingsUI.js';
 import { Placeholder } from './Placeholder.js';
 import { SceneMgr } from './SceneMgr.js';
+import { frameMarkOf } from './TV.js';       // PERF-1 texture-upload gating
 import { createConsole } from './Console.js';
 import { createGamepad } from './Gamepad.js';
 import { createLightGun } from './LightGun.js';
@@ -1414,6 +1415,22 @@ rackMgr.setBudgetEnabled(loadAutoPause());
 // dedupes — so it's safe to call after any repatch / console spawn. At N=1 this
 // just keeps tv0 ↔ console0 in sync with whatever the primary client booted.
 let _lastRouteSig = '';
+
+// PERF-1 (CODEX_REVIEW): the frame mark a TV uses to decide whether the picture
+// it already uploaded is still current. Returned as a closure over the CONSOLE
+// ID, not over the runtime object, so a console that is rebuilt under the same
+// id keeps working without a re-route.
+//
+// The mark policy itself is frameMarkOf() in [[src/TV.js]] — paused console → a
+// frozen sentinel (the screen keeps its last frame and stops costing bandwidth),
+// worker-hosted core → its presented-frame counter, anything else → null, meaning
+// "unknown, upload every frame". It lives there so it can be tested; this closure
+// is only the lookup from console id to live client.
+const _frameSignalFor = (consoleId) => {
+  if (!consoleId) return null;
+  return () => frameMarkOf(rackMgr.get(consoleId)?.client);
+};
+
 const routeVideo = () => {
   const diag = [];
   // M1.4: for a display-only client the PRIMARY console's screen is the HOST's
@@ -1428,8 +1445,9 @@ const routeVideo = () => {
   // rack consoles are local-only scenery for a watcher.
   const hostVideo = (_hostVideoEl && isDisplayOnlyClient()) ? _hostVideoEl : null;
   for (const tv of scene._tvs) {
-    // A powered-off TV shows the idle screen regardless of what's patched to it.
-    if (!isTvOn(tv.id)) { tv.setSource(placeholderCanvas); diag.push(`${tv.id}=off`); continue; }
+    // A powered-off TV shows the animated idle screen, whose producer we cannot
+    // interrogate — clear any frame signal so it keeps uploading every frame.
+    if (!isTvOn(tv.id)) { tv.setSource(placeholderCanvas); tv.setFrameSignal(null); diag.push(`${tv.id}=off`); continue; }
     const src = cable.sourceOf(tv.id);             // consoleId | null
     if (hostVideo && src === CONSOLE_ID) {
       tv.setVideo(hostVideo);
@@ -1441,6 +1459,9 @@ const routeVideo = () => {
     // A TV with no patched console shows the idle screen (a pulled video cord
     // leaves the TV blank rather than frozen on the last frame).
     tv.setSource(canvas || placeholderCanvas);
+    // PERF-1: the frame mark for whatever now feeds this screen. A TV falling
+    // back to the idle screen gets no signal (that canvas animates on its own).
+    tv.setFrameSignal(canvas ? _frameSignalFor(src) : null);
     diag.push(`${tv.id}<-${src || 'none'}#${canvas?.id || 'idle'}`);
   }
   // Diagnostic for the "game on both screens" report: logs which canvas each TV
@@ -3520,6 +3541,10 @@ async function buildCartridgeWorld() {
     // (TV.setVideo) rather than a local canvas — the display-only client's whole
     // reason for existing, so headless smokes can assert on it.
     tvs: () => scene._tvs.map((t) => ({ id: t.id, source: t.sourceCanvas?.id || null, video: !!t.sourceVideo, active: t.isActive() })),
+    // PERF-1: texture uploads vs. frames where the picture was already current.
+    // On a rack with paused consoles `skipped` should be climbing and `uploads`
+    // flat; both climbing together means the frame signals are not arriving.
+    videoUploads: () => scene.videoUploadStats(),
     video: () => scene._tvs.map((t) => ({ tv: t.id, console: cable.sourceOf(t.id) })),
     // Phase 4: drive the video patch cord headlessly. repatch moves a console's
     // plug onto a TV's jack and releases it (exercising the real snap + rewire);

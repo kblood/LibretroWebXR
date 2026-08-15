@@ -723,7 +723,10 @@ export function createTestApi(deps = {}) {
     hasCore: rt.hasCore ? !!rt.hasCore() : null,
     allowed: !!rt.runAllowed?.(),
     canvasId: rt.canvas?.id ?? null,
-    frames: rt.client?.frameBridge?.stats?.()?.framesPresented ?? null,
+    // FrameBridge's accessor is snapshot(); this read `stats()`, which does not
+    // exist, so optional chaining quietly reported frames:null for EVERY
+    // worker-hosted runtime — the one path that actually has a frame counter.
+    frames: rt.client?.frameBridge?.snapshot?.()?.framesPresented ?? null,
   });
   const rack = {
     list() { return R().runtimes().map(runtimeView); },

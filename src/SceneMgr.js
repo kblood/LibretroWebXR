@@ -181,6 +181,8 @@ export class SceneMgr {
     // single-console path is N=1 of the rack. Spawned consoles get their own
     // TVs via addTV(); _render iterates _tvs to upload each one's frame.
     this._tvs = [];
+    this._videoUploads = 0;   // PERF-1 accounting, see videoUploadStats()
+    this._videoSkips = 0;
     this.tv = this.addTV({ id: 'tv0', source: this.sourceCanvas, position: [0, 1.5, -3.6] });
     this.tvGroup = this.tv.group;   // legacy alias (spatial audio source object)
   }
@@ -199,6 +201,21 @@ export class SceneMgr {
 
   /** Look up a TV by its id (Patchbay TV node key). */
   getTV(id) { return this._tvs.find((t) => t.id === id) || null; }
+
+  /**
+   * Texture-upload accounting for the whole video side (PERF-1). `uploads` and
+   * `skipped` are frames where a TV did / did not hand the GPU a new picture;
+   * `perTv` breaks it down. A rack sitting on paused consoles should show skips
+   * climbing and uploads flat — if both climb together, the frame signals are
+   * not reaching the TVs and the gating is doing nothing.
+   */
+  videoUploadStats() {
+    return {
+      uploads: this._videoUploads,
+      skipped: this._videoSkips,
+      perTv: this._tvs.map((t) => t.uploadStats()),
+    };
+  }
 
   // Texture helper kept for the throwaway Phase-0 rack spike (addRackScreen).
   _makeScreenTexture(canvas) {
@@ -486,8 +503,14 @@ export class SceneMgr {
 
   _render() {
     // Upload each TV's latest emulator frame (skips paused/out-of-view via
-    // tv.setActive). This per-TV texture upload is the rack's main video cost.
-    for (const tv of this._tvs) tv.markNeedsUpdate();
+    // tv.setActive). This per-TV texture upload is the rack's main video cost,
+    // which is why PERF-1's gating lives one level down in TV.markNeedsUpdate():
+    // it now uploads only when the producer's frame mark changed (main.js's
+    // routeVideo supplies that mark). The counters make the saving measurable
+    // from a headset log instead of assumed — see videoUploadStats().
+    for (const tv of this._tvs) {
+      if (tv.markNeedsUpdate()) this._videoUploads++; else this._videoSkips++;
+    }
     // Phase-0 rack spike: upload each extra core's frame (perf cost measured).
     if (this._rackScreens) for (const r of this._rackScreens) r.tex.needsUpdate = true;
 
