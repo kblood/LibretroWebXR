@@ -6,8 +6,11 @@ grabbable light-gun prop — now a first-class, cord-connected, net-synced
 peripheral like the gamepad (commit `14fd173`) — aim it at the TV, pull the
 trigger, and the in-game light-gun registers the hit. Built on the proven core
 fix (patched `rwebinput`, `docs/patches/rwebinput-lightgun.diff`). Covers NES
-Zapper, SNES Super Scope, SNES Justifier (2-gun co-op), Genesis Menacer, and SMS
-Light Phaser — including simultaneous two-gun co-op (own port per gun) and
+Zapper, SNES Super Scope, SNES Justifier (2-gun co-op), Genesis Menacer, SMS
+Light Phaser, PSX GunCon, PS2 GunCon2 and — since 2026-08-15 — the Amiga Trojan
+Phazer (`npm run probe:amiga-lightgun`; see the Amiga note under the device
+table, its trigger does not travel the usual path) — including simultaneous
+two-gun co-op (own port per gun) and
 live core-switch reboot without a page reload. Verified headlessly through the
 real scene + load paths and with real ROMs (see `docs/LIGHTGUN_SUPPORT.md`
 verification scripts + `docs/HEADSET_LIGHTGUN_VALIDATION.md`). **Remaining:**
@@ -321,9 +324,38 @@ expands to `((id+1)<<8)|base`; `RETRO_DEVICE_LIGHTGUN=4`, `RETRO_DEVICE_POINTER=
 | SNES | snes9x | `LIGHTGUN_SUPER_SCOPE = (1<<8)|LIGHTGUN` | **260** | 1 (player 2) | none — reads native `RETRO_DEVICE_LIGHTGUN`; opt. `snes9x_superscope_crosshair="enabled"` |
 | SMS | genesis_plus_gx | `PHASER = SUBCLASS(LIGHTGUN,0)` | **260** | 0 (player 1) | none — native `RETRO_DEVICE_LIGHTGUN` |
 | Genesis | genesis_plus_gx | `MENACER = SUBCLASS(LIGHTGUN,1)` | **516** | 1 (player 2) | none — native `RETRO_DEVICE_LIGHTGUN` |
+| Amiga | puae | `PUAE_LIGHTGUN = SUBCLASS(LIGHTGUN,0)` (Trojan Phazer) | **260** | 0 (the DB9 *joystick* port, UAE jport 0) | none for aim — native `RETRO_DEVICE_LIGHTGUN`; `puae_physicalmouse="enabled"` gates the **trigger**, `puae_joyport_pointer_color` draws the crosshair |
 
 Also (source): snes9x Justifier=516 / Justifier2=772 / MACS Rifle=1028; genesis
 Justifiers=772. All read SCREEN_X/Y + TRIGGER/AUX/OFFSCREEN, which the patch feeds.
+
+**Amiga (Trojan Phazer) — added 2026-08-15, and it breaks two of this table's
+assumptions.** Read from libretro-uae source, then measured:
+
+* **The core never needed patching; only the frontend did.** PUAE has always read
+  the native `RETRO_DEVICE_LIGHTGUN` ids. The Amiga had no gun purely because
+  `public/cores/puae_libretro.js` was built 2026-06-14, before any of this work,
+  against a stock `rwebinput`. A *relink* against the patched tree was the entire
+  core-side fix — see `docs/AMIGA_CORE_BUILD.md` "Light-gun relink" and
+  `scripts/cores/amiga/build-puae-lightgun.sh`.
+* **PUAE ignores `RETRO_DEVICE_ID_LIGHTGUN_TRIGGER`.** `retro_lightpen_update()`
+  (`libretro/libretro-glue.c`) reads the gun's position and *discards* the button
+  byte; the fire button comes from `RETRO_DEVICE_MOUSE`'s left button on the same
+  port, gated by `puae_physicalmouse` ("enabled", the default, covers port 0 only
+  — a gun on port 1 would need "double"). That is why the gun sits on port 0,
+  which is also where a Phazer physically plugs in (UAE jport 0 is the DB9
+  *joystick* port; jport 1 is the mouse port). Aim and trigger therefore travel
+  two different paths in this core, and `npm run probe:amiga-lightgun` measures
+  them separately for that reason.
+* **The crosshair is drawn by the core, into the emulated framebuffer**
+  (`retro_ui_get_pointer_state`, colour from `puae_joyport_pointer_color`), so
+  its position in a captured frame is the core's own reading of the gun — which
+  is what makes it usable as ground truth in the probe (three aim points tracked
+  to within a few pixels, gone on an off-screen aim, absent entirely in a
+  negative-control boot with no gun seated).
+
+No Amiga light-gun *game* is on hand, so the in-game hit test that
+`probe-psx-guncon.js` does with a real disc is still open for this system.
 
 **Co-op caveat — RESOLVED (2026-06-21):** the stock `rwebinput` has a single mouse,
 so two guns on the **same** console would share one aim point. The **multiport patch**

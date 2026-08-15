@@ -332,8 +332,43 @@ export const SYSTEMS = {
     // kind the light guns got) — the stock core reads both ports from mouse_index 0,
     // so without the patch both ports follow the SAME pointer. EmulatorClient.sendMouse
     // is future-proofed to use a patched per-port setter when present, else the shared
-    // DOM path. See docs/MOUSE_SUPPORT.md "Two-mouse caveat".
-    mouse2: { label: 'Amiga 2-Mouse', core: 'puae', devices: [2, 2], ports: [0, 1] } },
+    // DOM path. NOTE (2026-08-15): puae has since been relinked against the patched
+    // rwebinput (see the light gun below), but that patch only splits the
+    // RETRO_DEVICE_LIGHTGUN reads per port — RETRO_DEVICE_MOUSE still comes from the
+    // one DOM mouse, so this caveat is unchanged. See docs/MOUSE_SUPPORT.md
+    // "Two-mouse caveat".
+    mouse2: { label: 'Amiga 2-Mouse', core: 'puae', devices: [2, 2], ports: [0, 1] },
+    // Amiga light gun — the Trojan Phazer (UAE jport mode 8 / submode 1). Device
+    // 260 = RETRO_DEVICE_PUAE_LIGHTGUN = SUBCLASS(LIGHTGUN,0), from libretro-uae's
+    // libretro/libretro-mapper.h; the sibling 516 = SUBCLASS(LIGHTGUN,1) is the
+    // Lightpen (submode 0) — same read path, different peripheral, not registered.
+    //
+    // PORT 0 is the Amiga's DB9 *joystick* port (UAE jport 0; jport 1 is the mouse
+    // port), i.e. where a Phazer actually plugs in — and it is also the only port
+    // whose trigger works out of the box, see puae_physicalmouse below.
+    //
+    // WHAT NEEDED DOING, because it is not the usual shape: libretro-uae needed NO
+    // patch — retro_ui_get_pointer_state() (libretro/libretro-mapper.c) already
+    // reads the standard input_state_cb(port, RETRO_DEVICE_LIGHTGUN, …) SCREEN_X/Y
+    // + IS_OFFSCREEN ids. The gap was the FRONTEND: public/cores/puae_libretro.js
+    // was built 2026-06-14, before any gun work, against a stock rwebinput that has
+    // no RETRO_DEVICE_LIGHTGUN case at all, so aim always read 0. The fix was a
+    // relink against the patched RetroArch (docs/AMIGA_CORE_BUILD.md "Light-gun
+    // relink"); no app-side gun code changed.
+    //
+    // coreOptions:
+    //   • puae_joyport_pointer_color — PUAE draws its OWN crosshair into the
+    //     emulated framebuffer for a gun/pen port. It already defaults to 'blue';
+    //     'red' is pinned because the colour is per-port (color = option + port) and
+    //     because scripts/probe-amiga-lightgun.mjs locates the crosshair by hue.
+    //   • puae_physicalmouse — the TRIGGER's gate. PUAE ignores the LIGHTGUN
+    //     TRIGGER id (retro_lightpen_update reads position only) and takes the fire
+    //     button from RETRO_DEVICE_MOUSE's left button on the same port, which this
+    //     option gates: 'enabled' (the default, pinned here) reads port 0 only,
+    //     'double' would be needed for a gun on port 1.
+    // Verified end-to-end headless, 2026-08-15: npm run probe:amiga-lightgun.
+    lightgun: { label: 'Trojan Phazer', core: 'puae', device: 260, port: 0,
+      coreOptions: { puae_joyport_pointer_color: 'red', puae_physicalmouse: 'enabled' } } },
   // DOS / IBM PC. Computer-class system (keyboard:true, like c64/amiga). Default
   // core is now dosbox_pure (see CORES.dosbox_pure for the full build/fix
   // history) — a real WSL2/Emscripten build that headless-verifies real,

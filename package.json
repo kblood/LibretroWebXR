@@ -87,7 +87,8 @@
     "probe:multitv": "node scripts/probe-multitv.mjs",
     "probe:persist": "node scripts/probe-persist.mjs",
     "probe:pong-boot": "node scripts/probe-pong-boot.mjs",
-    "probe:repatch": "node scripts/probe-repatch.mjs"
+    "probe:repatch": "node scripts/probe-repatch.mjs",
+    "probe:amiga-lightgun": "node scripts/probe-amiga-lightgun.mjs"
   },
   "engines": {
     "node": ">=22.12.0"
