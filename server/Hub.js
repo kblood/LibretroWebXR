@@ -298,7 +298,7 @@ export function measureValue(value, { maxNodes = Infinity, maxDepth = Infinity }
 
 export class Hub {
   constructor({ limits = {} } = {}) {
-    this.rooms = new Map();      // roomId -> Map(peerId -> { id, nick, color, sid, seq })
+    this.rooms = new Map();      // roomId -> Map(peerId -> { id, nick, color, sid, seq, v })
     this.roomState = new Map();  // roomId -> Map(key -> { value, id, bytes, nodes, cost })  (M0.5)
     this.roomHosts = new Map();  // roomId -> peerId  (M1.4 — the elected host)
     this.hostGrace = new Map();  // roomId -> { sid, at }  (reclaim window, M1.4)
@@ -469,7 +469,9 @@ export class Hub {
   connect(roomId, peerId, { sid = null, now = Date.now() } = {}) {
     const room = this._room(roomId);
     const others = [...room.values()].map((p) => ({ id: p.id, nick: p.nick, color: p.color }));
-    room.set(peerId, { id: peerId, nick: 'Player', color: '#88aaff', sid: sid == null ? null : String(sid), seq: ++this._seq });
+    // `v` is the peer's announced protocol version (COR-9) — unknown until its
+    // JOIN arrives, and possibly never (a pre-handshake client).
+    room.set(peerId, { id: peerId, nick: 'Player', color: '#88aaff', sid: sid == null ? null : String(sid), seq: ++this._seq, v: null });
 
     const prevHost = this.hostOf(roomId);
     const grace = this._activeGrace(roomId, now);
@@ -502,7 +504,7 @@ export class Hub {
    * Peer announced its nick/color (client→server JOIN). Records it and returns
    * { broadcast: { msg, exclude } } — a JOIN to relay to everyone else.
    */
-  identify(roomId, peerId, { nick, color } = {}) {
+  identify(roomId, peerId, { nick, color, v } = {}) {
     const room = this.rooms.get(roomId);
     const p = room?.get(peerId);
     if (!p) return {};
@@ -511,7 +513,23 @@ export class Hub {
     // for everyone else. NetProtocol.validate() has no length bound of its own.
     if (typeof nick === 'string') p.nick = nick.slice(0, this.limits.nickLen);
     if (typeof color === 'string') p.color = color.slice(0, this.limits.colorLen);
-    return { broadcast: { msg: makeJoin({ id: peerId, nick: p.nick, color: p.color }), exclude: peerId } };
+    // COR-9: remember the protocol version this peer announced, and relay THAT
+    // one — not the server's own — so the roster JOIN the other peers receive
+    // describes the peer it is about. `v: null` (a peer that announced nothing)
+    // makes makeJoin omit the field, which is how a legacy peer stays visibly
+    // legacy instead of being credited with whatever the relay happens to run.
+    // Capped for the same reason nick is: it is attacker-controlled and retained.
+    //
+    // Coerced rather than type-gated (2026-08-15): NetProtocol.validate() no
+    // longer refuses a non-string `v` (a type check there silently dropped the
+    // whole JOIN — see the note in its JOIN case), so a peer that announces
+    // `v: 1` as a NUMBER now reaches here with a version checkProtocol judged
+    // compatible. `typeof v === 'string'` would drop it on the floor and relay
+    // that peer to the room as version-less, i.e. mislabel a modern peer as
+    // legacy. An incompatible peer never gets this far: room-server.mjs closes
+    // it with 4010 before calling identify().
+    if (v != null && v !== '') p.v = String(v).slice(0, 16);
+    return { broadcast: { msg: makeJoin({ id: peerId, nick: p.nick, color: p.color, v: p.v ?? null }), exclude: peerId } };
   }
 
   /**

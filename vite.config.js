@@ -7,6 +7,109 @@ import { DENY_RULES, checkDist, fmt, matchDeny } from './scripts/check-dist.mjs'
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
+// ── Content-Security-Policy ──────────────────────────────────────────────────
+//
+// ⚠ THIS LIST IS DUPLICATED IN `public/.htaccess`. Dev/preview get their headers
+// from the middleware below; the DEPLOYED app gets them from that .htaccess, so
+// the two are one contract in two places. `node scripts/test-csp.mjs` (run by
+// the `npm test` chain, the pure-logic tier) imports this file, RUNS the
+// middleware below against a recording `res`, and fails if the header it
+// actually emits differs from the one .htaccess serves — checking the emitted
+// value, not this literal, because a decoupled `const CSP` used to be able to
+// revert the whole policy with that test still green. It also fails if
+// .htaccess modifies the header again further down (`Header unset` there would
+// mean the deployed app gets NO policy), if a value-pinned directive is widened
+// to `*`, and if any shipped HTML grows an inline <script> again (CODEX_REVIEW
+// SEC-6: headset-test.html had one, and our own script-src was silently killing
+// it on the headset).
+//
+// FILE REFERENCES BELOW NAME SYMBOLS, NOT LINE NUMBERS, on purpose: every
+// line-number anchor this comment once carried had gone stale (the round-5
+// verifier caught one pointing at an unrelated JSDoc block).
+//
+// The old policy was `script-src` + `worker-src` only. Everything else fell
+// through to "no policy at all". Adding the missing baseline directives is only
+// safe if it matches what this app ACTUALLY loads, so here is the enumeration
+// each directive below is derived from — extend the comment when you extend the
+// list:
+//
+//   scripts   — the vite bundle + `/src/**` modules (same-origin), and
+//               `EmulatorClient#_loadCore()` (src/EmulatorClient.js) which
+//               appends a real <script src=…> for "classic" Emscripten cores,
+//               plus the `import()` of "module"-style cores in the same method.
+//               All resolved against document.baseURI → same-origin. NO inline
+//               scripts anywhere (that is what test-csp.mjs guards).
+//               'wasm-unsafe-eval' is required because the PSX Lightrec dynarec
+//               and the Play! PS2 core COMPILE Wasm at runtime; plain
+//               'unsafe-eval' is deliberately NOT granted.
+//   workers   — `WorkerEmulatorClient#_createWorker()`
+//               (src/runtime/WorkerEmulatorClient.js): `new Worker(new
+//               URL('./EmulatorWorkerRuntime.js', import.meta.url))`,
+//               same-origin — and Emscripten pthread workers, some builds of
+//               which spawn from a blob: URL → 'self' blob:.
+//   connect   — three different things, and two of them are user-supplied:
+//                 • same-origin fetches of cores/ROMs/collection JSON;
+//                 • the room server WebSocket. Default is `wss://<host>/ws/`
+//                   (same-origin — `defaultServerUrl()` in src/net/NetMgr.js)
+//                   but `?server=` overrides it with ANY origin — the LAN dev
+//                   workflow is literally `?server=ws://192.168.x.x:8787`, so
+//                   ws:/wss: must both be allowed, not just 'self';
+//                 • the remote log server. `?log=<url>` is any origin
+//                   (`_detectServerUrl()` in src/Logger.js) and is the ONLY way
+//                   to read a Quest session's console → https:/http: allowed.
+//               Also `https:` because a collection entry's rom.url may be a
+//               signed/CDN URL rather than a path ending in the file name — see
+//               the "signed URL, a CDN endpoint with a query string" comment in
+//               `resolvePs2DiscCue()` (src/main.js), which resolves a CUE's
+//               track against that URL for exactly that reason — and blob:/data:
+//               for locally-sideloaded content.
+//               NOTE: RTCPeerConnection/STUN/TURN (`?turn=`) is NOT governed by
+//               connect-src in CSP3 — do not "fix" voice/video by widening it.
+//   images    — `blob:` object URLs from `entryObjectUrl()`
+//               (src/ImageLibrary.js) and from the `setPosterBtn` file-picker
+//               handler that feeds `applyCustomPosterSource()` (src/main.js) —
+//               local poster/label files, all of which end up in
+//               THREE.TextureLoader — `data:` for generated textures, and
+//               `https:` because `window.__add.setPosterImage('https://…')`
+//               (src/main.js) and room JSON can name a remote poster, which
+//               `applyPosterTexture()` (src/RoomBuilder.js) hands straight to
+//               THREE.TextureLoader.
+//   media     — game audio + the shared-screen <video>. WebRTC streams arrive
+//               via `videoEl.srcObject` (`VideoMgr#_attach()`,
+//               src/net/VideoMgr.js), which the CSP spec does not check, but
+//               `mediastream:` is listed so a stricter UA can't surprise us;
+//               blob:/data: cover recorded and generated media.
+//   styles    — index.html / desktop.html / headset-test.html each carry a
+//               <style> block and inline `style=` attributes, so
+//               'unsafe-inline' is REQUIRED here. It does not leak into
+//               script-src, which is set explicitly above it.
+//   the rest  — this app has no <base>, no <form>, no <object>/<embed>, no
+//               <iframe> and is never embedded, so base-uri, form-action,
+//               object-src and frame-ancestors get locked to 'none'. Verified
+//               by grep over src/, public/, index.html and desktop.html
+//               (2026-08-15). test-csp.mjs pins all four to that exact value on
+//               both copies, so widening one is a test failure, not a silent
+//               edit — presence-only checks used to let `base-uri *` through.
+//
+// COOP/COEP are NOT part of this and must not be touched: crossOriginIsolated
+// (and therefore SharedArrayBuffer, and therefore every threaded core) depends
+// on them.
+const CSP_DIRECTIVES = [
+  "default-src 'self' blob: data:",
+  "script-src 'self' 'wasm-unsafe-eval'",
+  "worker-src 'self' blob:",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' blob: data: https:",
+  "media-src 'self' blob: data: mediastream:",
+  "connect-src 'self' blob: data: ws: wss: http: https:",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'none'",
+];
+
+export const CSP = CSP_DIRECTIVES.join('; ');
+
 // Cross-origin isolation headers are required to enable SharedArrayBuffer,
 // which threaded libretro cores and the PSX JIT need for shared Wasm memory.
 const crossOriginIsolation = () => ({
@@ -15,9 +118,7 @@ const crossOriginIsolation = () => ({
     server.middlewares.use((_req, res, next) => {
       res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
       res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-      // Runtime Wasm compilation is the PSX dynarec's code-generation
-      // mechanism. This permits Wasm compilation without permitting JS eval.
-      res.setHeader('Content-Security-Policy', "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:");
+      res.setHeader('Content-Security-Policy', CSP);
       next();
     });
   },
@@ -25,7 +126,7 @@ const crossOriginIsolation = () => ({
     server.middlewares.use((_req, res, next) => {
       res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
       res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-      res.setHeader('Content-Security-Policy', "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:");
+      res.setHeader('Content-Security-Policy', CSP);
       next();
     });
   },

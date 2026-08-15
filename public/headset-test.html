@@ -226,35 +226,11 @@
   <button id="reset">Reset progress</button>
 </div>
 
-<script>
-  // Tap-to-toggle checklist with per-device persistence. Each <li> gets a stable
-  // id from its position so saved state survives reloads (and re-reads in VR).
-  const items = [...document.querySelectorAll('ol.checks > li')];
-  items.forEach((li, i) => { li.dataset.k = 'lwx-test-' + i; });
-  const progress = document.getElementById('progress');
-
-  function render() {
-    let done = 0;
-    for (const li of items) {
-      const on = localStorage.getItem(li.dataset.k) === '1';
-      li.classList.toggle('done', on);
-      if (on) done++;
-    }
-    progress.textContent = done + ' / ' + items.length + ' done';
-  }
-  for (const li of items) {
-    li.addEventListener('click', () => {
-      const on = localStorage.getItem(li.dataset.k) === '1';
-      if (on) localStorage.removeItem(li.dataset.k);
-      else localStorage.setItem(li.dataset.k, '1');
-      render();
-    });
-  }
-  document.getElementById('reset').addEventListener('click', () => {
-    for (const li of items) localStorage.removeItem(li.dataset.k);
-    render();
-  });
-  render();
-</script>
+<!-- The tap-to-toggle checklist logic. EXTERNAL ON PURPOSE (2026-08-15, SEC-6):
+     an inline script here was blocked by our own `script-src 'self'
+     'wasm-unsafe-eval'` CSP, so the checklist did nothing on a headset. The
+     relative src keeps working from any deploy subpath (vite `base: './'`).
+     scripts/test-csp.mjs fails the build if an inline script comes back. -->
+<script type="module" src="./headset-test.js"></script>
 </body>
 </html>

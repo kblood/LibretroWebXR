@@ -36,7 +36,7 @@ loopback and the limits below are the defence instead. Every one is an
 environment variable with a default that is comfortably above what a real
 4-player room sends; nothing here needs to be set for normal operation.
 
-All **33** are in the tables below: the 17 read by `room-server.mjs`, the 12 in
+All **34** are in the tables below: the 18 read by `room-server.mjs`, the 12 in
 `Hub.js`'s `HUB_LIMITS`, and the 4 read by `log-server.mjs`, which runs **in this
 same process** (`room-server.mjs` imports it). "Every env knob" is meant
 literally, and getting it literally right has taken three passes — one version
@@ -79,6 +79,7 @@ against.
 | `ROOM_ALLOWED_ORIGINS` | *(empty = any)* | See the warning above. |
 | `ROOM_SWEEP_MS` | `60000` | Empty-room reaper interval (safety net for a missed teardown). |
 | `ROOM_HEARTBEAT_MS` | `10000` | Ping sweep. Two missed periods terminate a socket, so this is also how fast an unclean host death is noticed and the host role migrates. Also drives the aggregate outbound sweep below. |
+| `ROOM_SHUTDOWN_GRACE_MS` | `5000` | SIGTERM/SIGINT drain window (see [Graceful shutdown](#graceful-shutdown-sigtermsigint)). How long live sockets get to acknowledge their `1001` close before the process forces its own exit, so a peer that never answers cannot hold the systemd unit open (`ws` would wait 30 s for it). `0` restores the pre-fix behaviour — exit immediately, every peer sees `1006` — and is the negative control in `scripts/test-room-protocol.mjs`. |
 
 ### The in-process log server (`log-server.mjs`)
 
@@ -284,6 +285,65 @@ budget could cost ~23 MiB of RSS depending on what shape arrived; with the node
 charge it costs ~1.5 MiB, measured. Raise it if you genuinely run that many
 big-shelf rooms and have the RAM.
 
+## Protocol compatibility — the client/server version handshake
+
+The app and this server ship by **two different commands** (`npm run deploy`
+publishes `dist/`; `npm run deploy-room` ships `server/*` plus
+`src/net/NetProtocol.js`). A version-skewed pair is therefore the **normal state
+during a rollout**, not an edge case — and skew used to be invisible, because
+`decode()` silently drops what it does not understand and both ends simply fall
+quiet. That is exactly how a missing `bye` signalling kind went unnoticed for
+months, and how the live relay ran a two-month-old `Hub.js` for five days.
+
+So both ends now **state their version**, from one shared constant
+(`PROTOCOL_VERSION` in `src/net/NetProtocol.js`, imported by the client *and* by
+`Hub.js`/`room-server.mjs`, so the two can never drift):
+
+- the client announces it in its **`JOIN`** (`join.v`);
+- the server announces it in its **`HELLO`** (`hello.v`), so a *new client
+  talking to an old server* — the direction the server cannot possibly check,
+  since it has never heard of the field — is detectable client-side.
+
+Format is `MAJOR.MINOR`. **The rule is: same MAJOR = compatible.** Bump MINOR for
+an additive change (a new message type, a new optional field, a new signalling
+kind) — an older peer ignores what it does not know and the pair still works.
+Bump MAJOR only when an existing message's meaning or required shape changes,
+i.e. when the old peer would *misinterpret* rather than ignore.
+
+| The client says | The server does |
+| --- | --- |
+| nothing (`join.v` absent) | **Accepts.** It is an app built before this handshake — and one is deployed right now. Logged once per socket so the skew is visible in the journal. A relay update must never brick a deployed app. |
+| the same MAJOR | Accepts, whatever the minor. |
+| a different MAJOR, or an unparseable version | Closes with **`4010`** and a human-readable reason naming both versions. |
+
+`4010` is **permanent**: retrying it with the same build can only produce another
+`4010`, so `NetMgr` and `DesktopNet` both break their reconnect backoff on it,
+record the reason and surface it (`onFatal`) instead of looping forever. Every
+other close — `1001`, `1006`, `4008`, `4009` — is still retried. Which codes are
+permanent lives in `NetProtocol.isPermanentClose()` rather than in each of the
+two connection lifecycles, because a rule written twice is a rule that drifts.
+
+## Graceful shutdown (SIGTERM/SIGINT)
+
+`npm run deploy-room` restarts the systemd unit on every server update. Until
+2026-08-15 there was **no signal handler at all**, so that restart destroyed
+every socket mid-frame: each headset saw a bare `1006`, indistinguishable from a
+crash or a Wi-Fi drop, and the room kept its ghost until the next heartbeat sweep.
+
+`SIGTERM`/`SIGINT` now drain, in order: stop the timers, `wss.close()` (stop
+*accepting* — `ws` does not close clients for you), close every live socket with
+**`1001` "going away" + `server restarting`**, close the in-process log server,
+and arm an **unref'd** forced-exit timer of `ROOM_SHUTDOWN_GRACE_MS`. Unref'd
+matters: a clean drain exits early and naturally (measured: ~10 ms), while a peer
+that never answers its close frame — which `ws` would wait 30 s for, long enough
+for systemd to give up and `SIGKILL` — is overruled at the grace deadline. The
+handler is idempotent, so a second signal neither re-runs the drain nor arms a
+second timer.
+
+`scripts/test-room-protocol.mjs` asserts all of it over real sockets against a
+spawned relay, with `ROOM_SHUTDOWN_GRACE_MS=0` as the negative control that shows
+the same client seeing the old `1006`.
+
 ## Architecture
 
 - **`Hub.js`** — pure room/peer bookkeeping + broadcast decisions. No sockets, so
@@ -301,6 +361,12 @@ npm test                      # from repo root — includes Hub assertions
 
 # end-to-end transport (real ws, two clients):
 cd server && node smoke.mjs
+
+# protocol handshake + graceful shutdown (spawns real relays on :8894/:8895):
+node scripts/test-room-protocol.mjs
+#   Asserts the COR-9 version handshake (legacy accepted, wrong major closed with
+#   4010) and the SEC-6 SIGTERM/SIGINT drain (1001 + reason, fast clean exit,
+#   forced exit past a stuck socket, idempotent), each paired with a control.
 
 # admission control end-to-end (spawns real relays on :8892/:8893, ~2.5 min):
 npm run test:room-limits

@@ -132,6 +132,10 @@ export const TOP_LEVEL_ALLOW = new Set([
   'index.html',       // VR entry point
   'desktop.html',     // flat-screen entry point
   'headset-test.html',
+  // Its script, extracted from an inline <script> so the shipped CSP can drop
+  // 'unsafe-inline' (SEC-6, [[scripts/test-csp.mjs]]). It is a sibling of the
+  // page above, not a bundle — vite copies it verbatim out of public/.
+  'headset-test.js',
   'favicon.svg',
   'assets',           // vite bundles (content-hashed)
   'cores',            // libretro cores, fetched by scripts/fetch-cores.mjs

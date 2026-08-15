@@ -612,6 +612,37 @@ const _defaultColor = _palette[Math.floor(Math.random() * _palette.length)];
 const SESSION_REJOIN_KEY = 'libretrowebxr.rejoin';
 // Set true at boot when we are resuming a session in which we were the host.
 let _resumeAsHost = false;
+
+// COR-9 (2026-08-15): the room server refused this build PERMANENTLY. Today the
+// only such refusal is close code 4010, an incompatible client/server protocol
+// major (NetProtocol.PERMANENT_CLOSE_CODES) — but the wording below deliberately
+// does not hard-code that diagnosis: the server sends a human-readable `reason`
+// and that string is the authority, so adding a second permanent code later
+// cannot silently turn this message into a lie.
+//
+// NetMgr records the refusal, stops reconnecting, and calls onFatal (wired in
+// connectToRoom). Until that was wired the only trace was a console.error, so
+// what the user actually saw was a multiplayer widget stuck on "Offline"
+// forever — no reason given, and no retry happening behind it either.
+//
+// Latched in a module variable rather than only written to the status line,
+// because updateMpWidget() repaints the widget every tick and would immediately
+// cover the explanation with the generic "Offline". Cleared by connectToRoom(),
+// since starting a new session re-asks the question.
+//
+// Verified by reading + `node --check`, like the rest of main.js's half of this
+// work: the pure-logic tier cannot import this module (three.js + DOM), and
+// scripts/test-remote-owner.mjs says so in its header rather than implying
+// coverage it does not have.
+let _netFatal = null;   // { code, reason } | null
+function _applyNetFatal(code, reason) {
+  const c = Number(code);
+  const r = String(reason || '');
+  _netFatal = { code: c, reason: r };
+  setStatus(`multiplayer unavailable — the room server permanently refused this build (${c}${r ? `: ${r}` : ''}). Reload the page to pick up the current build.`);
+  logger?.event?.('mp-fatal', _netFatal);
+  if (mpWidget) updateMpWidget();
+}
 function stashSessionRejoin() {
   try {
     if (!net) return;
@@ -638,6 +669,10 @@ function consumeSessionRejoin() {
  * current instance after reassignment.
  */
 function connectToRoom(room, nick, color) {
+  // A new session re-asks the compatibility question, so drop any previous
+  // refusal — otherwise the widget would keep explaining a verdict that no longer
+  // applies (e.g. after the user reloaded onto a matching build).
+  _netFatal = null;
   // Tear down any existing session cleanly.
   if (net) {
     net.disconnect();
@@ -673,7 +708,20 @@ function connectToRoom(room, nick, color) {
       if (isPowerStateKey(key)) _applyRemotePower(key, value);
     },
     // M1.1 host-authoritative input: inject remote buttons only when we are host.
-    onGameInput: (ev) => { if (amRoomHost()) gameInput?.setRemoteButton(ev); },
+    // COR-8: `ev` carries `from` (NetMgr._applyGameInput copies the relay's
+    // msg.from) and setRemoteButton keys its desired-state on it, so two peers
+    // driving the same port hold that button independently — one releasing no
+    // longer yanks it out from under the other. Never strip `from` here.
+    // COR-8 round 5 (2026-08-15): `remote: true` is what makes this the NETWORKED
+    // input path. It marks the owner as roster-reconcilable (see
+    // _reconcileRemoteInputOwners below — without it an orphaned peer's button
+    // stays down forever) and, if `ev.from` is ever missing, keeps the hold out of
+    // the LOCAL bucket where clearRemoteFrom(peerId) could never reach it and
+    // where a click-to-test laser would fight it for the same slot. The spread
+    // preserves every other field, including any NetMgr adds later; do not
+    // hand-list them, and do not mutate `ev` — NetMgr keeps it in its
+    // _recvInputs debug ring.
+    onGameInput: (ev) => { if (amRoomHost()) gameInput?.setRemoteButton({ ...ev, remote: true }); },
     // M2 transient relay: a peer's per-frame ephemera. 'gp' = a held pad's live
     // button state → animate that pad's ghost in the holder's hand. 'drag' = a
     // prop's live transform while held → move our copy in real time. 'gun'/
@@ -743,16 +791,29 @@ function connectToRoom(room, nick, color) {
       else setStatus('host stream interrupted — waiting for it to come back');
     },
     // FIX 1: clear latched remote keys when a peer disconnects mid-keypress.
-    // NOTE (FIX E): clearRemote() clears ALL remote input, not just the leaving
-    // peer's buttons. In a 3+ peer session this is a ~1-tick blip for other
-    // peers' held buttons: their keyups fire, then their keys re-latch on the
-    // very next tick when their setRemoteButton messages resume. Per-peer
-    // clearing would require threading `ev.from` (available in NetMgr's
-    // _applyGameInput as msg.from) through setRemoteButton and _remoteDesired
-    // entries, which is invasive across GameInputMgr, its tests, and the
-    // network contract. The conservative all-clear is safe and correct for the
-    // common 2-player case; the blip is benign in 3+ sessions.
-    onPeerLeave: (_peerId) => { if (amRoomHost()) gameInput?.clearRemote(); },
+    // COR-8 (2026-08-15): this used to be an unconditional clearRemote(), which
+    // dropped EVERY peer's held buttons because _remoteDesired had no notion of
+    // who owned an entry. Two costs, both now gone: a ~1-tick input blip for the
+    // peers who did NOT leave, and — worse — a silent stuck/lost button whenever
+    // two senders held the same one, since the first release deleted the shared
+    // entry and a transition-only sender never reasserts. Ownership is now
+    // {sender, console, player, control} and `ev.from` (stamped by the server in
+    // Hub.input(), carried through NetMgr._applyGameInput) is the sender, so we
+    // withdraw only the departing peer's claims. A pruned/LEAVE id is always
+    // present here; the all-clear stays as the belt-and-braces fallback for an
+    // id-less leave so a disconnect can never latch a key.
+    onPeerLeave: (peerId) => {
+      if (!amRoomHost()) return;
+      if (peerId != null) gameInput?.clearRemoteFrom(peerId);
+      else gameInput?.clearRemote();
+    },
+    // COR-9: a permanent protocol refusal (close code 4010 today). NetMgr has
+    // already given up reconnecting by the time this fires, so this is the ONLY
+    // chance to tell the user why multiplayer stopped — the alternative the user
+    // actually saw was a widget stuck on "Offline" and a console.error nobody in
+    // a headset can read. Signature is NetMgr's — `({ code, reason })`, fired at
+    // most once per NetMgr — and is deliberately not reshaped or renamed here.
+    onFatal: ({ code, reason }) => _applyNetFatal(code, reason),
   });
   net = newNet;
   net.connect();
@@ -801,6 +862,15 @@ function disconnectFromRoom() {
   // `net` null they can only throw, once per callback per frame, forever (§5.1).
   // Hand them back to SceneMgr — the next join re-attaches them.
   _detachNetTickCallbacks();
+  // COR-8 round 5 (2026-08-15): the room is gone, so every remote-owned button is
+  // gone with it. Without this a peer that was mid-keypress when we hit Leave left
+  // its key held on our core for the rest of the session — nothing left could lift
+  // it: _reconcileRemoteInputOwners is `net`-gated and we have just nulled `net`,
+  // no further LEAVE can arrive to reach clearRemoteFrom, and flushReleases() does
+  // NOT help (it clears _state only, and the next tick() re-latches the key from
+  // _remoteDesired). clearRemote() drops the desired-state itself, so the next
+  // tick()'s ordinary sweep emits the keyups.
+  gameInput?.clearRemote();
   setPrimaryScreen(primaryCanvas());
   client.resume?.();
   // Bring back any SECONDARY consoles that pauseAll() suspended while we watched
@@ -812,6 +882,107 @@ function disconnectFromRoom() {
   logger._nick = null;
 }
 
+// COR-8 round 5 (2026-08-15): keep GameInputMgr's remote button OWNERS honest
+// against the live roster. Runs from the persistent net tick below.
+//
+// Why this exists: remote holds are per-sender and OR-reduced, so a button stays
+// down while ANY owner claims it. That is the point — but it means an ORPHANED
+// owner (a peer id that will never send another transition and will never be
+// handed to clearRemoteFrom) pins its button DOWN for the rest of the session.
+// No other sender's release lifts it, and flushReleases() cannot either: it
+// clears GameInputMgr's _state, and the very next tick() re-latches the key from
+// the still-standing desired-state.
+//
+// Orphans are ordinary, not exotic. onPeerLeave (see connectToRoom) is gated on
+// amRoomHost(), which is false whenever net.connected is false — so every
+// peer-leave fired DURING our own socket drop, including the ones NetMgr.tick()
+// raises from presence.prune(), is discarded. NetMgr._scheduleReconnect() then
+// clears presence with no onPeerLeave at all, deliberately: the server mints a
+// fresh peer id per connection (server/room-server.mjs: `const peerId =
+// randomUUID()`), so the pre-blip roster is meaningless. A room-server restart or
+// a shared Wi-Fi blip drops host and clients together and hits exactly this.
+//
+// Two rules, both of which forget the id rather than trying to track how it went:
+//   * socket down  → the roster is meaningless → drop EVERY remote owner. A peer
+//     we are not connected to cannot be holding anything, and when it returns it
+//     returns under a new id and re-sends its transitions.
+//   * socket up    → drop owners not in presence. This also mops up any LEAVE we
+//     dropped on the floor while amRoomHost() was momentarily false.
+// The ROSTER rule (socket up) never touches local holds — GameInputMgr only
+// reconciles senders that arrived with `remote: true`. The SOCKET-DOWN rule is
+// blunter and does lift them, because clearRemote() drops every owner including
+// the click-to-test lasers; that is a deliberate trade (a dropped socket is not a
+// moment to be precise about who owns what) and it is stated here so the two
+// branches are not read as having the same scope.
+//
+// Cost: one `netSenderCount()` read per frame when nobody remote is holding a
+// button, which is the overwhelmingly common case. Only while a remote button IS
+// held does it go further, and the roster Set is module-scoped and reused, so
+// that path allocates just the array presence.peers() returns.
+const _liveSenderIds = new Set();
+function _reconcileRemoteInputOwners() {
+  if (!gameInput?.netSenderCount?.()) return;
+  if (!net.connected) { gameInput.clearRemote(); return; }
+  _liveSenderIds.clear();
+  for (const p of net.presence.peers()) _liveSenderIds.add(p.id);
+  const dropped = gameInput.reconcileRemoteSenders(_liveSenderIds);
+  if (dropped) logger?.event?.('mp-input-owner-reconcile', { dropped, live: _liveSenderIds.size });
+}
+
+// COR-8 round 6 (2026-08-15): the LOCAL half of the same cure, and the reason it
+// has to exist separately.
+//
+// A click-to-test laser press is an owner in GameInputMgr exactly like a peer is,
+// and since round 5 each laser is its OWN owner (`local-gp:<n>`, see the
+// selectstart handler in buildCartridgeWorld) so both hands can squeeze the same
+// virtual button. Give that owner no way to die and you have rebuilt the very
+// latch this work removed: a `selectstart` whose `selectend` never arrives — the
+// controller is lost mid-press (battery, sleep, the runtime dropping the input
+// source) — pins its button DOWN. The other hand's release cannot lift it (OR
+// semantics), flushReleases() cannot (it clears _state; the next tick() re-latches
+// from _remoteDesired), _reconcileRemoteInputOwners cannot (it skips local
+// senders, and it is `net`-gated so in SOLO play it never runs at all), and
+// disconnectFromRoom/_applyHostRole cannot (both `net`-gated too). Solo play is
+// the common case, so there was no cure at all in the common case.
+//
+// The liveness rule is object IDENTITY, not truthiness: an owner is live only
+// while the controller's inputSource is still the SAME XRInputSource the press
+// started on. A lost controller nulls it (SceneMgr's 'disconnected' listener), and
+// if it comes back its 'connected' listener stores whatever source object the
+// runtime hands over — which is not the one we captured, since that one was
+// removed. Either way the hold reads as "gone". The synthetic desktop controller
+// has a permanently null inputSource (SceneMgr sets it once and nothing assigns it
+// again, DesktopControls included), so null === null and mouse-driven clicks on a
+// flat screen are unaffected.
+//
+// We finish the abandoned press the way the missing selectend would have — drop
+// the record, un-press the virtual button's mesh — and let GameInputMgr withdraw
+// the owner, whose keyup then rides out on the next tick()'s ordinary sweep.
+//
+// Cost when nothing local is held (the overwhelmingly common case): one
+// localSenderCount() read, which is a subtraction.
+// Live click-to-test laser presses: ctrl → { gpObj, id, player, btn, consoleId,
+// from, src }. `from` is the GameInputMgr owner id this press holds under and
+// `src` the XRInputSource it started on. Module-scoped rather than block-scoped
+// inside buildCartridgeWorld so _reconcileLocalInputOwners can see which local
+// owners are still backed by a real, still-attached controller.
+const _gpLaserHeld = new Map();
+const _liveLocalSenderIds = new Set();
+function _reconcileLocalInputOwners() {
+  if (!gameInput?.localSenderCount?.()) return;
+  _liveLocalSenderIds.clear();
+  for (const [ctrl, held] of _gpLaserHeld) {
+    if ((ctrl.userData?.inputSource ?? null) === held.src) {
+      _liveLocalSenderIds.add(held.from);
+      continue;
+    }
+    _gpLaserHeld.delete(ctrl);
+    held.gpObj.userData.pressButton?.(held.id, false);
+  }
+  const dropped = gameInput.reconcileLocalSenders(_liveLocalSenderIds);
+  if (dropped) logger?.event?.('local-input-owner-reconcile', { dropped, live: _liveLocalSenderIds.size });
+}
+
 // Register the single persistent tick callback. Guards on `net` being non-null
 // so there is zero cost when the user is in solo mode.
 scene.addTickCallback((dt) => {
@@ -819,6 +990,12 @@ scene.addTickCallback((dt) => {
   // M1.4: while hosting, keep the room's authoritative room/shelf snapshot in sync
   // with what we actually have built (see _syncHostRoomState). Self-throttled.
   if (net) _syncHostRoomState(performance.now());
+  // Deliberately AFTER net.tick(): presence.prune() runs in there, so we reconcile
+  // against the roster as of this frame, not the previous one.
+  if (net) _reconcileRemoteInputOwners();
+  // NOT `net`-gated, on purpose: a local input owner can be orphaned in solo play,
+  // where there is no `net` at all. This is the only rule that can free it.
+  _reconcileLocalInputOwners();
 });
 
 // --- Wire the in-app multiplayer header widget ----------------------------
@@ -851,6 +1028,16 @@ function updateMpWidget() {
     mpStatusEl.textContent = `${net.room} — ${total} player${total === 1 ? '' : 's'}${names ? ` (${names}${more})` : ''}`;
     mpStatusEl.className = 'online';
     mpStatusEl.title = `Connected to room "${net.room}"`;
+  } else if (_netFatal) {
+    // COR-9: not "Offline" — offline implies "it will come back". It will not:
+    // NetMgr stopped retrying on purpose, because the server's refusal is
+    // permanent for this build. Only a reload onto a matching build changes the
+    // answer. The server's own `reason` is the tooltip, so the specific diagnosis
+    // comes from the side that made it. See _applyNetFatal.
+    mpStatusEl.textContent = `Refused by server (${_netFatal.code}) — reload`;
+    mpStatusEl.className = 'offline';
+    mpStatusEl.title = _netFatal.reason
+      || 'The room server permanently refused this client build.';
   } else {
     mpStatusEl.textContent = 'Offline';
     mpStatusEl.className = 'offline';
@@ -5702,7 +5889,8 @@ function buildMenuAndControlsPanel() {
     // Logical gamepad-button id → RetroPad button name for setRemoteButton.
     const GP_BTN = { a: 'A', b: 'B', start: 'Start', select: 'Select', up: 'Up', down: 'Down', left: 'Left', right: 'Right' };
     const _gpHover = new Map(); // ctrl → { gpObj, id }   (button currently under the laser)
-    const _gpHeld  = new Map(); // ctrl → { gpObj, id, player, btn, consoleId } (button being clicked)
+    // The button being clicked lives in the module-scoped _gpLaserHeld (declared
+    // next to _reconcileLocalInputOwners, which has to read it every frame).
 
     // Walk up from a hit cap mesh to its gamepad root (the object registered in
     // _gamepadObjs under its cableId).
@@ -5752,7 +5940,13 @@ function buildMenuAndControlsPanel() {
       }
     });
 
-    for (const ctrl of scene.controllers) {
+    for (const [ctrlIdx, ctrl] of scene.controllers.entries()) {
+      // COR-8: each laser is its OWN sender in GameInputMgr's ownership tuple
+      // {sender, console, player, control}. Both hands can point at the same
+      // virtual button (and a networked peer can be holding it too); with a
+      // shared sender id the first `selectend` would delete the shared entry and
+      // lift the button while the other hand was still squeezing.
+      const from = `local-gp:${ctrlIdx}`;
       ctrl.addEventListener('selectstart', () => {
         if (grabMgr?.isGamepadHeld?.()) return;
         const h = _gpHover.get(ctrl);
@@ -5763,15 +5957,26 @@ function buildMenuAndControlsPanel() {
         const player = (seat?.port ?? 0) + 1;
         const consoleId = seat?.consoleId || CONSOLE_ID;
         h.gpObj.userData.pressButton?.(h.id, true);
-        gameInput?.setRemoteButton?.({ player, btn, down: true, consoleId });
-        _gpHeld.set(ctrl, { gpObj: h.gpObj, id: h.id, player, btn, consoleId });
+        gameInput?.setRemoteButton?.({ player, btn, down: true, consoleId, from });
+        // COR-8 round 6: `src` is what makes this hold falsifiable. If the
+        // controller is lost mid-press its selectend never arrives, and
+        // _reconcileLocalInputOwners uses this exact object to notice — the owner
+        // is live only while the controller's inputSource is still THIS source.
+        // Normalised to null so the synthetic desktop controller (inputSource is
+        // permanently null) compares equal to itself and keeps working.
+        _gpLaserHeld.set(ctrl, {
+          gpObj: h.gpObj, id: h.id, player, btn, consoleId, from,
+          src: ctrl.userData.inputSource ?? null,
+        });
       });
       ctrl.addEventListener('selectend', () => {
-        const held = _gpHeld.get(ctrl);
+        const held = _gpLaserHeld.get(ctrl);
+        // Already finished by _reconcileLocalInputOwners (the press outlived its
+        // controller) → nothing left to release.
         if (!held) return;
-        _gpHeld.delete(ctrl);
+        _gpLaserHeld.delete(ctrl);
         held.gpObj.userData.pressButton?.(held.id, false);
-        gameInput?.setRemoteButton?.({ player: held.player, btn: held.btn, down: false, consoleId: held.consoleId });
+        gameInput?.setRemoteButton?.({ player: held.player, btn: held.btn, down: false, consoleId: held.consoleId, from });
       });
     }
   }
@@ -6418,8 +6623,11 @@ function resolveBootPeripherals(meta) {
   // armed this session by grabbing the prop) on a mouse-capable system, connect
   // the libretro MOUSE device on its port(s). A twoMouse-flagged game on a
   // two-mouse-capable system (Amiga) seats a mouse on BOTH ports (split-pointer
-  // 2-player); otherwise one mouse on port 0. Mutually exclusive with the gun
-  // (Amiga has no light gun), so this only applies on non-gun boots.
+  // 2-player); otherwise one mouse on port 0. The gun WINS when both are asked
+  // for on the same boot (`!gun` below): a port carries one device, and the gun
+  // is the more explicit request. This is not hypothetical — SNES has had both a
+  // Super Scope and a mouse from the start, and the Amiga gained a light gun on
+  // 2026-08-15 (SYSTEMS.amiga.lightgun), so it now has both too.
   const wantMouse = !gun && isMouseCapable(meta.system) && (meta.mouse || window.__mouseArmed);
   const twoMouse = wantMouse && !!meta.twoMouse && isTwoMouseCapable(meta.system);
   const mouse = wantMouse ? mouseLoadConfig(meta.system, { twoMouse }) : null;
@@ -7229,6 +7437,22 @@ function _applyHostRole({ isHost, hostId, prevHostId } = {}) {
     setStatus(net.connected ? 'waiting for the room host…' : 'reconnecting to the room…');
     return;
   }
+
+  // COR-8 round 5 (2026-08-15): a settled host change means whoever was holding a
+  // remote button was holding it against a DIFFERENT input authority. Promoted, we
+  // are about to start applying remote input to our core and must not inherit
+  // owners we never saw press anything; demoted, onGameInput stops feeding us
+  // (it is amRoomHost()-gated) so anything still owned here can only be an orphan.
+  // Belt and braces with _reconcileRemoteInputOwners rather than a replacement for
+  // it: this fires exactly ON the transition (including the HELLO after a
+  // reconnect, where the whole roster was re-minted under new peer ids — see
+  // server/room-server.mjs randomUUID()), whereas the tick reconcile would take
+  // until the next frame. Deliberately AFTER the election-pending return above —
+  // a momentary blip with hostId null is not a role change and must stay a no-op;
+  // NetMgr._setHost() no-ops when the id is unchanged, so this only ever runs on a
+  // real transition and cannot chew up a live peer's hold every frame.
+  // The keyups fire on the next gameInput.tick() via its ordinary sweep.
+  gameInput?.clearRemote();
 
   if (isHost) {
     // Promoted: we are first in, OR the previous host actually LEFT and we are the

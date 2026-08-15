@@ -5,9 +5,63 @@
 <IfModule mod_headers.c>
   Header set Cross-Origin-Embedder-Policy "require-corp"
   Header set Cross-Origin-Opener-Policy   "same-origin"
-  # Allow the Lightrec/Play! WebAssembly backend to compile generated blocks.
-  # JS eval remains disabled: wasm-unsafe-eval is deliberately narrower.
-  Header set Content-Security-Policy "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:"
+  # ── Content-Security-Policy ────────────────────────────────────────────────
+  # ⚠ THIS IS ONE HALF OF A DUPLICATED CONTRACT. The other half is
+  # `CSP_DIRECTIVES` in vite.config.js (dev + preview headers); THIS file is
+  # what the deployed app on dionysus.dk actually gets.
+  # `node scripts/test-csp.mjs` — run by the `npm test` chain, the pure-logic
+  # tier — diffs the header vite's middleware really emits against the one
+  # below and fails if they drift. Keep them character-for-character
+  # equivalent (directive order does not matter, sources do).
+  #
+  # THIS FILE MUST NAME Content-Security-Policy EXACTLY ONCE, WITH `Header set`.
+  # mod_headers applies its directives in file order and later ones rewrite what
+  # earlier ones built, so ANY second mention of this header — anywhere after
+  # the `Header set` line further down — silently becomes what browsers get,
+  # while that reviewed line sits there looking correct:
+  #   Header set    …  a second one replaces this policy wholesale;
+  #   Header unset  …  strips the header — the deployed app gets NO CSP AT ALL,
+  #                    which is the single worst outcome and the easiest thing
+  #                    to append while debugging on a headset and then forget;
+  #   Header append/merge/add/edit … alter the served value.
+  # test-csp.mjs collects every `Header [always] <verb> Content-Security-Policy`
+  # in this file and FAILS unless there is exactly one and its verb is `set`.
+  # Comment out a line to disable it (leading `#` lines are ignored) — do not
+  # neutralise it with a second directive.
+  #
+  # The full "what does this app actually load" enumeration that every source
+  # below was derived from lives in the comment above CSP_DIRECTIVES in
+  # vite.config.js. Read it before widening or narrowing anything here. The
+  # short version, per directive:
+  #   script-src   'self' + the classic-core <script src> injection; the
+  #                Lightrec/Play! WebAssembly backends compile generated blocks
+  #                at runtime, hence 'wasm-unsafe-eval'. Plain JS eval stays
+  #                disabled — wasm-unsafe-eval is deliberately narrower.
+  #                There are NO inline scripts; headset-test.html's was moved
+  #                to headset-test.js on 2026-08-15 precisely because this
+  #                policy was blocking it (CODEX_REVIEW SEC-6).
+  #   worker-src   emulator worker + Emscripten pthread workers (some builds
+  #                spawn those from blob:).
+  #   connect-src  deliberately wide: `?server=` (room WebSocket) and `?log=`
+  #                (remote log server — the only way to read Quest logs) both
+  #                accept an ARBITRARY origin, and rom.url may be a signed/CDN
+  #                URL. Narrowing this to 'self' silently kills multiplayer and
+  #                remote logging. STUN/TURN is not covered by connect-src.
+  #   img-src      blob:/data: object URLs for sideloaded posters + generated
+  #                textures; https: for remote poster art.
+  #   media-src    game audio / shared-screen video; WebRTC arrives via
+  #                srcObject, which CSP does not check.
+  #   style-src    'unsafe-inline' is REQUIRED — every shipped HTML page has a
+  #                <style> block and inline style= attributes.
+  #   base/object/frame-ancestors/form-action  locked to 'none': this app has
+  #                no <base>, <object>, <embed> or <form>, and is never framed.
+  #                test-csp.mjs pins all four to the literal 'none' (and
+  #                default-src to 'self' blob: data:), so widening any of them
+  #                — even to `*` in BOTH copies at once, which no drift check
+  #                can see — fails the suite.
+  # COOP/COEP above are separate and must not change — crossOriginIsolated,
+  # SharedArrayBuffer and every threaded core depend on them.
+  Header set Content-Security-Policy "default-src 'self' blob: data:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https:; media-src 'self' blob: data: mediastream:; connect-src 'self' blob: data: ws: wss: http: https:; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
 
   # Cache discipline borrowed from castlemastervr — Quest browser is happy
   # to serve stale modules unless told otherwise.

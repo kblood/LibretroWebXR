@@ -25,6 +25,7 @@ import { VideoMgr } from '../net/VideoMgr.js';
 import {
   MSG, makeJoin, makePose, makeState, makeSignal, makeInput,
   hostInputTarget, encode, decode,
+  PROTOCOL_VERSION, judgeServerVersion, isPermanentClose,
 } from '../net/NetProtocol.js';
 import { stableSessionId } from '../net/SessionUtils.js';
 import { FALLBACK_HOST_KEY, normaliseClaim, resolveFallbackHost } from '../net/HostElection.js';
@@ -58,6 +59,7 @@ export class DesktopNet {
     onConnect = null,        // (selfId) => void
     onDisconnect = null,     // () => void
     onHostChange = null,     // ({hostId,prevHostId,isHost}) => void — M1.4 election
+    onFatal = null,          // ({code,reason}) => void — permanent refusal (COR-9 4010)
     iceServers = null,
     sessionId = null,
     now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now()),
@@ -95,6 +97,12 @@ export class DesktopNet {
     this._closing = false;
     this._reconnectTries = 0;
     this._reconnectTimer = null;
+    // COR-9 protocol handshake — same contract as NetMgr's (this class is the
+    // flat-screen duplicate of that lifecycle, CODEX ARC-2, so a rule that only
+    // landed in one of them would be a rule that only works in VR).
+    this._fatal = null;
+    this._onFatal = onFatal;
+    this.serverVersion = null;
 
     this.video = new VideoMgr({
       getSelfId: () => this.presence.selfId,
@@ -192,6 +200,42 @@ export class DesktopNet {
   _clearFallbackTimer() {
     if (this._fallbackTimer) { clearTimeout(this._fallbackTimer); this._fallbackTimer = null; }
   }
+
+  // --- COR-9 protocol compatibility ------------------------------------------
+  // Mirrors NetMgr._noteFatal / _checkServerProtocol exactly; see the long notes
+  // there. Kept in step by the shared pure rules in NetProtocol
+  // (judgeServerVersion, isPermanentClose) rather than by copied conditionals:
+  // as of 2026-08-15 the "which verdict is fatal, with which close code" mapping
+  // is judgeServerVersion's, so this class and NetMgr cannot drift on it (ARC-2).
+
+  _noteFatal({ code, reason }) {
+    if (this._fatal) return;
+    this._fatal = { code: Number(code), reason: String(reason || '') };
+    this._closing = true;
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+    console.error(`[desktop-net] room server refused this build permanently (${this._fatal.code}): ${this._fatal.reason} - not reconnecting (client protocol ${PROTOCOL_VERSION}, server ${this.serverVersion ?? 'unknown'})`);
+    if (this._onFatal) {
+      try { this._onFatal(this._fatal); } catch (e) { console.warn('[desktop-net] onFatal', e); }
+    }
+  }
+
+  /** Judge the server's HELLO version. False = incompatible, socket closed. */
+  _checkServerProtocol(v) {
+    const verdict = judgeServerVersion(v);
+    this.serverVersion = verdict.serverVersion;
+    if (verdict.action === 'accept') return true;
+    if (verdict.action === 'accept-legacy') {
+      if (!this._legacyServerLogged) {
+        this._legacyServerLogged = true;
+        console.warn(`[desktop-net] room server announced no protocol version - pre-COR-9 relay, continuing (client speaks ${PROTOCOL_VERSION})`);
+      }
+      return true;
+    }
+    this._noteFatal({ code: verdict.code, reason: verdict.reason });
+    try { this.ws?.close(verdict.code, verdict.reason); } catch { /* already closing */ }
+    return false;
+  }
+
   peerCount() { return this.presence.size; }
   peers() { return this.presence.peers(); }
 
@@ -262,6 +306,12 @@ export class DesktopNet {
       tvOwner: () => this.objects.ownerOf('tv'),
       serverElects: () => this._serverElects,
       fallbackClaims: () => [...this._fallbackClaims.values()],
+      // COR-9 diagnostics (same shape as NetMgr's, and asserted the same way:
+      // scripts/test-net.mjs drives case 7 of the "Client reconnect gate"
+      // section through BOTH classes, so deleting these here goes red too).
+      protocolVersion: () => PROTOCOL_VERSION,
+      serverProtocol: () => this.serverVersion,
+      fatal: () => (this._fatal ? { ...this._fatal } : null),
       recvInputs: () => this._recvInputs.slice(),
       video: this.video.debugApi(),
     };
@@ -285,6 +335,10 @@ export class DesktopNet {
     ws.addEventListener('message', (e) => {
       const msg = decode(typeof e.data === 'string' ? e.data : '');
       if (!msg) return;
+      // COR-9: judge the server's announced protocol before acting on anything
+      // it sent (an OLD SERVER cannot check OUR JOIN version, so this direction
+      // of the skew is only ever caught here).
+      if (msg.type === MSG.HELLO && !this._checkServerProtocol(msg.v)) return;
       if (msg.type === MSG.SIGNAL) {
         if (msg.channel === 'video') this.video.handleSignal(msg);
         // (voice signals are not used on desktop v1)
@@ -329,12 +383,21 @@ export class DesktopNet {
     // kept both would become a SECOND host the moment the server migrates - then
     // reconnect (the server holds our sid in its reclaim window, so a quick return
     // gets the role back). Our own disconnect() sets _closing and skips all this.
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', (ev) => {
       const wasConnected = this._connected;
       this._connected = false;
       // The socket is gone: tear the capture down locally, but don't pretend to
       // announce a 'bye' that could not possibly be delivered.
       this.video.stopBroadcast({ announce: false });
+      // COR-9: 4010 is PERMANENT - the server refuses this build's protocol, so
+      // the backoff chain must stop instead of reconnecting into the same
+      // refusal every few seconds for the rest of the page's life.
+      if (isPermanentClose(ev?.code)) {
+        this._noteFatal({ code: ev.code, reason: String(ev.reason || 'incompatible protocol') });
+        this._setHost(null);
+        if (this._onDisconnect) { try { this._onDisconnect(); } catch (_) {} }
+        return;
+      }
       if (!this._closing) {
         this._setHost(null);
         if (wasConnected || this._reconnectTries) this._scheduleReconnect();
@@ -346,7 +409,8 @@ export class DesktopNet {
   }
 
   _scheduleReconnect() {
-    if (this._closing || this._reconnectTimer) return;
+    // `_fatal` guarded here too: this is the only path that re-opens a socket.
+    if (this._closing || this._fatal || this._reconnectTimer) return;
     const delay = RECONNECT_DELAYS_MS[Math.min(this._reconnectTries, RECONNECT_DELAYS_MS.length - 1)];
     this._reconnectTries++;
     this._reconnectTimer = setTimeout(() => {

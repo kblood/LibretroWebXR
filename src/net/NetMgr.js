@@ -18,7 +18,10 @@ import { RoomObjects } from './RoomObjects.js';
 import { AvatarMgr } from './AvatarMgr.js';
 import { VoiceMgr } from './VoiceMgr.js';
 import { VideoMgr } from './VideoMgr.js';
-import { MSG, makeJoin, makePose, makeSignal, makeState, makeInput, makeWire, hostInputTarget, encode, decode } from './NetProtocol.js';
+import {
+  MSG, makeJoin, makePose, makeSignal, makeState, makeInput, makeWire, hostInputTarget, encode, decode,
+  PROTOCOL_VERSION, judgeServerVersion, isPermanentClose,
+} from './NetProtocol.js';
 import { stableSessionId, spawnSeatOffset } from './SessionUtils.js';
 import { FALLBACK_HOST_KEY, normaliseClaim, resolveFallbackHost } from './HostElection.js';
 
@@ -47,7 +50,7 @@ function defaultServerUrl() {
 }
 
 export class NetMgr {
-  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, onWire = null, onPeerLeave = null, onHostChange = null, videoCanvas = null, videoAudio = null, onHostVideo = null, onHostVideoEnded = null, iceServers = null, sessionId = null, now = () => performance.now() }) {
+  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, onWire = null, onPeerLeave = null, onHostChange = null, onFatal = null, videoCanvas = null, videoAudio = null, onHostVideo = null, onHostVideoEnded = null, iceServers = null, sessionId = null, now = () => performance.now() }) {
     this.scene = scene;
     this.room = room || 'lobby';
     this.nick = nick || 'Player';
@@ -75,6 +78,16 @@ export class NetMgr {
     this._closing = false;
     this._reconnectTries = 0;
     this._reconnectTimer = null;
+    // COR-9 protocol handshake. `_fatal` is set once, and once it is set this
+    // NetMgr is DONE: the pair is incompatible, so retrying the same build can
+    // only produce the same refusal. `onFatal({code, reason})` is the app's hook
+    // for saying so in the UI instead of leaving the user in a room that never
+    // fills; it fires exactly once, from _noteFatal, and only for a PERMANENT
+    // close (a 1006 blip does not invoke it). Asserted in scripts/test-net.mjs,
+    // case 3c of the "Client reconnect gate" section, against this real class.
+    this._fatal = null;
+    this._onFatal = onFatal;
+    this.serverVersion = null;   // what the room server said in HELLO (null = pre-COR-9)
     // M0 hardening: optional TURN/STUN config for the WebRTC meshes (voice +
     // video). null → each manager uses its built-in STUN-only default. A full
     // list (built via NetProtocol.buildIceServers) is shared by both meshes so
@@ -271,6 +284,63 @@ export class NetMgr {
     return true;
   }
 
+  // --- COR-9 protocol compatibility ----------------------------------------
+
+  /**
+   * Record a permanent, non-retryable refusal and surface it. Sets `_closing` so
+   * every later path (the close handler, _scheduleReconnect) treats this session
+   * as finished — the same flag a deliberate disconnect() uses, because from the
+   * reconnect logic's point of view "we are never coming back" is the same state.
+   * That `_closing = true` is NOT decoration: removing it turns
+   * "a permanent refusal also marks the session closed" red in test-net.mjs.
+   * Idempotent (the `_fatal` early return), so `onFatal` reaches the app once
+   * however many later paths note the same refusal, and a throwing app callback
+   * is contained rather than allowed to abort the close handler.
+   */
+  _noteFatal({ code, reason }) {
+    if (this._fatal) return;
+    this._fatal = { code: Number(code), reason: String(reason || '') };
+    this._closing = true;
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+    console.error(`[net] room server refused this build permanently (${this._fatal.code}): ${this._fatal.reason} — not reconnecting (client protocol ${PROTOCOL_VERSION}, server ${this.serverVersion ?? 'unknown'})`);
+    if (this._onFatal) {
+      try { this._onFatal(this._fatal); } catch (e) { console.warn('[net] onFatal', e); }
+    }
+  }
+
+  /**
+   * Judge the room server's HELLO version (COR-9). Returns true when it is safe
+   * to go on processing this message.
+   *
+   * The DECISION is not made here: NetProtocol.judgeServerVersion owns it, and
+   * DesktopNet's copy of this method calls the same function (CODEX ARC-2 — two
+   * connection lifecycles, one protocol rule). This method only performs the side
+   * effects, which is the part that legitimately differs between the two clients
+   * (log prefix, and NetMgr's extra teardown).
+   *
+   * A server with NO version is a pre-COR-9 relay and is ACCEPTED — the deployed
+   * one was exactly that until this landed, and refusing it would mean an app
+   * deploy could not precede a server deploy. An incompatible MAJOR (or a `v` of
+   * any junk shape) closes the socket from OUR side with the same 4010 the server
+   * would have used, so the two directions of the same failure read identically
+   * in a log.
+   */
+  _checkServerProtocol(v) {
+    const verdict = judgeServerVersion(v);
+    this.serverVersion = verdict.serverVersion;
+    if (verdict.action === 'accept') return true;
+    if (verdict.action === 'accept-legacy') {
+      if (!this._legacyServerLogged) {
+        this._legacyServerLogged = true;
+        console.warn(`[net] room server announced no protocol version — pre-COR-9 relay, continuing (client speaks ${PROTOCOL_VERSION})`);
+      }
+      return true;
+    }
+    this._noteFatal({ code: verdict.code, reason: verdict.reason });
+    try { this.ws?.close(verdict.code, verdict.reason); } catch { /* already closing */ }
+    return false;
+  }
+
   // --- M1.4 fallback election (pre-M1.4 room server) ------------------------
 
   // Remember a peer's fallback claim (ours or a relayed one) and re-resolve.
@@ -381,6 +451,12 @@ export class NetMgr {
     ws.addEventListener('message', (e) => {
       const msg = decode(typeof e.data === 'string' ? e.data : '');
       if (!msg) return;
+      // COR-9: the server states its protocol version in HELLO. An OLD SERVER
+      // talking to a NEW app is the half the server-side JOIN check cannot catch
+      // (it doesn't know the field exists), so the client judges it here — before
+      // acting on the roster, because an incompatible HELLO's contents are
+      // exactly what we must not trust.
+      if (msg.type === MSG.HELLO && !this._checkServerProtocol(msg.v)) return;
       if (msg.type === MSG.SIGNAL) {                                  // WebRTC negotiation
         if (msg.channel === 'video') this.video.handleSignal(msg);   // host↔client game video
         else this.voice.handleSignal(msg);                           // voice mesh (default)
@@ -433,13 +509,22 @@ export class NetMgr {
     // and will migrate the role if we don't come back. Demote ourselves so we
     // can't keep running + publishing as a second host (the exact "two
     // simultaneous hosts" bug), then try to reconnect and reclaim.
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', (ev) => {
       const wasConnected = this._connected;
       this._connected = false;
       // CONNECTION LOST (or our own close, already announced above): the socket
       // is gone, so a 'bye' cannot reach anyone — tear the capture down locally
       // and don't pretend to announce it.
       this.video.stopBroadcast({ announce: false });
+      // COR-9: a PERMANENT refusal (4010 — the server rejected our protocol
+      // major) must break the backoff chain. Every other close is retried, which
+      // is right for a Wi-Fi blip or a server restart (1001) but is a silent
+      // infinite loop against a server that will refuse this build every time.
+      if (isPermanentClose(ev?.code)) {
+        this._noteFatal({ code: ev.code, reason: String(ev.reason || 'incompatible protocol') });
+        this._setHost(null);
+        return;
+      }
       if (!this._closing) {
         this._setHost(null);
         if (wasConnected || this._reconnectTries) this._scheduleReconnect();
@@ -453,7 +538,10 @@ export class NetMgr {
   // are cleared first (the server assigns a NEW peer id on reconnect, so the old
   // roster is meaningless); the shared object state is replayed by the server.
   _scheduleReconnect() {
-    if (this._closing || this._reconnectTimer) return;
+    // `_fatal` is checked here as well as in the close handler on purpose: this
+    // is the only place that re-opens a socket, so the "never retry a permanent
+    // refusal" rule holds even if some future caller reaches it another way.
+    if (this._closing || this._fatal || this._reconnectTimer) return;
     const delay = RECONNECT_DELAYS_MS[Math.min(this._reconnectTries, RECONNECT_DELAYS_MS.length - 1)];
     this._reconnectTries++;
     this._reconnectTimer = setTimeout(() => {
@@ -621,6 +709,15 @@ export class NetMgr {
       // electing among peers (pre-M1.4 relay)?
       serverElects: () => this._serverElects,
       fallbackClaims: () => [...this._fallbackClaims.values()],
+      // COR-9 diagnostics: what we speak, what the server said, and whether we
+      // gave up permanently (a probe that sees `fatal` knows the socket is not
+      // coming back and should not wait for a reconnect that will never happen).
+      // `fatal()` hands out a COPY so a probe cannot mutate client state. All
+      // three are asserted in scripts/test-net.mjs, case 7 of the "Client
+      // reconnect gate" section — delete any of them and that goes red.
+      protocolVersion: () => PROTOCOL_VERSION,
+      serverProtocol: () => this.serverVersion,
+      fatal: () => (this._fatal ? { ...this._fatal } : null),
     };
   }
 }

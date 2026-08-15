@@ -20,10 +20,14 @@
 import { WebSocketServer } from 'ws';
 // Log server: in-process HTTP companion for remote log ingestion + viewing.
 // Import first so it starts listening before any WebSocket connections arrive.
-import './log-server.mjs';
+// The handle is bound (not a bare side-effect import) because the graceful
+// shutdown at the bottom of this file has to close it too — it is an HTTP
+// listener in THIS process, so leaving it open would hold the unit alive past a
+// SIGTERM and hand systemd a timeout kill instead of a clean stop.
+import { logServer } from './log-server.mjs';
 import { randomUUID } from 'node:crypto';
 import { Hub, HUB_LIMITS } from './Hub.js';
-import { decode, encode, MSG } from '../src/net/NetProtocol.js';
+import { decode, encode, MSG, PROTOCOL_VERSION, PROTOCOL_CLOSE_CODE, checkProtocol } from '../src/net/NetProtocol.js';
 
 // ---------------------------------------------------------------------------
 // Crash containment (CLAUDE_REVIEW §4.2 / P0-3).
@@ -127,6 +131,18 @@ const MAX_BUFFERED_TOTAL = envInt('ROOM_MAX_BUFFERED_TOTAL_BYTES', 32 * 1024 * 1
 // exactly the pre-fix "terminate at once" behaviour, and scripts/test-room-limits.mjs
 // uses it as the negative control that proves the grace is what makes 4009 arrive.)
 const BACKPRESSURE_GRACE_MS = envIntZeroOk('ROOM_BACKPRESSURE_GRACE_MS', 2000);
+// How long a SIGTERM/SIGINT drain is given before the process is forced out.
+// systemd restarts this unit on every `npm run deploy-room`, and with no signal
+// handler at all (the state before 2026-08-15, CODEX_REVIEW SEC-6) every headset
+// in every room had its socket destroyed mid-frame and saw a bare 1006 — the same
+// undiagnosable code a Wi-Fi drop produces. Draining with 1001 + a reason instead
+// tells the client this was deliberate and that reconnecting will work.
+//
+// Parsed with envIntZeroOk, not envInt: 0 is a MEANINGFUL setting here — it is
+// exactly the pre-fix behaviour (exit at once, everyone gets 1006), and
+// scripts/test-room-protocol.mjs uses it as the negative control that proves the
+// drain is what makes 1001 arrive. Same idiom as ROOM_BACKPRESSURE_GRACE_MS.
+const SHUTDOWN_GRACE_MS  = envIntZeroOk('ROOM_SHUTDOWN_GRACE_MS', 5000);
 const ROOM_ID_MAX_LEN    = envInt('ROOM_MAX_ROOM_ID_LEN', 40);
 const SID_MAX_LEN        = envInt('ROOM_MAX_SID_LEN', 64);
 const SWEEP_MS           = envInt('ROOM_SWEEP_MS', 60000);
@@ -142,7 +158,10 @@ const ALLOWED_ORIGINS = (process.env.ROOM_ALLOWED_ORIGINS || '')
   .split(',').map((s) => s.trim()).filter(Boolean);
 
 // Application close codes (4000-4999 is the reserved private range).
-const CLOSE = { RATE: 4008, BACKPRESSURE: 4009 };
+// PROTOCOL (4010) comes from NetProtocol rather than being spelled out here: the
+// CLIENT has to recognise it as permanent (its reconnect backoff must not retry
+// it), so the number is part of the shared contract, not a server-local detail.
+const CLOSE = { RATE: 4008, BACKPRESSURE: 4009, PROTOCOL: PROTOCOL_CLOSE_CODE };
 // Ping sweep. Two missed periods terminate a socket, so this is also how fast an
 // UNCLEAN host death (Quest sleeping, Wi-Fi yanked, killed tab) is noticed and the
 // host role migrates. 30s meant up to a minute of clients staring at a frozen
@@ -360,7 +379,31 @@ wss.on('connection', (ws, req) => {
       }
       return;
     }
-    if (msg.type === MSG.JOIN) broadcast(roomId, hub.identify(roomId, peerId, msg).broadcast);
+    if (msg.type === MSG.JOIN) {
+      // --- protocol compatibility handshake (CODEX_REVIEW COR-9) -----------
+      // The app and this server are deployed by SEPARATE commands, so a skewed
+      // pair is the normal state during a rollout. The rule (NetProtocol
+      // checkProtocol) is deliberately asymmetric:
+      //   • NO version   → a client older than this handshake. ACCEPTED — a
+      //     deployed app must never be bricked by deploying a new relay — but
+      //     logged ONCE per socket so an operator can see the skew. (Once per
+      //     socket, not per JOIN: a client that spams JOIN would otherwise spam
+      //     the journal at the full 600 msg/s budget.)
+      //   • different MAJOR → closed with 4010 and a human-readable reason,
+      //     because the alternative is what this fixes: messages the other end
+      //     silently drops, for months, with everything looking healthy.
+      const compat = checkProtocol(msg.v);
+      if (compat.verdict === 'incompatible') {
+        console.log(`[room-server] x closing ${peerId.slice(0, 8)} in "${roomId}": ${compat.reason}`);
+        ws.close(CLOSE.PROTOCOL, compat.reason);
+        return;
+      }
+      if (compat.verdict === 'legacy' && !ws._legacyLogged) {
+        ws._legacyLogged = true;
+        console.log(`[room-server] ! ${peerId.slice(0, 8)} in "${roomId}" announced no protocol version — pre-COR-9 client, accepted (server speaks ${PROTOCOL_VERSION})`);
+      }
+      broadcast(roomId, hub.identify(roomId, peerId, msg).broadcast);
+    }
     else if (msg.type === MSG.POSE) broadcast(roomId, hub.pose(roomId, peerId, msg).broadcast);
     else if (msg.type === MSG.SIGNAL) {
       const { direct } = hub.signal(roomId, peerId, msg);
@@ -449,7 +492,72 @@ const sweeper = setInterval(() => {
 if (typeof sweeper.unref === 'function') sweeper.unref();
 wss.on('close', () => clearInterval(sweeper));
 
+// ---------------------------------------------------------------------------
+// Graceful shutdown (CODEX_REVIEW SEC-6)
+//
+// Before this there was NO SIGTERM/SIGINT handler at all, so `systemctl restart`
+// — which `npm run deploy-room` does on every server update — killed the process
+// with sockets wide open. Every connected headset saw an abrupt 1006, which is
+// indistinguishable from a Wi-Fi drop or a crash, and (because the peer never
+// sent a close frame) the room kept its ghost for a heartbeat period.
+//
+// The drain, in order:
+//   1. stop the timers, so nothing new is scheduled while we're leaving;
+//   2. wss.close() — stop ACCEPTING, without touching live sockets (`ws` does
+//      not close clients for you);
+//   3. close every live socket with 1001 "going away" + a reason, so the client
+//      knows this was deliberate and its ordinary reconnect backoff applies;
+//   4. close the in-process log server (an HTTP listener with keep-alive
+//      connections that would otherwise hold the event loop open);
+//   5. a forced-exit timer, UNREF'd — it cannot keep the loop alive by itself,
+//      so a clean drain exits early and naturally, but if anything is stuck (a
+//      peer that never answers the close frame — `ws` would wait 30 s for it —
+//      or an open NDJSON write stream in the log server) the process still goes
+//      within SHUTDOWN_GRACE_MS instead of hanging the systemd unit forever.
+//
+// Idempotent: systemd sends SIGTERM and then, if the unit lingers, SIGKILL, but a
+// human hitting Ctrl-C twice (or a SIGINT racing a SIGTERM) must not restart the
+// drain and re-arm a second forced-exit timer.
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) {
+    console.log(`[room-server] ${signal} ignored — already shutting down`);
+    return;
+  }
+  shuttingDown = true;
+  if (SHUTDOWN_GRACE_MS <= 0) {
+    // ROOM_SHUTDOWN_GRACE_MS=0 restores the pre-fix behaviour on purpose: no
+    // drain, every peer gets a bare 1006. It is the negative control in
+    // scripts/test-room-protocol.mjs — the thing that proves the 1001 the other
+    // half of that test observes comes from THIS code and not from `ws` being
+    // polite on its own.
+    console.log(`[room-server] ${signal} — ROOM_SHUTDOWN_GRACE_MS=0, exiting immediately (${wss.clients.size} socket(s) dropped as 1006)`);
+    process.exit(0);
+  }
+  console.log(`[room-server] ${signal} — draining ${wss.clients.size} socket(s) with 1001, ${SHUTDOWN_GRACE_MS}ms before forced exit`);
+  clearInterval(heartbeat);
+  clearInterval(sweeper);
+  for (const t of graceTimers.values()) clearTimeout(t);
+  graceTimers.clear();
+  try { wss.close(); } catch { /* never listened */ }
+  for (const ws of wss.clients) {
+    try { ws.close(1001, 'server restarting'); } catch { /* already gone */ }
+  }
+  try { logServer.closeAllConnections?.(); logServer.close(); } catch { /* never listened */ }
+  const forced = setTimeout(() => {
+    console.error(`[room-server] shutdown grace elapsed with ${wss.clients.size} socket(s) still open — forcing exit`);
+    process.exit(0);
+  }, SHUTDOWN_GRACE_MS);
+  if (typeof forced.unref === 'function') forced.unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
 console.log(`[room-server] listening on :${PORT} (rooms by ?room=, default "lobby")`);
+// Print the protocol version the same way the limits are printed: the whole point
+// of COR-9 is that a version skew must be VISIBLE, and the journal is where an
+// operator looks first after a deploy.
+console.log(`[room-server] protocol ${PROTOCOL_VERSION} (same MAJOR = compatible; mismatch closes with ${CLOSE.PROTOCOL}, no version = legacy client, accepted), shutdown grace ${SHUTDOWN_GRACE_MS}ms`);
 console.log(`[room-server] limits: payload ${MAX_PAYLOAD_BYTES}B, ${MAX_PEERS_PER_ROOM} peers/room, ${MAX_ROOMS} rooms, ${MAX_SOCKETS} sockets, ${MSG_RATE_PER_SEC} msg/s (burst ${MSG_BURST}, kill at ${MAX_RATE_KILLS} drops per ${RATE_WINDOW_MS}ms), buffered ${MAX_BUFFERED_BYTES}B/socket + ${MAX_BUFFERED_TOTAL}B total (grace ${BACKPRESSURE_GRACE_MS}ms), origins: ${ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS.join(' ') : 'any'}`);
 // The aggregate STATE budget is the cap that makes the per-axis ones add up to a
 // number instead of 32 GiB — print it, so a deployment's real ceiling is visible
