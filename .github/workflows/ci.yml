@@ -2,12 +2,21 @@
 #
 # WHAT THIS GATES, AND WHY ONLY THIS
 # ----------------------------------
-# `npm test` is a long `&&` chain of 35 `scripts/test-*.mjs` runners plus three
-# `node --test` files (`npm run test:node`). Every one of them was checked
-# before this workflow was written: none of them import `ws`, `node:net`,
-# `node:http`, `node:dgram`, `node:child_process` or `puppeteer-core`, none of
-# them bind a port, and none of them need a browser. They are pure logic, so
-# they run on a clean hosted runner with nothing else started.
+# `npm test` is `node scripts/run-tests.mjs`: every `scripts/test-*.mjs` that is
+# not a server suite, DISCOVERED from the filesystem, plus three `node --test`
+# files. Every one of them was checked before this workflow was written: none of
+# them import `ws`, `node:net`, `node:http`, `node:dgram`, `node:child_process`
+# or `puppeteer-core`, none of them bind a port, and none of them need a browser.
+# They are pure logic, so they run on a clean hosted runner with nothing else
+# started — and that property is no longer maintained by hand: the runner
+# re-checks those import specifiers on every run and FAILS the tier with
+# MISCLASSIFIED if a logic-tier suite ever grows one (see run-tests.mjs).
+#
+# It used to be a hand-written `&&` chain. That chain both hid failures (`&&`
+# stops at the first one) and silently omitted four suites that existed and were
+# green but that nobody ran. Discovery is the fix for the second problem, and it
+# is why the maintenance rule below is now enforced by code rather than by
+# reading this comment.
 #
 # The whole chain was executed against a tracked-files-only tree (produced with
 # `git archive HEAD`, i.e. exactly what a fresh clone gets) and passed
@@ -30,17 +39,20 @@
 # Adding a vacuously-green browser tier here would be worse than omitting it.
 # See CODEX_REVIEW.md TST-1 for the full tiered plan this is tier 1+2 of.
 #
-# MAINTENANCE RULE: the `app` job runs `npm test`, so anything appended to that
-# chain in package.json lands here automatically. Whatever you add must (a) need
+# MAINTENANCE RULE: the `app` job runs `npm test`, and that tier is discovered,
+# so a new `scripts/test-*.mjs` lands here the moment it exists — nothing to
+# append, and nothing to forget. Whatever you add must (a) need
 # no browser, (b) need no core under public/cores/ and no ROM under
 # public/roms/local/ — both are gitignored and absent on a runner, and (c) bind
 # only ephemeral loopback ports it starts and stops itself, never the fixed dev
 # ports 5173/8787/8788. If a check cannot honour all three, give it its own
 # npm script and its own workflow tier instead of bolting it onto `npm test`.
 #
-# That rule is why the three socket-level suites (test-net-signal, test-log-server,
-# test-room-limits) are NOT in `npm test`: they spawn servers and bind fixed
-# ports. They run in the `server` job below as `npm run test:servers` — tier 3.
+# That rule is why the four socket-level suites (test-net-signal, test-log-server,
+# test-room-limits, test-room-protocol) are NOT in `npm test`: they spawn servers
+# and bind fixed ports. They are listed by name in run-tests.mjs's SERVER_SUITES —
+# the one thing discovery cannot infer — and run in the `server` job below as
+# `npm run test:servers`, tier 3.
 #
 # NODE VERSION: pinned to the exact interpreter this repo is developed and
 # verified on (`node -v` -> v24.7.0). package.json declares

@@ -51,6 +51,15 @@ $env:LAN=1; npm run dev        # then: Remove-Item Env:LAN
 - `npm test` — pure-logic tier: no browser, no server, no ports. This is the CI gate.
 - `npm run test:servers` — spawns the room/log servers on 8891-8897 and drives
   them over real sockets. Kept out of `npm test` on purpose.
+
+Both tiers run through `scripts/run-tests.mjs`, which **discovers** every
+`scripts/test-*.mjs`: writing one is all it takes to be in CI — there is no list
+to append to (four suites were once written, green and never run). The server
+tier is the one explicit list in that file, and a logic-tier suite that imports
+`ws`/`puppeteer`/`node:http`/`node:net`/`node:child_process` fails the run as
+MISCLASSIFIED rather than quietly binding a port on a CI runner. Pass substrings
+to run a subset: `node scripts/run-tests.mjs voice gun`.
+
 - `scripts/probe-*` / `scripts/smoke-*` — need real Chrome and/or a running
   room-server and fetched cores. Opt-in, never in CI.
 
