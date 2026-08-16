@@ -72,8 +72,9 @@ import {
 } from './net/MouseSync.js';
 import {
   makePropStateKey, isPropStateKey, propIdFromStateKey,
-  makePeerPropId, serializePropState, parsePropEntries, diffPropSync,
+  makePeerPropId, parsePropEntries, diffPropSync, diffPropBaseline,
 } from './net/PropSync.js';
+import { propWorldPayload } from './net/PropTransform.js';
 import { loadCollection, parseCollection } from './Collection.js';
 import { resolve as resolveRom, cacheRom, cacheBundle, isBundleMeta, hasBundleCached, restoreBundleFiles, pickLibraryDirectory, fileSystemAccessSupported, resolutionPlan, opfsSupported, isLocalRomMeta, romUrlFor } from './RomResolver.js';
 import {
@@ -571,7 +572,9 @@ window.__testApi = createTestApi({
     // GrabMgr's own release callback: editor snapping + the authoritative
     // `prop:<id>` broadcast + rack persistence. Exactly what a VR release runs.
     editRelease: (object) => grabMgr?.onEditRelease?.(object),
-    serialize: (prop, object) => serializePropState(prop, object),
+    // World-space, exactly like the broadcast path — a driver that serializes a
+    // HELD prop must see the pose peers would get, not the controller-local one.
+    serialize: (prop, object) => _propPayload(prop, object),
     isStatic: (propId) => (_testHooks.staticPropIds ? _testHooks.staticPropIds.has(propId) : null),
     holdKeyFor: (object) => {
       const cableId = object?.userData?.cableId;
@@ -1665,9 +1668,26 @@ function syncVideoCords() {
   }
 }
 
+// The ONE way to build a `prop:` payload. Reads the object's WORLD transform,
+// which is what every peer's copy of the prop is expressed in — a synced prop is
+// a direct child of the scene root everywhere, so at rest world == local and
+// this is identical to what the old inline serializePropState(prop, obj) calls
+// produced. It differs in exactly the case that was broken: a prop currently in
+// somebody's hand is parented onto the CONTROLLER, so its local transform is a
+// few centimetres from the controller's origin. The live-drag wire (~20 Hz)
+// published that as a room position, which put the prop under the floor for
+// every other peer — and, for a gamepad, the wrong pose only became VISIBLE on
+// release, when GhostGamepadMgr un-hid the real mesh at whatever the last drag
+// packet had left it. Route every payload through here.
+function _propPayload(prop, obj) {
+  return propWorldPayload(prop, obj, { root: scene.scene });
+}
+
 // Broadcast the current position + descriptor of a placed prop to all peers in
 // the session. Called from GrabMgr's onEditRelease (after the editor has snapped
-// the final position) and from addProp (to announce a newly created prop).
+// the final position), from onObjectReleased (a PLAY-mode release — the gamepad
+// path, which never reaches the editor), and from addProp (to announce a newly
+// created prop).
 // No-ops outside a session (net === null) or if the object has no prop descriptor
 // or no id.  The key is `prop:<propId>`; the value is the serialized payload
 // (type, pos, rot, and any type-specific fields like poster texture).
@@ -1678,7 +1698,7 @@ function _broadcastPropMove(obj) {
   if (!net || !obj) return;
   const prop = obj.userData?.roomProp;
   if (!prop || !prop.id) return;
-  const payload = serializePropState(prop, obj);
+  const payload = _propPayload(prop, obj);
   const changed = net.setObjectState(makePropStateKey(prop.id), payload);
   // Sync _knownPropPayloads so diffPropSync doesn't re-process our own echo.
   if (changed) _knownPropPayloads.set(prop.id, payload);
@@ -2895,6 +2915,47 @@ function _publishHostShelf() {
 // Only runs while hosting a session; compares a serialization before sending, so a
 // static room costs one JSON.stringify per interval and zero traffic. Prop MOVES
 // keep riding the finer-grained prop:* deltas — this is about structure.
+//
+// HOST side, the other half: publish a `prop:<id>` BASELINE for everything the
+// host actually has placed. The room snapshot above is the room DESCRIPTOR, and
+// a descriptor carries the positions the room was authored with — not where the
+// host has since put things. Everything that moves a prop outside a networked
+// edit (the room the host arranged solo before anyone joined, a restored local
+// layout, a gamepad seated into a port at boot, a console/TV placed by the rack
+// restore) left no trace in room state at all. That is exactly the reported
+// symptom: a peer joining sees the room as authored, while every move made
+// AFTER it joined arrives correctly — because those, and only those, broadcast a
+// prop: delta.
+//
+// Publishing the whole set as `prop:` keys reuses the receive path that already
+// works (the late-join snapshot replay → _reconcilePropState's full re-scan)
+// rather than inventing a second one. setObjectState is a no-op when the value
+// is unchanged, so this is one pass of cheap serialization per interval and zero
+// traffic once the room is settled. It cannot fight a remote peer's move either:
+// applying one updates _knownPropPayloads, so the next sweep agrees with it.
+function _publishHostPropBaseline() {
+  if (!net || !amRoomHost()) return 0;
+  const current = new Map();
+  const held = new Set();
+  for (const [propId, rec] of _syncedProps) {
+    if (!rec?.prop || !rec.object) continue;
+    // A prop in a hand is skipped, not published: the live-drag wire owns its
+    // pose until it is let go, and _broadcastPropMove owns the final one.
+    if (grabMgr?.isHeld?.(rec.object)) { held.add(propId); continue; }
+    try { current.set(propId, _propPayload(rec.prop, rec.object)); } catch { /* skip */ }
+  }
+  const toPublish = diffPropBaseline({ current, published: _knownPropPayloads, skip: held });
+  let published = 0;
+  for (const { propId, payload } of toPublish) {
+    if (net.setObjectState(makePropStateKey(propId), payload)) {
+      _knownPropPayloads.set(propId, payload);
+      published++;
+    }
+  }
+  if (published) logger?.event?.('mp-prop-baseline', { published, props: _syncedProps.size, held: held.size });
+  return published;
+}
+
 const HOST_ROOM_WATCH_MS = 2000;
 let _lastPublishedRoom = '';
 let _hostRoomWatchAt = 0;
@@ -2902,6 +2963,7 @@ function _syncHostRoomState(nowMs) {
   if (!net || !amRoomHost() || !currentRoom) return;
   if (nowMs - _hostRoomWatchAt < HOST_ROOM_WATCH_MS) return;
   _hostRoomWatchAt = nowMs;
+  _publishHostPropBaseline();
   let snap;
   try { snap = serializeRoom(currentRoom); } catch { return; }
   const sig = JSON.stringify(snap);
@@ -3295,6 +3357,17 @@ async function buildCartridgeWorld() {
         const cableId = obj.userData?.cableId;
         if (net && cableId) net.setObjectState(makeMouseHoldKey(cableId), null);
       }
+      // The authoritative resting pose, for a release in ANY mode. Until this,
+      // only an EDIT-mode release broadcast one (via onEditRelease) — so a
+      // gamepad, light gun or mouse dropped during PLAY left the room's last
+      // word on where it is being the final live-drag packet, which was sent
+      // while the prop was still in a hand. Peers were left holding a pose from
+      // mid-flight (and, before _propPayload, one in controller-local
+      // coordinates — under the floor), while the releaser saw it exactly where
+      // they let go. GrabMgr calls this LAST, after the port-snap/insert
+      // handlers have moved the prop, so this is genuinely the final position.
+      // No-ops for anything without a roomProp descriptor (cartridges, plugs).
+      if (net) _broadcastPropMove(obj);
     },
     // Remote-hold lock: refuse grab of a gamepad, light gun, or mouse currently
     // held by a remote peer. ghostGpMgr/ghostGunMgr/ghostMouseMgr are set up just
@@ -4193,8 +4266,19 @@ async function buildCartridgeWorld() {
 
     // Apply a remote prop payload to a live object (move-only, no snap — the
     // sender already snapped before broadcasting).
+    //
+    // Never onto something OUR hand is holding. A payload is a ROOM pose, but a
+    // held prop is parented to a controller, so writing one into `.position`
+    // teleports it by however far the holder is from the origin — and the next
+    // live-drag packet republishes that. The local hand is authoritative for
+    // what it holds until it lets go; peers get the resting pose from the
+    // release broadcast, which runs after GrabMgr has already re-parented the
+    // prop back to the scene, so this guard cannot swallow it. _applyLiveDrag
+    // has always had this rule; the STATE path needs it too now that the host
+    // baseline republishes every prop, including one a client is dragging.
     function _applyRemotePropTransform(object, payload) {
       if (!object || !payload) return;
+      if (grabMgr?.isHeld?.(object)) return;
       const DEG = Math.PI / 180;
       if (Array.isArray(payload.pos)) {
         object.position.set(
@@ -4374,7 +4458,7 @@ async function buildCartridgeWorld() {
       broadcastMove: (propId) => {
         const rec = _syncedProps.get(propId);
         if (!rec || !net) return false;
-        net.setObjectState(makePropStateKey(propId), serializePropState(rec.prop, rec.object));
+        net.setObjectState(makePropStateKey(propId), _propPayload(rec.prop, rec.object));
         _knownPropPayloads.set(propId, net.getObjectState(makePropStateKey(propId)));
         return true;
       },
@@ -4387,7 +4471,7 @@ async function buildCartridgeWorld() {
         // Move to requested position if supplied.
         if (opts.pos) rec.object.position.set(opts.pos[0] ?? 0, opts.pos[1] ?? 1.5, opts.pos[2] ?? -3.9);
         if (opts.texture) rec.prop.texture = opts.texture;
-        if (net) net.setObjectState(makePropStateKey(prop.id), serializePropState(rec.prop, rec.object));
+        if (net) net.setObjectState(makePropStateKey(prop.id), _propPayload(rec.prop, rec.object));
         _knownPropPayloads.set(prop.id, net?.getObjectState(makePropStateKey(prop.id)));
         return prop.id;
       },
@@ -4598,7 +4682,9 @@ async function buildCartridgeWorld() {
         const prop = o?.userData?.roomProp;
         if (!prop?.id || seen.has(prop.id)) continue;
         seen.add(prop.id);
-        const payload = serializePropState(prop, o);
+        // WORLD transform: `o` is parented to the controller right now (see
+        // _propPayload) — its local one is not a room position.
+        const payload = _propPayload(prop, o);
         const sig = JSON.stringify(payload);
         if (_lastDragSig.get(prop.id) === sig) continue;  // not moving → don't spam
         _lastDragSig.set(prop.id, sig);
@@ -4940,7 +5026,7 @@ function addTvProp() {
   ensureEditMode();
   setStatus('added TV — grab to place; patch a console into it to show a game');
   if (net) {
-    _knownPropPayloads.set(prop.id, serializePropState(prop, r.object));
+    _knownPropPayloads.set(prop.id, _propPayload(prop, r.object));
     _broadcastPropMove(r.object);
   }
   return prop;

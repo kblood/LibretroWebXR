@@ -82,21 +82,41 @@ export function makePeerPropId(selfId, counter) {
  *
  * `roundTo` rounds coordinates to the given decimal places (3 = millimetre
  * precision, plenty for room layout). Non-finite values become 0.
+ *
+ * `transform` overrides where the pose is read from. It is duck-typed exactly
+ * like an Object3D — `{ position: {x,y,z}, rotation: {x,y,z} }`, rotation in
+ * radians — and callers pass the object's WORLD transform through it.
+ *
+ * Why that matters: a prop being carried is re-parented onto the holder's
+ * controller (GrabMgr._finalizeAttach → ctrl.attach), so while it is held
+ * `object.position` is a few centimetres from the CONTROLLER's origin, not a
+ * room position at all. The live-drag wire serializes this payload ~20 Hz while
+ * a prop is held, and the receiver applies it to its own scene-parented copy —
+ * so a held prop was published to every peer as "6 cm in front of the world
+ * origin", i.e. under the floor. At rest a synced prop is a direct child of the
+ * scene root, where world == local, so supplying the world transform changes
+ * nothing for the release/STATE path and only fixes the in-flight one.
+ *
+ * This module stays THREE-free (see the header), which is why the world
+ * transform is computed by the caller rather than read off `object.matrixWorld`
+ * here. main.js funnels every call through its own `_propPayload` helper so no
+ * call site can forget.
  */
-export function serializePropState(prop, object, { roundTo = 3 } = {}) {
+export function serializePropState(prop, object, { roundTo = 3, transform = null } = {}) {
   const f = 10 ** roundTo;
   const r = (n) => (Number.isFinite(n) ? Math.round(n * f) / f + 0 : 0);
   const RAD2DEG = 180 / Math.PI;
+  const src = transform || object;
 
   const pos = [
-    r(object.position.x),
-    r(object.position.y),
-    r(object.position.z),
+    r(src.position.x),
+    r(src.position.y),
+    r(src.position.z),
   ];
   const rot = [
-    r(object.rotation.x * RAD2DEG),
-    r(object.rotation.y * RAD2DEG),
-    r(object.rotation.z * RAD2DEG),
+    r(src.rotation.x * RAD2DEG),
+    r(src.rotation.y * RAD2DEG),
+    r(src.rotation.z * RAD2DEG),
   ];
 
   const payload = { type: prop.type, pos, rot };
@@ -141,6 +161,42 @@ export function parsePropEntries(entries) {
     if (propId) result.push({ propId, payload: value });
   }
   return result;
+}
+
+/**
+ * HOST side: which of our placed props does room state not know about yet?
+ *
+ * The room snapshot (`room` STATE) is the room DESCRIPTOR, and a descriptor
+ * carries the positions the room was AUTHORED with — not where the host has
+ * since put things. Everything that moves a prop outside a networked edit (the
+ * layout the host arranged solo before anyone joined, a restored local layout, a
+ * gamepad seated into its port at boot, a console placed by the rack restore)
+ * therefore left no trace in room state at all, and a joining peer built the
+ * room as authored. Moves made AFTER it joined arrived correctly, because those
+ * — and only those — broadcast a `prop:` delta. That asymmetry is the "the room
+ * doesn't sync when a player joins" report.
+ *
+ * The fix is a baseline: publish a `prop:` entry for every prop the host has
+ * placed, so the state the server replays to a late joiner describes the room as
+ * it actually IS. This computes what that costs — only the entries that differ
+ * from what room state already holds, so a settled room publishes nothing.
+ *
+ * @param {Map|Iterable} current    propId → the payload the prop has RIGHT NOW
+ * @param {Map|Iterable} published  propId → the payload room state already holds
+ * @param {Set} [skip]              propIds to leave alone (a prop in a hand: the
+ *                                  live-drag wire owns its pose until release)
+ * @returns {Array<{propId: string, payload: object}>} entries to publish
+ */
+export function diffPropBaseline({ current, published, skip = new Set() }) {
+  const have = published instanceof Map ? published : new Map(published);
+  const now = current instanceof Map ? current : new Map(current);
+  const out = [];
+  for (const [propId, payload] of now) {
+    if (!payload || skip.has(propId)) continue;
+    if (JSON.stringify(have.get(propId)) === JSON.stringify(payload)) continue;
+    out.push({ propId, payload });
+  }
+  return out;
 }
 
 /**
