@@ -132,23 +132,54 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
     branchToken(consoleId) { return byConsole.get(consoleId)?.token ?? null; },
 
     /**
+     * Unregister `consoleId`'s branch WITHOUT tearing it down: it keeps playing
+     * (its sink is still connected to the panner) but the console id is free, so
+     * a replacement core booting into the same console registers its own branch
+     * instead of inheriting this one.
+     *
+     * This is the boot-attempt window (PERF-2). A cross-core swap boots the
+     * replacement BEFORE retiring the incumbent, and that boot can fail — at
+     * which point the incumbent is still the console's running game and must
+     * still be audible. Hand the returned branch to reattachBranch() to undo.
+     * @returns {object|null} the detached branch, or null if there wasn't one.
+     */
+    detachBranch(consoleId) {
+      const branch = byConsole.get(consoleId);
+      if (!branch) return null;
+      byConsole.delete(consoleId);
+      return branch;
+    },
+
+    /** Undo detachBranch() — re-register `branch` for its console. */
+    reattachBranch(branch) {
+      if (!branch || branch.consoleId == null) return false;
+      if (!branches.includes(branch)) return false;      // already torn down
+      byConsole.set(branch.consoleId, branch);
+      branch.sink.gain.value = gainFor(branch.consoleId);
+      return true;
+    },
+
+    /**
      * Drop a console's audio branch and disconnect its nodes (COR-5: branches
      * were append-only, so every core swap left a dead GainNode + PositionalAudio
      * — and its netplay tap — connected to the one shared AudioContext for the
      * rest of the session).
      *
-     * `token` guards against removing a SUCCESSOR's branch: pass the token you
-     * were given when your branch was made and the call is a no-op once the
-     * console has been re-registered by someone else. Omit it to remove whatever
-     * is registered (what a deliberate replacement does before booting).
+     * `token` identifies the exact branch to remove, and is looked up across ALL
+     * branches — not just the one currently registered for `consoleId`. That
+     * matters both ways round: a retired runtime whose successor has already
+     * claimed the console id still tears down its OWN branch (the successor's is
+     * untouched), and a branch detached by detachBranch() is still reachable.
+     * Omit the token to remove whatever is registered for the console.
      *
      * @returns {boolean} whether a branch was actually removed.
      */
     removeBranch(consoleId, token = null) {
-      const branch = byConsole.get(consoleId);
+      const registered = byConsole.get(consoleId) || null;
+      const branch = token == null ? registered : branches.find((b) => b.token === token) || null;
       if (!branch) return false;
-      if (token != null && branch.token !== token) return false;
-      byConsole.delete(consoleId);
+      if (token != null && branch.consoleId !== consoleId) return false;
+      if (registered === branch) byConsole.delete(consoleId);
       const i = branches.indexOf(branch);
       if (i >= 0) branches.splice(i, 1);
       // Disconnect outward-first: the tap and the panner both hang off `sink`,
@@ -158,7 +189,10 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
       try { branch.positional.disconnect?.(); } catch (_) {}
       try { branch.positional.parent?.remove(branch.positional); } catch (_) {}
       branch.netTap = null;
-      poweredOff.delete(consoleId);
+      // Only forget the power state when the console genuinely has no branch
+      // left — tearing down a RETIRED branch must not un-mute a console its
+      // successor is still holding powered off.
+      if (!byConsole.has(consoleId)) poweredOff.delete(consoleId);
       return true;
     },
 
@@ -177,8 +211,17 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
     // off the main thread (e.g. the PSX worker runtime) and so can't rely on
     // the AudioContext-stub trick above, which only intercepts a same-thread
     // `new AudioContext()` call.
-    pushSamples(consoleId, { samples, format = 'f32', channels = 2, sampleRate = 48000 } = {}) {
-      const branch = byConsole.get(consoleId);
+    //
+    // `token` addresses the pusher's OWN branch rather than whatever is
+    // registered for the console. A runtime that has been detached (its console
+    // id handed to a replacement that is still booting) keeps playing into its
+    // own branch instead of falling silent, and a retired-but-not-yet-disposed
+    // core can never push into its successor's branch. Callers without a token
+    // (a core that has only just registered) get the console's branch.
+    pushSamples(consoleId, { samples, format = 'f32', channels = 2, sampleRate = 48000 } = {}, token = null) {
+      const branch = token != null
+        ? branches.find((b) => b.token === token)
+        : byConsole.get(consoleId);
       if (!branch || !(samples instanceof ArrayBuffer) || !Number.isInteger(channels) || channels < 1) return;
       const source = format === 's16' ? new Int16Array(samples) : new Float32Array(samples);
       const frameCount = Math.floor(source.length / channels);

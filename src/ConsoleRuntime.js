@@ -107,7 +107,10 @@ export class ConsoleRuntime {
       this.client = new RuntimeEmulatorClient();
     }
     if (this._audio && typeof this.client?.addEventListener === 'function') {
-      this.client.addEventListener('audio', (event) => this._audio.pushSamples(this.id, event.detail));
+      // Pass this runtime's own branch token: once it has one, its PCM goes to
+      // ITS branch, not to whatever currently answers to this console id (see
+      // SpatialAudio.pushSamples).
+      this.client.addEventListener('audio', (event) => this._audio.pushSamples(this.id, event.detail, this._audioToken));
     }
   }
 
@@ -227,12 +230,17 @@ export class ConsoleRuntime {
     // spawn/swap site already follows for main-thread cores); harmless no-op
     // for a main-thread boot (B3, 2026-07-25 review).
     if (options.execution === 'worker') this._audio?.ensureBranch?.(this.id);
-    await this.client.start(this.canvas, romBuffer, options);
-    // Which audio branch is MINE (COR-5). Read after the boot, so it covers both
-    // ways a branch appears: ensureBranch() above for a worker core, and the
-    // AudioContext stub firing during start() for a main-thread one. dispose()
-    // removes only this exact branch, never a successor's.
-    this._audioToken = this._audio?.branchToken?.(this.id) ?? null;
+    try {
+      await this.client.start(this.canvas, romBuffer, options);
+    } finally {
+      // Which audio branch is MINE (COR-5). Read after the boot ATTEMPT, so it
+      // covers both ways a branch appears — ensureBranch() above for a worker
+      // core, and the AudioContext stub firing during start() for a main-thread
+      // one — and covers them even when the boot then THREW: a failed boot that
+      // got as far as creating its branch still has to clean that branch up in
+      // dispose(), and must clean up no other (PERF-2's failed-boot soak).
+      this._audioToken = this._audio?.branchToken?.(this.id) ?? null;
+    }
     this.coreName = core.name;
     this.system = meta.system ?? null;
     this.title = meta.title ?? null;
@@ -268,7 +276,22 @@ export class ConsoleRuntime {
     catch (e) { console.warn('[ConsoleRuntime] canRun threw', e); return true; }
   }
 
-  pause() { try { this.client?.pause?.(); } catch (e) { console.warn('[ConsoleRuntime] pause', e); } }
+  // Both pause() and resume() may return a PROMISE (a worker-execution client
+  // round-trips the request to its worker), and that promise can reject — most
+  // obviously when the worker is already gone, which is exactly the state
+  // dispose() calls pause() in. A bare try/catch does not catch a rejected
+  // promise, so before this every failed boot ended in an uncaught
+  // "execution worker is not running" (PERF-2's failed-boot soak).
+  _settle(what, result) {
+    if (result && typeof result.catch === 'function') {
+      result.catch((e) => console.warn(`[ConsoleRuntime] ${what}`, e));
+    }
+  }
+
+  pause() {
+    try { this._settle('pause', this.client?.pause?.()); }
+    catch (e) { console.warn('[ConsoleRuntime] pause', e); }
+  }
 
   /**
    * Start (or restart) this console's main loop — UNLESS running is currently
@@ -279,10 +302,11 @@ export class ConsoleRuntime {
    */
   resume() {
     if (!this.runAllowed()) {
-      try { this.client?.pause?.(); } catch (_) {}
+      try { this._settle('pause', this.client?.pause?.()); } catch (_) {}
       return false;
     }
-    try { this.client?.resume?.(); } catch (e) { console.warn('[ConsoleRuntime] resume', e); }
+    try { this._settle('resume', this.client?.resume?.()); }
+    catch (e) { console.warn('[ConsoleRuntime] resume', e); }
     return true;
   }
 
@@ -314,10 +338,15 @@ export class ConsoleRuntime {
     if (this._disposed) return this._disposal || Promise.resolve();
     this._disposed = true;
     this.pause();
-    // Only if this branch is still ours — a replacement that already registered
-    // its own branch under this console id must keep it (see SpatialAudio's
-    // removeBranch).
-    try { this._audio?.removeBranch?.(this.id, this._audioToken); } catch (e) { console.warn('[ConsoleRuntime] audio branch', e); }
+    // Remove MY branch, by token — never "whatever is registered for this
+    // console", which by now may be a successor's (see SpatialAudio's
+    // removeBranch). A null token means this runtime never got a branch at all,
+    // and must therefore take none: a runtime whose boot failed before it could
+    // create one would otherwise tear down the audio of the incumbent it failed
+    // to replace.
+    if (this._audioToken != null) {
+      try { this._audio?.removeBranch?.(this.id, this._audioToken); } catch (e) { console.warn('[ConsoleRuntime] audio branch', e); }
+    }
     if (!this.adopted) {
       try { this.canvas?.remove?.(); } catch (_) {}
     }

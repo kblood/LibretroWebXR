@@ -22,7 +22,8 @@
 // reverted):
 //   * as shipped                                       → 14/14, exit 0
 //   * the pre-COR-5 dispose restored (no client.stop(), no branch removal in
-//     ConsoleRuntime.dispose, no pre-boot removeBranch in bootFreshRuntime)
+//     ConsoleRuntime.dispose, no pre-boot branch handover in bootFreshRuntime —
+//     that handover is a detachBranch since PERF-2, see probe-swap-soak.mjs)
 //                                                      → 10/14, with the retired
 //     runtime reporting `oldWorker: true, oldFrameBridge: true, oldReady: true`
 //     while flagged disposed, and the console holding TWO audio branches

@@ -92,6 +92,7 @@
     "probe:amiga-lightgun": "node scripts/probe-amiga-lightgun.mjs",
     "probe:saveram-per-console": "node scripts/probe-saveram-per-console.mjs",
     "probe:runtime-release": "node scripts/probe-runtime-release.mjs",
+    "probe:swap-soak": "node scripts/probe-swap-soak.mjs",
     "test:csp": "node scripts/test-csp.mjs",
     "test:remote-owner": "node scripts/test-remote-owner.mjs",
     "test:session-id": "node scripts/test-session-id.mjs",

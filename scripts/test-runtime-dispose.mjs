@@ -41,6 +41,14 @@ const section = async (name, fn) => {
 };
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+// A rejected lifecycle promise that nobody handles is an uncaught PAGE ERROR in
+// the browser — PERF-2's failed-boot soak surfaced four of them, one per failed
+// boot, all from pausing a client whose worker had already gone. Record them
+// here instead of letting Node abort, and assert at the end that this suite
+// produced none.
+const unhandled = [];
+process.on('unhandledRejection', (reason) => unhandled.push(String(reason?.message || reason)));
+
 // --- fakes ------------------------------------------------------------------
 
 // A Web Audio node that remembers what it is wired to, so a test can ask the
@@ -178,8 +186,9 @@ await section('a retired runtime cannot take its SUCCESSOR\'s audio with it', as
   router.ensureBranch('console1');
   oldRuntime.noteLoaded('psx');
 
-  // …the swap: the old branch is retired, the new core registers its own.
-  router.removeBranch('console1');
+  // …the swap: the incumbent's registration is released (main.js's
+  // bootFreshRuntime) and the new core registers its own branch under the id.
+  router.detachBranch('console1');
   const newRuntime = new ConsoleRuntime({ id: 'console1', document: fakeDocument(), audio: router });
   newRuntime.client = fakeClient();
   router.expect('console1', tv);
@@ -234,6 +243,146 @@ await section('a removed branch stops consuming pushed audio', async () => {
   router.removeBranch('console1');
   router.pushSamples('console1', { samples });
   eq(branch.started, 1, 'audio pushed to a REMOVED console is dropped, not scheduled into a dead node');
+});
+
+// === B2. the boot-attempt window (PERF-2) ==================================
+// A cross-core swap boots the replacement BEFORE retiring the incumbent, so
+// there is a window in which the incumbent is still the console's running game
+// while its console id has been handed to a boot that may yet fail. Everything
+// here is about that window; the failed-boot soak
+// (scripts/probe-swap-soak.mjs) is the same claims in a real browser.
+
+// Give a router's context the two calls pushSamples makes, and report where
+// audio actually landed by counting starts per branch.
+function withPushablePlumbing(router) {
+  router.context.createBuffer = (channels, frames) => ({
+    duration: frames / 48000, getChannelData: () => new Float32Array(frames),
+  });
+  let current = null;
+  router.context.createBufferSource = () => Object.assign(fakeNode('bufferSource'), {
+    buffer: null, start() { if (current) current.started = (current.started || 0) + 1; },
+  });
+  // → true when the push actually reached `branch` and scheduled a buffer on it.
+  return (branch, consoleId, token = null) => {
+    const before = branch.started || 0;
+    current = branch;
+    router.pushSamples(consoleId, { samples: new Float32Array([0.1, 0.1]).buffer }, token);
+    current = null;
+    return (branch.started || 0) > before;
+  };
+}
+
+await section('a detached branch keeps playing — it is still the console\'s game', async () => {
+  const { router } = spatialAudio();
+  const push = withPushablePlumbing(router);
+  router.expect('console1', new THREE.Object3D());
+  const incumbent = router.ensureBranch('console1');
+
+  const detached = router.detachBranch('console1');
+  ok(detached === incumbent, 'detachBranch hands back the branch it unregistered');
+  ok(router.branchToken('console1') === null, 'the console id is free for the replacement');
+  ok(router.branches.includes(incumbent), 'but the branch itself is still in the graph');
+  ok(push(incumbent, 'console1', incumbent.token) === true, 'and audio addressed BY TOKEN still reaches it');
+  // NEGATIVE CONTROL: addressed by console id alone — the pre-token lookup —
+  // nothing is registered, so the incumbent would go silent for the whole boot.
+  ok(push(incumbent, 'console1', null) === false, 'while a console-id lookup finds nothing to play into');
+
+  ok(router.reattachBranch(detached) === true, 'reattachBranch restores the registration');
+  ok(router.branchToken('console1') === incumbent.token, 'and the console answers to it again');
+});
+
+await section('a FAILED replacement gives the incumbent its audio back', async () => {
+  // main.js's bootFreshRuntime, step for step, with a core that throws on boot.
+  const { router } = spatialAudio();
+  const tv = new THREE.Object3D();
+  const incumbentRt = new ConsoleRuntime({ id: 'console1', document: fakeDocument(), audio: router });
+  incumbentRt.client = fakeClient();
+  router.expect('console1', tv);
+  const incumbent = router.ensureBranch('console1');
+  incumbentRt.noteLoaded('mupen64plus_next');
+
+  const outgoing = router.detachBranch('console1');
+  const next = new ConsoleRuntime({ id: 'console1', document: fakeDocument(), audio: router });
+  next.client = { ...fakeClient(), start: () => Promise.reject(new Error('core died on boot')) };
+  router.expect('console1', tv);
+  let threw = null;
+  try {
+    await next.load(new ArrayBuffer(4), { name: 'fceumm', url: 'x', style: 'module' }, { execution: 'worker' });
+  } catch (e) { threw = e; }
+  ok(!!threw, 'the boot failed, as arranged');
+  ok(next._audioToken != null, 'the half-booted runtime still knows which branch IT created');
+  ok(next._audioToken !== incumbent.token, 'and it is not the incumbent\'s');
+
+  router.reattachBranch(outgoing);
+  await next.dispose();
+
+  eq(router.branches.length, 1, 'exactly one branch survives the failed swap');
+  ok(router.branchToken('console1') === incumbent.token, 'and it is the INCUMBENT\'s — the console is still audible');
+  ok(incumbent.sink.outputs.length > 0, 'its sink is still wired into the graph');
+
+  // NEGATIVE CONTROL: dispose the failed runtime WITHOUT handing the
+  // registration back first — the shipped order before this fix — and the
+  // running console loses its audio for the rest of the session.
+  const control = spatialAudio().router;
+  control.expect('console1', tv);
+  const keep = control.ensureBranch('console1');
+  control.detachBranch('console1');
+  const bad = new ConsoleRuntime({ id: 'console1', document: fakeDocument(), audio: control });
+  bad.client = { ...fakeClient(), start: () => Promise.reject(new Error('boom')) };
+  control.expect('console1', tv);
+  await bad.load(new ArrayBuffer(4), { name: 'fceumm', url: 'x', style: 'module' }, { execution: 'worker' }).catch(() => {});
+  await bad.dispose();
+  control.removeBranch('console1');          // the untokened removal that shipped
+  ok(!control.branches.includes(keep) || control.branchToken('console1') === null,
+    'without the hand-back the console ends up with no registered branch');
+});
+
+await section('a runtime that never got a branch takes none with it', async () => {
+  // dispose() used to pass its token through unconditionally, and a null token
+  // meant "remove whatever is registered" — so a boot that failed before it
+  // could create a branch would tear down the incumbent it failed to replace.
+  const { router } = spatialAudio();
+  router.expect('console1', new THREE.Object3D());
+  const incumbent = router.ensureBranch('console1');
+
+  const neverBooted = new ConsoleRuntime({ id: 'console1', document: fakeDocument(), audio: router });
+  neverBooted.client = fakeClient();
+  ok(neverBooted._audioToken === null, 'it has no branch token');
+  await neverBooted.dispose();
+  eq(router.branches.length, 1, 'the incumbent\'s branch is untouched');
+  ok(router.branchToken('console1') === incumbent.token, 'and still registered to the incumbent');
+});
+
+await section('removeBranch by token reaches a branch the console no longer answers to', async () => {
+  const { router } = spatialAudio();
+  const tv = new THREE.Object3D();
+  router.expect('console1', tv);
+  const oldBranch = router.ensureBranch('console1');
+  router.detachBranch('console1');
+  router.expect('console1', tv);
+  const newBranch = router.ensureBranch('console1');
+
+  ok(router.removeBranch('console1', oldBranch.token) === true, 'the detached branch is still removable by token');
+  eq(router.branches.length, 1, 'only it was removed');
+  ok(router.branchToken('console1') === newBranch.token, 'the live branch is still registered');
+  eq(oldBranch.sink.outputs.length, 0, 'and the removed one is unwired');
+  ok(router.removeBranch('console1', oldBranch.token) === false, 'removing it twice is a no-op');
+});
+
+await section('retiring a branch does not un-mute a console its successor keeps powered off', async () => {
+  const { router } = spatialAudio();
+  const tv = new THREE.Object3D();
+  router.expect('console1', tv);
+  const oldBranch = router.ensureBranch('console1');
+  router.detachBranch('console1');
+  router.expect('console1', tv);
+  const live = router.ensureBranch('console1');
+  router.setPower('console1', false);
+  eq(live.sink.gain.value, 0, 'the powered-off console is silent');
+
+  router.removeBranch('console1', oldBranch.token);
+  router.setFocus(null);                       // any gain re-application
+  eq(live.sink.gain.value, 0, 'and stays silent after the RETIRED branch is torn down');
 });
 
 // === C. WorkerEmulatorClient teardown ======================================
@@ -347,7 +496,33 @@ await section('a dead WORKER is torn down; a core-reported error is not', async 
   ok(client2.worker !== null, 'and the client can still be used');
 });
 
+await section('pausing a client whose worker is already gone is not an error', async () => {
+  const WorkerClass = fakeWorkerClass();
+  const client = await startClient(WorkerClass);
+  await client.stop();
+  let rejected = null;
+  await client.pause().catch((e) => { rejected = e; });
+  ok(rejected === null, 'pause() on a stopped client resolves — nothing is running, so it is already paused');
+  ok(client.paused === true, 'and it still reports itself paused');
+
+  // ConsoleRuntime.dispose() pauses on its way to stopping and does NOT await
+  // what it gets back, so a rejection there escapes entirely. Anything a client
+  // returns from pause() has to be settled for it.
+  const rt = new ConsoleRuntime({ id: 'console1', document: fakeDocument() });
+  rt.client = {
+    paused: false,
+    pause: () => Promise.reject(new Error('execution worker is not running')),
+    stop: () => Promise.resolve(),
+  };
+  await rt.dispose();
+  await tick();
+});
+
 globalThis.OffscreenCanvas = OFFSCREEN;
+
+// unhandledRejection lands on a later macrotask than the code that caused it.
+await new Promise((r) => setTimeout(r, 50));
+ok(unhandled.length === 0, `an unhandled rejection escaped this suite: ${JSON.stringify(unhandled)}`);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

@@ -112,6 +112,12 @@ export class WorkerEmulatorClient extends EventTarget {
 
   pause() {
     this.paused = true;
+    // No worker means nothing is running, so "pause" is already true — report
+    // success rather than rejecting. dispose() pauses on its way to stopping a
+    // client that may already have torn its worker down (a failed start, a
+    // worker that died), and a rejection there is an uncaught error, not
+    // information anyone can act on.
+    if (!this.worker) return Promise.resolve();
     return this._request('pause');
   }
 

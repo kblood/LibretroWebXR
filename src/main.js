@@ -3592,6 +3592,18 @@ async function buildCartridgeWorld() {
     // bytes — see that file's header). Debug surface only; app code should go
     // through rackMgr.
     runtime: (id) => rackMgr.get(id) || null,
+    // PERF-2: the page-level resource counters a swap must not grow. Consoles
+    // come and go, but the number of canvases, audio branches and live runtimes
+    // must track the number of consoles that EXIST — not the number of boots the
+    // session has done. scripts/probe-swap-soak.mjs asserts exactly that across
+    // repeated swaps and repeated FAILED swaps.
+    resources: () => ({
+      runtimes: rackMgr.count(),
+      canvases: document.querySelectorAll('canvas').length,
+      audioBranches: audioRouter.branches.length,
+      tvs: scene._tvs.length,
+      heapBytes: performance?.memory?.usedJSHeapSize ?? null,
+    }),
     // M1.4 ground truth for "one room, one game": may this machine run ANY local
     // core? false on a display-only client, and then EVERY entry of live() must
     // read live:false. This is the assertion headless smokes should make — the
@@ -7189,13 +7201,15 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
   await saveRam.flush(consoleId, 'runtime-replaced');
 
   const next = new ConsoleRuntime({ id: consoleId, audio: audioRouter });
-  // Retire the OUTGOING core's audio branch before the new one registers its own
-  // (COR-5). Branches are keyed by console id and were append-only: without this
-  // the replacement's ensureBranch() would simply hand back the dead core's
-  // branch, and the retired runtime's dispose() — which now removes only the
-  // branch it owns — would have nothing to remove. Cost: this console is silent
-  // for the length of the boot, which it very nearly was anyway.
-  audioRouter.removeBranch?.(consoleId);
+  // Free the console id on the audio router — but only the REGISTRATION, not the
+  // outgoing branch itself. Branches are keyed by console id, so without this the
+  // replacement's ensureBranch() would simply hand back the incumbent's branch
+  // and the two runtimes would fight over one token. Detaching (rather than
+  // removing, as this first did) keeps the incumbent audible: it is still the
+  // console's running game until the new core actually boots, and if that boot
+  // FAILS the branch is handed straight back (PERF-2's failed-boot soak found a
+  // console left permanently silent by a swap that never happened).
+  const outgoingBranch = audioRouter.detachBranch?.(consoleId) ?? null;
   if (tvGroup) audioRouter.expect(consoleId, tvGroup);
   try {
     await next.load(romBuffer, core, {
@@ -7217,10 +7231,13 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
     // worker/canvas/audio branch it already allocated are unreachable from
     // anywhere else — `next` was never added to the rack. The OLD runtime is
     // still installed and still owns the console, so this throws on to the
-    // caller with the console intact rather than half-swapped — except for its
-    // audio, which was already handed over above and cannot be handed back (a
-    // main-thread core's output is bound to the branch it booted with).
+    // caller with the console fully intact rather than half-swapped: give it its
+    // audio registration back FIRST, then dispose the failed runtime — which
+    // removes only the branch IT created (by token), never the one just handed
+    // back. Order matters; reversed, dispose() would find the incumbent
+    // registered and the console would end up silent.
     logger?.event?.('runtime-boot-failed', { consoleId, core: core?.name, error: String(e?.message || e) });
+    audioRouter.reattachBranch?.(outgoingBranch);
     try { await next.dispose(); } catch (_) {}
     throw e;
   }
