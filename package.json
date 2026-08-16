@@ -90,13 +90,15 @@
     "probe:pong-boot": "node scripts/probe-pong-boot.mjs",
     "probe:repatch": "node scripts/probe-repatch.mjs",
     "probe:amiga-lightgun": "node scripts/probe-amiga-lightgun.mjs",
+    "probe:saveram-per-console": "node scripts/probe-saveram-per-console.mjs",
     "test:csp": "node scripts/test-csp.mjs",
     "test:remote-owner": "node scripts/test-remote-owner.mjs",
     "test:session-id": "node scripts/test-session-id.mjs",
     "test:voice-recovery": "node scripts/test-voice-recovery.mjs",
     "test:room-protocol": "node scripts/test-room-protocol.mjs",
     "smoke-rejoin": "node scripts/smoke-rejoin.mjs",
-    "test:session-lifecycle": "node scripts/test-session-lifecycle.mjs"
+    "test:session-lifecycle": "node scripts/test-session-lifecycle.mjs",
+    "test:saveram-guard": "node scripts/test-saveram-guard.mjs"
   },
   "engines": {
     "node": ">=22.12.0"

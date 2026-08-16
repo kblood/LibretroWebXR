@@ -11,6 +11,7 @@ import { EmulatorClient } from './EmulatorClient.js';
 import { RuntimeEmulatorClient } from './RuntimeEmulatorClient.js';
 import { FirmwareStore } from './FirmwareStore.js';
 import { SaveRamStore } from './SaveRamStore.js';
+import { createSaveRamGuard } from './SaveRamGuard.js';
 import { InputMgr } from './InputMgr.js';
 import { Bindings } from './Bindings.js';
 import { DesktopGamepad } from './DesktopGamepad.js';
@@ -154,6 +155,12 @@ let client = new RuntimeEmulatorClient();
 // wrappers; nothing here is uploaded anywhere.
 const firmwareStore = new FirmwareStore();
 const saveRamStore = new SaveRamStore();
+// COR-6: SaveRAM belongs to a RUNTIME, not to the primary console. The guard
+// tracks each booted console's own save identity (the core that actually booted
+// + the content hash) and writes it on the timer, on the way out of the page, and
+// before any runtime is replaced or removed. Before it, only console0 ever wrote
+// a card — every rack console restored its save at boot and never saved again.
+const saveRam = createSaveRamGuard({ store: saveRamStore, logger });
 // Desktop controller-binding model ([[src/Bindings.js]]): keyboard + PC-gamepad
 // remapping for the emulated RetroPad. Managed for all four couch-co-op players
 // so the historical P2-4 keyboard forwarding keeps working (defaults reproduce
@@ -1420,7 +1427,15 @@ const cableAdapter = {
 // core the first time anything re-ran the perf budget (the in-world Auto-pause
 // toggle, or just gazing at a second TV), putting the watcher back to emulating
 // its own copy of the game behind the host's video feed.
-const rackMgr = new RackMgr({ logger, allowRun: mayRunLocalCore });
+// beforeRemove: the LAST chance to persist a console's SaveRAM (COR-6). Every
+// deliberate replacement flushes explicitly before it boots the new core, so this
+// is the backstop for teardown paths that just drop a runtime — it flushes and
+// then forgets the console, generation-guarded so it can't unhook the runtime
+// that replaced it (see SaveRamGuard.retire).
+const rackMgr = new RackMgr({
+  logger, allowRun: mayRunLocalCore,
+  beforeRemove: (runtime) => { saveRam.retire(runtime.id, 'runtime-removed'); },
+});
 const primaryRuntime = new ConsoleRuntime({ id: CONSOLE_ID, adopt: { client, canvas: emuCanvas }, audio: audioRouter });
 rackMgr.add(primaryRuntime);
 rackMgr.setFocus(CONSOLE_ID);
@@ -1923,6 +1938,10 @@ async function spawnConsole(system, opts = {}) {
     firmware: spawnStart.firmware, restoredSaves: spawnStart.restoredSaves,
   });
   rackMgr.add(runtime);
+  // COR-6: a spawned console persists its OWN card from now on. This is the
+  // console class that never saved at all before — it restored its SaveRAM here
+  // at boot and then had no path that ever wrote one back.
+  trackConsoleSaveRam(consoleId, spawnDev.coreName, spawnContent, meta);
   // FIX B: record this console's system so connectKeyboardTo() can pick the
   // correct layout (c64/standard) when the keyboard is plugged into a secondary
   // console. Without this, _consoleSystems has no entry for consoleN and the
@@ -3567,6 +3586,12 @@ async function buildCartridgeWorld() {
     saved: () => loadRack(),
     autoPause: (on) => { if (on !== undefined) { rackMgr.setBudgetEnabled(on); saveAutoPause(on); rackMgr.applyBudget(); refreshAudioFocus(); } return rackMgr.isBudgetEnabled(); },
     live: () => rackMgr.runtimes().map((r) => ({ id: r.id, core: r.coreName, live: r.isLive() })),
+    // The ConsoleRuntime itself, for probes that need to reach a specific
+    // console's client (scripts/probe-saveram-per-console.mjs stubs its
+    // flushSaveRam, because no core we can boot headless yields real SaveRAM
+    // bytes — see that file's header). Debug surface only; app code should go
+    // through rackMgr.
+    runtime: (id) => rackMgr.get(id) || null,
     // M1.4 ground truth for "one room, one game": may this machine run ANY local
     // core? false on a display-only client, and then EVERY entry of live() must
     // read live:false. This is the assertion headless smokes should make — the
@@ -6520,6 +6545,28 @@ function regionHintFromMeta(meta) {
 }
 
 /**
+ * Register (or re-register) one console's native SaveRAM identity with the guard
+ * (COR-6). Called from EVERY boot path — primary, spawn, hot swap, fresh runtime
+ * — so "which console just booted what" is answered in one place instead of by a
+ * pair of module-level variables that only ever described console0.
+ *
+ * `coreName` must be the core that actually BOOTED (a gun boot may run a
+ * different core than meta.core); `content` is the wrapped ContentBundle whose
+ * contentId keys the card. Both a main-thread core (no contentId) and a game
+ * with no battery RAM simply end up untracked / flushing nothing.
+ */
+function trackConsoleSaveRam(consoleId, coreName, content, meta = {}) {
+  saveRam.track(consoleId, {
+    // Resolved at flush time, through the rack — see SaveRamGuard's note on why
+    // a captured client is a bug waiting for the next live reboot.
+    client: () => rackMgr.get(consoleId)?.client,
+    coreId: coreName,
+    contentId: content?.contentId ?? null,
+    entryPath: meta?.file ?? null,
+  });
+}
+
+/**
  * Build the options object for client.start() / ConsoleRuntime.load(), given a
  * resolved core + boot meta + already-prepared content. `meta` carries the
  * per-boot overrides callers have already computed (coreOptions/inputDevices/
@@ -6569,6 +6616,13 @@ async function buildStartOptions(coreInfo, meta = {}, content = null) {
     else setStatus(`${coreInfo.label} needs a BIOS — use "Import BIOS" first, then pick the game again`);
   }
   if (content?.contentId) {
+    // NEVER read a restore record while a live core still owns unflushed bytes
+    // for it (COR-6). This is the one place a save is read back, so it is the
+    // right place to make that invariant true: a console booting the game
+    // another (or this) runtime is currently playing would otherwise restore a
+    // record up to 30s stale and roll the player's progress back. Cheap — the
+    // guard skips consoles whose bytes are unchanged since their last write.
+    await saveRam.flushAll('pre-restore');
     const saved = await saveRamStore.load({ coreId: coreInfo.name, contentId: content.contentId }).catch(() => null);
     if (saved?.data) options.restoredSaves = { data: saved.data, slot: 1 };
   }
@@ -7014,8 +7068,13 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
         firmware: intoStart.firmware, restoredSaves: intoStart.restoredSaves,
       });
     } else {
+      // Same-core hot swap: this console stops owning the previous game's card
+      // the moment the new content is in, so write it out first (COR-6). The
+      // fresh-runtime branch above does its own flush inside bootFreshRuntime.
+      await saveRam.flush(consoleId, 'content-swap');
       await runtime.load(intoContent, intoCoreInfo, intoMeta);
     }
+    trackConsoleSaveRam(consoleId, coreName, intoContent, meta);
     // Repaint via the patch graph (idempotent) so this console's TV samples its
     // canvas and no other TV is touched — the fix for "game showed on both screens".
     // Loading into a console implies it's on — keep power state + switch in sync.
@@ -7123,6 +7182,12 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
 
   // Boot the new core first (TV keeps showing the old canvas until it's ready),
   // then atomically retire the old runtime and install the new one under this id.
+  // COR-6: the outgoing runtime is about to stop being the owner of its card —
+  // and unlike a page unload there is no event to catch it, so write it here,
+  // before the replacement boots. (rackMgr's beforeRemove hook below is the
+  // backstop; by then the retired core is already about to be paused.)
+  await saveRam.flush(consoleId, 'runtime-replaced');
+
   const next = new ConsoleRuntime({ id: consoleId, audio: audioRouter });
   if (tvGroup) audioRouter.expect(consoleId, tvGroup);
   await next.load(romBuffer, core, {
@@ -7141,6 +7206,11 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
   });
   rackMgr.remove(consoleId);   // dispose old (pause + detach its canvas)
   rackMgr.add(next);
+  // Re-key this console's SaveRAM onto what it now runs. AFTER remove(), whose
+  // beforeRemove hook retires the OLD identity — retire is generation-guarded, so
+  // ordering it the other way would still be safe, but this way the window in
+  // which the console has no tracked identity is a single statement long.
+  trackConsoleSaveRam(consoleId, core.name, romBuffer, meta);
 
   // Re-point video + controller ports for the new system. Re-adding the console to
   // the patch graph only updates its port count (it keeps the existing TV edge),
@@ -7201,6 +7271,14 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
 // canvas, so a double call is inert rather than harmful.
 async function bootOnPrimary(meta, bootCore, content, startOptions, { publishTv = true } = {}) {
   const booted = await _bootOnPrimaryCore(meta, bootCore, content, startOptions);
+  // COR-6: whatever this console is now running is what its SaveRAM writes must
+  // be keyed on — `bootCore.name`, NOT meta.core. They differ for a light-gun
+  // boot (SMS → genesis_plus_gx), and the restore path (buildStartOptions) keys
+  // on the boot core, so the old meta.core-keyed write was filed where nothing
+  // ever read it. The client is resolved LATE, through the rack: a live reboot
+  // replaces the primary's client object, and a captured one would go on
+  // flushing a retired core for ever.
+  trackConsoleSaveRam(CONSOLE_ID, bootCore.name, content, meta);
   if (publishTv) publishTvAndBroadcast(meta);
   return booted;
 }
@@ -8251,28 +8329,34 @@ if (firmwareInput) {
 
 // Native SaveRAM flush: worker-mode cores expose the emulated cart's SaveRAM
 // bytes via readSaveRam/flushSaveRam (both resolve null for a core/game with
-// no battery-backed RAM). A periodic safety-net flush plus a pagehide flush
-// (tab close / navigation) — there is no in-game "save" moment to hook, so
-// this is the only way native SaveRAM survives a reload. Restored on the next
-// boot of the same disc via SaveRamStore.load (see the romInput handler).
+// no battery-backed RAM). There is no in-game "save" moment to hook, so a
+// periodic safety net plus the page-exit events is the only way native SaveRAM
+// survives a reload. Restored on the next boot of the same content via
+// SaveRamStore.load (see buildStartOptions).
+//
+// EVERY console, not just the primary (COR-6): the guard holds one save identity
+// per running runtime, so a game on a rack console persists exactly like console0.
 async function flushCurrentSaveRam() {
-  if (!currentMeta?.contentId) return;
-  try {
-    const data = await client.flushSaveRam?.();
-    if (!data) return;
-    await saveRamStore.save({
-      coreId: currentMeta.core,
-      contentId: currentMeta.contentId,
-      data,
-      coreBuildHash: client.buildHash,
-      entryPath: currentMeta.file,
-    });
-  } catch (e) {
-    console.warn('[main] SaveRAM flush failed:', e);
-  }
+  return saveRam.flush(CONSOLE_ID, 'primary');
 }
-setInterval(() => { flushCurrentSaveRam(); }, 30000);
-window.addEventListener('pagehide', () => { flushCurrentSaveRam(); });
+setInterval(() => { saveRam.flushAll('periodic'); }, 30000);
+// pagehide covers navigation/close; visibilitychange covers the case that
+// actually happens on a headset and on mobile — the tab is backgrounded and the
+// browser may freeze or discard it without ever firing pagehide. Both are
+// best-effort (an async IndexedDB write can be cut off), which is why the 30s
+// timer stays: these events shorten the window, they don't replace it.
+window.addEventListener('pagehide', () => { saveRam.flushAll('pagehide'); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') saveRam.flushAll('hidden');
+});
+// Debug/verification hook, in the same spirit as window.__rack: what is tracked
+// and how many writes have actually happened.
+window.__saveRam = {
+  stats: () => saveRam.stats(),
+  ids: () => saveRam.ids(),
+  identity: (id) => saveRam.identity(id),
+  flushAll: (reason = 'manual') => saveRam.flushAll(reason),
+};
 
 resetBtn.addEventListener('click', () => client.reset());
 

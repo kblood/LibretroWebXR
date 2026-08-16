@@ -14,7 +14,7 @@
 import { planLive } from './RackBudget.js';
 
 export class RackMgr {
-  constructor({ budget, maxLive, logger, allowRun } = {}) {
+  constructor({ budget, maxLive, logger, allowRun, beforeRemove } = {}) {
     this._runtimes = new Map();   // id -> ConsoleRuntime (or fake in tests)
     this._budgetOpts = {};
     if (budget != null) this._budgetOpts.budget = budget;
@@ -33,6 +33,20 @@ export class RackMgr {
     // the host's picture — i.e. exactly the "each computer runs its own game" bug
     // this release fixes, re-entered through a perf path.
     this._allowRun = typeof allowRun === 'function' ? allowRun : null;
+    // Called with a runtime that is about to be disposed, BEFORE dispose() runs —
+    // the one place every teardown passes through, so state that must outlive a
+    // console (its SaveRAM; see src/SaveRamGuard.js) has somewhere to be written
+    // from. Deliberately fire-and-forget: remove()/dispose() are synchronous
+    // callers, and a save write must not be able to abort a teardown, so a
+    // throwing hook is reported and the dispose happens anyway.
+    this._beforeRemove = typeof beforeRemove === 'function' ? beforeRemove : null;
+  }
+
+  /** Run the beforeRemove hook for one runtime. Never throws. */
+  _notifyRemoving(runtime) {
+    if (!this._beforeRemove || !runtime) return;
+    try { this._beforeRemove(runtime); }
+    catch (e) { console.warn('[RackMgr] beforeRemove', e); }
   }
 
   /** Enable/disable the perf budget. Disabled = keep every loaded console live. */
@@ -72,6 +86,7 @@ export class RackMgr {
   remove(id) {
     const r = this._runtimes.get(id);
     if (!r) return;
+    this._notifyRemoving(r);
     try { r.dispose?.(); } catch (e) { console.warn('[RackMgr] dispose', e); }
     this._runtimes.delete(id);
     if (this._focusedId === id) this._focusedId = null;
@@ -169,6 +184,7 @@ export class RackMgr {
 
   dispose() {
     for (const r of this._runtimes.values()) {
+      this._notifyRemoving(r);
       try { r.dispose?.(); } catch (_) {}
     }
     this._runtimes.clear();
