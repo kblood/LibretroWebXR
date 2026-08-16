@@ -7189,22 +7189,42 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
   await saveRam.flush(consoleId, 'runtime-replaced');
 
   const next = new ConsoleRuntime({ id: consoleId, audio: audioRouter });
+  // Retire the OUTGOING core's audio branch before the new one registers its own
+  // (COR-5). Branches are keyed by console id and were append-only: without this
+  // the replacement's ensureBranch() would simply hand back the dead core's
+  // branch, and the retired runtime's dispose() — which now removes only the
+  // branch it owns — would have nothing to remove. Cost: this console is silent
+  // for the length of the boot, which it very nearly was anyway.
+  audioRouter.removeBranch?.(consoleId);
   if (tvGroup) audioRouter.expect(consoleId, tvGroup);
-  await next.load(romBuffer, core, {
-    // bootOpts.contentExt lets a caller override the VFS/bridge extension
-    // (used by the PS2 .cue resolution in swapConsoleCore: the resolved
-    // bytes are the primary disc track, not the .cue itself — same reasoning
-    // as buildStartOptions's own contentExt override for the primary path).
-    system: meta.system, title: meta.title, contentExt: bootOpts.contentExt ?? extOf(meta.file),
-    coreOptions: bootOpts.coreOptions, inputDevices: bootOpts.inputDevices, remapName: bootOpts.remapName,
-    systemFiles: bootOpts.systemFiles, execution: bootOpts.execution ?? core.execution,
-    requiresThreads: bootOpts.requiresThreads ?? core.requiresThreads,
-    // Worker-mode BIOS + restored native SaveRAM (B1) — pre-resolved by the
-    // caller (buildStartOptions) since resolving them needs IndexedDB stores
-    // this class deliberately doesn't hold a reference to.
-    firmware: bootOpts.firmware, restoredSaves: bootOpts.restoredSaves,
-  });
-  rackMgr.remove(consoleId);   // dispose old (pause + detach its canvas)
+  try {
+    await next.load(romBuffer, core, {
+      // bootOpts.contentExt lets a caller override the VFS/bridge extension
+      // (used by the PS2 .cue resolution in swapConsoleCore: the resolved
+      // bytes are the primary disc track, not the .cue itself — same reasoning
+      // as buildStartOptions's own contentExt override for the primary path).
+      system: meta.system, title: meta.title, contentExt: bootOpts.contentExt ?? extOf(meta.file),
+      coreOptions: bootOpts.coreOptions, inputDevices: bootOpts.inputDevices, remapName: bootOpts.remapName,
+      systemFiles: bootOpts.systemFiles, execution: bootOpts.execution ?? core.execution,
+      requiresThreads: bootOpts.requiresThreads ?? core.requiresThreads,
+      // Worker-mode BIOS + restored native SaveRAM (B1) — pre-resolved by the
+      // caller (buildStartOptions) since resolving them needs IndexedDB stores
+      // this class deliberately doesn't hold a reference to.
+      firmware: bootOpts.firmware, restoredSaves: bootOpts.restoredSaves,
+    });
+  } catch (e) {
+    // A failed boot must not leave its half-built runtime behind (COR-5): the
+    // worker/canvas/audio branch it already allocated are unreachable from
+    // anywhere else — `next` was never added to the rack. The OLD runtime is
+    // still installed and still owns the console, so this throws on to the
+    // caller with the console intact rather than half-swapped — except for its
+    // audio, which was already handed over above and cannot be handed back (a
+    // main-thread core's output is bound to the branch it booted with).
+    logger?.event?.('runtime-boot-failed', { consoleId, core: core?.name, error: String(e?.message || e) });
+    try { await next.dispose(); } catch (_) {}
+    throw e;
+  }
+  rackMgr.remove(consoleId);   // retire the old runtime (stop + release)
   rackMgr.add(next);
   // Re-key this console's SaveRAM onto what it now runs. AFTER remove(), whose
   // beforeRemove hook retires the OLD identity — retire is generation-guarded, so

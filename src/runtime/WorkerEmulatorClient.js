@@ -9,11 +9,21 @@ import {
 } from './protocol.js';
 
 export class WorkerEmulatorClient extends EventTarget {
-  constructor({ workerUrl = null, workerFactory = null, requestTimeoutMs = 60000 } = {}) {
+  /**
+   * @param {object} [opts]
+   * @param {number} [opts.requestTimeoutMs] how long an ordinary request may take.
+   * @param {number} [opts.stopTimeoutMs] how long stop() waits for the core to
+   *   shut itself down cleanly before the Worker is terminated anyway. Short on
+   *   purpose (COR-5): stop() used to inherit requestTimeoutMs, so a wedged core
+   *   held the whole teardown — and the caller replacing this runtime — for a
+   *   full minute before the memory was released.
+   */
+  constructor({ workerUrl = null, workerFactory = null, requestTimeoutMs = 60000, stopTimeoutMs = 2000 } = {}) {
     super();
     this.workerUrl = workerUrl;
     this.workerFactory = workerFactory;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.stopTimeoutMs = stopTimeoutMs;
     this.ready = false;
     this.paused = false;
     this.capabilities = {};
@@ -48,11 +58,29 @@ export class WorkerEmulatorClient extends EventTarget {
 
     this.worker = this._createWorker();
     this.worker.addEventListener('message', (event) => this._onMessage(event.data));
+    // A worker-level 'error'/'messageerror' is TERMINAL: no response is ever
+    // coming, and the worker that produced it is not usable again. Tear it down
+    // rather than leaving a dead worker holding its core's Wasm memory (COR-5).
     this.worker.addEventListener('error', (event) => this._fatal(
-      `${event.message || 'execution worker failed'} @ ${event.filename}:${event.lineno}:${event.colno} stack=${event.error?.stack}`
+      `${event.message || 'execution worker failed'} @ ${event.filename}:${event.lineno}:${event.colno} stack=${event.error?.stack}`,
+      { terminal: true },
     ));
-    this.worker.addEventListener('messageerror', () => this._fatal('execution worker sent an unreadable message'));
+    this.worker.addEventListener('messageerror', () => this._fatal('execution worker sent an unreadable message', { terminal: true }));
 
+    // Everything from here can throw — a rejected launch payload, a start that
+    // times out, a core that dies mid-boot. Before COR-5 any of those left the
+    // Worker and the FrameBridge allocated with nothing referencing them.
+    try {
+      await this._startRequest(outputCanvas, content, opts, urls);
+    } catch (error) {
+      this._teardown(`start failed: ${error?.message || error}`);
+      throw error;
+    }
+    this.ready = true;
+    this.dispatchEvent(new CustomEvent('ready'));
+  }
+
+  async _startRequest(outputCanvas, content, opts, urls) {
     const prepared = await prepareLaunchPayload(content, opts);
     const result = await this._request('start', {
       ...urls,
@@ -76,8 +104,6 @@ export class WorkerEmulatorClient extends EventTarget {
       remapName: opts.remapName || null,
     }, prepared.transfer);
     this.capabilities = result?.capabilities || {};
-    this.ready = true;
-    this.dispatchEvent(new CustomEvent('ready'));
   }
 
   reset() {
@@ -170,15 +196,35 @@ export class WorkerEmulatorClient extends EventTarget {
 
   async stop() {
     if (!this.worker) return;
-    try { await this._request('stop'); } catch (_) {}
-    this.worker.terminate();
-    this.worker = null;
+    // Ask the core to shut down cleanly, but never wait longer than
+    // stopTimeoutMs for it: a core that has hung (or crashed in a way that eats
+    // the response) must not keep its Wasm memory alive while a replacement is
+    // already booting. Terminate happens either way — a libretro core has no
+    // state worth saving past this point that a caller hasn't already flushed
+    // (see SaveRamGuard's flush-before-replacement).
+    try { await withTimeout(this._request('stop'), this.stopTimeoutMs); } catch (_) {}
+    this._teardown('execution worker stopped');
+  }
+
+  /**
+   * Release everything this client owns: the Worker (and with it the core's
+   * whole Wasm memory), the frame bridge's canvas context and any bitmap it is
+   * holding, and every in-flight request. Idempotent, and safe to call from a
+   * failure path — which is the point (COR-5): a worker that died, or a start()
+   * that threw halfway, used to leave all of it allocated with nothing left
+   * holding a reference that could clean it up.
+   */
+  _teardown(reason = 'execution worker stopped') {
+    if (this.worker) {
+      try { this.worker.terminate(); } catch (_) {}
+      this.worker = null;
+    }
     this.ready = false;
-    this.frameBridge?.dispose();
+    try { this.frameBridge?.dispose(); } catch (_) {}
     this.frameBridge = null;
     for (const { reject, timer } of this._pending.values()) {
       clearTimeout(timer);
-      reject(new Error('execution worker stopped'));
+      reject(new Error(reason));
     }
     this._pending.clear();
   }
@@ -244,7 +290,14 @@ export class WorkerEmulatorClient extends EventTarget {
     this.dispatchEvent(new CustomEvent(message.event, { detail: message.detail }));
   }
 
-  _fatal(message) {
+  /**
+   * @param {string} message
+   * @param {{terminal?: boolean}} [opts] terminal = the WORKER itself is gone or
+   *   unusable (an error/messageerror event), so tear it down. A core-reported
+   *   'error' event is NOT terminal by default: the core is still there and the
+   *   caller may well want to reset or read from it.
+   */
+  _fatal(message, { terminal = false } = {}) {
     console.error('[WorkerEmulatorClient]', message);
     // A worker 'error'/'messageerror' means no RESPONSE is ever coming for
     // whatever request is in flight (most commonly 'start'). Without this,
@@ -253,13 +306,29 @@ export class WorkerEmulatorClient extends EventTarget {
     // callers hanging for the full requestTimeoutMs (60s default) with zero
     // visible feedback before the existing error UI (placeholder + status)
     // ever got a chance to run. Same reject-all-pending pattern stop() uses.
-    for (const { reject, timer } of this._pending.values()) {
-      clearTimeout(timer);
-      reject(new Error(message));
+    if (terminal) {
+      // Rejects the pending requests too, with this message.
+      this._teardown(message);
+    } else {
+      for (const { reject, timer } of this._pending.values()) {
+        clearTimeout(timer);
+        reject(new Error(message));
+      }
+      this._pending.clear();
     }
-    this._pending.clear();
     this.dispatchEvent(new CustomEvent('error', { detail: message }));
   }
+}
+
+/**
+ * Resolve/reject with `promise`, or resolve anyway once `ms` has passed. The
+ * timer is always cleared, so a slow-but-eventually-fine request can't keep the
+ * event loop (or a test runner) alive after we stopped caring about it.
+ */
+function withTimeout(promise, ms) {
+  let timer = null;
+  const capped = new Promise((resolve) => { timer = setTimeout(resolve, ms); });
+  return Promise.race([promise, capped]).finally(() => clearTimeout(timer));
 }
 
 // Blob/File sources are structured-clone-transferable as-is — postMessage

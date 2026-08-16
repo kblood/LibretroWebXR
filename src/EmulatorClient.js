@@ -82,6 +82,12 @@ const SYSTEM_DIR = RETROARCH_SYSTEM_DIR;
 // logical button so the controller works even if no cfg is honoured.
 const RA_CFG_PATH = '/home/web_user/retroarch/userdata/retroarch.cfg';
 
+// How long a classic core may take between "its script loaded" and its
+// onRuntimeInitialized callback before the boot is declared failed (COR-5 — see
+// _waitForRuntime). Generous: a cold 30-40 MiB Wasm compile on a Quest is slow,
+// and a false timeout here would break a boot that was merely late.
+const RUNTIME_INIT_TIMEOUT_MS = 45000;
+
 // Cores whose light gun is really UAE's LIGHT PEN, which needs RELATIVE mouse
 // motion on top of the absolute aim. Only PUAE (Amiga) is in this club.
 //
@@ -820,10 +826,24 @@ export class EmulatorClient extends EventTarget {
     }
   }
 
-  _waitForRuntime() {
+  /**
+   * Wait for a classic core's onRuntimeInitialized. BOUNDED (COR-5): this used to
+   * wait for ever, so a core whose script loaded but never initialised — a bad
+   * build, a missing .wasm sibling, a core that aborts inside its own startup —
+   * left start() pending with no error, no status line and no way for the caller
+   * to fall back. A rejection here surfaces the normal boot-failure UI instead.
+   */
+  _waitForRuntime(timeoutMs = RUNTIME_INIT_TIMEOUT_MS) {
     if (this._runtimeReady) return Promise.resolve();
-    return new Promise((resolve) => {
-      this.addEventListener('runtime', () => resolve(), { once: true });
+    return new Promise((resolve, reject) => {
+      const onRuntime = () => { clearTimeout(timer); resolve(); };
+      const timer = setTimeout(() => {
+        this.removeEventListener('runtime', onRuntime);
+        const message = `${this.coreName} core never finished initialising (${timeoutMs}ms)`;
+        this._fail(message);
+        reject(new Error(message));
+      }, timeoutMs);
+      this.addEventListener('runtime', onRuntime, { once: true });
     });
   }
 

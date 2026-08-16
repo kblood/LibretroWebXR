@@ -16,9 +16,12 @@
 //             single-console path becomes console0 of the rack with no behaviour
 //             change and no second WebGL context.
 //
-// Cores can't cleanly unload (they pin a WebGL context that survives callMain),
-// so dispose() pauses + detaches rather than truly freeing — RackBudget's
-// maxLive cap is what bounds live contexts.
+// MAIN-THREAD cores can't cleanly unload (they pin a WebGL context that survives
+// callMain), so for those dispose() pauses + detaches rather than truly freeing,
+// and RackBudget's maxLive cap is what bounds live contexts. A WORKER-execution
+// core is a different story: dispose() stops its client, which terminates the
+// Worker and takes its whole Wasm memory with it (COR-5 — this used to be a bare
+// pause, so every core swap kept a 256-512 MiB heap alive for the session).
 
 import { RuntimeEmulatorClient } from './RuntimeEmulatorClient.js';
 import { bootConfigSignature } from './EmulatorClient.js';
@@ -82,7 +85,11 @@ export class ConsoleRuntime {
     // `loaded`, which only flips once the boot resolved — see hasCore().
     this._started = false;
     this._disposed = false;
+    this._disposal = null;
     this._audio = audio;
+    // Token of the SpatialAudio branch this runtime owns, recorded once it has
+    // booted (see load/noteLoaded). Null means "I never had one".
+    this._audioToken = null;
 
     if (adopt) {
       this.client = adopt.client;
@@ -221,6 +228,11 @@ export class ConsoleRuntime {
     // for a main-thread boot (B3, 2026-07-25 review).
     if (options.execution === 'worker') this._audio?.ensureBranch?.(this.id);
     await this.client.start(this.canvas, romBuffer, options);
+    // Which audio branch is MINE (COR-5). Read after the boot, so it covers both
+    // ways a branch appears: ensureBranch() above for a worker core, and the
+    // AudioContext stub firing during start() for a main-thread one. dispose()
+    // removes only this exact branch, never a successor's.
+    this._audioToken = this._audio?.branchToken?.(this.id) ?? null;
     this.coreName = core.name;
     this.system = meta.system ?? null;
     this.title = meta.title ?? null;
@@ -234,6 +246,7 @@ export class ConsoleRuntime {
   // budget knows this console's real weight/system without load() owning boot.
   noteLoaded(coreName, meta = {}) {
     this._started = true;
+    this._audioToken = this._audio?.branchToken?.(this.id) ?? null;
     this.coreName = coreName;
     this.system = meta.system ?? this.system;
     this.title = meta.title ?? this.title;
@@ -278,13 +291,39 @@ export class ConsoleRuntime {
     this.client?.sendInput?.(eventType, code, key, keyCode, location);
   }
 
-  /** Pause + detach. Never frees the WebGL context (cores can't unload). */
+  /**
+   * Retire this console: pause, STOP the client, drop its audio branch, detach
+   * the canvas. Idempotent — a second call returns the same promise.
+   *
+   * What this can and cannot free (COR-5). A worker-execution core (PSX/N64/PS2)
+   * really is freed: client.stop() terminates the Worker, and its 256-512 MiB
+   * Wasm memory goes with it — which is the whole reason this method stopped
+   * being a bare pause(). A MAIN-THREAD core cannot be unloaded at all: it pins
+   * a WebGL context and globals that survive callMain, so for those this is
+   * still "as released as it can get" and RackBudget.maxLive remains the real
+   * bound on how many can exist.
+   *
+   * SYNCHRONOUS callers are fine: the parts that must happen before the caller
+   * continues (the pause, the branch removal, the canvas detach) happen before
+   * the first await; only the client stop is asynchronous, and it is safe to let
+   * it settle in the background. The returned promise is for callers that want
+   * to wait (tests, and anything that must know the worker is gone).
+   * @returns {Promise<void>}
+   */
   dispose() {
-    if (this._disposed) return;
+    if (this._disposed) return this._disposal || Promise.resolve();
     this._disposed = true;
     this.pause();
+    // Only if this branch is still ours — a replacement that already registered
+    // its own branch under this console id must keep it (see SpatialAudio's
+    // removeBranch).
+    try { this._audio?.removeBranch?.(this.id, this._audioToken); } catch (e) { console.warn('[ConsoleRuntime] audio branch', e); }
     if (!this.adopted) {
       try { this.canvas?.remove?.(); } catch (_) {}
     }
+    this._disposal = Promise.resolve()
+      .then(() => this.client?.stop?.())
+      .catch((e) => { console.warn('[ConsoleRuntime] stop', e); });
+    return this._disposal;
   }
 }

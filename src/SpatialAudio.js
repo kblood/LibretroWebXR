@@ -46,6 +46,8 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
     for (const b of branches) b.sink.gain.value = gainFor(b.consoleId);
   }
 
+  let branchSeq = 0;
+
   function makeBranch(sourceObject, consoleId) {
     const sink = ctx.createGain();
     const positional = new THREE.PositionalAudio(listener);
@@ -55,7 +57,11 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
     positional.setMaxDistance(maxDistance);
     (sourceObject || listener).add(positional);
     positional.setNodeSource(sink);
-    const branch = { consoleId, sink, positional, sourceObject, nextAudioTime: 0 };
+    // `token` identifies THIS branch, not just this console id. A console that is
+    // replaced (core swap, live reboot) gets a new branch under the same id, and
+    // the retired runtime must not be able to tear down its successor's audio —
+    // see removeBranch and ConsoleRuntime.dispose (COR-5).
+    const branch = { consoleId, sink, positional, sourceObject, nextAudioTime: 0, token: ++branchSeq };
     branches.push(branch);
     if (consoleId != null) byConsole.set(consoleId, branch);
     sink.gain.value = gainFor(consoleId);
@@ -118,6 +124,44 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
       if (pending?.consoleId === consoleId) pending = null;
       return makeBranch(target, consoleId);
     },
+    /**
+     * The token of the branch currently registered for `consoleId`, or null.
+     * A runtime records this once it has booted, so it can tell "my branch" from
+     * "the branch of whatever replaced me" at dispose time.
+     */
+    branchToken(consoleId) { return byConsole.get(consoleId)?.token ?? null; },
+
+    /**
+     * Drop a console's audio branch and disconnect its nodes (COR-5: branches
+     * were append-only, so every core swap left a dead GainNode + PositionalAudio
+     * — and its netplay tap — connected to the one shared AudioContext for the
+     * rest of the session).
+     *
+     * `token` guards against removing a SUCCESSOR's branch: pass the token you
+     * were given when your branch was made and the call is a no-op once the
+     * console has been re-registered by someone else. Omit it to remove whatever
+     * is registered (what a deliberate replacement does before booting).
+     *
+     * @returns {boolean} whether a branch was actually removed.
+     */
+    removeBranch(consoleId, token = null) {
+      const branch = byConsole.get(consoleId);
+      if (!branch) return false;
+      if (token != null && branch.token !== token) return false;
+      byConsole.delete(consoleId);
+      const i = branches.indexOf(branch);
+      if (i >= 0) branches.splice(i, 1);
+      // Disconnect outward-first: the tap and the panner both hang off `sink`,
+      // and a PositionalAudio keeps a node reference of its own (setNodeSource).
+      try { branch.netTap && branch.sink.disconnect(branch.netTap); } catch (_) {}
+      try { branch.sink.disconnect(); } catch (_) {}
+      try { branch.positional.disconnect?.(); } catch (_) {}
+      try { branch.positional.parent?.remove(branch.positional); } catch (_) {}
+      branch.netTap = null;
+      poweredOff.delete(consoleId);
+      return true;
+    },
+
     // Make only `consoleId` audible; mute the rest. null → unmute all.
     setFocus(consoleId) {
       focusedId = consoleId;

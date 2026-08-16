@@ -91,6 +91,7 @@
     "probe:repatch": "node scripts/probe-repatch.mjs",
     "probe:amiga-lightgun": "node scripts/probe-amiga-lightgun.mjs",
     "probe:saveram-per-console": "node scripts/probe-saveram-per-console.mjs",
+    "probe:runtime-release": "node scripts/probe-runtime-release.mjs",
     "test:csp": "node scripts/test-csp.mjs",
     "test:remote-owner": "node scripts/test-remote-owner.mjs",
     "test:session-id": "node scripts/test-session-id.mjs",
@@ -98,7 +99,8 @@
     "test:room-protocol": "node scripts/test-room-protocol.mjs",
     "smoke-rejoin": "node scripts/smoke-rejoin.mjs",
     "test:session-lifecycle": "node scripts/test-session-lifecycle.mjs",
-    "test:saveram-guard": "node scripts/test-saveram-guard.mjs"
+    "test:saveram-guard": "node scripts/test-saveram-guard.mjs",
+    "test:runtime-dispose": "node scripts/test-runtime-dispose.mjs"
   },
   "engines": {
     "node": ">=22.12.0"
