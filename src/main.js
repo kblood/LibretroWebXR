@@ -49,6 +49,8 @@ import { RackMgr } from './RackMgr.js';
 import { ConsoleRuntime, clientNeedsFreshBoot } from './ConsoleRuntime.js';
 import { computeRouting as routeControllers } from './Routing.js';
 import { NetMgr } from './net/NetMgr.js';
+import { createLiveAvatars } from './net/LiveAvatars.js';   // COR-2
+import { createSessionScope } from './net/SessionScope.js'; // COR-2
 import { buildIceServers } from './net/NetProtocol.js';
 import { FALLBACK_HOST_KEY } from './net/HostElection.js';
 import { sanitiseRoom, randomRoomSuffix } from './net/SessionUtils.js';
@@ -247,6 +249,13 @@ window.__client = client;
 // when `net` is null so the solo experience is completely unchanged.
 let net = null;
 
+// COR-2: the handle every session-scoped manager is given INSTEAD of
+// `net.avatars`. Each room session builds a new NetMgr with a new AvatarMgr, and
+// those managers are built once per world build — holding the object by value
+// meant that after a leave+rejoin they were still asking a dead session where its
+// peers' hands were. See [[src/net/LiveAvatars.js]].
+const liveAvatars = createLiveAvatars(() => net);
+
 // --- M1.4 room-role helpers -------------------------------------------------
 //
 // The SERVER elects the room host (server/Hub.js: first in wins, migration by
@@ -323,11 +332,15 @@ let _peerMouseCounter = 0;
 // auto-join (net exists at build → wired during build) AND the in-app Join
 // widget (net created AFTER the world is built → connectToRoom calls this to
 // wire post-build). No-op stub until buildCartridgeWorld runs.
-// FOLLOW-UP (known limitation, intentionally not fixed here): the wired managers
-// capture `net.avatars` etc. at first-wire, so a leave+widget-rejoin within one
-// build reads a stale net. The _netSessionWired guard blocks re-wire within a
-// build on purpose — first-join (the actual gap) is fixed; rejoin is no worse
-// than before this change.
+// The managers are still built ONCE per world build — the _netSessionWired guard
+// blocks a re-wire on purpose, because re-running this body double-registers
+// every tick callback and rebuilds managers that own scene objects. What used to
+// make that a bug (COR-2) was capturing `net.avatars` by value at first wire, so
+// after a leave+rejoin the managers asked a DEAD session where the new session's
+// peers were and got null for every one of them: no ghosts, and any local prop
+// hidden by a remote hold stayed hidden. They now take `liveAvatars`, which
+// resolves through the current `net` on every call ([[src/net/LiveAvatars.js]]),
+// and Leave runs _runSessionCleanups() to release what they were holding.
 let _wireNetSession = () => {};
 let _netSessionWired = false;
 
@@ -369,6 +382,26 @@ function _attachNetTickCallbacks() {
   _netTicksDetached = false;
   for (const fn of _netTickCallbacks) scene.addTickCallback(fn);
 }
+
+// --- Room-session cleanups (COR-2) -----------------------------------------
+//
+// The other half of "session-scoped": state a manager is holding ON BEHALF of
+// the session that just ended. Detaching the tick callbacks stops the managers
+// being asked anything, which is exactly why whatever they were holding at that
+// moment never gets released — most visibly a LOCAL prop hidden because a peer
+// was holding it (GhostGamepadMgr._hidden and friends). Leave, and your own
+// gamepad/gun/mouse is invisible for the rest of the build: the sweep that would
+// unhide it lives in sync(), and sync() is never called again.
+//
+// Registered once, at wire time, and run on every Leave. They must therefore be
+// IDEMPOTENT and safe with no session — each is a removeAll() on a manager that
+// is empty when nothing was held. The registry itself is
+// [[src/net/SessionScope.js]] so its two load-bearing properties (every cleanup
+// runs even if one throws; run() is repeatable) are pinned by a test instead of
+// living inline in a file no test can import.
+const _sessionScope = createSessionScope();
+const _addSessionCleanup = (fn) => _sessionScope.add(fn);
+const _runSessionCleanups = () => _sessionScope.run();
 
 // Probe hook (see scripts/probe-hotswap-config.mjs): how many session ticks exist
 // and whether they're currently attached to the render loop.
@@ -863,6 +896,11 @@ function disconnectFromRoom() {
   // `net` null they can only throw, once per callback per frame, forever (§5.1).
   // Hand them back to SceneMgr — the next join re-attaches them.
   _detachNetTickCallbacks();
+  // …and release what those managers were holding for the session (COR-2). Order
+  // matters: detach first so nothing re-populates them from a half-torn-down
+  // `net`, then clean up. A peer holding our gamepad when we hit Leave had left
+  // it hidden for the rest of the build.
+  _runSessionCleanups();
   // COR-8 round 5 (2026-08-15): the room is gone, so every remote-owned button is
   // gone with it. Without this a peer that was mid-keypress when we hit Leave left
   // its key held on our core for the rest of the session — nothing left could lift
@@ -3830,7 +3868,12 @@ async function buildCartridgeWorld() {
     if (_netSessionWired) return; // already wired this build (no double ticks)
     _netSessionWired = true;
     const getCartByObjId = (objId) => cartridges.find((c) => c.userData.file === objId) || null;
-    const ghostMgr = new GhostCartMgr({ avatars: net.avatars, getCartByObjId });
+    const ghostMgr = new GhostCartMgr({ avatars: liveAvatars, getCartByObjId });
+    // COR-2: whatever this manager is holding when the session ends is released
+    // on Leave — ghosts removed, and any LOCAL prop it hid because a peer held it
+    // made visible again. Without this the sweep that unhides lives in sync(),
+    // which stops being called the moment the ticks are detached.
+    _addSessionCleanup(() => ghostMgr.removeAll());
     // Session-scoped: detached from the render loop on Leave (see
     // _addNetTickCallback). The `!net` guard is defence in depth for the frame
     // in which the session goes away.
@@ -3848,7 +3891,8 @@ async function buildCartridgeWorld() {
     // Shared-gamepad sync: show a ghost gamepad in the remote holder's hand and
     // lock the local gamepad from being grabbed while it's held remotely.
     // Uses the `hold:gp:<cableId>` STATE namespace (same Hub auto-clear as cart holds).
-    ghostGpMgr = new GhostGamepadMgr({ avatars: net.avatars, gamepadObjs: _gamepadObjs });
+    ghostGpMgr = new GhostGamepadMgr({ avatars: liveAvatars, gamepadObjs: _gamepadObjs });
+    _addSessionCleanup(() => ghostGpMgr?.removeAll());
     _addNetTickCallback(() => {
       if (!net) return;
       const presentIds = new Set(net.presence.peers().map((p) => p.id));
@@ -3873,7 +3917,8 @@ async function buildCartridgeWorld() {
     // local gun from being grabbed while it's held remotely. Uses the
     // `hold:gun:<cableId>` STATE namespace (same Hub auto-clear as cart/gamepad
     // holds). Mirrors the gamepad wiring immediately above.
-    ghostGunMgr = new GhostLightGunMgr({ avatars: net.avatars, lightGunObjs: _lightGunObjsById });
+    ghostGunMgr = new GhostLightGunMgr({ avatars: liveAvatars, lightGunObjs: _lightGunObjsById });
+    _addSessionCleanup(() => ghostGunMgr?.removeAll());
     _addNetTickCallback(() => {
       if (!net) return;
       const presentIds = new Set(net.presence.peers().map((p) => p.id));
@@ -3895,7 +3940,8 @@ async function buildCartridgeWorld() {
     // Shared-mouse sync: mirrors the light-gun wiring immediately above. Uses
     // the `hold:mouse:<cableId>` STATE namespace (same Hub auto-clear as
     // cart/gamepad/gun holds).
-    ghostMouseMgr = new GhostMouseMgr({ avatars: net.avatars, mouseObjs: _mouseObjsById });
+    ghostMouseMgr = new GhostMouseMgr({ avatars: liveAvatars, mouseObjs: _mouseObjsById });
+    _addSessionCleanup(() => ghostMouseMgr?.removeAll());
     _addNetTickCallback(() => {
       if (!net) return;
       const presentIds = new Set(net.presence.peers().map((p) => p.id));
