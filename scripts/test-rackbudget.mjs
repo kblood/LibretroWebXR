@@ -11,9 +11,38 @@ const ok = (name, cond) => { if (cond) pass++; else { fail++; console.error(`FAI
 const eq = (name, got, want) => ok(`${name} (got ${JSON.stringify(got)})`,
   JSON.stringify(got) === JSON.stringify(want));
 
-console.log('--- defaults sanity ---');
-ok('budget default is 4', DEFAULT_RACK_BUDGET === 4);
-ok('maxLive default is 3', DEFAULT_MAX_LIVE === 3);
+console.log('--- the defaults are the ones planLive actually applies ---');
+{
+  // This block used to be `ok(DEFAULT_RACK_BUDGET === 4)` + `ok(DEFAULT_MAX_LIVE
+  // === 3)`: the same two literals read out of the same module they were imported
+  // from, which is a tautology, not a test. It stayed green if planLive stopped
+  // consulting the constants entirely (a hardcoded budget, a dropped `??`
+  // fallback) — the one failure the block is named for. So assert the BEHAVIOUR
+  // the defaults must produce, with NO opts passed, and let the numbers be
+  // implied by it.
+  const overWeight = planLive([
+    { id: 'a', weight: 2 }, { id: 'b', weight: 2 },
+    { id: 'c', weight: 1 },   // 2+2+1 = 5, over the default weight budget of 4
+  ]);
+  eq('default budget admits 2+2 and no more', overWeight.live, ['a', 'b']);
+  eq('default budget pauses the 5th weight unit', overWeight.paused, ['c']);
+  ok('default budget is exactly 4 units of weight', overWeight.liveWeight === 4);
+
+  // Four weight-1 cores fit the weight budget exactly, so anything paused here
+  // can only be the live-COUNT cap — which is what separates this case from the
+  // one above.
+  const overCount = planLive([
+    { id: 'a', weight: 1 }, { id: 'b', weight: 1 },
+    { id: 'c', weight: 1 }, { id: 'd', weight: 1 },
+  ]);
+  eq('default maxLive caps the live set at 3', overCount.live, ['a', 'b', 'c']);
+  eq('default maxLive pauses the 4th, budget notwithstanding', overCount.paused, ['d']);
+
+  // The constants are still worth pinning as the documented contract for
+  // RackMgr's UI copy — but only AFTER the behaviour above proved they are live.
+  ok('DEFAULT_RACK_BUDGET matches the enforced budget', DEFAULT_RACK_BUDGET === 4);
+  ok('DEFAULT_MAX_LIVE matches the enforced cap', DEFAULT_MAX_LIVE === 3);
+}
 
 console.log('--- proven config: nes+gb+snes (1+1+2=4) all live ---');
 {

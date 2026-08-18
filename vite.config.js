@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 
-import { DENY_RULES, checkDist, fmt, matchDeny } from './scripts/check-dist.mjs';
+import { BUNDLE_BUDGETS, DENY_RULES, checkDist, fmt, matchDeny } from './scripts/check-dist.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -317,6 +317,16 @@ export default defineConfig({
     // so backups/credentials/scratch never reach dist/. Flipping this back to
     // true would restore the unfiltered copy.
     copyPublicDir: false,
+    // Rollup's chunk-size advisory has ONE global threshold, so it cannot express
+    // "three may be 600 kB but desktop may not be 60". The real per-chunk policy
+    // is BUNDLE_BUDGETS in scripts/check-dist.mjs, which this build already runs
+    // (and throws on) in excludePrivateAssets() below. Pin the advisory to the
+    // largest budget there: any lower and it warns about `three` on every single
+    // build, and a warning that fires on a known-good chunk is one people learn
+    // to scroll past. Derived, not copied, so the two can't drift.
+    chunkSizeWarningLimit: Math.round(
+      Math.max(...Object.values(BUNDLE_BUDGETS).map((b) => b.bytes)) / 1000,
+    ),
     rollupOptions: {
       // Two entry points: the VR app (index.html) and the flat-screen desktop
       // build (desktop.html). They share src/ modules; the desktop entry never

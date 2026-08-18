@@ -10,6 +10,25 @@
 #
 # Installed on dionysus.dk 2026-06-09 (active; PORT=8787; User=kaspersolesen).
 # Adjust User/paths for a different host. Node path: `command -v node`.
+#
+# ── The one manual step: the log read token ────────────────────────────────
+# EnvironmentFile below supplies LOG_TOKEN, which gates GET /logs and
+# /logs.json. Without it `curl https://dionysus.dk/logs.json?tail=0` returns
+# EVERY session — room names, nicks and the ROM filenames of the private
+# library — to anyone on the internet, and every visitor to the production host
+# ships logs there automatically (src/Logger.js auto-enables remote logging on
+# dionysus.dk). POST /log is never gated, so the Quest needs no secret and the
+# headset workflow is unaffected apart from the token on the viewer URL.
+#
+# The value is GENERATED ON THE BOX and never committed (same rule as
+# deploy/coturn.conf.example):
+#
+#   sudo sh -c 'umask 077; echo "LOG_TOKEN=$(openssl rand -hex 24)" > /etc/default/libretrowebxr-room'
+#   sudo systemctl restart libretrowebxr-room
+#   sudo cat /etc/default/libretrowebxr-room     # append &token=<value> to your /logs bookmark
+#
+# The leading `-` on EnvironmentFile means "start anyway if it is missing", so a
+# fresh box comes up ungated (today's behaviour) instead of crash-looping.
 
 [Unit]
 Description=LibretroWebXR M0 presence room server
@@ -20,6 +39,23 @@ Type=simple
 WorkingDirectory=/opt/libretrowebxr-room/server
 ExecStart=/usr/local/bin/node room-server.mjs
 Environment=PORT=8787
+# Bind loopback only: Apache reverse-proxies /ws/ from 127.0.0.1
+# (deploy/libretrowebxr-room.conf), so the public interface was pure exposure —
+# :8787 was reachable straight from the internet, bypassing TLS termination and
+# anything the vhost enforces. LAN dev leaves ROOM_HOST unset (a Quest connects
+# directly to the dev box), which is why this lives here and not in the code.
+Environment=ROOM_HOST=127.0.0.1
+# REQUIRED BY THE LINE ABOVE. Behind the proxy every socket's peer address is
+# 127.0.0.1, so the per-address caps (ROOM_MAX_SOCKETS_PER_IP) would bill every
+# headset in the world to one key and refuse the 17th connection to the whole
+# site (ROOM_MAX_SOCKETS_PER_IP defaults to ROOM_MAX_PEERS = 16).
+# With this set they key on the LAST X-Forwarded-For hop — the one Apache
+# appended, which the client cannot forge. Only safe *because* ROOM_HOST closes
+# the unproxied path: nothing can reach the port without going through Apache.
+# If you remove ROOM_HOST, remove this too.
+Environment=ROOM_TRUST_PROXY=1
+# LOG_TOKEN lives here, generated on the box — see the header. `-` = optional.
+EnvironmentFile=-/etc/default/libretrowebxr-room
 Restart=always
 RestartSec=2
 User=kaspersolesen

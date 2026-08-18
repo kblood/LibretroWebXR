@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "artifactBasename": "mupen64plus_next_libretro",
+  "artifacts": {
+    "mupen64plus_next_libretro.js": {
+      "bytes": 327283,
+      "sha256": "b572d0d18af3110f86b079c952b02373048b0ab53e37c666bac7d1786b8e7686"
+    },
+    "mupen64plus_next_libretro.wasm": {
+      "bytes": 8149805,
+      "sha256": "65110d85785cecbd3cdff46f64d147f83cb3150aca85f44415e866194725c9c7"
+    },
+    "mupen64plus_next_libretro.worker.js": {
+      "bytes": 2163,
+      "sha256": "fdd581150616c7cd9d049c09b563aef4cd7ef342159674993612aeeb1977c972"
+    }
+  },
+  "pins": {
+    "RETROARCH_REPOSITORY": "https://github.com/libretro/RetroArch.git",
+    "RETROARCH_COMMIT": "058f49992707c9ca90ae6c5acc50425a829e6bbb",
+    "MUPEN64PLUS_NEXT_REPOSITORY": "https://github.com/libretro/mupen64plus-libretro-nx.git",
+    "MUPEN64PLUS_NEXT_COMMIT": "98c1b0d877542b01314b3b04272282ba223b65b3",
+    "EMSDK_VERSION": "3.1.46",
+    "EMSDK_REPOSITORY": "https://github.com/emscripten-core/emsdk.git",
+    "EMSDK_COMMIT": "d223ae73c6998296e3ab27cf81dc2c2c9fd383de",
+    "EMSCRIPTEN_COMMIT": "19607820c447a13fd8d0b7680c56148427d6e1b8"
+  },
+  "build": {
+    "cpuBackend": "interpreter (no dynarec — mupen64plus-next's new_dynarec is native-x86/ARM-only; see docs/research/n64-wasm-jit-plan.md, this is the Phase N0 baseline, not the final JIT track)",
+    "videoPlugin": "GLideN64",
+    "audioBackend": "LibretroWebXR-worker-bridge",
+    "modularize": true,
+    "exportEs6": true,
+    "pthreads": true,
+    "sharedMemory": true,
+    "initialMemoryBytes": 268435456,
+    "memoryGrowth": true,
+    "webglMinVersion": 2,
+    "webglMaxVersion": 2,
+    "wasmBigInt": true,
+    "exportedRuntimeMethods": [
+      "callMain",
+      "FS",
+      "PATH",
+      "ERRNO_CODES",
+      "ENV",
+      "stringToNewUTF8",
+      "UTF8ToString",
+      "Browser",
+      "EmscriptenSendCommand",
+      "EmscriptenReceiveCommandReply"
+    ],
+    "notes": [
+      "Core's own emscripten Makefile block patched: -fno-common (Emscripten/Clang -fcommon archive-resolution quirk left plain globals like retro_thread undefined when pulled from a static archive), -pthread -matomics -mbulk-memory (GLideN64 ThreadedOpenGl needs shared-memory-linked objects compiled with atomics/bulk-memory, not just linked with -pthread), GLES3 := 1 (core defaulted to GLES2; switched to match RetroArch's HAVE_OPENGLES3=1 / WebGL2 target).",
+      "libretro-common/glsym/glsym_es3.c recompiled standalone with ~203 additional -D<name>=glupen_<name> renames (beyond the core's existing ~20-entry rename list) to resolve duplicate-symbol link errors against RetroArch's own compiled copy of the same file; the renamed .o was spliced into the core's .a via emar before final link.",
+      "wasm-ld has no --allow-multiple-definition / -z muldefs equivalent, and llvm-objcopy for the wasm target has no symbol-table editing support (--localize-symbol etc.) — both were tried and confirmed unavailable before the -D rename approach was used.",
+      "GLideN64 gDP.cpp LLETriangle::draw() patched (2026-07-26): non-shaded LLE triangles (RDP cmd 0x08/0x09, gDPTriFill/gDPTriFillZ) never wrote vtx->r/g/b/a at all — updateVtx() only assigned vertex colour under `if (_shade)`. In G_CYC_FILL cycle mode CombinerInfo::update() swaps the colour combiner for a pure shade-only program, so the fragment colour IS that never-written vertex shade (uninitialised stack -> solid black under wasm). Real RDP hardware ignores the combiner in FILL mode and writes SET_FILL_COLOR, which gDPFillRectangle() already reproduced for rectangles via gDP.rectColor but LLE triangles were missing. Fix: seed non-shaded vertices from gDPGetFillColor() when cycleType == G_CYC_FILL (white otherwise, matching the function's own `int r = 0xff` intent), plus value-initialise the local SPVertex array. Symptom fixed: pre-rdpq libdragon content (rdp_enable_primitive_fill + rdp_set_primitive_color + rdp_draw_filled_triangle, e.g. games/n64-scene) rendered correctly-shaped but solid-black triangles while its fill rectangles were correctly coloured.",
+      "Linked with the opt-in NJ1 JIT-spike libs (N64_JIT=1 + N64_JIT_CODEGEN_LIB/N64_JIT_FRAMEWORK_LIB from ~/n64-jit-spike/build-wasm-codegen), matching the previously-shipped binary — the shadow-differential harness in cached_interp.c references vr4300_jit_bridge.o, which in turn needs Play!'s CodeGen/Framework archives at link time. See docs/research/n64-jit-nj1-spike.md.",
+      "Linked with RWEBAUDIO_JS_LIBRARY=emscripten/library_libretrowebxr_rwebaudio.js (retroarch-rwebaudio.patch from github.com/kblood/psx-wasm-jit-libretro), replacing RetroArch's stock page-only AudioContext audio glue with a worker-safe one that calls globalThis.__libretroWebXRRuntime.pushAudio(). Without this override the first N64 link used the stock library_rwebaudio.js, which assumes a real window.AudioContext unavailable inside a dedicated Worker; this override is core-agnostic (implements RetroArch's standard RWebAudio* ABI) and was already required infra from the PSX build, just not the RetroArch checkout's default."
+    ]
+  }
+}

@@ -314,6 +314,22 @@ export function makeState({ key, value = null, id } = {}) {
   return msg;
 }
 
+// Bounds on an INPUT's two attacker-chosen fields (RELAY-4). Exported so the
+// relay, the tests and any future consumer read the same numbers.
+//
+//   player — a console PORT SLOT, 1-based. The widest input path this app ships
+//            is a 4-player NES Four Score; 8 covers an SNES multitap and leaves
+//            headroom. validate() used to accept ANY finite number, so
+//            `player: -1e9` and `player: 0.5` were legal on the wire and both
+//            land on player 1 (GameInputMgr.codesFor treats `player <= 1` as
+//            player 1) — and a distinct value per message is an unbounded Map
+//            key in the receiving host's tab (src/desktop/main.js remoteHeld).
+//   btn    — a RetroPad button NAME resolved against a fixed table. The longest
+//            in ControllerMaps is 6 characters ('Select'); 32 is 5x that and
+//            still 8 kB short of what a 1 MiB frame could carry.
+export const MAX_INPUT_PLAYER = 8;
+export const MAX_INPUT_BTN_LEN = 32;
+
 /**
  * Build an INPUT message (M1 host-authoritative game sync). Carries one logical
  * RetroPad button transition for `player` (a console port slot, 1-based) as
@@ -415,8 +431,26 @@ export function validate(msg) {
       return { ok: true };
     case MSG.INPUT:
       if (typeof msg.to !== 'string') return { ok: false, error: 'input.to' };
-      if (typeof msg.player !== 'number' || !Number.isFinite(msg.player)) return { ok: false, error: 'input.player' };
-      if (typeof msg.btn !== 'string' || msg.btn === '') return { ok: false, error: 'input.btn' };
+      // RELAY-4: a port SLOT and a button NAME, not "any finite number" and "any
+      // string up to the frame limit" (which is what this accepted until
+      // 2026-08-17 — see MAX_INPUT_PLAYER for what that bought an attacker).
+      //
+      // A new type check in validate() is the move that reintroduced the COR-9
+      // silent-drop bug (read the JOIN case above before adding another), so this
+      // one is justified rather than assumed: EVERY shipped sender derives
+      // `player` from the routing table, which only ever yields 1-4
+      // (GameInputMgr), and `btn` from the fixed RetroPad name list, whose
+      // longest entry is 6 characters. Nothing in the field can be dropped by
+      // these bounds. And unlike a dropped JOIN, a dropped INPUT is neither
+      // silent nor terminal: the room server counts undecodable frames per socket
+      // and logs them ("sent N undecodable message(s)"), and the sender's next
+      // press re-asserts the button.
+      if (!Number.isInteger(msg.player) || msg.player < 1 || msg.player > MAX_INPUT_PLAYER) {
+        return { ok: false, error: 'input.player' };
+      }
+      if (typeof msg.btn !== 'string' || msg.btn === '' || msg.btn.length > MAX_INPUT_BTN_LEN) {
+        return { ok: false, error: 'input.btn' };
+      }
       if (typeof msg.down !== 'boolean') return { ok: false, error: 'input.down' };
       return { ok: true };
     case MSG.WIRE:

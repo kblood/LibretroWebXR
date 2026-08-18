@@ -46,8 +46,22 @@ The app auto-ships structured logs to the server when running on `dionysus.dk`.
 Read them live from a PC browser at:
 
 ```
-https://dionysus.dk/logs?session=<room>
+https://dionysus.dk/logs?session=<room>&token=<yours>
 ```
+
+**The `&token=` is not optional in production** (it was, until 2026-08-17).
+Reading logs is gated so that `curl https://dionysus.dk/logs.json?tail=0` no
+longer hands every session — room names, nicks, private-library ROM filenames —
+to anyone on the internet. **Ingest is not gated**, so the headset needs no
+secret and nothing about a test session changes; only the PC-side viewer URL
+grows a suffix. Get the value with
+`sudo cat /etc/default/libretrowebxr-room` on the box (it is generated there and
+is not in the repo — see "Reading headset logs (the token)" in
+[`docs/HANDOFF.md`](HANDOFF.md)). Bookmark the URL **with** the token: the
+viewer's 5 s auto-refresh and its filter form both carry it forward, so a gated
+session behaves exactly like an ungated one once it is loaded. A missing or wrong
+token is a plain `401`, not an empty page — do not confuse it with the
+`?session=` mistake below.
 
 **Finding the right `<session>` — read this, it is the #1 way to waste a session.**
 If you joined a multiplayer room, `<session>` is the room id. **If you are testing
@@ -58,12 +72,17 @@ viewer at `?session=default` will show an empty page and look like logging is br
 
 Three reliable ways to get it right:
 
-- **Easiest:** open `https://dionysus.dk/logs` with **no** `?session=` — it shows
-  *all* sessions, with a dropdown listing live ones. Pick yours.
+- **Easiest:** open `https://dionysus.dk/logs?token=<yours>` with **no**
+  `?session=` — it shows *all* sessions, with a dropdown listing live ones. Pick
+  yours. (Yes, the token is still required with no session filter — that
+  combination is precisely the one the gate exists for.)
 - The app logs its own read URL as its first line:
   `[Logger] remote logging active → … | session=… | read: …`. Find it in the
   all-sessions view.
-- Raw JSON for scripting/grep: `https://dionysus.dk/logs.json?session=<session>`.
+- Raw JSON for scripting/grep:
+  `curl "https://dionysus.dk/logs.json?session=<session>&token=$LOG_TOKEN"` (or
+  send it as `-H "X-Log-Token: $LOG_TOKEN"` to keep the secret out of your shell
+  history).
 
 Endpoints verified working 2026-07-29 (ingest `POST /log` → `204`, entries read
 back and still present 45s later). Note the paths differ: **`/log`** (singular)
@@ -83,7 +102,7 @@ the logs while or shortly after testing — do not leave it until the next day.
 ### Recommended crew
 
 - 1 tester in the headset.
-- 1 spotter at a PC: watches `/logs?session=<room>` AND, ideally, a cast/mirror of
+- 1 spotter at a PC: watches `/logs?session=<room>&token=<yours>` AND, ideally, a cast/mirror of
   the headset view (Quest casting) so they can see where the in-game crosshair
   actually lands vs. where the tester says they are pointing.
 
@@ -341,7 +360,7 @@ Off-screen / wrong-console aim sends `sendLightgun(-1,-1,trigger)` = a reload.
 **Corrected 2026-07-29.** This section used to open "today there are **zero**
 gun-specific `logger.event` calls" and was headed SPEC ONLY. That is no longer
 true — most of it was built. What actually ships today, all readable from
-`dionysus.dk/logs?session=<room>`:
+`dionysus.dk/logs?session=<room>&token=<yours>`:
 
 | Event | Where | Spec below |
 |---|---|---|

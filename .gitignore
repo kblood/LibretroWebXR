@@ -29,4 +29,23 @@ public/roms/*
 # Libretro cores (~2-5 MB each). NOT distributed in this repo — fetched at
 # build/deploy time by scripts/fetch-cores.mjs and rehosted on the deploy
 # server. See docs/LICENSING.md for why we don't bundle them.
-public/cores/
+#
+# `public/cores/*`, not `public/cores/` — git cannot re-include a file inside an
+# excluded DIRECTORY, so ignoring the contents rather than the directory itself is
+# what makes the negation below possible. Everything under here is still ignored;
+# only the one negation below ships (the .build.json provenance manifests). The
+# PATCHED marker mentioned further down is NOT a second exception — it stays
+# ignored.
+public/cores/*
+# ...EXCEPT the provenance manifests (ARC-3). Each `<core>.build.json` records the
+# upstream repos + commit SHAs, the emsdk/emscripten versions, the build flags and
+# a sha256 per emitted artifact — a few KB of reviewable text that is the ENTIRE
+# record of how a shipped binary was produced. Keeping them ignored meant a clean
+# clone could neither reproduce nor authenticate a single core, and
+# scripts/fetch-cores.mjs's sha256 verifier had nothing to verify against. The
+# binaries stay out; their provenance comes in.
+!public/cores/*.build.json
+# The light-gun PROTECTION marker stays ignored on purpose — see
+# scripts/test-patched-cores.mjs: its absence is how a clean clone is
+# distinguished from a machine whose patched builds are unprotected, and shipping
+# a template would destroy that signal.

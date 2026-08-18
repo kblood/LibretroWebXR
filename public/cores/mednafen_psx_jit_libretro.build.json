@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "artifactBasename": "mednafen_psx_jit_libretro",
+  "artifacts": {
+    "mednafen_psx_jit_libretro.js": {
+      "bytes": 318771,
+      "sha256": "fae99977d0e78c4aa203d597fe94c50f95396a04d9387613325f783673e7c17f"
+    },
+    "mednafen_psx_jit_libretro.wasm": {
+      "bytes": 6912103,
+      "sha256": "2ba610e065515304e861699d507b5c2f8ad06eb596ba9df5517063e124c01d38"
+    },
+    "mednafen_psx_jit_libretro.worker.js": {
+      "bytes": 2163,
+      "sha256": "c1ef9202edfcd6250d7237847f41da1023a70a6d88906421e8177972ed68b66e"
+    }
+  },
+  "pins": {
+    "RETROARCH_REPOSITORY": "https://github.com/libretro/RetroArch.git",
+    "RETROARCH_COMMIT": "45246ce85eec8fb36d11c3bf551b9b81d3a426a1",
+    "BEETLE_PSX_REPOSITORY": "https://github.com/libretro/beetle-psx-libretro.git",
+    "BEETLE_PSX_COMMIT": "d6caed07fcba47c211ff23c4fa1b20b894830ff2",
+    "PLAY_CODEGEN_REPOSITORY": "https://github.com/jpd002/Play--CodeGen.git",
+    "PLAY_CODEGEN_COMMIT": "a5009f7dca062695b8e5aebbd71e67b4ddfa9251",
+    "PLAY_FRAMEWORK_REPOSITORY": "https://github.com/jpd002/Play--Framework.git",
+    "PLAY_FRAMEWORK_COMMIT": "587f278917acc0026bf5fc34b39f995fc26bd015",
+    "EMSDK_VERSION": "3.1.46",
+    "EMSDK_REPOSITORY": "https://github.com/emscripten-core/emsdk.git",
+    "EMSDK_COMMIT": "d223ae73c6998296e3ab27cf81dc2c2c9fd383de",
+    "EMSCRIPTEN_COMMIT": "19607820c447a13fd8d0b7680c56148427d6e1b8"
+  },
+  "build": {
+    "cpuBackend": "Lightrec-to-Play--CodeGen-Wasm",
+    "audioBackend": "LibretroWebXR-worker-bridge",
+    "audioSampleRateHz": 48000,
+    "modularize": true,
+    "exportEs6": true,
+    "pthreads": true,
+    "sharedMemory": true,
+    "initialMemoryBytes": 536870912,
+    "memoryGrowth": true,
+    "offscreenCanvas": true,
+    "webglMinVersion": 2,
+    "webglMaxVersion": 2,
+    "wasmBigInt": true,
+    "allowTableGrowth": true,
+    "embind": true,
+    "cppExceptions": true,
+    "exportedRuntimeMethods": [
+      "callMain",
+      "FS",
+      "addFunction",
+      "removeFunction"
+    ],
+    "exportedDiscCommands": [
+      "cmd_disk_eject_toggle",
+      "cmd_disk_next",
+      "cmd_disk_prev"
+    ],
+    "exportedJitSymbols": [
+      "lr_play_backend_compiled_blocks",
+      "lr_play_backend_live_blocks",
+      "lr_play_backend_invalidate_all"
+    ]
+  }
+}

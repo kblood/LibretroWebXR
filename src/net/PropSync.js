@@ -181,19 +181,29 @@ export function parsePropEntries(entries) {
  * it actually IS. This computes what that costs — only the entries that differ
  * from what room state already holds, so a settled room publishes nothing.
  *
+ * `force` (TEARDOWN-1) exists because `published` is the HOST's own memory of what
+ * it sent, and that memory can outlive the room state it describes: leaving a room
+ * empty destroys every `prop:*` key server-side, so after a leave/rejoin the two
+ * disagree and the diff — comparing only against itself — publishes nothing. The
+ * next peer to join then builds the room as AUTHORED while the host sees it
+ * rearranged, which is the join-layout bug all over again. A forced pass ignores
+ * the memory and republishes everything, re-seeding it correctly; `skip` is still
+ * honoured, because a prop in somebody's hand belongs to the drag wire either way.
+ *
  * @param {Map|Iterable} current    propId → the payload the prop has RIGHT NOW
  * @param {Map|Iterable} published  propId → the payload room state already holds
  * @param {Set} [skip]              propIds to leave alone (a prop in a hand: the
  *                                  live-drag wire owns its pose until release)
+ * @param {boolean} [force]         republish every prop, dedupe memory or not
  * @returns {Array<{propId: string, payload: object}>} entries to publish
  */
-export function diffPropBaseline({ current, published, skip = new Set() }) {
+export function diffPropBaseline({ current, published, skip = new Set(), force = false }) {
   const have = published instanceof Map ? published : new Map(published);
   const now = current instanceof Map ? current : new Map(current);
   const out = [];
   for (const [propId, payload] of now) {
     if (!payload || skip.has(propId)) continue;
-    if (JSON.stringify(have.get(propId)) === JSON.stringify(payload)) continue;
+    if (!force && JSON.stringify(have.get(propId)) === JSON.stringify(payload)) continue;
     out.push({ propId, payload });
   }
   return out;

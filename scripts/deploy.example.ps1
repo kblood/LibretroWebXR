@@ -156,18 +156,33 @@ if ($Room) {
   Write-Host "=== room server -> ${Target}:$RoomBase ($Unit) ===" -ForegroundColor Cyan
   # Hub.js imports ../src/net/NetProtocol.js — ship them together or the service
   # crash-loops on a missing export.
+  # server/package-lock.json SHIPS TOO, and the remote install is `npm ci`, not
+  # `npm install`. This is a real gap that was closed, not a tidy-up: the lockfile
+  # stayed on the dev box, so `npm install` resolved `"ws": "^8.21.1"` against the
+  # registry AT DEPLOY TIME. CI proves ws 8.21.3; the first deploy after 8.22.x
+  # publishes would have put 8.22.x on the server with no gate anywhere — the
+  # deployed relay was the one component whose dependency set was never the tested
+  # one, and `npm run test:servers` (which gates the admission limits and the
+  # SIGNAL 'bye' round trip) never saw that build.
   $files = @(
-    @{ src = 'server\Hub.js';          dst = "$RoomBase/server/" },
-    @{ src = 'server\room-server.mjs'; dst = "$RoomBase/server/" },
-    @{ src = 'server\log-server.mjs';  dst = "$RoomBase/server/" },
-    @{ src = 'server\package.json';    dst = "$RoomBase/server/" },
-    @{ src = 'src\net\NetProtocol.js'; dst = "$RoomBase/src/net/" }
+    @{ src = 'server\Hub.js';            dst = "$RoomBase/server/" },
+    @{ src = 'server\room-server.mjs';   dst = "$RoomBase/server/" },
+    @{ src = 'server\log-server.mjs';    dst = "$RoomBase/server/" },
+    @{ src = 'server\package.json';      dst = "$RoomBase/server/" },
+    @{ src = 'server\package-lock.json'; dst = "$RoomBase/server/" },
+    @{ src = 'src\net\NetProtocol.js';   dst = "$RoomBase/src/net/" }
   )
   foreach ($f in $files) { if (-not (Test-Path (Join-Path $RepoRoot $f.src))) { throw "missing $($f.src)" } }
   $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
   Invoke-Ssh "sudo cp -a '$RoomBase' '$RoomBase.bak-$stamp' && echo 'backup: $RoomBase.bak-$stamp'"
   foreach ($f in $files) { Write-Host "    + $($f.src)"; Invoke-Scp (Join-Path $RepoRoot $f.src) $f.dst }
-  Invoke-Ssh "cd '$RoomBase/server' && npm install --omit=dev --no-audit --no-fund >/dev/null && echo 'deps ok'"
+  # `npm ci` deletes and recreates node_modules and HARD-FAILS if package.json and
+  # package-lock.json disagree. That is the intended new failure: a room deploy
+  # now aborts rather than silently installing a dependency set nothing tested.
+  # Run the first deploy after this change with -DryRun, then verify on the box:
+  #   node -e "console.log(require('ws/package.json').version)"
+  # must print exactly the version in server/package-lock.json.
+  Invoke-Ssh "cd '$RoomBase/server' && npm ci --omit=dev --no-audit --no-fund >/dev/null && echo 'deps ok (npm ci, locked)'"
   Invoke-Ssh "sudo systemctl restart $Unit"
   Start-Sleep 3
   Invoke-Ssh "systemctl is-active $Unit"

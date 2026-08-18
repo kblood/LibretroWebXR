@@ -14,10 +14,18 @@
 //   GET  /logs.json  same params but → raw JSON
 //
 // Storage
-//   In-memory ring buffer per session (SESSION_RING_MAX entries). Optionally
-//   appends to `server/logs/<sessionId>.log` when LOG_DIR env var is set or
-//   the `server/logs/` directory already exists.  Log files use one JSON entry
-//   per line (NDJSON) so they can be tail-followed.
+//   In-memory ring buffer per session (SESSION_RING_MAX entries per session,
+//   MAX_SESSIONS sessions) under one AGGREGATE MAX_STORE_BYTES budget for the
+//   whole store — the two per-axis counts multiply out to tens of GB on their
+//   own, see "Resource limits" below.
+//   File logging is ALWAYS ON: ensureFileLogging() mkdirSync -p's `logsDir`
+//   (LOG_DIR, default `server/logs`) the first time an entry is stored. This
+//   note used to say "optionally … when LOG_DIR is set or the directory already
+//   exists", which was never what the code did and made the disk budget read as
+//   something only some deployments needed. Files are NDJSON (one JSON entry
+//   per line) so they can be tail-followed, and are bounded per file
+//   (MAX_FILE_BYTES) AND in aggregate by count and total size
+//   (MAX_LOG_FILES / MAX_LOG_DIR_BYTES, oldest evicted first).
 //
 // Apache proxy snippet: see deploy/log-proxy.conf.
 //
@@ -28,7 +36,7 @@
 //
 // This module is reverse-proxied to the public internet (deploy/log-proxy.conf)
 // and lives in the SAME PROCESS as the room server, so anything that throws out
-// of a handler here takes multiplayer down with it. Three rules hold:
+// of a handler here takes multiplayer down with it. Four rules hold:
 //
 //   1. Nothing reaches the viewer HTML unescaped. Every interpolation that
 //      lands in the response is either esc()'d — attribute values included —
@@ -46,6 +54,11 @@
 //      every field on ingest, so the renderer can never meet a surprise type.
 //   3. No handler may throw. Both handlers run inside try/catch and answer
 //      400/500 instead of killing the process.
+//   4. Nothing is bounded on ONE axis only. Every per-axis cap below also has
+//      an aggregate budget over it — MAX_STORE_BYTES for retained heap,
+//      MAX_LOG_FILES/MAX_LOG_DIR_BYTES for the log directory — because the
+//      caps multiply and a process killed by an OOM abort is just as dead as
+//      one killed by a TypeError, and rule 3 cannot catch that one.
 //
 // What ingest does to structured event fields (`logger.event(name, extra)`)
 //   Scalars (string/number/boolean/null) are kept as scalars, capped.
@@ -84,7 +97,7 @@
 //              POST /log keeps `*` deliberately — see applyCors().
 
 import { createServer }       from 'node:http';
-import { createWriteStream, mkdirSync, statSync } from 'node:fs';
+import { createWriteStream, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join, dirname }      from 'node:path';
 import { fileURLToPath }      from 'node:url';
 import { timingSafeEqual }    from 'node:crypto';
@@ -137,6 +150,53 @@ const HEADERS_TIMEOUT   = 10_000;       // ms — slowloris guard
 // long to wait for its own earlier requests to stop occupying slots before it
 // measures the cap. Change it and that wait follows automatically.
 const KEEPALIVE_TIMEOUT = 5_000;
+
+// ─── The two AGGREGATE budgets (CLAUDE_REVIEW §4.2, CODEX SEC-2) ──────────────
+//
+// Everything above is a PER-AXIS cap, and per-axis caps are individually
+// defensible and jointly meaningless — the same asymmetry server/Hub.js:70-124
+// documents for room STATE, where 512 x 250 KiB went into one room with zero
+// refusals because nothing ever multiplied the caps out. Multiplied out here:
+//
+//   memory   MAX_SESSIONS 100 x SESSION_RING_MAX 5000 entries, each allowed
+//            MAX_MSG_CHARS 8 KiB + MAX_EXTRA_FIELDS 24 x MAX_EXTRA_BYTES 4 KiB
+//            ≈ 106 kB  →  ~52 GB of retained heap, driven by unauthenticated
+//            POSTs rotating `sessionId` to spread across the 100 slots. A V8
+//            heap OOM is an ABORT, so room-server.mjs's uncaughtException net
+//            (:45-47) does not catch it and netplay dies with the log server —
+//            exactly the §4.2 outcome, reached by a different route.
+//   disk     nothing bounded the file COUNT or the directory TOTAL, and nothing
+//            ever deleted a file: one fresh 64-char session id per ~127 kB POST
+//            is ~1 GB and ~8,000 inodes per 8,000 requests, unbounded after
+//            that, on the same filesystem as the room-server unit and Apache.
+//
+// So two aggregate budgets, in the same vocabulary Hub.js uses for
+// stateBytesPerPeer/PerRoom/Total:
+//
+//   MAX_STORE_BYTES      what this PROCESS may retain in the ring store, in
+//                        ACCOUNTED bytes — serialized characters PLUS
+//                        STORE_NODE_COST_BYTES per JSON node. Bytes alone are
+//                        the wrong unit because the defender picks the unit and
+//                        the attacker picks the shape: JSON's cheapest heap
+//                        object is three characters wide (`[{},{},…]`), and
+//                        Hub.js measured a byte-only budget of the same size
+//                        admitting a 22.78x heap multiplier. 128 B/node is
+//                        Hub.js's measured figure (121 B per empty object, 68 B
+//                        per empty array, 110 B per `"k123":1` property),
+//                        reused rather than re-derived.
+//   MAX_LOG_DIR_BYTES /  what the log DIRECTORY may hold, by total size and by
+//   MAX_LOG_FILES        file count, oldest evicted (and unlinked) first.
+//
+// Both are ~600x the real workload — a handful of headsets POSTing ~8 kB of
+// ~200-char messages every 800 ms — and the in-memory ring, not the file, is
+// the read path the headset workflow uses, so evicting an old file costs a
+// developer nothing they were reading. Deliberately NOT env knobs:
+// scripts/test-room-limits.mjs scans this module for `process.env` reads and
+// fails the run when a knob has no server/README.md row.
+const STORE_NODE_COST_BYTES = 128;              // accounted bytes per JSON node
+const MAX_STORE_BYTES   = 64 * 1024 * 1024;     // whole in-memory store, accounted
+const MAX_LOG_FILES     = 200;                  // .log files kept in logsDir
+const MAX_LOG_DIR_BYTES = 512 * 1024 * 1024;    // total size of logsDir
 
 // ─── Escaping ─────────────────────────────────────────────────────────────────
 
@@ -304,23 +364,98 @@ function sanitizeEntry(e) {
   return out;
 }
 
-// ─── Optional file persistence ────────────────────────────────────────────────
+// ─── File persistence (ALWAYS ON — see the Storage note in the header) ───────
 
 const logsDir = process.env.LOG_DIR || join(__dir, 'logs');
 // Map<safeSessionId -> { ws: WriteStream, bytes: number, refused: boolean }>
 // Insertion-ordered, so the first key is the least-recently-opened stream.
 let fileStreams = null; // null until ensureFileLogging() decides
 
+// The DIRECTORY budget's bookkeeping.
+//   dirFiles: Map<filename -> { bytes, mtime, pinned }>, oldest-first after the
+//             startup sweep; `mtime` is "last opened or swept", so an actively
+//             written session is the last thing evicted, and `pinned` marks a
+//             file whose unlink failed so the eviction loop cannot spin on it.
+//   dirBytes: running total of dirFiles' bytes.
+let dirFiles = null;
+let dirBytes = 0;
+
+// Only files matching this are counted, and — far more important — only files
+// matching this are ever unlinked. It is exactly safeSessionId()'s surviving
+// alphabet plus the `.log` suffix, so the eviction below can only ever delete a
+// file this module created, never something a developer parked in the directory
+// and never anything reached through a name that came back off the disk.
+const LOG_NAME_RE = /^[A-Za-z0-9._-]+\.log$/;
+
 function ensureFileLogging() {
   if (fileStreams) return fileStreams;
   try {
     mkdirSync(logsDir, { recursive: true });
     fileStreams = new Map();
+    dirFiles = new Map();
+    dirBytes = 0;
+    // Sweep what is ALREADY on disk. Without this the budget would reset to
+    // zero on every restart and only ever bound one process's worth of logs —
+    // the same reason fileStreamFor() seeds rec.bytes from statSync().
+    let names = [];
+    try { names = readdirSync(logsDir); } catch { names = []; }
+    const seen = [];
+    for (const name of names) {
+      if (!LOG_NAME_RE.test(name)) continue;
+      try {
+        const st = statSync(join(logsDir, name));
+        if (st.isFile()) seen.push({ name, bytes: st.size, mtime: st.mtimeMs });
+      } catch { /* vanished, or a device file that refuses to stat — ignore it */ }
+    }
+    seen.sort((a, b) => a.mtime - b.mtime);   // insertion order == eviction order
+    for (const f of seen) {
+      dirFiles.set(f.name, { bytes: f.bytes, mtime: f.mtime, pinned: false });
+      dirBytes += f.bytes;
+    }
   } catch {
     // Can't write to disk — stay in-memory only.
     fileStreams = null;
+    dirFiles = null;
+    dirBytes = 0;
   }
   return fileStreams;
+}
+
+/**
+ * Hold logsDir under MAX_LOG_FILES / MAX_LOG_DIR_BYTES by unlinking the oldest
+ * `.log` files. Called before a NEW file is created and after every append, so
+ * neither "many sessions" nor "one long session" can grow the directory past
+ * the budget — per-file MAX_FILE_BYTES x MAX_LOG_FILES is 6.4 GB, which is why
+ * the append path needs this too and not just the open path.
+ *
+ * @param {string} keepName  the file being written right now — never a victim
+ * @param {number} reserve   1 when a file is about to be ADDED, else 0
+ */
+function enforceDirBudget(keepName, reserve) {
+  if (!dirFiles) return;
+  while (dirFiles.size + reserve > MAX_LOG_FILES || dirBytes > MAX_LOG_DIR_BYTES) {
+    let victim = null;
+    let rec = null;
+    for (const [name, r] of dirFiles) {
+      if (name === keepName || r.pinned) continue;
+      if (!rec || r.mtime < rec.mtime) { victim = name; rec = r; }
+    }
+    if (!victim) return;                  // nothing left this may delete
+    // The file may still have an open write stream (32 of them can be open);
+    // end it first so the handle goes with the name.
+    closeStream(victim.slice(0, -'.log'.length));
+    try {
+      unlinkSync(join(logsDir, victim));
+    } catch {
+      // Locked/readonly/already gone. Pin it so the next pass picks a DIFFERENT
+      // victim instead of retrying this one forever — the loop must always make
+      // progress, it runs inside an HTTP handler.
+      rec.pinned = true;
+      continue;
+    }
+    dirFiles.delete(victim);
+    dirBytes = Math.max(0, dirBytes - rec.bytes);
+  }
 }
 
 function closeStream(id) {
@@ -334,10 +469,13 @@ function closeStream(id) {
 /**
  * Get (or lazily open) the NDJSON stream for an ALREADY-SANITISED session id.
  *
- * Two limits live here: at most MAX_OPEN_FILES handles are open at once (the
+ * Three limits live here: at most MAX_OPEN_FILES handles are open at once (the
  * least-recently-opened is closed to make room — a remote client used to be
  * able to open one file descriptor per invented session id and never give it
- * back), and a session file stops accepting writes past MAX_FILE_BYTES.
+ * back), a session file stops accepting writes past MAX_FILE_BYTES, and the
+ * DIRECTORY itself is held under MAX_LOG_FILES / MAX_LOG_DIR_BYTES before a new
+ * file is added to it. Closing a handle was never the same thing as bounding
+ * the disk: pre-budget, every evicted stream left its file behind forever.
  *
  * @param {string} safeId  output of safeSessionId()
  */
@@ -352,8 +490,14 @@ function fileStreamFor(safeId) {
     closeStream(oldest);
   }
 
+  const name = `${safeId}.log`;
+  // Make room BEFORE creating the file, and only reserve a slot when this name
+  // is not already on disk (a reopened session must not evict a file to make
+  // room for itself).
+  enforceDirBudget(name, dirFiles?.has(name) ? 0 : 1);
+
   try {
-    const path = join(logsDir, `${safeId}.log`);
+    const path = join(logsDir, name);
     // Seed the byte counter from the file already on disk so the cap survives
     // restarts instead of resetting to zero every boot.
     let bytes = 0;
@@ -361,13 +505,39 @@ function fileStreamFor(safeId) {
     const rec = { ws: createWriteStream(path, { flags: 'a', encoding: 'utf8' }), bytes, refused: false };
     rec.ws.on('error', () => { closeStream(safeId); });  // ENOSPC/EACCES → memory only
     streams.set(safeId, rec);
+    if (dirFiles) {
+      const known = dirFiles.get(name);
+      if (known) {
+        // Re-sync with the disk (another process, or our own pre-restart self,
+        // may have written it) and refresh its age: "oldest" means least
+        // recently OPENED, so a session that keeps logging is evicted last.
+        dirBytes += bytes - known.bytes;
+        known.bytes  = bytes;
+        known.mtime  = Date.now();
+        known.pinned = false;
+      } else {
+        dirFiles.set(name, { bytes, mtime: Date.now(), pinned: false });
+        dirBytes += bytes;
+      }
+    }
     return rec;
   } catch {
     return null;
   }
 }
 
-function appendToFile(safeId, record) {
+/**
+ * Append one ALREADY-SERIALIZED record to the session's NDJSON file.
+ *
+ * Takes the serialized line rather than the record because storeEntries() has
+ * to JSON.stringify() it anyway to charge it against MAX_STORE_BYTES, and
+ * stringifying the same record twice per entry is pure waste on the hot path.
+ *
+ * @param {string} safeId  output of safeSessionId()
+ * @param {string} json    JSON.stringify(record), '' if it could not be serialized
+ */
+function appendToFile(safeId, json) {
+  if (!json) return;
   const rec = fileStreamFor(safeId);
   if (!rec) return;
   if (rec.bytes >= MAX_FILE_BYTES) {
@@ -378,9 +548,21 @@ function appendToFile(safeId, record) {
     return;
   }
   try {
-    const line = `${JSON.stringify(record)}\n`;
-    rec.bytes += Buffer.byteLength(line);
+    const line = `${json}\n`;
+    const n = Buffer.byteLength(line);
+    rec.bytes += n;
     rec.ws.write(line);
+    const name = `${safeId}.log`;
+    // Only charge bytes we can also REFUND. dirBytes is refunded from the
+    // tracked record when the file is unlinked, so counting bytes for an
+    // untracked name would leak the total upward forever and end with the
+    // budget evicting everything on every append.
+    const tracked = dirFiles?.get(name);
+    if (tracked) { tracked.bytes += n; dirBytes += n; }
+    // One long-lived session can reach MAX_FILE_BYTES on its own, so the
+    // directory total has to be re-checked on the APPEND path too, not only
+    // when a new file appears.
+    enforceDirBudget(name, 0);
   } catch { /* non-fatal */ }
 }
 
@@ -395,9 +577,86 @@ function appendToFile(safeId, record) {
 // set (and the bogus cap) is gone rather than given a constant it doesn't need.
 const sessions = new Map();
 
+// What the store currently costs against MAX_STORE_BYTES, and the per-record
+// costs it is the sum of. A WeakMap and not a field on the record: the record
+// is exactly what /logs.json serializes and what the NDJSON line contains, so
+// an accounting field would leak into both the API and the file.
+const entryCost = new WeakMap();
+let storeBytes = 0;
+
+/**
+ * ACCOUNTED size of one stored record: serialized characters plus
+ * STORE_NODE_COST_BYTES per JSON node — the unit server/Hub.js charges room
+ * STATE in, for the reason documented there: retained heap is paid per
+ * allocated object, not per character, and JSON's cheapest object is three
+ * characters wide. One node per container and one per array element / object
+ * property; KEYS are not counted separately (their characters are already in
+ * the serialized length, and their value's node is already charged).
+ *
+ * Iterative, like Hub.js's measureValue(), even though sanitizeEntry() has
+ * already bounded the shape to MAX_EXTRA_DEPTH: nothing that runs on
+ * attacker-shaped data inside an HTTP handler should be able to RangeError.
+ *
+ * @param {object} record      the stored record
+ * @param {string} serialized  JSON.stringify(record), '' if it did not serialize
+ */
+function accountedBytes(record, serialized) {
+  let nodes = 0;
+  const stack = [record];
+  while (stack.length) {
+    const v = stack.pop();
+    nodes++;
+    if (v === null || typeof v !== 'object') continue;
+    if (Array.isArray(v)) { for (const x of v) stack.push(x); }
+    else { for (const k of Object.keys(v)) stack.push(v[k]); }
+  }
+  return serialized.length + nodes * STORE_NODE_COST_BYTES;
+}
+
 function getSession(id) {
   if (!sessions.has(id)) sessions.set(id, { ring: [] });
   return sessions.get(id);
+}
+
+/** Drop a session's oldest entry, refunding its accounted cost. */
+function dropOldestEntry(sess) {
+  const gone = sess.ring.shift();
+  if (gone !== undefined) storeBytes = Math.max(0, storeBytes - (entryCost.get(gone) || 0));
+}
+
+/** Forget a whole session: its entries, its accounted cost and its file handle. */
+function forgetSession(id) {
+  const sess = sessions.get(id);
+  if (sess) {
+    for (const rec of sess.ring) storeBytes = Math.max(0, storeBytes - (entryCost.get(rec) || 0));
+    sessions.delete(id);
+  }
+  closeStream(id);
+}
+
+/**
+ * Free the single oldest entry in the store, for the MAX_STORE_BYTES budget.
+ * Sessions are walked in insertion order, so the oldest session gives up its
+ * oldest entry first, and a session that empties is dropped outright (its file
+ * handle with it).
+ *
+ * @param {string} keepId  the session being written right now. Its ENTRIES are
+ *   still evictable, but the Map entry itself must survive: storeEntries() holds
+ *   a reference to that ring, and deleting it here would leave the caller
+ *   pushing into a detached array — entries invisible to /logs.json whose cost
+ *   nothing could ever refund, i.e. a counter leak that ends in a busy loop.
+ * @returns {boolean} false when there was nothing left to free
+ */
+function evictOldestEntry(keepId) {
+  for (const [id, sess] of sessions) {
+    if (sess.ring.length) {
+      dropOldestEntry(sess);
+      if (!sess.ring.length && id !== keepId) forgetSession(id);
+      return true;
+    }
+    if (id !== keepId) forgetSession(id);   // empty husk: free its handle too
+  }
+  return false;
 }
 
 function storeEntries(safeId, clientId, nick, entries) {
@@ -406,15 +665,23 @@ function storeEntries(safeId, clientId, nick, entries) {
   // invented session ids exhausted file descriptors.
   if (!sessions.has(safeId) && sessions.size >= MAX_SESSIONS) {
     const oldest = sessions.keys().next().value;
-    if (oldest !== undefined) { sessions.delete(oldest); closeStream(oldest); }
+    if (oldest !== undefined) forgetSession(oldest);
   }
   const sess = getSession(safeId);
 
   for (const e of entries) {
     const record = { ...e, sessionId: safeId, clientId, nick: nick || null };
-    if (sess.ring.length >= SESSION_RING_MAX) sess.ring.shift();
+    let json;
+    try { json = JSON.stringify(record); } catch { json = ''; }
+    if (sess.ring.length >= SESSION_RING_MAX) dropOldestEntry(sess);
+    entryCost.set(record, accountedBytes(record, json));
+    storeBytes += entryCost.get(record);
     sess.ring.push(record);
-    appendToFile(safeId, record);
+    appendToFile(safeId, json);
+    // AGGREGATE budget, checked per entry. The per-session ring cap above is a
+    // COUNT and the session cap is a COUNT; multiplied out they permit ~52 GB
+    // of heap, and a V8 OOM takes the room server with it (see the constants).
+    while (storeBytes > MAX_STORE_BYTES && evictOldestEntry(safeId)) { /* until under */ }
   }
 }
 

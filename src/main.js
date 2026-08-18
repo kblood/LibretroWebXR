@@ -52,14 +52,15 @@ import { computeRouting as routeControllers } from './Routing.js';
 import { NetMgr } from './net/NetMgr.js';
 import { createLiveAvatars } from './net/LiveAvatars.js';   // COR-2
 import { createSessionScope } from './net/SessionScope.js'; // COR-2
+import { createAuthorityEpoch } from './net/AuthorityEpoch.js'; // COR-3
 import { buildIceServers } from './net/NetProtocol.js';
 import { FALLBACK_HOST_KEY } from './net/HostElection.js';
 import { sanitiseRoom, randomRoomSuffix } from './net/SessionUtils.js';
 import { GhostCartMgr } from './GhostCartMgr.js';
-import { GhostGamepadMgr, makeGamepadHoldKey, isGamepadHoldKey, cableIdFromHoldKey } from './GhostGamepadMgr.js';
-import { GhostLightGunMgr, makeGunHoldKey, isGunHoldKey, cableIdFromGunHoldKey } from './GhostLightGunMgr.js';
-import { GhostMouseMgr, makeMouseHoldKey, isMouseHoldKey, cableIdFromMouseHoldKey } from './GhostMouseMgr.js';
-import { makeHoldKey, parseHolds } from './net/HoldState.js';
+import { GhostGamepadMgr, GP_HOLD_PREFIX, makeGamepadHoldKey, cableIdFromHoldKey } from './GhostGamepadMgr.js';
+import { GhostLightGunMgr, GUN_HOLD_PREFIX, makeGunHoldKey, cableIdFromGunHoldKey } from './GhostLightGunMgr.js';
+import { GhostMouseMgr, MOUSE_HOLD_PREFIX, makeMouseHoldKey, cableIdFromMouseHoldKey } from './GhostMouseMgr.js';
+import { HOLD_PREFIX, HoldView, makeHoldKey } from './net/HoldState.js';
 import {
   makeGamepadStateKey, isGamepadStateKey, cableIdFromStateKey,
   makePeerGamepadId, parseGamepadEntries, diffGamepadSync,
@@ -136,11 +137,12 @@ if (!self.crossOriginIsolated) {
 
 const urlParams = new URLSearchParams(location.search);
 const coreOverride = urlParams.get('core');
-// Experimental systems (PSX/N64 as of the 2026-07-24 review — see
-// systems.js's `experimental` flag) are hidden from the default shelf/
-// manifest UI: their worker cores are real but not yet reachable from the
-// real in-VR cartridge-insert path (P0-2), so they'd otherwise dead-end a
-// real user. `?experimental=1` opts back in for testing.
+// Experimental systems (currently n64 only — psx was un-gated 2026-08-07 and
+// dos 2026-08-01; see the dated notes at systems.js:520 and :386, which stay
+// the single source of truth) are hidden from the default shelf/manifest UI:
+// their cores are real but not yet reachable from the real in-VR
+// cartridge-insert path, so they'd otherwise dead-end a real user.
+// `?experimental=1` opts back in for testing.
 const experimentalSystems = urlParams.get('experimental') === '1';
 
 // `client` is the PRIMARY console's EmulatorClient. It starts as the singleton
@@ -189,6 +191,60 @@ let _lastLoadedMeta = null;
 // top of each other"). loadCartridge captures its own generation and bails
 // after every await that could have been outlived by a newer call.
 let _primaryLoadGeneration = 0;
+// COR-3: the generation above orders competing LOADS; it says nothing about who
+// is allowed to boot. This is the other half of the same boot transaction — the
+// room-authority epoch, bumped wherever this machine LOSES the room (a settled
+// demotion, and Leave). A boot captures it at entry and abandons after any await
+// that outlived our hosting stint, so a peer demoted mid-fetch stops instead of
+// finishing the boot and running its own core behind the new host's video feed.
+// See [[src/net/AuthorityEpoch.js]].
+// mayRunLocalCore(), NOT amRoomHost(), is the live half of the predicate: a
+// momentary socket drop makes amRoomHost() read false (it requires net.connected)
+// while the peer is still very much the room's host, and abandoning a boot on
+// every Wi-Fi hiccup would be a worse bug than the one being fixed. The LATCHED
+// display-only role is the honest question — it is set exactly when the server
+// tells us somebody else hosts, and stays set across a blip by design.
+const hostAuthority = createAuthorityEpoch({
+  isAuthoritative: () => mayRunLocalCore(),
+  onBump: (epoch, reason) => logger?.event?.('mp-authority-epoch', { epoch, reason }),
+});
+// …but not every epoch move is a LOSS of authority, and only a loss may abandon a
+// boot. Leaving a room moves the epoch too, and it hands the machine back to US:
+// after a Leave we are solo, mayRunLocalCore() is true, and the cart we were
+// fetching should simply finish booting LOCALLY — which is what it did before
+// COR-3 and what the user pressing Leave mid-fetch expects. Bumping alone made
+// that boot vanish with the status line stuck on "loading …" (2026-08-18
+// regression). So each bump also says whether the room's authority passed to
+// SOMEBODY ELSE; only those handoffs — a settled demotion, and any future
+// transition that forgets to say — invalidate a boot in flight.
+// Counted here rather than in AuthorityEpoch so that module stays a plain,
+// app-agnostic counter (and stays trivially testable).
+let _authorityHandoffs = 0;
+/**
+ * @param {string} reason for the log.
+ * @param {boolean} [opts.handoff] did the room's authority go to another peer?
+ *        Defaults TRUE (fail safe: an unlabelled new transition abandons boots
+ *        rather than silently letting a demoted peer finish one).
+ */
+function bumpHostAuthority(reason, { handoff = true } = {}) {
+  if (handoff) _authorityHandoffs += 1;
+  return hostAuthority.bump(reason);
+}
+/**
+ * Capture the room authority for a boot that is about to start awaiting things.
+ * The returned predicate is "abandon this work": true once another peer has held
+ * the room since we started, or once this machine may no longer run a core at
+ * all. A pure Leave satisfies neither, so a Leave lets the boot finish solo.
+ * @returns {() => boolean}
+ */
+function captureBootAuthority() {
+  const epochMoved = hostAuthority.guard();
+  const atHandoffs = _authorityHandoffs;
+  // Same fail-CLOSED rule as AuthorityEpoch's own predicate: an unanswerable
+  // "may I run a core?" refuses the boot instead of assuming yes.
+  const mayStillRun = () => { try { return mayRunLocalCore(); } catch (_) { return false; } };
+  return () => epochMoved() && (_authorityHandoffs !== atHandoffs || !mayStillRun());
+}
 let _lightgunArmedConsole = false;  // primary console booted with the gun device
 let _mouseArmedConsole = false;     // primary console booted with the mouse device
 // Two-gun (co-op) state: the ordered libretro gun PORTs the active two-gun config
@@ -391,6 +447,31 @@ function _attachNetTickCallbacks() {
   for (const fn of _netTickCallbacks) scene.addTickCallback(fn);
 }
 
+// --- One shared, version-keyed view of the room's holds (PERF-4(b)) ---------
+//
+// The four ghost-sync ticks below (carts, gamepads, guns, mice) each used to
+// call net.objects.entries() AND build their own
+// `new Set(presence.peers().map(...))` EVERY RENDERED FRAME — four full copies
+// of the room-state map, three of them then filtered down to a handful of keys,
+// with a key count a PEER gets to choose. [[src/net/HoldState.js]]'s HoldView
+// carries the whole rationale and the two-counter memo key; this is just the
+// wiring, and it is one object so all four ticks share the same parse.
+//
+// Slice shapes are exactly what each manager wanted before:
+//   • carts take EVERY `hold:` key (peripheral holds included — byte-for-byte
+//     the set the unfiltered entries() used to hand them),
+//   • each peripheral takes its own namespace and remaps the parsed objId
+//     ('gp:<cableId>') down to the bare <cableId> its manager keys on.
+const _holdView = new HoldView([
+  { name: 'carts', prefix: HOLD_PREFIX },
+  { name: 'gamepads', prefix: `${HOLD_PREFIX}${GP_HOLD_PREFIX}`, remap: (id) => cableIdFromHoldKey(`${HOLD_PREFIX}${id}`) },
+  { name: 'guns', prefix: `${HOLD_PREFIX}${GUN_HOLD_PREFIX}`, remap: (id) => cableIdFromGunHoldKey(`${HOLD_PREFIX}${id}`) },
+  { name: 'mice', prefix: `${HOLD_PREFIX}${MOUSE_HOLD_PREFIX}`, remap: (id) => cableIdFromMouseHoldKey(`${HOLD_PREFIX}${id}`) },
+]);
+
+/** The current holds, parsed at most once per state/roster change. */
+function _netHolds() { return _holdView.update(net.objects, net.presence); }
+
 // --- Room-session cleanups (COR-2) -----------------------------------------
 //
 // The other half of "session-scoped": state a manager is holding ON BEHALF of
@@ -452,6 +533,18 @@ let _peerPropCounter = 0;
 // Known synced payloads: propId → last payload applied from the network.
 // Used by diffPropSync to detect moves vs first-time-seen.
 const _knownPropPayloads = new Map();
+// TEARDOWN-1: force the NEXT host prop-baseline pass to republish everything,
+// ignoring the dedupe above. Set on Leave and on promotion, exactly where the
+// sibling room/shelf signatures are reset and for the same reason: an empty room
+// is destroyed server-side (Hub.js _dropRoomState), so after leave/rejoin every
+// `prop:*` key is gone while this map still claims we published them — the
+// baseline then diffs to nothing and the next joiner sees the room as AUTHORED,
+// the exact join-layout bug closed in 41167e2, back after one rejoin cycle.
+// Deliberately a force FLAG and not `_knownPropPayloads.clear()`: the map is
+// dual-purpose (publish-dedupe AND "props we know about" for diffPropSync's
+// removal loop, fed as `localProps` at the full re-scan), so clearing it would
+// arm a mass _removeRemoteProp() of every non-static prop on the next re-scan.
+let _forcePropBaseline = false;
 // Registry of all synced props (static room props + peer-spawned): propId → { prop, object }.
 // Populated in buildCartridgeWorld and updated when local props are added/broadcast.
 // Also used by window.__props debug hook.
@@ -687,6 +780,27 @@ function _applyNetFatal(code, reason) {
   logger?.event?.('mp-fatal', _netFatal);
   if (mpWidget) updateMpWidget();
 }
+
+// I2's other half, and the counterpart of _applyNetFatal above: a TRANSIENT
+// refusal. The relay does not kill an admission refusal's upgrade — it accepts
+// the socket and closes it 1013 + a human reason ("room \"x\" full (16/16)",
+// "too many connections from this address (16/16)", "server at capacity") —
+// precisely so the reason can reach the user, and NetMgr then retries on the
+// slow 5-30 s table. Until this was wired the widget painted a bare "Offline"
+// with an empty tooltip and the VR panel said "Connecting…", so the user saw the
+// same dead end COR-9 removed: no reason, and no sign anything was still trying.
+//
+// Deliberately NOT latched in a module variable the way _netFatal is. A fatal is
+// final, so it has to survive repaints; this one is the opposite — NetMgr clears
+// `lastClose` itself the moment a session exists (_noteSessionEstablished), so
+// reading it live on each repaint is exactly what makes the line disappear on its
+// own when we get in. This hook therefore only records the event and forces an
+// immediate repaint, because the widget tick may not be running yet on a
+// first-connect failure (_ensureMpTick runs on join, not on close).
+function _applyNetRetry(info) {
+  logger?.event?.('mp-retry', info);
+  if (mpWidget) updateMpWidget();
+}
 function stashSessionRejoin() {
   try {
     if (!net) return;
@@ -858,6 +972,10 @@ function connectToRoom(room, nick, color) {
     // a headset can read. Signature is NetMgr's — `({ code, reason })`, fired at
     // most once per NetMgr — and is deliberately not reshaped or renamed here.
     onFatal: ({ code, reason }) => _applyNetFatal(code, reason),
+    // …and the transient half (RELAY-3 I2). Signature is NetMgr's —
+    // `({ code, reason, attempt, delayMs })`, fired once per scheduled retry —
+    // and is deliberately not reshaped here. See _applyNetRetry.
+    onRetry: (info) => _applyNetRetry(info),
   });
   net = newNet;
   net.connect();
@@ -892,6 +1010,22 @@ function disconnectFromRoom() {
   // dead) host video and Leave looked like it did nothing.
   _hostVideoEl = null;
   _pendingInsertMeta = null;
+  // COR-3: leaving ends this hosting stint, so record the transition — the epoch
+  // stays the identity of a stint, and `mp-authority-epoch` in the log is how a
+  // headset session is read back afterwards. It is explicitly NOT a handoff: we
+  // are walking out to be solo, not handing the room to a new host, so a boot
+  // still fetching its ROM keeps its authority and finishes locally (see
+  // captureBootAuthority). An earlier version abandoned it here, justified as
+  // preventing a `tv` publish and a video broadcast "into a session we no longer
+  // have" — neither can fire, because both are `net?.…` calls and `net` is nulled
+  // a few lines below; all that guard actually did was strand the user on
+  // "loading <title>…" with the game never appearing.
+  bumpHostAuthority('leave', { handoff: false });
+  // TEARDOWN-1: the room we are leaving may be destroyed the moment we go (an
+  // empty room drops all of its state server-side), so nothing we "already
+  // published" survives. Arm a full prop-baseline republish for the next hosting
+  // stint — belt and braces with the promotion branch, and idempotent.
+  _forcePropBaseline = true;
   // Leaving gives us our own machine back: drop the display-only latch (see
   // mayRunLocalCore) BEFORE resuming, or every resume below is refused by design.
   // (_wasDisplayOnly is deliberately left set: the local ROM library / saved rack
@@ -1061,6 +1195,55 @@ const mpJoinBtn   = document.getElementById('mp-join-btn');
 const mpLeaveBtn  = document.getElementById('mp-leave-btn');
 const mpStatusEl  = document.getElementById('mp-status');
 
+// The relay's "come back in a moment" close (RFC 6455 1013). Repeated here
+// rather than imported for the same reason NetMgr/DesktopNet repeat it: it is
+// not part of the protocol CONTRACT, it is a hint about how to word a line.
+const MP_TRY_AGAIN_CLOSE_CODE = 1013;
+
+/**
+ * Why we are NOT in a room, as one short line + a tooltip — or null when the
+ * honest answer is just "we never joined".
+ *
+ * Shared by the header widget and the in-VR panel so the two cannot drift, and
+ * because before this they disagreed in the worst possible way: the widget said
+ * "Offline" with an empty tooltip and the panel said "Connecting…", while the
+ * relay had in fact told us exactly why and NetMgr was sitting on a 5-30 s retry
+ * timer. Neither string was true, and a user in a headset had no way to find out
+ * that the room was simply full.
+ *
+ * Order matters: a fatal outranks a retry, because _netFatal means nothing is
+ * coming and the retry line would promise otherwise. Everything else is read
+ * live off `net.lastClose`, which NetMgr clears on HELLO — so this returns null
+ * again by itself once we are in, with nothing to reset.
+ */
+function mpOfflineStatus() {
+  // COR-9: not "Offline" — offline implies "it will come back". It will not:
+  // NetMgr stopped retrying on purpose, because the server's refusal is permanent
+  // for this build. Only a reload onto a matching build changes the answer. The
+  // server's own `reason` is the tooltip, so the specific diagnosis comes from
+  // the side that made it. See _applyNetFatal.
+  if (_netFatal) {
+    return {
+      text: `Refused by server (${_netFatal.code}) — reload`,
+      title: _netFatal.reason || 'The room server permanently refused this client build.',
+    };
+  }
+  const lc = net?.lastClose || null;
+  if (!lc) return null;
+  const secs = Math.max(1, Math.round((lc.delayMs || 0) / 1000));
+  // The relay's own reason is the authority — it is the side that made the
+  // decision, and it phrases capacity refusals with the numbers in them
+  // ("room \"x\" full (16/16)"). A plain drop carries no reason, so name the
+  // close code instead of inventing a diagnosis.
+  const why = lc.reason || (lc.code ? `disconnected (${lc.code})` : 'connection lost');
+  return {
+    text: `${why} — retrying in ${secs}s`,
+    title: lc.code === MP_TRY_AGAIN_CLOSE_CODE
+      ? `The room server is busy and asked us to come back later: "${why}". Attempt ${lc.attempt}, next in ${secs}s — it lets us in as soon as a seat frees, so there is nothing to do.`
+      : `The connection dropped. Attempt ${lc.attempt}, next in ${secs}s.`,
+  };
+}
+
 /** Update the header widget to reflect the current connection state. */
 function updateMpWidget() {
   const connected = !!net && net._connected;
@@ -1077,20 +1260,13 @@ function updateMpWidget() {
     mpStatusEl.textContent = `${net.room} — ${total} player${total === 1 ? '' : 's'}${names ? ` (${names}${more})` : ''}`;
     mpStatusEl.className = 'online';
     mpStatusEl.title = `Connected to room "${net.room}"`;
-  } else if (_netFatal) {
-    // COR-9: not "Offline" — offline implies "it will come back". It will not:
-    // NetMgr stopped retrying on purpose, because the server's refusal is
-    // permanent for this build. Only a reload onto a matching build changes the
-    // answer. The server's own `reason` is the tooltip, so the specific diagnosis
-    // comes from the side that made it. See _applyNetFatal.
-    mpStatusEl.textContent = `Refused by server (${_netFatal.code}) — reload`;
-    mpStatusEl.className = 'offline';
-    mpStatusEl.title = _netFatal.reason
-      || 'The room server permanently refused this client build.';
   } else {
-    mpStatusEl.textContent = 'Offline';
+    // A refusal or a drop we are still retrying says so, with the relay's own
+    // words; "Offline" is reserved for the one case where it is the whole truth.
+    const why = mpOfflineStatus();
+    mpStatusEl.textContent = why ? why.text : 'Offline';
     mpStatusEl.className = 'offline';
-    mpStatusEl.title = '';
+    mpStatusEl.title = why ? why.title : '';
   }
 }
 
@@ -2944,7 +3120,12 @@ function _publishHostPropBaseline() {
     if (grabMgr?.isHeld?.(rec.object)) { held.add(propId); continue; }
     try { current.set(propId, _propPayload(rec.prop, rec.object)); } catch { /* skip */ }
   }
-  const toPublish = diffPropBaseline({ current, published: _knownPropPayloads, skip: held });
+  // `force` (TEARDOWN-1) republishes even payloads the dedupe map already holds —
+  // see _forcePropBaseline's declaration for why a stale map outlives a rejoin and
+  // why it must not simply be cleared. The loop below re-seeds the map from the
+  // writes it makes, so receive-side bookkeeping is untouched either way.
+  const force = _forcePropBaseline;
+  const toPublish = diffPropBaseline({ current, published: _knownPropPayloads, skip: held, force });
   let published = 0;
   for (const { propId, payload } of toPublish) {
     if (net.setObjectState(makePropStateKey(propId), payload)) {
@@ -2952,7 +3133,11 @@ function _publishHostPropBaseline() {
       published++;
     }
   }
-  if (published) logger?.event?.('mp-prop-baseline', { published, props: _syncedProps.size, held: held.size });
+  // Cleared only once a pass actually had props to consider: the watcher can fire
+  // before buildCartridgeWorld has registered any, and spending the forced pass on
+  // an empty set would leave the rejoin unpublished after all.
+  if (force && current.size) _forcePropBaseline = false;
+  if (published) logger?.event?.('mp-prop-baseline', { published, props: _syncedProps.size, held: held.size, force });
   return published;
 }
 
@@ -3654,7 +3839,13 @@ async function buildCartridgeWorld() {
     // 2026-07-25 review) or the AudioContext-stub trick schedules a buffer on
     // this branch — a cheap headless signal that a console's audio pipeline
     // actually delivered at least one buffer, not just that a branch exists.
-    audio: () => audioRouter.branches.map((b) => ({ console: b.consoleId, gain: b.sink.gain.value, nextAudioTime: b.nextAudioTime })),
+    // batches/leadMs/reanchors are the worker-audio drift counters (PERF-3):
+    // a rising `reanchors` is the audible hard-cut in the PCM queue, which had
+    // no evidence channel at all before.
+    audio: () => audioRouter.branches.map((b) => ({
+      console: b.consoleId, gain: b.sink.gain.value, nextAudioTime: b.nextAudioTime,
+      batches: b.batches || 0, leadMs: Math.round(b.leadMs || 0), reanchors: b.reanchors || 0,
+    })),
     clearSaved: () => { clearRack(); spawnedMetas.length = 0; return 'cleared'; },
     saved: () => loadRack(),
     autoPause: (on) => { if (on !== undefined) { rackMgr.setBudgetEnabled(on); saveAutoPause(on); rackMgr.applyBudget(); refreshAudioFocus(); } return rackMgr.isBudgetEnabled(); },
@@ -3989,8 +4180,7 @@ async function buildCartridgeWorld() {
     // in which the session goes away.
     _addNetTickCallback(() => {
       if (!net) return;
-      const presentIds = new Set(net.presence.peers().map((p) => p.id));
-      ghostMgr.sync(parseHolds(net.objects.entries(), { selfId: net.presence.selfId, presentIds }));
+      ghostMgr.sync(_netHolds().carts);
     });
     window.__ghost = {
       count: () => ghostMgr.ghostCount,
@@ -4003,15 +4193,11 @@ async function buildCartridgeWorld() {
     // Uses the `hold:gp:<cableId>` STATE namespace (same Hub auto-clear as cart holds).
     ghostGpMgr = new GhostGamepadMgr({ avatars: liveAvatars, gamepadObjs: _gamepadObjs });
     _addSessionCleanup(() => ghostGpMgr?.removeAll());
+    // Holds are parsed once per change for all four managers (see _netHolds);
+    // `gamepads` is the hold:gp:* slice with objId already remapped to <cableId>.
     _addNetTickCallback(() => {
       if (!net) return;
-      const presentIds = new Set(net.presence.peers().map((p) => p.id));
-      // Filter entries to only gamepad holds (hold:gp:*) and parse them.
-      const gpEntries = net.objects.entries().filter(([k]) => isGamepadHoldKey(k));
-      // Remap objId from 'gp:<cableId>' to just '<cableId>' for GhostGamepadMgr.
-      const gpHolds = parseHolds(gpEntries, { selfId: net.presence.selfId, presentIds })
-        .map((h) => ({ ...h, objId: cableIdFromHoldKey(`hold:${h.objId}`) || h.objId }));
-      ghostGpMgr.sync(gpHolds);
+      ghostGpMgr.sync(_netHolds().gamepads);
     });
     window.__ghostGp = {
       count: () => ghostGpMgr.ghostCount,
@@ -4031,12 +4217,7 @@ async function buildCartridgeWorld() {
     _addSessionCleanup(() => ghostGunMgr?.removeAll());
     _addNetTickCallback(() => {
       if (!net) return;
-      const presentIds = new Set(net.presence.peers().map((p) => p.id));
-      const gunEntries = net.objects.entries().filter(([k]) => isGunHoldKey(k));
-      // Remap objId from 'gun:<cableId>' to just '<cableId>' for GhostLightGunMgr.
-      const gunHolds = parseHolds(gunEntries, { selfId: net.presence.selfId, presentIds })
-        .map((h) => ({ ...h, objId: cableIdFromGunHoldKey(`hold:${h.objId}`) || h.objId }));
-      ghostGunMgr.sync(gunHolds);
+      ghostGunMgr.sync(_netHolds().guns);
     });
     window.__ghostGun = {
       count: () => ghostGunMgr.ghostCount,
@@ -4054,12 +4235,7 @@ async function buildCartridgeWorld() {
     _addSessionCleanup(() => ghostMouseMgr?.removeAll());
     _addNetTickCallback(() => {
       if (!net) return;
-      const presentIds = new Set(net.presence.peers().map((p) => p.id));
-      const mouseEntries = net.objects.entries().filter(([k]) => isMouseHoldKey(k));
-      // Remap objId from 'mouse:<cableId>' to just '<cableId>' for GhostMouseMgr.
-      const mouseHolds = parseHolds(mouseEntries, { selfId: net.presence.selfId, presentIds })
-        .map((h) => ({ ...h, objId: cableIdFromMouseHoldKey(`hold:${h.objId}`) || h.objId }));
-      ghostMouseMgr.sync(mouseHolds);
+      ghostMouseMgr.sync(_netHolds().mice);
     });
     window.__ghostMouse = {
       count: () => ghostMouseMgr.ghostCount,
@@ -5925,7 +6101,13 @@ function buildMenuAndControlsPanel() {
       const n = net.presence.peers().length + 1;
       mpStatusVrBtn.setLabel(`${net.room} (${n}p)`);
     } else if (net) {
-      mpStatusVrBtn.setLabel('Connecting…');
+      // "Connecting…" is only true while nothing has come back yet. Once the
+      // relay has refused us it has said WHY, and the retry table is 5-30 s —
+      // so for most of that gap "Connecting…" was a lie by omission, and the one
+      // place a Quest user could have read the truth is this button. Truncated
+      // because the panel draws its labels into a fixed-width canvas texture.
+      const why = mpOfflineStatus();
+      mpStatusVrBtn.setLabel(why ? why.text.slice(0, 34) : 'Connecting…');
     } else {
       mpStatusVrBtn.setLabel('Offline');
     }
@@ -6886,6 +7068,38 @@ async function loadCartridge(meta, { echo = true } = {}) {
   // resolving a slow fetch quietly gives up instead of booting over it.
   const myLoadGen = ++_primaryLoadGeneration;
   const supersededByNewerLoad = () => myLoadGen !== _primaryLoadGeneration;
+  // COR-3: the amRoomHost() check above is ENTRY-ONLY, and everything below it
+  // awaits — a PS2 disc over a headset's Wi-Fi is seconds. If the server migrates
+  // the host away inside that window, demotion pauses the rack but has no idea a
+  // boot is in flight, and the generation check above still says "go" (no NEWER
+  // load exists). The result was a demoted watcher finishing the boot and resuming
+  // its own core behind the new host's video feed. Authority is therefore part of
+  // this boot transaction too: captured here, re-checked after every await.
+  // captureBootAuthority(), not the raw epoch guard: a Leave mid-fetch moves the
+  // epoch as well, and that one must NOT abandon — it leaves us solo and able to
+  // run the core, so the boot finishes locally.
+  const authorityLost = captureBootAuthority();
+  const abandonReason = () => (supersededByNewerLoad() ? 'newer-load' : authorityLost() ? 'authority-lost' : null);
+  const logAbandon = (reason, where) => {
+    logger?.event?.(
+      reason === 'newer-load' ? 'load-superseded' : 'mp-boot-suppressed',
+      { file: meta.file, system: meta.system, core: meta.core, where, reason,
+        hostId: net?.hostId?.() ?? null, connected: !!net?.connected });
+    // An abandoned boot must never just stop: the status line still reads
+    // `loading <title>…` from the top of this function and the TV still shows
+    // whatever was on it, so silence looks exactly like a hang. A superseded load
+    // is the one exception — the NEWER load owns the status line now and printing
+    // over it would describe the wrong game.
+    if (reason === 'newer-load') return;
+    // Re-queue for the replay _applyHostRole does on promotion: the demotion that
+    // abandoned us already consumed (and nulled) _pendingInsertMeta before this
+    // boot reached its checkpoint, so without this the cart is simply forgotten
+    // and the user has to notice and re-insert it.
+    // (…unless something was queued while we were fetching: that request is
+    // NEWER than ours — it was made after the demotion — so it wins.)
+    if (!_pendingInsertMeta) _pendingInsertMeta = { ...meta };
+    setStatus(`${meta.title} stopped loading — another player is hosting this room now`);
+  };
   // Boot telemetry (diagnoses headset boot failures): how the ROM resolves +
   // whether the OPFS cache is even available on this device, logged BEFORE the
   // attempt so a crash/hang still leaves a breadcrumb. See [[src/RomResolver.js]].
@@ -6898,12 +7112,11 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // folder / picker / OPFS cache, per its rom.source (default: url).
     let buf = await resolveRom(meta);
     // A newer loadCartridge() call already won the primary console while
-    // this one's fetch was still in flight — stop here, before touching any
-    // shared boot state, so this stale request can never clobber it.
-    if (supersededByNewerLoad()) {
-      logger?.event?.('load-superseded', { file: meta.file, system: meta.system, where: 'resolveRom' });
-      return;
-    }
+    // this one's fetch was still in flight — or we stopped being the host
+    // (COR-3). Stop here, before touching any shared boot state, so neither a
+    // stale request nor a demoted peer can clobber it.
+    let abandoned = abandonReason();
+    if (abandoned) { logAbandon(abandoned, 'resolveRom'); return; }
     // Peripheral wiring (light gun / mouse / Four Score) + the core those imply,
     // resolved by the SAME helper every console path uses — see
     // resolveBootPeripherals above.
@@ -6940,13 +7153,25 @@ async function loadCartridge(meta, { echo = true } = {}) {
     }, content);
     // Last check before this call actually touches the primary console (new
     // canvas, rackMgr add/remove, currentCore) — see the resolveRom check above.
-    if (supersededByNewerLoad()) {
-      logger?.event?.('load-superseded', { file: meta.file, system: meta.system, where: 'pre-boot' });
-      return;
-    }
+    abandoned = abandonReason();
+    if (abandoned) { logAbandon(abandoned, 'pre-boot'); return; }
     // publishTv:false — this function does its own `tv` publish + broadcast below,
     // gated on `echo` (see the M1.4d note on bootOnPrimary).
     await bootOnPrimary(meta, { name: coreName, url: core.url, style: core.style }, content, startOptions, { publishTv: false });
+    // COR-3, the commit gate: the boot itself is the longest await of all, so ask
+    // one last time before ANY of the state below is committed. Everything past
+    // this line tells the machine (and, on the echo path, the whole room) that
+    // this game is now playing here — a peer demoted while its core was starting
+    // must not claim that. The core it just booted stays paused: bootOnPrimary's
+    // fresh-runtime branch resumes through the gated runtime (refused for a
+    // non-host) and the same-core branch re-applies the pause pauseAll() set, and
+    // applyBudget() below re-asserts both rather than trusting either.
+    abandoned = abandonReason();
+    if (abandoned) {
+      logAbandon(abandoned, 'post-boot');
+      rackMgr.applyBudget();
+      return;
+    }
     rackMgr.get(CONSOLE_ID)?.noteLoaded(coreName, { system: meta.system, title: meta.title });
     currentCore = coreName;
     currentMeta = { core: meta.core, file: meta.file, title: meta.title, system: meta.system, contentId: content?.contentId ?? null };
@@ -7001,7 +7226,16 @@ async function loadCartridge(meta, { echo = true } = {}) {
     if (echo) {
       // Make sure our own core is actually running before we broadcast it (we may
       // have been paused while watching a previous host's stream).
-      client.resume();
+      // COR-3: through the RUNTIME, not the raw `client` facade — the facade's
+      // resume() forwards straight to the delegate with no predicate, while
+      // ConsoleRuntime.resume() consults the M1.4 display-only gate (RackMgr.add →
+      // setCanRun → mayRunLocalCore) and re-asserts the pause when running is
+      // forbidden. Exactly what the fresh-runtime branch of _bootOnPrimaryCore
+      // already does with next.resume(); this line used to undo that refusal.
+      // The fallback covers a rack with no CONSOLE_ID entry (tests/headless);
+      // startup always adopts it, so in the app the runtime is there.
+      const gatedPrimary = rackMgr.get(CONSOLE_ID);
+      if (gatedPrimary) gatedPrimary.resume(); else client.resume();
       // tvStateValue also carries the current disc for multi-disc (.m3u) content.
       // The refreshDiscPanel() above is async, so currentDiscStatus may still be
       // stale here — whichever of the two finishes second publishes the disc
@@ -7067,6 +7301,14 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
     return;
   }
   setStatus(`loading ${meta.title} on ${consoleId}…`);
+  // COR-3, mirroring loadCartridge: the host check above is entry-only and the
+  // ROM fetch below can outlive our hosting stint. This path is rescued in
+  // practice by the trailing rackMgr.applyBudget(), which suspends everything
+  // once running is forbidden — but that is a self-heal, not a decision, and it
+  // still commits the console's power/ports/keyboard/persisted state on the way.
+  // Handoff-aware (see captureBootAuthority): a Leave mid-fetch makes us solo and
+  // this boot goes on to finish on its console, exactly as it did pre-COR-3.
+  const authorityLost = captureBootAuthority();
   logger?.event?.('boot-attempt', {
     consoleId, file: meta.file, system: meta.system, core: meta.core,
     plan: resolutionPlan(meta), opfs: opfsSupported(),
@@ -7147,6 +7389,21 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
       execution: intoStart.execution, requiresThreads: intoStart.requiresThreads,
       firmware: intoStart.firmware, restoredSaves: intoStart.restoredSaves,
     };
+    // COR-3: last checkpoint before this console's core is actually touched.
+    // Abandoning here leaves the console exactly as it was (still on its previous
+    // game, still paused by pauseAll) rather than standing up a fresh runtime for
+    // a room we no longer host.
+    if (authorityLost()) {
+      logger?.event?.('mp-boot-suppressed', {
+        consoleId, file: meta.file, core: meta.core, where: 'loadCartridgeIntoConsole/pre-boot',
+        reason: 'authority-lost', hostId: net?.hostId?.() ?? null, connected: !!net?.connected,
+      });
+      // …and say so, or the status line keeps the `loading <title> on consoleN…`
+      // it was given at entry forever and the stop reads as a hang.
+      setStatus(`${meta.title} stopped loading — another player is hosting this room now`);
+      rackMgr.applyBudget();
+      return;
+    }
     // Same rule as the primary console (see _bootOnPrimaryCore): the loaded core
     // can serve this boot only if its boot configuration is unchanged. When it
     // isn't — the gun/mouse cartridge case — stand up a FRESH runtime for this
@@ -7746,6 +8003,10 @@ function _applyHostRole({ isHost, hostId, prevHostId } = {}) {
     // overwrite the departed host's room/shelf rather than assume they match.
     _lastPublishedRoom = '';
     _lastPublishedShelf = '';
+    // TEARDOWN-1: the prop BASELINE has a third dedupe store (_knownPropPayloads)
+    // that the two lines above do not cover, and a new host must overwrite the
+    // departed host's prop state the same way it overwrites their room/shelf.
+    _forcePropBaseline = true;
     if (currentRoom) {
       const snap = serializeRoom(currentRoom);
       _lastPublishedRoom = JSON.stringify(snap);
@@ -7800,6 +8061,19 @@ function _applyHostRole({ isHost, hostId, prevHostId } = {}) {
   } else {
     // Demoted / joined as a client: stop streaming, stop emulating, adopt the
     // host's room + shelf if ours differ, and wait for their video.
+    //
+    // COR-3: this is where a boot in flight loses the authority it started under,
+    // so this — and ONLY this — is where the epoch moves. Deliberately not in the
+    // promoted branch: a Wi-Fi blip tears the socket down (_setHost(null) → the
+    // election-pending return above) and the reconnect's HOST message re-fires
+    // this handler with isHost true for the SAME host, so bumping there would
+    // abandon a live host's legitimate in-flight boot on every hiccup — the
+    // opposite of the bug being fixed. Any real loss of authority reaches us as a
+    // demotion, and a peer that was never the host could not have started a boot
+    // at all (loadCartridge's entry gate queues it instead). Leave bumps too, in
+    // disconnectFromRoom, but as a NON-handoff: it makes us solo rather than
+    // giving the room away, so it must not abandon anything. This is the handoff.
+    bumpHostAuthority('demoted', { handoff: true });
     _wasDisplayOnly = true;
     _displayOnlyLatch = true;      // sticky across a later socket blip
     _lastPublishedRoom = '';

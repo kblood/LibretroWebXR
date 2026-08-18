@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "artifactBasename": "dosbox_pure_libretro",
+  "artifacts": {
+    "dosbox_pure_libretro.js": {
+      "bytes": 306176,
+      "sha256": "eecae6121654f01e774804ce9e558189f839993e59cb9f472ff9dab671c81a49"
+    },
+    "dosbox_pure_libretro.wasm": {
+      "bytes": 5131818,
+      "sha256": "c098ec162c3a3aae7737878b8bfb0cc59bb1a83e4a7cc94cbc47e08df8213af9"
+    },
+    "dosbox_pure_libretro.worker.js": {
+      "bytes": 2117,
+      "sha256": "8e65952ee364dd4ba4d0a83675a4fa355f3d254ded42a6d3efa39050393683de"
+    }
+  },
+  "pins": {
+    "RETROARCH_REPOSITORY": "https://github.com/libretro/RetroArch.git",
+    "RETROARCH_COMMIT": "1825596b1a9072998d5caa5cedb4d4da8b98c6cb",
+    "DOSBOX_PURE_REPOSITORY": "https://github.com/EmulatorJS/dosbox-pure.git",
+    "DOSBOX_PURE_COMMIT": "ef363f86d7ce7ff632064d969b891be2932dd767",
+    "EMSDK_VERSION": "3.1.46"
+  },
+  "build": {
+    "cpuBackend": "interpreter (DBP's C_DYNAMIC_X86/C_DYNREC dynarecs are gated on host-CPU macros Emscripten never defines, so the core falls back to its own interpreter with no build-time flag needed)",
+    "audioBackend": "LibretroWebXR-worker-bridge",
+    "modularize": true,
+    "exportEs6": true,
+    "pthreads": true,
+    "sharedMemory": true,
+    "haveThreads": 1,
+    "webglMinVersion": 2,
+    "webglMaxVersion": 2,
+    "notes": [
+      "Built from the EmulatorJS fork of dosbox-pure (the only fork with a working platform=emscripten Makefile block), following the puae/play/mupen64plus_next recipe (docs/AMIGA_CORE_BUILD.md, scripts/cores/dos/build.sh).",
+      "First link attempt failed with undefined glMapBufferRange/glUnmapBuffer: the shared ~/amiga-build/RetroArch obj tree had gl2.o compiled with HAVE_OPENGLES3 from a prior core (N64/PS2), while this core's link line omitted it, so Makefile.emscripten took the FULL_ES2 LDFLAGS branch and disagreed with its own objects. Fixed by passing HAVE_OPENGLES3=1, same as N64/PS2 already document.",
+      "HAVE_THREADS=1 (unlike PUAE's HAVE_THREADS=0): DBP_ThreadControl spawns a genuine pthread_create()+semaphores pair, not the libco-fiber-via-Asyncify hack N64 needed. Untested at build time whether pthread_create() from inside this app's own dedicated execution Worker (a worker-in-worker topology no other core here has exercised) actually spawns and runs correctly in a browser — see the headless boot probe (scripts/probe-dos-core.js) for the real answer.",
+      "library_name confirmed as 'DOSBox-pure' by reading dosbox_pure_libretro.cpp:2073 directly, not guessed.",
+      "supported_extensions (from the core's own .info file) = zip|dosz|exe|com|bat|iso|chd|cue|ins|img|ima|vhd|jrc|m3u|m3u8|conf|/ ; needs_fullpath=true; supports_no_game=true (the core can boot to its own internal DOS shell with a trivial/empty .conf and no mounted disk at all).",
+      "2026-08-01: hashes here were STALE (recorded 2045782b/f8c8d9dc, an earlier link) until the final clean rebuild's real hashes were written back. resolveCoreBuildHash() keys save-state compatibility off the .wasm sha256 in this file, so a stale manifest silently gives two different builds the same identity. Regenerate this file whenever the core is relinked.",
+      "That final build carries the local frontend/drivers/platform_emscripten.c patch (search 'LWX:' in the shared ~/amiga-build/RetroArch checkout) that resolves EM_TIMING_SETIMMEDIATE to EM_TIMING_SETTIMEOUT under HAVE_THREADS. Without it retro_run() never ticks in this app's nested-Worker topology and the screen stays black. The patch is NOT upstreamed - reapply it if that checkout is reset.",
+      "2026-08-08 upstream refresh (task #10): DOSBOX_PURE_COMMIT is UNCHANGED (ef363f86...) because the EmulatorJS dosbox-pure fork's main branch had not moved since the prior build - it was already at upstream HEAD, confirmed via `git fetch && git rev-parse origin/main`. RETROARCH_COMMIT was bumped from 058f4999 (2026-06-14) to 1825596b (2026-08-08, ~2215 commits) after verifying in an isolated `git worktree` that this repo's 5 locally-patched files (Makefile.emscripten, frontend/drivers/platform_emscripten.c, gfx/drivers/gl2.c, gfx/drivers/gl3.c, input/drivers/rwebinput_input.c) still `git apply --check` cleanly against the new upstream tip. Applied for real on the shared checkout via stash -> ff-only merge -> stash pop, under the build.sh concurrency lock; git reported clean auto-merges on all 4 touched files (rwebinput_input.c had zero upstream changes), zero conflict markers. All three LWX: comment sites in platform_emscripten.c were confirmed present verbatim after the merge - the patch survived the update and did NOT need to be manually reapplied. Rebuilt with FORCE_RELINK=1; the link step genuinely recompiled ~230 changed RetroArch source files (confirmed from the build log, not assumed) before producing new .js/.wasm output.",
+      "2026-08-08 verification: scripts/probe-dos-core.js PASSED (crossOriginIsolated=true, 3 frames presented, non-black samples, errorLogCount=0, no worker errors) against the no-content internal-shell boot path. Additionally re-ran the same real-disk boot this doc's 2026-08-01 entry describes (freedos-boot.img, verbose -v) via an ad-hoc puppeteer screenshot script and got the same bar: a fully legible 'DOSBOX PURE START MENU' with the FreeDOS file listing rendered crisply - confirms the rebuilt core still boots and renders real content, not just non-black pixels. That ad-hoc run's stricter log-level assertions (test/dos-core-e2e/harness.js's errorLogCount check, which scripts/probe-dos-core.js does not exercise on this code path) flagged several PRE-EXISTING benign warnings unrelated to this update (headless-Chrome wheel/pointerlock callback creation failures, no MIDI hardware, an empty-core-path playlist push) - these are generic frontend/environment messages, not a regression from the RetroArch bump."
+    ]
+  }
+}

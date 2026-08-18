@@ -1,0 +1,63 @@
+# Automated dependency updates (CODEX_REVIEW TST-4: "no automated dependency
+# updates and no scheduled audit").
+#
+# TWO PACKAGE TREES, BOTH LISTED. The root app and `server/` have separate
+# package.json + package-lock.json files. server/ is one dependency deep (`ws`)
+# and runs unattended on a public box; leaving it off this list would automate
+# updates for the half that is only ever run locally.
+#
+# GROUPED AND MONTHLY, ON PURPOSE. This is a single-maintainer project with a
+# 100-script package.json and a manual headset-verification step for anything
+# that touches the renderer. A weekly stream of one-dependency PRs would be
+# ignored, and an ignored bot is worse than none — so: monthly, grouped into one
+# PR per tree for minor+patch, with majors left as individual PRs because those
+# are the ones that need reading (vite 7 -> 8 moves the Node floor in
+# package.json `engines`; three's minors have broken WebXR sessions before).
+#
+# SECURITY UPDATES ARE NOT ON THIS SCHEDULE. Dependabot raises those immediately
+# and independently of `schedule` — the monthly cadence below only throttles
+# version-bump PRs. The scheduled `npm audit` in .github/workflows/audit.yml is
+# the second, independent check that an advisory has not been sitting unnoticed.
+#
+# CI GATES EVERY ONE OF THESE. .github/workflows/ci.yml runs on `push` and
+# `pull_request`, so a dependabot PR gets `npm ci` + `npm test` + `npm run build`
+# for the root tree and `npm ci` + the socket suites for server/. Nothing here
+# merges itself.
+
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the routine churn; majors stay individual (see the header).
+      app-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: npm
+    directory: "/server"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      room-server-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: "deps(server)"
+
+  # The workflows themselves pin `actions/checkout@v4` / `actions/setup-node@v4`;
+  # without this they silently rot until a runner drops support for the version.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"

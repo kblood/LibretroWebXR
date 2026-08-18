@@ -17,7 +17,11 @@ This is **not** a greenfield plan; a working app was carried over (see
 
 - Three.js + WebXR scene with an enclosed 3D room (`SceneMgr`, `CrtShader`).
 - libretro cores driven directly (main-thread `<script>` + dynamic `import()`
-  for MODULARIZE cores), rendering onto a CRT/TV mesh (`EmulatorClient`).
+  for MODULARIZE cores), rendering onto a CRT/TV mesh (`EmulatorClient`). The
+  four heavy cores added since (PSX, PS2, N64, DOS) carry `execution: 'worker'`
+  and run in a dedicated execution worker instead —
+  `src/runtime/EmulatorWorkerRuntime.js` + `RuntimeEmulatorClient`; see **DOS**
+  and **Phase C** below, and `docs/HANDOFF.md`'s "PSX / PS2 / N64 core status".
 - A VR room: grabbable **cartridges** on shelves and **bookcases** (up to 15
   carts), a **console**, a **gamepad**, a **memory card**, with grab + locomotion
   (`Cartridge`, `Shelf`, `Console`, `Gamepad`, `MemoryCard`, `Furniture`,
@@ -41,7 +45,9 @@ This is **not** a greenfield plan; a working app was carried over (see
 - **In-world Now Playing / input debug panel** (`NowPlayingPanel`): current
   system/core/ROM + live input pulse diagnostic.
 - **Remote logging** (`Logger`, `server/log-server.mjs`, `deploy/log-proxy.conf`):
-  ships Quest console/error logs to `https://dionysus.dk/logs?session=<room>`.
+  ships Quest console/error logs to
+  `https://dionysus.dk/logs?session=<room>&token=<yours>` — **reads are
+  token-gated in production**, `POST /log` is not (see below).
 - **Room persistence** (`RoomPersistence`): room survives cross-core reload;
   auto-saves to localStorage on Export; Import Room button.
 - **Poster image picker + fit/scale** (`ImageLibrary`, `PosterFit`): grant an
@@ -59,8 +65,11 @@ This is **not** a greenfield plan; a working app was carried over (see
   "PSX / PS2 / N64 core status" for the core-level detail.
 - COOP/COEP for SharedArrayBuffer (`vite.config.js`, `deploy/`), and a puppeteer
   health-check harness (`scripts/debug.js`, `DEBUGGING.md`).
-- Test suite: grows every phase (`npm test`; see `package.json` for the current
-  script list — one `test-*.mjs` per pure module).
+- Test suite: grows every phase. `npm test` is `node scripts/run-tests.mjs`,
+  which **discovers** every `scripts/test-*.mjs` that is not a server suite —
+  writing one is all it takes to be in CI, and `package.json` no longer carries
+  a list to append to (it used to, as an `&&` chain, and four green suites sat
+  outside it for months). See `CLAUDE.md` → Tests.
 
 So the foundation EmuVR took years to build (room + emulator-on-a-TV + grabbable
 games) largely exists. The roadmap is about **making it open, declarative, and
@@ -385,11 +394,35 @@ Prerequisite for diagnosing headset-only bugs without a USB cable:
   `formatEntry`/`buildBatch` helpers are unit-tested (+38 assertions).
 - `server/log-server.mjs` (mounted by `room-server.mjs`, port 8788): POST `/log`,
   GET `/logs` (auto-refreshing HTML viewer), GET `/logs.json`. Per-session ring
-  buffer + optional NDJSON append.
+  buffer + NDJSON append (file logging is **always on**, not optional — this
+  bullet said otherwise for a year and it was never what the code did).
 - `deploy/log-proxy.conf`: Apache reverse-proxy snippet for `/log` + `/logs` +
   `/logs.json`. Note: `/logs.json` rule must appear before `/logs` (ProxyPass
   matches on whole segments — see HANDOFF.md Gotchas).
-- Read headset logs at **`https://dionysus.dk/logs?session=<room>`**.
+- Read headset logs at
+  **`https://dionysus.dk/logs?session=<room>&token=<yours>`**.
+
+**Hardened 2026-08-17** (both 2026-08-13 whole-repo reviews had this as their
+second finding — it shares a process with multiplayer, so a bug here takes
+netplay down):
+- **Reads are token-gated in production** (`LOG_TOKEN`, generated on the box into
+  `/etc/default/libretrowebxr-room`, pulled in by the systemd unit's
+  `EnvironmentFile=-…`). The gate already existed in code; the deployment simply
+  never switched it on. Ungated, `GET /logs.json?tail=0` enumerated every session
+  and handed out room names, nicks and private-library ROM filenames. **`POST
+  /log` is not gated and never will be**, so the Quest carries no secret.
+- Entries are escaped on the way out (stored XSS) and validated on ingest, and
+  the viewer handler is wrapped — a malformed POST used to be a one-request kill
+  switch on the room server.
+- Every per-axis cap now has an **aggregate** budget over it, because per-axis
+  caps multiply: `MAX_STORE_BYTES` (64 MiB accounted, counting per-JSON-node heap
+  cost, not just characters) for the in-memory store, and
+  `MAX_LOG_FILES`/`MAX_LOG_DIR_BYTES` (200 files / 512 MiB, oldest evicted and
+  unlinked first) for the log directory. Before: ~52 GB of retainable heap and
+  unbounded disk, from unauthenticated POSTs rotating `sessionId`.
+- Recipe and rationale: `docs/HANDOFF.md` → "Reading headset logs (the token)";
+  every knob has a row in `server/README.md` (`scripts/test-room-limits.mjs`
+  fails the run if one doesn't).
 
 ### Input pipeline instrumentation  ✅ done (2026-06-13)
 `main.js` emits Logger `'input'` events on every keydown and throttled
@@ -890,6 +923,16 @@ Current work list, highest value first. Everything above this section is
 shipped; this is what is actually left. See `docs/HANDOFF.md` for context on
 the artifact-integrity items.
 
+> **Where the 2026-08 review work is tracked.** Two independent whole-repo
+> reviews landed on 2026-08-13 (`CLAUDE_REVIEW.md`, `CODEX_REVIEW.md`) and a
+> remediation pass ran on 2026-08-17. **Their status blocks, not this file, are
+> the record of which finding is closed, still open, or rejected-for-this-project
+> — read the dated block at the top of each before acting on anything in them.**
+> Two findings are settled REJECTIONS and must not be re-litigated: the
+> private-ROM deploy (SEC-1 / §4.7 — deliberate, see `README.md` and
+> `CLAUDE.md`) and §5.5's host-watcher optimization (§10 says it reintroduces the
+> bug the watcher was written to fix). This has already been re-argued twice.
+
 **The multiplayer work is done and live.** The M1.4 shared-room rewrite
 (server-elected host, display-only clients, host-owned room/shelf, seniority
 migration, and the M1.4d Load-ROM republish fix) is shipped, deployed — **app
@@ -1009,28 +1052,32 @@ comparison, two `test-routing` optional-chain comparisons, `smoke-gameinput`'s
 `[].every()` anti-spoof check, `smoke-held`'s `>= 1` under an "exactly one"
 label, and eight `ok(true, …)` literals across the smoke family.
 
-**Still open (deliberately not attempted — each needs a real rewrite, not a
-one-liner):**
+**Round 3 (2026-08-17).** Items 17, 18 and most of 20 below were closed as part
+of the CODEX_REVIEW TST-2 pass; each is struck through with what actually
+changed. 19 and the `test-routing` half of 20 are still open.
 
-17. **`probe-media` shelf assertions (5 checks).** `probe-media.mjs:244-252`
-    filters `c64ShelfCarts`/`snesShelfCarts` out of an `allGrabbables` set that
-    already contains the carts the probe itself injected at steps 1 and 3, and
-    both assertions carry a `count === 0 ||` escape hatch — so shelf minting can
-    be entirely broken and stay green. `:205-208`'s `>= 1` thresholds are
-    likewise guaranteed by the probe's own side effects, and `:224-231`'s four
-    "grab dispatch" / "insert axis" checks are byte-identical predicates to
-    `:95-96`, `:103-104` and `:146` while invoking no GrabMgr code at all. Fix:
-    snapshot the grabbable set *before* step 1 and assert only on pre-existing
-    objects.
-18. **`probe-local-rom` Part 4 (`:208-226`).** Claims to prove that special
-    characters in filenames don't corrupt OPFS keys, but `RomResolver.js:70-73`
-    builds the key purely from the sha1 — `meta.file` never enters it, so no
-    filename-escaping bug can turn this red. It is a duplicate of the Part 1
-    sha1 round-trip. Either assert on the actual OPFS key (enumerate the
-    directory) or drop the claim. Related dead scaffolding at `:177-178`:
-    `requestsBefore` reads `window.__romFetchLog`, which **nothing in the repo
-    ever writes** — the intended in-page fetch-delta check was never
-    implemented; only the Node-side `page.on('request')` listener is real.
+17. ~~**`probe-media` shelf assertions (5 checks).**~~ ✅ **DONE (2026-08-17).**
+    The thresholds were measured against an `allGrabbables` set that already
+    contained the carts the probe itself injected at steps 1-5, so they were
+    satisfied by its own side effects and stayed green with shelf minting
+    completely broken. The probe now snapshots the pre-existing shelf
+    (`shelfBefore`) **before** step 1 and asserts the floppy/cartridge counts
+    against that set only, and the four "grab dispatch" / "insert axis" checks
+    that were byte-identical re-reads of `userData.kind`/`pinAxis` from earlier
+    sections were replaced rather than repeated. The `count === 0 ||` escape
+    hatches are gone.
+18. ~~**`probe-local-rom` Part 4.**~~ ✅ **DONE (2026-08-17).** Part 4 claimed to
+    prove that special characters in a filename don't corrupt OPFS keys, but
+    `RomResolver`'s key is `sha1-<hex>` and `meta.file` is not an input to it —
+    no filename-escaping bug could ever turn it red. It now asserts the property
+    that actually holds, against the real OPFS directory: enumerate
+    `navigator.storage.getDirectory()`, require an entry named exactly
+    `sha1-<hex>`, and require that **no** entry name carries any fragment of the
+    filename — which goes red the moment someone "improves" the key by mixing
+    the filename in. The dead `window.__romFetchLog` scaffolding at `:177-178`
+    was removed (a repo-wide grep found those two reads were its only mentions;
+    nothing has ever written it), leaving the Node-side `page.on('request')`
+    delta as the single, real fetch check.
 19. **Negative-only "nothing happened" checks.** `smoke-gameinput:84`
     ("bystander received nothing"), `smoke-mp-sync:113-115` ("WIRE messages are
     NOT persisted"), `test-multiplayer:128` and `:249`, and the "no
@@ -1038,21 +1085,35 @@ one-liner):**
     `probe-local-rom-persist:231` all pass hardest when the mechanism under
     test is *completely dead* — the same shape as the severed-`sendInput()`
     failure item 13 found in `probe:psx-timecrisis`. Each needs a positive
-    companion arm in the same run.
-20. **Config-pinning masquerading as behaviour.** `test-rackbudget:15-16`
-    restates `DEFAULT_RACK_BUDGET`/`DEFAULT_MAX_LIVE` from source;
-    `test-session:64` re-checks shape instead of distinctness, so
-    `randomRoomSuffix()` returning a constant is green; `test-routing:175-180`
-    contributes zero assertions if `r` is empty. Low value, low risk — batch
-    these whenever one of those files is next touched.
+    companion arm in the same run. (2026-08-17: `probe-local-rom`'s half was
+    only *clarified* — the dead in-page `__romFetchLog` scaffolding came out so
+    the Node-side request delta is visibly the one real check. It still has no
+    positive arm. The other five sites are untouched.)
+20. **Config-pinning masquerading as behaviour** — mostly closed
+    (2026-08-17). `test-rackbudget` no longer reads the two constants out of the
+    module it imported them from: it drives `planLive()` with **no opts** and
+    asserts the behaviour the defaults must produce (2+2 admitted and no more; a
+    4th weight-1 core paused by the live-COUNT cap, not the weight budget), then
+    pins the constants only *after* that proved they are live. `test-session`
+    now takes eight draws from `randomRoomSuffix()` and demands at least two
+    distinct values — a constant-returning implementation, the one failure that
+    matters, used to pass. `test-controller-portswitch` gained the cardinality
+    guards its set-wide `.every()`/`!.some()` blocks needed (`[].every(p)` is
+    true, so a `computeRouting()` returning `[]` scored 4/4 with the feature
+    dead). **Still open:** `test-routing:175-180` still contributes zero
+    assertions if `r` is empty.
 
 **Multiplayer / worker-core loose ends (small, post-M1.4)**
-21. **Disc-swap panel republish.** The M1.4d fix put
-    `setObjectState('tv',…)` + `startVideoBroadcast()` inside `bootOnPrimary`,
-    so every primary-boot path gets it for free — but the disc-swap panel does
-    **not** go through `bootOnPrimary`, so it's a plausible third instance of
-    that bug class and has never been checked. Cheap to test with the
-    `smoke-host-picker` pattern.
+21. ~~**Disc-swap panel republish.**~~ ✅ **DONE (`dbb9594`, "Three shared-room
+    fixes: spawn seats, honest isLive(), disc index in `tv`").** It *was* the
+    third instance of that bug class: the disc-swap panel does not go through
+    `bootOnPrimary`, "a swap does not re-boot, so nothing else on this path
+    would have republished `tv` — which is exactly why the disc index used to be
+    invisible to every other peer". `stepDisc()` now calls `publishDiscState()`
+    (`src/main.js:8236`), which merges the disc fields onto the room's existing
+    `tv` value via `src/net/TvState.js`'s `mergeDiscIntoTv` behind the same host
+    gate `publishTvAndBroadcast` uses. Pinned by `scripts/test-tvstate.mjs`
+    (logic tier, in the CI gate) and `scripts/smoke-mp-state.mjs`.
 22. **P0-5 — native SaveRAM persistence is PARTIAL.** The last open P0 from
     `docs/research/psx-ps2-n64-review-2026-07-24.md`: `autosave_interval` is
     wired and `flushSaveRam`/`readSaveRam` do live reads, but end-to-end

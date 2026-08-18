@@ -38,6 +38,31 @@ export function isHostOwnedKey(key) {
   return key === 'tv' || key === 'room' || (typeof key === 'string' && key.startsWith('shelf:'));
 }
 
+// OWNER-SCOPED STATE namespaces: a key here describes one peer's grip on a
+// shared object, so it BELONGS to the peer that wrote it. Two server-side rules
+// follow from that, and they are deliberately different (RELAY-6):
+//   • disconnect() clears the departed peer's own keys — a held cartridge can't
+//     stay stuck in a gone player's hand, and abandoned pads would pile up.
+//   • a CLEAR (`value: null`) is accepted only from the key's current owner or
+//     from the elected host. Before this, any room member could send
+//     `{key:'hold:<cartId>', value:null}` and rip a cartridge out of another
+//     player's hand — broadcast to the room as authoritative, and unrecoverable
+//     from the victim's side, because a client only writes this key on its own
+//     grab/release events and its next write is a release.
+// An OVERWRITE stays open to anyone on purpose: shared gamepads are grab-any
+// (d8ab0e6), and handing a cartridge from one player to another is exactly a
+// `hold:` write by a DIFFERENT peer id. Only the destructive half is gated.
+//
+// ONE list, so the auto-clear and the ACL cannot drift: "owner-scoped" has to
+// mean the same thing to both, or a namespace ends up with an owner on
+// disconnect that it doesn't have while its owner is still connected.
+// `gun:`/`mouse:`/`power:`/`prop:` are NOT here — they are collaborative room
+// state (any peer may re-point a cable or flip a console's power), which is what
+// the shipped clients already do.
+export function isOwnerScopedKey(key) {
+  return typeof key === 'string' && (key.startsWith('hold:') || key.startsWith('gamepad:'));
+}
+
 // ---------------------------------------------------------------------------
 // Admission limits (CLAUDE_REVIEW §4.4 / CODEX_REVIEW SEC-3)
 //
@@ -238,7 +263,56 @@ export const HUB_LIMITS = Object.freeze({
   /** Max characters kept from a JOIN nick / color (the rest is truncated). */
   nickLen: envInt('ROOM_MAX_NICK_LEN', 64),
   colorLen: envInt('ROOM_MAX_COLOR_LEN', 32),
+  // --- EPHEMERAL RELAY CAPS (RELAY-2) --------------------------------------
+  // Everything above bounds RETAINED state. WIRE and SIGNAL are relayed and
+  // FORGOTTEN, so not one of those budgets applies to them, and until these two
+  // existed the only bound on either was `ws`'s own maxPayload
+  // (ROOM_MAX_PAYLOAD_BYTES, 1 MiB) — four times the largest STATE value this
+  // same server will accept. A 1 MiB WIRE was legal, was fanned out to every
+  // other peer in the room (x15 at ROOM_MAX_PEERS) and is the INGRESS half of
+  // the outbound-buffer attack RELAY-1 bounds at the other end.
+  //
+  // POSE needs no knob and got none: pose() rebuilds the message from the
+  // format's own fields instead of spreading the sender's, so its body is a
+  // fixed ~200 B whatever was attached to it. Same for INPUT in input().
+  //
+  // An over-cap body is DROPPED and NOT answered with a correction, unlike a
+  // refused STATE write: both kinds are fire-and-forget, so there is no
+  // authoritative value to re-converge onto — the sender just loses that frame,
+  // which for per-frame ephemera the next frame replaces anyway.
+  /**
+   * Max JSON characters in one relayed WIRE. Real channels are tiny — 'gun' and
+   * 'mouse' ~80 B, 'gp' ~60 B, 'drag' one serialized prop (~150-400 B),
+   * 'insert' a game descriptor (~200 B) — so 8 KiB is ~20x the largest.
+   */
+  wireBytes: envInt('ROOM_MAX_WIRE_BYTES', 8 * 1024),
+  /**
+   * Max JSON characters in one relayed SIGNAL. The biggest real one is a WebRTC
+   * offer's SDP (a few kB even with every codec); ICE candidates are ~200 B.
+   * Kept an order of magnitude looser than WIRE because an SDP's size is the
+   * browser's choice, not ours, and a dropped offer costs a whole call.
+   */
+  signalBytes: envInt('ROOM_MAX_SIGNAL_BYTES', 64 * 1024),
 });
+
+/**
+ * Serialized length of a message about to be relayed, or Infinity if it cannot
+ * be serialized at all.
+ *
+ * Measured AFTER the projection each relay path does, so an attacker's junk
+ * fields are never stringified — the walk only ever covers the bytes that would
+ * really go back out on the wire, and a 1 MiB field attached to a 60 B WIRE
+ * costs the relay nothing beyond the JSON.parse it already paid.
+ *
+ * The try/catch cannot fire for anything that came off the wire (JSON.parse
+ * produces neither cycles nor BigInt), but this runs inside the room server's
+ * synchronous message handler, where one throw is an uncaught exception in the
+ * relay — the same reasoning as versionText() in NetProtocol.js.
+ */
+function relayBytes(msg) {
+  try { return JSON.stringify(msg)?.length ?? 0; }
+  catch { return Infinity; }
+}
 
 /**
  * Walk a JSON-shaped value and report { nodes, depth, over }.
@@ -535,11 +609,28 @@ export class Hub {
   /**
    * Peer sent a POSE. Stamp the server-side id (anti-spoof) and return a
    * broadcast to everyone else in the room.
+   *
+   * PROJECTED, not spread (RELAY-2). `{ ...poseMsg }` rebroadcast whatever the
+   * sender attached: validate() bounds head/left/right to 7-number tuples but
+   * says nothing about any OTHER property, so a 900 kB junk field rode a 12 Hz
+   * message out to every peer in the room. No consumer ever read it —
+   * PresenceState.applyPose takes exactly id/head/left/right — it was pure
+   * amplification. Rebuilding the message from the format makes a POSE's size a
+   * property of the protocol instead of a choice the sender makes, which is a
+   * stronger bound than any byte cap. ADD A FIELD HERE if the POSE format gains
+   * one; `t` is carried only when it is a real number, for the same reason.
    */
   pose(roomId, peerId, poseMsg) {
     const room = this.rooms.get(roomId);
     if (!room || !room.has(peerId)) return {};
-    const msg = { ...poseMsg, type: MSG.POSE, id: peerId };
+    const msg = {
+      type: MSG.POSE,
+      head: poseMsg.head ?? null,
+      left: poseMsg.left ?? null,
+      right: poseMsg.right ?? null,
+      id: peerId,
+    };
+    if (typeof poseMsg.t === 'number' && Number.isFinite(poseMsg.t)) msg.t = poseMsg.t;
     return { broadcast: { msg, exclude: peerId } };
   }
 
@@ -547,11 +638,21 @@ export class Hub {
    * Peer sent a SIGNAL (M0.4 voice). Stamp the real sender id and return
    * { direct: { to, msg } } — a DIRECTED relay to a single peer (not a
    * broadcast). Dropped if sender or target isn't in the room.
+   *
+   * Projected to the fields makeSignal defines and capped at `signalBytes`
+   * (RELAY-2): `data` is opaque SDP/ICE passed through verbatim, so it is the
+   * one relayed field whose size nothing else bounds — it used to inherit the
+   * 1 MiB frame limit and nothing tighter. Over-cap is dropped, not corrected;
+   * see the HUB_LIMITS note.
    */
   signal(roomId, fromPeerId, msg) {
     const room = this.rooms.get(roomId);
     if (!room || !room.has(fromPeerId) || !room.has(msg.to)) return {};
-    return { direct: { to: msg.to, msg: { ...msg, from: fromPeerId } } };
+    const out = { type: MSG.SIGNAL, to: msg.to, kind: msg.kind, data: msg.data, from: fromPeerId };
+    if (msg.channel != null) out.channel = String(msg.channel);
+    const bytes = relayBytes(out);
+    if (bytes > this.limits.signalBytes) return { rejected: 'signal-too-large', bytes };
+    return { direct: { to: msg.to, msg: out } };
   }
 
   /**
@@ -652,6 +753,19 @@ export class Hub {
         };
       }
     }
+    // RELAY-6: an owner-scoped key may only be CLEARED by its current owner or by
+    // the elected host. See isOwnerScopedKey for why the overwrite half stays
+    // open (a cartridge handoff and a grab-any gamepad are both legitimate writes
+    // by a different peer) and why only the destructive half is gated. The
+    // refused peer gets the authoritative value back, the same shape every other
+    // refusal uses, so a client that thought it had dropped the object
+    // re-converges on "someone else is still holding it" instead of diverging.
+    if (value == null && isOwnerScopedKey(key)) {
+      const prev = state.get(key);
+      if (prev && prev.id !== peerId && this.hostOf(roomId) !== peerId) {
+        return { rejected: 'not-key-owner', direct: this._correction(state, key, peerId) };
+      }
+    }
     if (value == null) this._delEntry(roomId, key);
     else this._setEntry(roomId, key, { value, id: peerId, bytes, nodes, cost });
     return { broadcast: { msg: makeState({ key, value: value ?? null, id: peerId }), exclude: peerId } };
@@ -700,7 +814,11 @@ export class Hub {
         // Auto-clear owner-scoped ephemeral keys on disconnect:
         //   hold:*    — held carts/gamepads (can't stay in a gone player's hand)
         //   gamepad:* — dynamically-spawned gamepads (abandoned pads would pile up)
-        if (s.id === peerId && (key.startsWith('hold:') || key.startsWith('gamepad:'))) {
+        // The namespace list is isOwnerScopedKey's, shared with the RELAY-6 clear
+        // ACL: a key the server clears FOR its owner is exactly a key only that
+        // owner may clear, and writing the two lists separately is how one gains
+        // a namespace the other doesn't have.
+        if (s.id === peerId && isOwnerScopedKey(key)) {
           this._delEntry(roomId, key);   // NOT state.delete — keeps the byte tallies honest
           stateClears.push(makeState({ key, value: null, id: peerId }));
         }
@@ -737,13 +855,42 @@ export class Hub {
 
   /**
    * Peer sent an INPUT (M1 game sync). Stamp the real sender id and return
-   * { direct: { to, msg } } — a DIRECTED relay to the host peer (not a
-   * broadcast). Dropped if sender or target isn't in the room. Mirrors signal().
+   * { direct: { to, msg } } — a DIRECTED relay to THE ELECTED HOST (not a
+   * broadcast, and not to any member the sender names). Mirrors signal().
+   *
+   * RELAY-4: the docstring said "directed to the host peer" from the start; the
+   * code only checked that `to` was A MEMBER. In a room where a peer had booted
+   * a game and then joined as a non-host, any other member could aim an INPUT at
+   * it and drive its core — src/desktop/DesktopNet.js routes an INPUT straight to
+   * _applyGameInput with no host check of its own, and src/desktop/main.js's
+   * handler guards only on `booted`. (The VR client is safe: src/main.js gates on
+   * amRoomHost().) It is also what let a non-host peer be given an unbounded
+   * stream of distinct `player` values to key a Map on. One line closes all of it
+   * at the relay, for clients already in the field that will never be rebuilt.
+   *
+   * DURING THE HOST-RECLAIM WINDOW hostOf() is null by design (see
+   * HOST_RECLAIM_MS) and every INPUT is therefore dropped for up to 15 s. That is
+   * the correct reading of that window rather than a side effect of it: nobody is
+   * running the room's core, so there is nothing an input could reach — and the
+   * peer that is about to be promoted must NOT start receiving inputs before it
+   * has the role, which is exactly the transient-stand-in bug the window exists
+   * to prevent. Clients keep sending; the buttons they hold are re-asserted by
+   * GameInputMgr's next tick once a host exists again.
+   *
+   * The relayed message is PROJECTED to the fields makeInput defines, for the
+   * same reason pose() is: `{ ...msg }` forwarded any junk field the sender
+   * attached, at 1 MiB a frame, straight into the host's tab.
    */
   input(roomId, fromPeerId, msg) {
     const room = this.rooms.get(roomId);
     if (!room || !room.has(fromPeerId) || !room.has(msg.to)) return {};
-    return { direct: { to: msg.to, msg: { ...msg, from: fromPeerId } } };
+    const host = this.hostOf(roomId);
+    if (!host || msg.to !== host) return { rejected: 'input-not-host' };
+    const out = {
+      type: MSG.INPUT, to: host, player: msg.player, btn: msg.btn, down: !!msg.down, from: fromPeerId,
+    };
+    if (typeof msg.seq === 'number' && Number.isFinite(msg.seq)) out.seq = msg.seq;
+    return { direct: { to: host, msg: out } };
   }
 
   /**
@@ -752,11 +899,20 @@ export class Hub {
    * ephemera (live drag, pad button bitmasks). Deliberately NOT persisted: late
    * joiners don't replay it (it would be stale by the next frame). Dropped if the
    * sender isn't in the room.
+   *
+   * Projected to { ch, data } and capped at `wireBytes` (RELAY-2). This is the
+   * kind that most needed it: `data` is passed through verbatim, a WIRE is
+   * BROADCAST (so one frame is amplified to every other peer in the room), and
+   * the channel runs at frame rate — a 1 MiB WIRE at 120 Hz was the cheapest way
+   * to fill the process's whole outbound budget from a single socket.
    */
   wire(roomId, peerId, msg) {
     const room = this.rooms.get(roomId);
     if (!room || !room.has(peerId)) return {};
-    return { broadcast: { msg: { ...msg, type: MSG.WIRE, id: peerId }, exclude: peerId } };
+    const out = { type: MSG.WIRE, ch: msg.ch, data: msg.data ?? null, id: peerId };
+    const bytes = relayBytes(out);
+    if (bytes > this.limits.wireBytes) return { rejected: 'wire-too-large', bytes };
+    return { broadcast: { msg: out, exclude: peerId } };
   }
 
   /** Peer ids currently in a room (for the adapter's broadcast loop). */

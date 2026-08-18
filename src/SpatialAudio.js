@@ -22,6 +22,7 @@
 // Install AFTER SceneMgr creates its AudioListener, BEFORE any core is fetched.
 
 import * as THREE from 'three';
+import { deinterleaveInto } from './runtime/audioFrames.js';
 
 export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6, rolloffFactor = 1.4, maxDistance = 18 }) {
   const ctx = listener.context;
@@ -61,7 +62,12 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
     // replaced (core swap, live reboot) gets a new branch under the same id, and
     // the retired runtime must not be able to tear down its successor's audio —
     // see removeBranch and ConsoleRuntime.dispose (COR-5).
-    const branch = { consoleId, sink, positional, sourceObject, nextAudioTime: 0, token: ++branchSeq };
+    // batches/leadMs/reanchors are the worker-audio drift counters (PERF-3);
+    // they stay 0 for a core that uses the AudioContext-stub path instead.
+    const branch = {
+      consoleId, sink, positional, sourceObject, nextAudioTime: 0, token: ++branchSeq,
+      batches: 0, leadMs: 0, reanchors: 0,
+    };
     branches.push(branch);
     if (consoleId != null) byConsole.set(consoleId, branch);
     sink.gain.value = gainFor(consoleId);
@@ -227,18 +233,26 @@ export function installSpatialAudio({ listener, defaultSource, refDistance = 1.6
       const frameCount = Math.floor(source.length / channels);
       if (!frameCount) return;
       const buffer = ctx.createBuffer(channels, frameCount, sampleRate);
-      for (let channel = 0; channel < channels; channel++) {
-        const output = buffer.getChannelData(channel);
-        for (let frame = 0; frame < frameCount; frame++) {
-          const sample = source[frame * channels + channel];
-          output[frame] = format === 's16' ? sample / 32768 : sample;
-        }
-      }
+      // Shared with the desktop sink so the two can't drift apart again, and
+      // branch-free in the inner loop (PERF-3) — see src/runtime/audioFrames.js.
+      deinterleaveInto(buffer, source, format, channels, frameCount);
       const node = ctx.createBufferSource();
       node.buffer = buffer;
       node.connect(branch.sink);
       const now = ctx.currentTime;
-      if (branch.nextAudioTime < now || branch.nextAudioTime > now + 0.25) branch.nextAudioTime = now + 0.02;
+      // Drift telemetry (PERF-3). The re-anchor below is a real, AUDIBLE hard
+      // cut — a core running slightly fast accumulates scheduling lead until it
+      // crosses 250 ms and the queue is thrown away — and nothing counted it, so
+      // "the PSX crackles occasionally" had no evidence channel. `leadMs` is how
+      // far ahead of the clock we already are (a healthy core sits at a few tens
+      // of ms); `reanchors` is how many times we gave up on it. Both ride
+      // window.__rack.audio(), so a headset session ships them in its log.
+      branch.batches = (branch.batches || 0) + 1;
+      branch.leadMs = Math.max(0, (branch.nextAudioTime - now) * 1000);
+      if (branch.nextAudioTime < now || branch.nextAudioTime > now + 0.25) {
+        branch.nextAudioTime = now + 0.02;
+        branch.reanchors = (branch.reanchors || 0) + 1;
+      }
       node.start(branch.nextAudioTime);
       branch.nextAudioTime += buffer.duration;
       node.onended = () => node.disconnect();

@@ -95,6 +95,29 @@ DOSBOX_PURE_REPO="${DOSBOX_PURE_REPO:-https://github.com/EmulatorJS/dosbox-pure.
 RETROARCH_DIR="${RETROARCH_DIR:-$HOME/amiga-build/RetroArch}"
 RWEBAUDIO_SOURCE_REPO="${RWEBAUDIO_SOURCE_REPO:-https://github.com/kblood/psx-wasm-jit-libretro.git}"
 
+# ---------------------------------------------------------------------------
+# PINS  (ARC-3: "core builds are not reproducible from a clean checkout")
+# ---------------------------------------------------------------------------
+# These are the exact SHAs recorded in the SHIPPED manifest,
+# public/cores/dosbox_pure_libretro.build.json — which is now git-tracked, so a
+# clean clone carries them (.gitignore force-includes public/cores/*.build.json).
+#
+# This script used to `git clone --depth 1` at branch HEAD and simply RECORD
+# whatever it got. Two runs a month apart therefore produced legitimately
+# different binaries and the manifest documented the drift after the fact instead
+# of preventing it. Pinning does not make the build hermetic — the shared
+# RetroArch checkout and the emsdk install are still ambient — but it makes the
+# two inputs that move on their own reproducible, and it makes every remaining
+# source of drift an explicit, opted-into decision rather than a silent one.
+#
+#   ALLOW_UNPINNED=1  downgrades every pin mismatch below back to a warning.
+# Use it when you are DELIBERATELY moving a pin (then update this file and the
+# shipped build.json in the same commit), or when another agent session has the
+# shared RetroArch checkout at a different commit and you accept the consequence.
+DOSBOX_PURE_COMMIT_EXPECTED="${DOSBOX_PURE_COMMIT_EXPECTED:-ef363f86d7ce7ff632064d969b891be2932dd767}"
+RETROARCH_COMMIT_EXPECTED="${RETROARCH_COMMIT_EXPECTED:-1825596b1a9072998d5caa5cedb4d4da8b98c6cb}"
+ALLOW_UNPINNED="${ALLOW_UNPINNED:-0}"
+
 LIBRETRO_NAME="${LIBRETRO_NAME:-dosbox_pure}"
 HAVE_THREADS="${HAVE_THREADS:-1}"
 EXTRA_LINK_FLAGS="${EXTRA_LINK_FLAGS:-}"
@@ -117,6 +140,20 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*"; }
 phase() { CURRENT_PHASE="$1"; log "===== PHASE: $1 ====="; }
 run() { log "+ $*"; "$@"; }
+
+# A pin mismatch is an ERROR by default and a warning under ALLOW_UNPINNED=1.
+# One helper so every pin behaves identically — the old code had one WARNING that
+# proceeded anyway (emsdk) and one that only printed `git status` (RetroArch), and
+# the inconsistency is how a mismatch stops being read as a problem.
+pin_violation() {
+  if [ "$ALLOW_UNPINNED" = "1" ]; then
+    log "WARNING (ALLOW_UNPINNED=1): $*"
+  else
+    log "ERROR: $*" >&2
+    log "       Re-run with ALLOW_UNPINNED=1 if this drift is deliberate — and then update the pins at the top of this script AND public/cores/${LIBRETRO_NAME}_libretro.build.json in the same commit." >&2
+    exit 1
+  fi
+}
 
 on_exit() {
   local code=$?
@@ -184,8 +221,34 @@ else
   rm -rf "$SRC_DIR"
   run git clone --depth 1 "$DOSBOX_PURE_REPO" "$SRC_DIR"
 fi
+
+# Check the PINNED commit out. A `--depth 1` clone lands on branch HEAD, which is
+# a moving target — this is the line that turns "whatever upstream shipped today"
+# into a reproducible input. GitHub serves a single SHA to `fetch --depth 1`, so
+# the shallow clone stays shallow.
+if [ -n "$DOSBOX_PURE_COMMIT_EXPECTED" ]; then
+  if [ "$(git -C "$SRC_DIR" rev-parse HEAD)" != "$DOSBOX_PURE_COMMIT_EXPECTED" ]; then
+    log "Checking out pinned dosbox-pure commit $DOSBOX_PURE_COMMIT_EXPECTED"
+    if ! (git -C "$SRC_DIR" fetch --depth 1 origin "$DOSBOX_PURE_COMMIT_EXPECTED" \
+          && git -C "$SRC_DIR" checkout --detach FETCH_HEAD); then
+      pin_violation "could not check out pinned dosbox-pure commit $DOSBOX_PURE_COMMIT_EXPECTED (fetch-by-SHA refused, or the commit no longer exists). Building from $(git -C "$SRC_DIR" rev-parse HEAD) instead."
+    fi
+  fi
+fi
 DOSBOX_PURE_COMMIT="$(git -C "$SRC_DIR" rev-parse HEAD)"
-log "dosbox-pure commit (PIN for build.json later): $DOSBOX_PURE_COMMIT"
+log "dosbox-pure commit: $DOSBOX_PURE_COMMIT"
+if [ -n "$DOSBOX_PURE_COMMIT_EXPECTED" ] && [ "$DOSBOX_PURE_COMMIT" != "$DOSBOX_PURE_COMMIT_EXPECTED" ]; then
+  pin_violation "dosbox-pure is at $DOSBOX_PURE_COMMIT but the pin says $DOSBOX_PURE_COMMIT_EXPECTED."
+fi
+if [ -n "$(git -C "$SRC_DIR" status --porcelain)" ]; then
+  # Unlike the shared RetroArch tree (see phase 3), this checkout is this
+  # script's own and carries no intentional local patches, so anything modified
+  # here is an accident or a leftover experiment — and it would silently end up
+  # in the binary with nothing recording it.
+  log "dosbox-pure working tree is NOT clean:"
+  (cd "$SRC_DIR" && git status --short) | sed 's/^/    /'
+  pin_violation "the dosbox-pure checkout at $SRC_DIR has uncommitted changes, so the build is not reproducible from the pin above."
+fi
 
 if ! grep -q 'platform.*emscripten' "$SRC_DIR/Makefile" 2>/dev/null; then
   log "ERROR: no 'platform...emscripten' block found in $SRC_DIR/Makefile — has the EmulatorJS fork changed shape? Re-check the recipe in the build plan before continuing." >&2
@@ -208,7 +271,12 @@ EMCC_VERSION_LINE="$(emcc --version | head -1)"
 log "emcc reports: $EMCC_VERSION_LINE"
 case "$EMCC_VERSION_LINE" in
   *"$EMSDK_VERSION_EXPECTED"*) log "emsdk version matches expected pin ($EMSDK_VERSION_EXPECTED)." ;;
-  *) log "WARNING: emcc version line does not contain expected pin '$EMSDK_VERSION_EXPECTED' — proceeding anyway, but note this in build.json's pins block." ;;
+  # Was "WARNING ... proceeding anyway". The compiler version is not a footnote:
+  # it decides the emitted glue, the pthread bootstrap shape and the exported
+  # symbol set, i.e. everything the frontend's locateFile and the light-gun export
+  # checks depend on. A build against the wrong emsdk is a different core, so it
+  # gets the same treatment as any other pin.
+  *) pin_violation "emcc reports '$EMCC_VERSION_LINE', which does not contain the pinned emsdk version '$EMSDK_VERSION_EXPECTED'. Activate the pinned emsdk (\`cd $EMSDK_DIR && ./emsdk install $EMSDK_VERSION_EXPECTED && ./emsdk activate $EMSDK_VERSION_EXPECTED\`)." ;;
 esac
 
 cd "$SRC_DIR"
@@ -262,8 +330,34 @@ if [ ! -d "$RETROARCH_DIR/.git" ]; then
 fi
 RETROARCH_COMMIT_PRELOCK="$(git -C "$RETROARCH_DIR" rev-parse HEAD)"
 log "Shared RetroArch checkout commit: $RETROARCH_COMMIT_PRELOCK"
+if [ -n "$RETROARCH_COMMIT_EXPECTED" ] && [ "$RETROARCH_COMMIT_PRELOCK" != "$RETROARCH_COMMIT_EXPECTED" ]; then
+  pin_violation "the shared RetroArch checkout is at $RETROARCH_COMMIT_PRELOCK but this core's pin says $RETROARCH_COMMIT_EXPECTED. It is SHARED — another core build may have moved it, and re-pointing it would disturb theirs. Either check out the pin (and expect to reapply the local patches below), or accept the drift with ALLOW_UNPINNED=1 and update the pin + build.json afterwards."
+fi
+
+# THE SHARED CHECKOUT IS SUPPOSED TO BE DIRTY. It carries this project's local
+# frontend patches — rwebinput light-gun (docs/patches/rwebinput-lightgun.diff and
+# -multiport), the rwebaudio worker bridge, and the LWX-tagged
+# EM_TIMING_SETIMMEDIATE -> EM_TIMING_SETTIMEOUT fix in
+# frontend/drivers/platform_emscripten.c. None of them are upstreamed, and
+# docs/DOS_CORE_BUILD.md describes the last one in PROSE and tells the reader to
+# recover the text from `LWX:` comments in a directory that does not exist in this
+# repo. If ~/amiga-build/RetroArch is ever reset, the DOS core becomes
+# unrebuildable. So: do not demand a clean tree (that would be wrong), CAPTURE it.
+# The diff is written next to the artifacts as a real .patch file and fingerprinted
+# into the manifest, which turns "the patches live on one WSL2 box" into "the
+# patches ship with every build output".
+RETROARCH_WORKTREE_PATCH="$WORK_DIR/retroarch-worktree.patch"
+(cd "$RETROARCH_DIR" && git diff) > "$RETROARCH_WORKTREE_PATCH" || true
+RETROARCH_WORKTREE_SHA256="$(sha256sum "$RETROARCH_WORKTREE_PATCH" | cut -d' ' -f1)"
 log "Shared RetroArch checkout local diffs (git status --short):"
 (cd "$RETROARCH_DIR" && git status --short) | sed 's/^/    /' || true
+log "Captured the local patch set: $RETROARCH_WORKTREE_PATCH ($(stat -c%s "$RETROARCH_WORKTREE_PATCH") bytes, sha256 $RETROARCH_WORKTREE_SHA256)"
+if [ ! -s "$RETROARCH_WORKTREE_PATCH" ]; then
+  # A pristine shared checkout means the light-gun frontend patch is GONE, and
+  # the link would silently produce a core whose gun input always reads 0 — the
+  # genesis_plus_gx incident's exact shape (see scripts/test-patched-cores.mjs).
+  pin_violation "the shared RetroArch checkout has NO local modifications. This project's frontend patches (rwebinput light-gun, rwebaudio, the LWX platform_emscripten timing fix) are missing, so this link would emit a core with no light-gun support and no worker audio. Reapply them before building — docs/DOS_CORE_BUILD.md and docs/patches/."
+fi
 
 # ---------------------------------------------------------------------------
 # Acquire the shared-checkout lock. Everything from here through the end of
@@ -400,17 +494,77 @@ MANIFEST="$STAGE_TS_DIR/MANIFEST.txt"
     [ -f "$f" ] || continue
     printf '  %s\t%s\t%s\n' "$(basename "$f")" "$(stat -c%s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"
   done
+  echo "  RETROARCH_WORKTREE_PATCH_SHA256 = $RETROARCH_WORKTREE_SHA256"
   echo
-  echo "NOTE: this manifest is a convenience reference for hand-authoring"
-  echo "public/cores/${LIBRETRO_NAME}_libretro.build.json (mirror the shape of"
-  echo "the existing mupen64plus_next_libretro.build.json) — it is NOT that"
-  echo "build.json itself, and nothing here has been copied into public/cores/."
+  echo "NOTE: the machine-readable version of this is ${LIBRETRO_NAME}_libretro.build.json,"
+  echo "staged beside it. This text file stays because it is the thing a human"
+  echo "actually reads in a build log."
 } > "$MANIFEST"
 log "Wrote manifest: $MANIFEST"
 cat "$MANIFEST" | sed 's/^/    /'
 
+# ---------------------------------------------------------------------------
+# The PROVENANCE MANIFEST, emitted rather than hand-authored (ARC-3).
+# public/cores/*.build.json is git-tracked now, and it is the only record a clean
+# clone has of how a shipped binary was produced — so it must not depend on
+# somebody remembering to transcribe a log into JSON. Generated here, from the
+# same variables the build actually used. Install it alongside the artifacts when
+# you install the core; scripts/fetch-cores.mjs verifies the sha256s in it against
+# the bytes on disk before adopting it.
+# ---------------------------------------------------------------------------
+BUILD_JSON="$STAGE_TS_DIR/${LIBRETRO_NAME}_libretro.build.json"
+{
+  echo '{'
+  echo '  "schemaVersion": 1,'
+  echo "  \"artifactBasename\": \"${LIBRETRO_NAME}_libretro\","
+  echo '  "artifacts": {'
+  sep=''
+  for f in "$STAGE_TS_DIR"/*.js "$STAGE_TS_DIR"/*.wasm; do
+    [ -f "$f" ] || continue
+    printf '%s    "%s": { "bytes": %s, "sha256": "%s" }' \
+      "$sep" "$(basename "$f")" "$(stat -c%s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"
+    sep=$',\n'
+  done
+  echo
+  echo '  },'
+  echo '  "pins": {'
+  echo "    \"RETROARCH_REPOSITORY\": \"https://github.com/libretro/RetroArch.git\","
+  echo "    \"RETROARCH_COMMIT\": \"$(git -C "$RETROARCH_DIR" rev-parse HEAD)\","
+  echo "    \"RETROARCH_LOCAL_PATCH_SHA256\": \"$RETROARCH_WORKTREE_SHA256\","
+  echo "    \"DOSBOX_PURE_REPOSITORY\": \"$DOSBOX_PURE_REPO\","
+  echo "    \"DOSBOX_PURE_COMMIT\": \"$DOSBOX_PURE_COMMIT\","
+  echo "    \"EMSDK_VERSION\": \"$EMSDK_VERSION_EXPECTED\""
+  echo '  },'
+  echo '  "build": {'
+  echo "    \"emccVersionLine\": \"$EMCC_VERSION_LINE\","
+  echo "    \"haveThreads\": $HAVE_THREADS,"
+  echo '    "haveOpenGLES3": true,'
+  echo '    "audioBackend": "LibretroWebXR-worker-bridge",'
+  echo "    \"linkInputKind\": \"$LINK_INPUT_KIND\","
+  echo "    \"extraLinkFlags\": \"${EXTRA_LINK_FLAGS}\","
+  echo "    \"allowUnpinned\": $([ "$ALLOW_UNPINNED" = "1" ] && echo true || echo false),"
+  echo "    \"generatedBy\": \"scripts/cores/dos/build.sh\","
+  echo "    \"generatedAt\": \"$(ts)\""
+  echo '  }'
+  echo '}'
+} > "$BUILD_JSON"
+# Refuse to hand over a manifest that is not valid JSON — a broken one is worse
+# than none, because fetch-cores.mjs would fail to parse it and fall back to
+# trusting the bytes.
+if command -v node >/dev/null 2>&1; then
+  node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$BUILD_JSON" \
+    || { log "ERROR: generated $BUILD_JSON is not valid JSON" >&2; exit 1; }
+fi
+log "Wrote provenance manifest: $BUILD_JSON"
+
+# Ship the captured frontend patch set with the artifacts, so a rebuild after a
+# reset of the shared checkout has something to reapply.
+cp "$RETROARCH_WORKTREE_PATCH" "$STAGE_TS_DIR/retroarch-worktree.patch"
+cp "$BUILD_JSON" "$STAGE_TS_DIR/retroarch-worktree.patch" "$LATEST_DIR/" 2>/dev/null || true
+
 log "Staged output (timestamped): $STAGE_TS_DIR"
 log "Staged output (latest alias): $LATEST_DIR"
+log "To install: copy the .js/.wasm/.worker.js AND ${LIBRETRO_NAME}_libretro.build.json into public/cores/ (the manifest is git-tracked; the binaries are not)."
 
 # Lock is released automatically when fd 9 closes at script exit (trap runs
 # after this point); nothing further touches $RETROARCH_DIR.

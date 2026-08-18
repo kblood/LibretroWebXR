@@ -366,8 +366,13 @@ export class EmulatorClient extends EventTarget {
       if (opts.coreName) this.coreName = opts.coreName;
       if (opts.moduleStyle) this.moduleStyle = opts.moduleStyle;
     } else if (opts.coreName && opts.coreName !== this.coreName) {
-      this._fail(`core switch from ${this.coreName} to ${opts.coreName} requires page reload`);
-      return;
+      // COR-4b: THROW, don't resolve. `_fail` only logs and dispatches `error`, so
+      // returning here handed the caller a resolved promise for a boot that never
+      // happened — main.js's loadCartridge then skipped its catch, committed
+      // currentCore/currentMeta and told the whole room a game was playing.
+      const msg = `core switch from ${this.coreName} to ${opts.coreName} requires page reload`;
+      this._fail(msg);
+      throw new Error(msg);
     }
 
     if (!this._coreLoaded) {
@@ -401,7 +406,16 @@ export class EmulatorClient extends EventTarget {
       this.dispatchEvent(new CustomEvent('ready'));
     } catch (e) {
       console.error('[EmulatorClient] callMain exception:', e, e?.stack);
+      // COR-4b: `ready` is still false and no main loop exists, so this start did
+      // NOT happen — rethrow rather than resolving. Silently resolving here is how
+      // a bad/truncated ROM, a 404'd core asset or an out-of-memory Wasm
+      // instantiation on a Quest ended with loadCartridge's catch skipped, the
+      // ROM-error placeholder never painted, and `tv` + a video broadcast
+      // published for a black screen. The `error` event still fires first, so the
+      // existing status-line listener is unchanged; the ORIGINAL error is rethrown
+      // to preserve the core's own stack.
       this._fail(`callMain threw: ${e.message || e}`);
+      throw e;
     }
   }
 

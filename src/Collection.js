@@ -46,9 +46,9 @@ export function normalizeGame(raw) {
  * bad row doesn't blank the whole wall.
  *
  * `experimental` (default false): systems flagged `experimental: true` in
- * SYSTEMS (see systems.js — currently PSX/N64, per the 2026-07-24 review's
- * Phase A item A4: their worker cores aren't yet reachable from the real
- * in-VR cartridge-insert path) are dropped from the shelf/manifest UI unless
+ * SYSTEMS (see systems.js — currently n64 only; psx was un-gated 2026-08-07
+ * and dos 2026-08-01, per the dated notes at systems.js:520 and :386, which
+ * remain the single source of truth) are dropped from the shelf/manifest UI unless
  * this is true. main.js sets it from the `?experimental=1` URL param — this
  * is the ONE place that gate is enforced, so every collection source (the
  * default manifest, a dropped/pasted collection, an extra loaded collection,

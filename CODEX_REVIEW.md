@@ -4,6 +4,79 @@ Review date: 2026-08-13
 Reviewed revision: `cb29aa8` (`Guard loadCartridge() against a slower older request clobbering a newer one`)  
 Scope: the tracked application, server, deployment configuration, documentation, authored games, tests, and the locally present ignored runtime/build assets. The pre-existing untracked `CLAUDE_REVIEW.md` was deliberately not used as input.
 
+## STATUS AS OF 2026-08-18 - read this before acting on anything below
+
+**Everything after this block is the report exactly as written on 2026-08-13. It
+is a snapshot, not a to-do list.** A remediation pass ran 2026-08-17; where a
+finding is marked closed here, its own section below is out of date and the code
+is right. Verified against the tree, not against prior status text.
+
+**Settled REJECTIONS - do not re-open.** Both have already been re-argued (and
+in one case implemented and reverted twice), which is why this block exists at
+all:
+
+- **SEC-1, the private-ROM half.** Publishing `public/roms/local/` to
+  dionysus.dk is **deliberate**: it is the user's own box and the only practical
+  way to test light guns on a real Quest, and the redistributable light-gun game
+  universe is essentially empty. A strip guard was added and reverted twice
+  (`0df8aeb` -> `b192911`, again 2026-08-14). See `CLAUDE.md`, `README.md`, and
+  the header of `scripts/check-dist.mjs`. **The rest of SEC-1 is implemented**:
+  `.wasm.bak` backup cores, credentials, VCS/deps, scratch dirs, symlinks,
+  unlisted or oversize freeware ROMs and unexpected file types are all refused in
+  both modes, by the vite copy filter *and* independently by the postbuild /
+  pre-scp guard. `--strict` (for a genuinely public release) refuses the private
+  tree too.
+- **CLAUDE_REVIEW section 5.5's host-watcher optimization** (no CODEX
+  counterpart, but adjacent to COR-2). That review's own section 10 says a
+  version counter reintroduces the "a new call site forgets to publish" bug the
+  watcher was written to fix.
+
+### Closed
+
+| ID | Closed by |
+|---|---|
+| **SEC-1** (backup cores, credentials, unlisted media) | `scripts/check-dist.mjs` as postbuild **and** as the pre-`scp` deploy gate, plus `vite.config.js` copying `public/` through the same deny filter instead of `copyPublicDir`. Pinned by `scripts/test-check-dist.mjs`. ROM half rejected - see above. |
+| **SEC-2** | Output escaping; ingest validation + wrapped viewer handler + `uncaughtException`; `LOG_TOKEN` read gate **switched on in the deployment** (`deploy/libretrowebxr-room.service`); bounded open file handles; and 2026-08-17 the two aggregate budgets the per-axis caps left open - `MAX_STORE_BYTES` (64 MiB accounted, charging per JSON node) and `MAX_LOG_FILES`/`MAX_LOG_DIR_BYTES` (200 files / 512 MiB, oldest unlinked first, with a startup sweep so a restart doesn't reset the budget). |
+| **SEC-3** | Payload/rate/peer/room/socket caps, per-address socket + upgrade caps keyed on the last `X-Forwarded-For` hop when `ROOM_TRUST_PROXY` is set, per-socket **and** aggregate outbound-buffer budgets enforced on the send path (not only on the heartbeat), `ROOM_HOST` bind, `Origin` allow-list - and the relay **trust model**: host-only `INPUT`, host-only `STATE` on `tv`/`room`/`shelf:*`, owner-or-host-only *clears* of `hold:*`/`gamepad:*`, and `player`/`btn` bounds in `NetProtocol.validate()`. Rules and rationale: `docs/MULTIPLAYER.md` -> "What the relay refuses"; knobs: `server/README.md`; tests: `scripts/test-net.mjs`, `scripts/test-room-limits.mjs`, each with a negative control. |
+| **SEC-4** | `vite@7.3.6` locked; dev/preview bind `127.0.0.1` with an explicit `LAN=1` opt-in. |
+| **SEC-5**, **SEC-6** | Shipped earlier (URL-parameter debug/TURN surface; header/service hardening + the CSP fix). |
+| **COR-1** | `'bye'` added to `SIGNAL_KINDS`, with a round-trip test over every kind. |
+| **COR-2** | `ba0426b`. The residual found on re-review - the host prop **baseline** staying suppressed after leave/rejoin, because `_knownPropPayloads` is dual-purpose and was never reset on teardown - closed 2026-08-17 by forcing one full baseline republish per hosting stint. |
+| **COR-3** | 2026-08-17. `src/net/AuthorityEpoch.js`: authority is now part of the boot **transaction**, not a check at the door - bumped on every settled role transition, captured when a boot starts, and re-asked after every await, so a mid-fetch demotion can no longer end in `client.resume()` behind the new host's video feed. Pure module, so it is testable: `scripts/test-authority-epoch.mjs`. |
+| **COR-4** | Boot configuration is part of runtime identity. 2026-08-17 closed the leftover bullet - `EmulatorClient.start()` **throws** instead of resolving a failed boot into a state the room is told is playing - and added `scripts/test-boot-config.mjs`, the first test to pin any of it. |
+| **COR-5** | `74add0e` - retiring a console actually releases it. |
+| **COR-6** | `d7ab899` - SaveRAM belongs to the runtime that made it, not to `console0`. |
+| **COR-7**, **COR-8**, **COR-9** | Shipped earlier (voice failed-connection recovery + trickle-ICE parking; per-peer remote controller state; client/server protocol handshake). |
+| **ARC-3** | Provenance, not hermeticity: `public/cores/*.build.json` is now **tracked** (`.gitignore` ignores `public/cores/*` so the negation can apply), recording upstream repos + SHAs, emsdk/emscripten versions, build flags and a sha256 per artifact. `fetch-cores.mjs`'s verifier finally has something to verify against. |
+| **ARC-5** | Both halves. Source comments (`src/Collection.js`, `src/main.js`) no longer call PSX experimental; `server/README.md`, `docs/ROADMAP.md`, `README.md`, `CLAUDE.md` and `DEBUGGING.md` were reconciled 2026-08-17/18, including the disc-swap claim (republished since `dbb9594`) and the hardcoded suite count (the suite list is *discovered* - no prose copy of the number survives). |
+| **TST-1** | `.github/workflows/ci.yml`, two jobs: **app** (`npm ci` / `npm test` / `npm run build`, uploads `dist/`) and **server** (locked install, `node --check`, `npm run test:servers`). A suite that runs and asserts nothing now declares itself **INERT** instead of reporting a green - `test-patched-cores` on a runner with no cores fetched is the live case. |
+| **TST-2** | The remaining false-green sites were fixed and each validated red: `test-controller-portswitch` cardinality guards (`[].every(p)` is true), `test-rackbudget` asserting the behaviour the defaults produce instead of reading the constants out of the module it imported them from, `test-session` demanding distinct `randomRoomSuffix()` draws, `probe-media` snapshotting the shelf *before* it injects into it, `probe-local-rom` Part 4 enumerating the real OPFS directory instead of a round trip that could not fail. |
+| **TST-3** | New pure-logic suites for the highest-risk cases, all auto-discovered: `test-boot-config` (COR-4), `test-authority-epoch` (COR-3), `test-roomobjects` (PERF-4b), `test-audio-push` (PERF-3), `test-check-dist` (SEC-1/PERF-5), `test-toolchain` (TST-4), plus adversarial coverage in `test-net` / `test-room-limits`. |
+| **TST-4** | Policy asserted rather than assumed: `engines: node >=22.12.0` in **both** manifests, `server/package-lock.json` tracked, and `scripts/deploy.example.ps1` installing it with `npm ci --omit=dev` (the live `scripts/deploy.ps1` is gitignored and still uses `npm install --omit=dev` — it has to be updated by hand on the box), `.github/dependabot.yml` (both trees + the workflows' own action pins, monthly, grouped, majors separate), `.github/workflows/audit.yml` (scheduled `npm audit` over both trees; unparseable output = UNKNOWN, never clean), and `scripts/test-toolchain.mjs` in the CI gate. |
+| **PERF-1** | Shipped - TV textures upload only on a new emulator frame. |
+| **PERF-2** | `195ee4e` - measured what a swap costs and fixed what the measurement found. |
+| **PERF-5** | `BUNDLE_BUDGETS` in `scripts/check-dist.mjs`: a raw **and** a gzip ceiling per rollup chunk, `oversize-chunk` as a hard violation, the full chunk table printed on every green build, and `vite.config.js` deriving rollup's own advisory threshold from the largest budget so the two cannot drift. Gzip is the governing number - it is what a Quest downloads cold. |
+
+### Closed to a deliberately narrower scope
+
+| ID | What was done, and what was refused |
+|---|---|
+| **PERF-3** | The shared inner loop moved to `src/runtime/audioFrames.js` - one hoisted format branch and a strided walk, removing ~96,000 per-second string compares from the XR render thread and de-duplicating `SpatialAudio`/`DesktopAudio`, which were verbatim copies. **Refused:** moving the deinterleave into the worker, and the AudioWorklet ring the review recommends. Measured at ~0.01-0.02 ms per 72 Hz frame for the one worker console the rack budget can ever have live; it would change the worker-to-page audio message shape, and silent worker-core audio is a worse outcome than 1 ms/s. |
+| **PERF-4** | (a) The pump is now `src/runtime/FramePump.js`, testable with a fake clock, and it checks `paused` **before** re-arming - an auto-paused rack console used to wake its worker thread ~62x/s for ever, producing nothing. (b) `RoomObjects.version` + `PresenceState.rosterVersion` + a memoised `HoldView` make the four per-frame ghost-sync ticks O(1) in the steady state instead of rebuilding the whole room-state map four times per rendered frame. **Deferred, not forgotten:** ack-driven frame delivery. The one-in-flight ACK gate already caps *production* at the presentation rate, so what remains is wakeups, not pixels - and driving delivery off `FRAME_ACK` puts a permanently black console one lost message away, the exact failure the 500 ms stale-ack watchdog exists for. Needs a headset measurement first. |
+
+### Still open
+
+| ID | Note |
+|---|---|
+| **ARC-1** | `src/main.js` has **grown**: 7,974 -> 8,820 lines. Do **not** attempt the four-session (`AppSession`/`RoomSession`/`ConsoleSession`/`WorldSession`) rewrite as one change - it is a rewrite of a file with zero test coverage. Note also that CLAUDE_REVIEW's P2 #12 extraction order and three of its five size estimates were found to be wrong on re-review, and that "tests green between" is vacuous today because **no test imports `main.js`** - any extraction must ship a `scripts/test-<module>.mjs` in the same change. |
+| **ARC-2** | All three halves. (a) `NetMgr`/`DesktopNet` share the protocol *decisions* but not the socket *lifecycle* - and it cost real work: the 2026-08-17 relay hardening had to be written twice. (b) RetroArch `.cfg`/`.rmp` generation is still duplicated verbatim between the main-thread and worker backends. (c) Launch **option**-building is shared; transaction assembly is not. COR-3's authority epoch is not the boot epoch (c) asks for. |
+| **ARC-4** | `TestApi` is still eagerly imported and constructed on every build (`src/main.js:35`). |
+| **CLAUDE_REVIEW section 3.3** | The four peripherals are still four copies, and the duplication now reaches into `systems.js`. Worth doing *before* the next peripheral is added. |
+| **docs index** | No `docs/README.md` marking which files under `docs/` are current vs. historical (CLAUDE_REVIEW section 8). |
+| **`test-routing:175-180`** | Contributes zero assertions if `r` is empty - the last of `docs/ROADMAP.md` loose-end 20. Loose-end 19 (negative-only "nothing happened" checks) is also still open. |
+
+---
+
 ## Executive summary
 
 LibretroWebXR has a stronger internal design than its 7,974-line entry point initially suggests. The pure state/protocol modules (`NetProtocol`, `Hub`, `PresenceState`, `RoomObjects`, `RackBudget`, `ContentBundle`), the main-thread/worker runtime facade, content-addressed saves, and the automation facade are useful seams. The default test command is unusually broad for a prototype and passed in this review.

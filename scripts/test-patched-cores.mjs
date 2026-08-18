@@ -121,7 +121,7 @@
 // when there is provably no artifact to be wrong about. If a file exists and we
 // cannot check it, that is a failure, not a skip.
 
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -129,6 +129,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CORES_DIR = join(__dirname, '..', 'public', 'cores');
 
 let pass = 0, fail = 0;
+
+// How many CORE ARTIFACTS this run actually inspected. It is the difference
+// between "green" and "green and meaningful", and on a CI runner it is zero:
+// public/cores/ is gitignored (.gitignore) except the .build.json provenance
+// manifests, so `git ls-files public/cores` lists metadata but NOT ONE core
+// BINARY; a hosted runner reaches the no-marker branch with `builtCores = []`, fires
+// ONE vacuously-true assertion (`[].filter(...).length === 0`) and reports a
+// passing suite for the light-gun patch protection while proving nothing about
+// it. That is precisely the shape of false green this whole file was written to
+// eliminate (see "WHAT THIS TEST REFUSES TO SKIP" above) — so rather than let the
+// runner count it as coverage, the suite declares itself INERT and
+// scripts/run-tests.mjs reports it separately in the summary.
+let artifactChecks = 0;
 
 const ok = (name, cond, detail) => {
   if (cond) { pass++; }
@@ -203,6 +216,7 @@ const glueCarriesMultiport = (file) => {
 
 if (!existsSync(markerPath)) {
   const unprotectedPatched = builtCores.filter(glueCarriesMultiport);
+  artifactChecks += builtCores.length; // every glue file on disk was read
   ok('public/cores/PATCHED.json exists whenever PATCHED core builds do',
      unprotectedPatched.length === 0,
      `public/cores/ holds ${unprotectedPatched.length} core build(s) that ACTUALLY `
@@ -316,6 +330,7 @@ if (!existsSync(markerPath)) {
         console.log(`SKIP  ${core}: listed in PATCHED.json but no build present (no .js, no .wasm)`);
         continue;
       }
+      artifactChecks++; // a real build is on disk and is about to be checked
 
       // NOT a skip: .wasm present + .js missing is a genuinely broken, actively
       // protected, unrepairable build. isProtected() sees the .wasm and returns
@@ -382,6 +397,30 @@ if (!existsSync(markerPath)) {
       }
     }
   }
+}
+
+// --- Honesty report --------------------------------------------------------
+// A pass that inspected no artifact is not coverage. Say so on stdout for a
+// human, and — when run under scripts/run-tests.mjs — in the machine-readable
+// status file it hands us, so the tier summary can print "(1 inert)" instead of
+// counting this run as a verified suite. Writing a FILE rather than parsing
+// stdout keeps the runner's `stdio: 'inherit'` (and therefore the interleaving of
+// every suite's own output) exactly as it was.
+if (artifactChecks === 0) {
+  console.log(
+    'SUITE-STATUS: inert — 0 core artifacts inspected. public/cores/ is gitignored, so on a\n'
+    + '              CI runner and on a fresh clone there is no build here to verify and the\n'
+    + '              assertions above are structural or vacuous. Run `npm run fetch-cores`\n'
+    + '              (or build the light-gun cores) to make this suite mean something.',
+  );
+} else {
+  console.log(`SUITE-STATUS: ok — ${artifactChecks} core artifact(s) inspected`);
+}
+if (process.env.SUITE_STATUS_FILE) {
+  try {
+    writeFileSync(process.env.SUITE_STATUS_FILE,
+      artifactChecks === 0 ? 'inert 0 core artifacts on disk (public/cores/ is gitignored)' : `ok ${artifactChecks} artifacts`);
+  } catch { /* the report is a nicety; never fail the suite over it */ }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

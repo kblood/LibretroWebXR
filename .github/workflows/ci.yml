@@ -19,8 +19,27 @@
 # reading this comment.
 #
 # The whole chain was executed against a tracked-files-only tree (produced with
-# `git archive HEAD`, i.e. exactly what a fresh clone gets) and passed
-# 209 script assertions + 26 node:test cases, exit 0, in ~10s.
+# `git archive HEAD`, i.e. exactly what a fresh clone gets): every discovered
+# suite green, exit 0, in ~10s. The count is deliberately NOT quoted here — the
+# runner DISCOVERS suites, so any number written down rots the next time one is
+# added (it already read 46 when the real count was 52).
+#
+# The SCRIPT-assertion total is deliberately not pinned here. It was once written
+# down as "209" and had drifted to ~5,600 by the time anyone re-ran it, so the
+# number was evidence of nothing. It also legitimately differs between this runner
+# and a developer box, because some suites assert per artifact on disk. The suite
+# count and the exit code are the stable facts; use them.
+#
+# ONE SUITE IS INERT HERE, ON PURPOSE AND VISIBLY. `scripts/test-patched-cores.mjs`
+# verifies that each core listed in public/cores/PATCHED.json really carries the
+# light-gun patch — and public/cores/ is gitignored, so on this runner there is no
+# core to inspect and the suite proves nothing. It used to report a plain green
+# suite for that protection. It now declares itself INERT (see the INERT SUITES
+# note in scripts/run-tests.mjs) and the tier summary prints
+# "N/N suites passed  (1 INERT — passed without asserting anything)". Inert is
+# not a failure and must not be made one: the suite is meaningful on a machine
+# with cores fetched, and a red CI for an absent gitignored artifact would just be
+# noise. The point is that the log never again implies coverage that isn't there.
 #
 # DELIBERATELY NOT IN CI (they cannot pass on a clean hosted runner):
 #   * `scripts/probe-*.mjs|js` and `scripts/smoke-*.mjs` — these drive real

@@ -20,6 +20,12 @@
 // libretro Emscripten cores build their own graph and connect it to
 // ctx.destination with no hook to redirect it, so we hand them a Proxy whose
 // `destination` is OUR mixer. install() must therefore run BEFORE any core loads.
+//
+// The one piece of SpatialAudio it DOES share is the deinterleave loop
+// (src/runtime/audioFrames.js) — a leaf module with no THREE in it, so the
+// three-free promise above still holds.
+
+import { deinterleaveInto } from '../runtime/audioFrames.js';
 
 /**
  * Install the desktop audio graph. Returns a handle; safe to call once at module
@@ -103,13 +109,10 @@ export function installDesktopAudio() {
       const frames = Math.floor(source.length / channels);
       if (!frames) return false;
       const buffer = ctx.createBuffer(channels, frames, sampleRate);
-      for (let ch = 0; ch < channels; ch++) {
-        const out = buffer.getChannelData(ch);
-        for (let f = 0; f < frames; f++) {
-          const v = source[f * channels + ch];
-          out[f] = format === 's16' ? v / 32768 : v;
-        }
-      }
+      // Was a verbatim copy of SpatialAudio's nested loop, string compare in the
+      // innermost iteration included (PERF-3). One shared implementation now, so
+      // a fix to one sink can't miss the other.
+      deinterleaveInto(buffer, source, format, channels, frames);
       const node = ctx.createBufferSource();
       node.buffer = buffer;
       node.connect(mixer);

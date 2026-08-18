@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { coreAssetBase, locateCoreAsset } from '../src/runtime/assetUrls.js';
 import { FrameBridge } from '../src/runtime/FrameBridge.js';
+import { FramePump } from '../src/runtime/FramePump.js';
 import { JitRuntimeBridge } from '../src/runtime/JitRuntimeBridge.js';
 import { classifyCoreLog } from '../src/runtime/coreLog.js';
 import { WorkerEmulatorClient } from '../src/runtime/WorkerEmulatorClient.js';
@@ -105,6 +106,65 @@ test('frame bridge keeps the newest frame and closes transferred bitmaps', () =>
   } finally {
     globalThis.requestAnimationFrame = previousRaf;
   }
+});
+
+// PERF-4(a). The pump used to re-arm BEFORE checking `paused`, so an auto-paused
+// rack console kept waking its worker thread ~62 times a second producing
+// nothing — for as long as RackBudget kept it parked. The half of the fix that
+// can go permanently wrong is the OTHER direction: if resume fails to re-arm,
+// the console is black for the rest of the session with no recovery (the exact
+// class of bug the FRAME_ACK watchdog exists for), so pause→resume→frames is
+// asserted here, not just "pause stops".
+test('frame pump sleeps while paused and produces again after resume', () => {
+  // Fake clock: one pending callback at a time, fired by hand.
+  let pending = null;
+  let seq = 0;
+  const clock = {
+    setTimeout: (fn) => { pending = fn; return ++seq; },
+    clearTimeout: () => { pending = null; },
+  };
+  const fire = () => { const fn = pending; pending = null; fn?.(); };
+
+  let ticks = 0;
+  const pump = new FramePump({ intervalMs: 16, onTick: () => { ticks++; }, ...clock });
+
+  pump.start();
+  assert.equal(ticks, 1, 'start produces a frame immediately (unchanged behaviour)');
+  assert.equal(pump.running, true);
+  fire();
+  assert.equal(ticks, 2, 'and keeps producing on each wake');
+
+  pump.setPaused(true);
+  assert.equal(pump.running, false, 'a paused pump has NO wake scheduled');
+  assert.equal(pending, null);
+  fire();                       // nothing to fire — the wake is gone
+  assert.equal(ticks, 2, 'a paused console produces nothing');
+
+  pump.setPaused(false);
+  assert.equal(pump.running, true, 'resume re-arms the pump');
+  assert.equal(ticks, 2, 'resume does NOT capture in the same turn (a blank canvas would flash black)');
+  fire();
+  assert.equal(ticks, 3, 'frames flow again one interval after resume');
+
+  // Idempotence: the client can send pause/resume twice (or a duplicate command
+  // can arrive), and two chains of wakes must never end up running.
+  pump.setPaused(false);
+  pump.start();
+  assert.equal(pump.running, true);
+  fire();
+  assert.equal(ticks, 5, 'start() ticks once and leaves exactly one chain armed');
+
+  // A throwing capture must not kill the pump — the worker posts an error event
+  // and expects the next frame to still come.
+  const angry = new FramePump({ intervalMs: 16, onTick: () => { throw new Error('capture failed'); }, ...clock });
+  assert.throws(() => angry.start(), /capture failed/);
+  assert.equal(angry.running, true, 'the pump stays armed through a failed capture');
+
+  // Teardown wins over resume: stop() must not be undone by a late resume.
+  pump.stop();
+  assert.equal(pump.running, false);
+  pump.setPaused(false);
+  assert.equal(pump.running, false, 'a stopped pump stays stopped');
 });
 
 test('JIT bridge compiles, publishes and removes a Wasm block in one realm', () => {

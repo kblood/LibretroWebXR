@@ -50,6 +50,18 @@ Think [EmuVR](https://emuvr.net), but open-source and running in a web page.
 - Save states, spatial audio, in-VR menus, a C64/VIC-20 virtual keyboard.
 - **Networked multiplayer**: shared room presence, voice, room-object sync,
   and host-authoritative 2-player game streaming — see `docs/MULTIPLAYER.md`.
+  The relay (`server/`) is deployed on a public box, so it carries real
+  admission control — per-room/-peer/-address caps, payload and rate limits,
+  backpressure eviction, and a server-side trust model for who may say what
+  (host-only `STATE` on `tv`/`room`/`shelf:*`, host-only `INPUT`, owner-only
+  clears of `hold:*`/`gamepad:*`). Limits and env knobs: `server/README.md`;
+  the trust rules and why each exists: `docs/MULTIPLAYER.md`.
+- **Remote logging** for headset debugging: the app ships console/error logs to
+  `https://dionysus.dk/logs?session=<room>`. **Reads are token-gated in
+  production** (`LOG_TOKEN`, set on the box, never in the repo) because an
+  ungated `logs.json` hands every session's room names, nicks and private-library
+  ROM filenames to anyone — `POST /log` stays open, so the headset carries no
+  secret. See `docs/HANDOFF.md` → "Reading headset logs (the token)".
 
 ## Important: no ROMs, no bundled cores
 
@@ -59,6 +71,13 @@ This repo ships **neither game ROMs nor emulator cores**, by design — see
 - **Cores** (`.wasm`/`.js`) are fetched at build/deploy time, not committed.
   Run `npm run fetch-cores` (see that script for sources). They keep their own
   upstream licenses (`THIRD_PARTY_LICENSES.md`); some are non-commercial.
+  Their **provenance manifests are tracked**, though: `public/cores/*.build.json`
+  records the upstream repos + commit SHAs, the emsdk/emscripten versions, the
+  build flags and a sha256 per emitted artifact for the cores this project
+  builds itself. A few KB of reviewable text is the entire record of how a
+  shipped binary was produced, and without it a clean clone could neither
+  reproduce nor authenticate a single core (CODEX_REVIEW ARC-3). The binaries
+  stay out; their provenance comes in.
 - **ROMs & BIOS** are copyrighted — supply your own from media you own. The only
   game content here is free / homebrew / public-domain test material; see
   `public/roms/README.md`.
@@ -75,12 +94,31 @@ Click **Load ROM** to pick a game, or load a collection/room (see
 `docs/ROOM_AND_COLLECTIONS.md`). On Quest, open the HTTPS deploy and tap **Enter
 VR**. `npm run debug` runs the headless health-check harness (`DEBUGGING.md`).
 
-`npm test` runs the release gate: 35 pure-logic script suites plus three
-`node --test` files. It needs no browser, no server and no cores, so it also
-runs in CI (`.github/workflows/ci.yml`: `npm ci` / `npm test` / `npm run build`
-on a pinned Node). The `probe-*` / `smoke-*` scripts in `scripts/` are opt-in
-diagnostics that need real Chrome, a running room-server, or fetched cores —
-they are deliberately **not** part of the gate.
+`npm test` runs the release gate: every `scripts/test-*.mjs` that is not a
+server suite — **discovered from the filesystem**, so there is no list to
+append to and no count worth writing down here (the runner prints it; this
+paragraph said "35" for long enough to be wrong by sixteen) — plus the three
+`node --test` files in `test/`. It needs no browser, no server and no cores.
+
+CI runs it in two jobs (`.github/workflows/ci.yml`): **app** does `npm ci` /
+`npm test` / `npm run build` and uploads `dist/`; **server** does a locked
+`server/` install, `node --check` on each server module, and `npm run
+test:servers` — the socket-level tier that spawns the room/log servers on
+8891-8897 and is deliberately kept out of `npm test`. A separate scheduled
+workflow (`.github/workflows/audit.yml`) runs `npm audit` over **both** package
+trees weekly and on any manifest/lockfile change, and reports an unreachable
+registry as UNKNOWN rather than clean; `.github/dependabot.yml` raises grouped
+monthly dependency PRs for both trees, which the same CI then gates.
+
+One suite is **inert** on a clean runner and says so: `test-patched-cores`
+inspects `public/cores/`, which is gitignored, so with no cores fetched it
+asserts nothing and the summary prints `(1 INERT)` instead of a green that
+implies coverage. Inert is not a failure — see the note in
+`scripts/run-tests.mjs`.
+
+The `probe-*` / `smoke-*` scripts in `scripts/` are opt-in diagnostics that need
+real Chrome, a running room-server, or fetched cores — they are deliberately
+**not** part of the gate.
 
 Requirements: HTTPS + `Cross-Origin-Opener-Policy: same-origin` +
 `Cross-Origin-Embedder-Policy: require-corp` (handled by `vite.config.js` in dev
@@ -123,7 +161,8 @@ npm run deploy-app   # FAST code-only refresh (see the warning below)
 
 `.gitignore` is **not** the publishing boundary: vite copies `public/` into
 `dist/` and the deploy scp's `dist/` to a public web server. Nothing checked what
-was in there, so editor backups, the 8 pre-patch `*.wasm.bak` cores, a stray
+was in there, so editor backups, the pre-patch `*.bak` cores (10 in the tree as
+this was written, and the count moves every time a core is re-patched), a stray
 `.env`, or a ROM this project has no right to redistribute would all have shipped
 silently. Two independent things check now:
 
@@ -168,6 +207,18 @@ The guard **refuses** (exit 1, listing every offender):
 | `not-allowlisted` | a top-level entry that isn't one of the expected ones, or a `roms/` path that isn't `freeware/` or a `*.json`/README pointer |
 | `unexpected-type` | a file type outside the publishable extension allowlist |
 | `oversize-file` / `oversize-total` | over **32 MiB** for one file / **400 MiB** for the tree |
+| `oversize-chunk` | a hashed `assets/*.js`/`*.css` chunk over its **per-chunk** raw *or* gzip budget (`BUNDLE_BUDGETS`) |
+
+`oversize-chunk` is the bundle-regression guard (CODEX_REVIEW PERF-5). The
+32 MiB per-file rule was the only ceiling `dist/assets/` ever faced, so pulling
+`three` into the flat-screen `desktop` chunk — a 25x regression — passed every
+gate in the project. Each named rollup chunk now carries a raw **and** a gzip
+ceiling, and gzip is the one to care about: it is what a Quest downloads on a
+cold load. The guard prints the whole chunk table on every green build, so the
+trend is visible before it breaks. **Raising a budget is a deliberate, reviewed
+act** — a number bumped in the same commit as the growth that broke it is a
+changelog, not a budget. `vite.config.js` derives rollup's own advisory
+`chunkSizeWarningLimit` from the largest budget here so the two cannot drift.
 
 `roms/freeware/` is **not** a blanket "anything in here is publishable" folder.
 It is the tree this repo *tracks*, so what lands there should be reviewable. A
@@ -239,7 +290,10 @@ Full design: `docs/ROOM_AND_COLLECTIONS.md`. Multiplayer plan:
 LibretroWebXR/
 ├── index.html              Flat-mode shell (header + canvases)
 ├── vite.config.js          Dev server with COOP/COEP
-├── .github/workflows/      CI release gate (ci.yml: npm ci / test / build)
+├── .github/
+│   ├── workflows/ci.yml    CI release gate: app (ci/test/build) + server (test:servers)
+│   ├── workflows/audit.yml Scheduled npm audit over both package trees
+│   └── dependabot.yml      Monthly grouped dependency PRs (root + server/)
 ├── src/                    The app (Three.js + WebXR, emulator client, input, VR room)
 ├── scripts/
 │   ├── debug.js            Puppeteer health-check harness (see DEBUGGING.md)
@@ -247,7 +301,8 @@ LibretroWebXR/
 │   ├── deploy.ps1          (gitignored, real hosts) — deploy.example.ps1 is the template
 │   └── fetch-cores.mjs     Pulls libretro cores into public/cores/ (gitignored)
 ├── public/
-│   ├── cores/              (gitignored) fetched cores
+│   ├── cores/              (gitignored) fetched cores — except the tracked
+│   │                       *.build.json provenance manifests (see above)
 │   └── roms/               freeware/ (tracked) + roms/local/ (private sideload)
 ├── deploy/                 Apache config to enable .htaccess COOP/COEP
 └── docs/                   ROADMAP, EMUVR_RESEARCH, ROOM_AND_COLLECTIONS, MULTIPLAYER, LICENSING, PROJECT_HISTORY

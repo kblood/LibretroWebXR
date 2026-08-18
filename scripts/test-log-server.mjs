@@ -103,17 +103,30 @@ function summarize() {
 // constant is a hard error, never a default.
 
 const REAL_SRC = readFileSync(REAL_MOD, 'utf8');
+// Products are accepted (`64 * 1024 * 1024`), not just bare integers: the byte
+// budgets in the module are all written that way, and a stricter pattern would
+// have sent this helper down its FATAL path for a constant that is perfectly
+// readable. Only integer literals and `*` — nothing here evaluates module text.
 function moduleConst(name) {
-  const m = REAL_SRC.match(new RegExp(`^const\\s+${name}\\s*=\\s*([0-9_]+)\\s*;`, 'm'));
+  const m = REAL_SRC.match(new RegExp(`^const\\s+${name}\\s*=\\s*([0-9_]+(?:\\s*\\*\\s*[0-9_]+)*)\\s*;`, 'm'));
   if (!m) {
     console.error(`  FATAL: could not read ${name} out of ${REAL_MOD}. ` +
                   `The cap assertions below would measure a number this suite invented. Aborting.`);
     process.exit(1);
   }
-  return Number(m[1].replace(/_/g, ''));
+  return m[1].split('*').reduce((acc, part) => acc * Number(part.trim().replace(/_/g, '')), 1);
 }
 const MAX_CONN     = moduleConst('MAX_CONNECTIONS');
 const KEEPALIVE_MS = moduleConst('KEEPALIVE_TIMEOUT');
+// The two AGGREGATE budgets (CLAUDE_REVIEW §4.2, CODEX SEC-2) and the constants
+// the probes for them have to size themselves from.
+const MAX_STORE_BYTES  = moduleConst('MAX_STORE_BYTES');
+const NODE_COST        = moduleConst('STORE_NODE_COST_BYTES');
+const MAX_LOG_FILES    = moduleConst('MAX_LOG_FILES');
+const MAX_EXTRA_ITEMS  = moduleConst('MAX_EXTRA_ITEMS');
+const MAX_EXTRA_FIELDS = moduleConst('MAX_EXTRA_FIELDS');
+const MAX_EXTRA_BYTES  = moduleConst('MAX_EXTRA_BYTES');
+const MAX_BODY         = moduleConst('MAX_BODY');
 
 // ─── The negative control: the REAL pre-fix module, straight out of git ──────
 // `git archive <PREFIX_REF> <path> | tar -x -C <tmp>`. Deliberately NOT
@@ -391,6 +404,86 @@ async function probeHostileSessionIds() {
   await sleep(400);   // let the write streams flush
 }
 
+// ─── The AGGREGATE budgets: heap (CLAUDE_REVIEW §4.2) and disk (CODEX SEC-2) ──
+//
+// Both defects had the same shape — every PER-AXIS cap was in place and nothing
+// multiplied them out — so both probes have the same shape too: drive the axis
+// the caps do NOT sum, then ask whether the OLDEST thing survived.
+//
+// The heap probe deliberately attacks the ACCOUNTING UNIT, not just the byte
+// count, exactly as server/Hub.js's section 0b does for room STATE: an extra
+// field of `[[[],[],…],…]` is ~3.1 kB of characters but ~1,057 JSON nodes, so
+// 24 of them fit in one ~77 kB POST (well under MAX_BODY) while retaining tens
+// of thousands of V8 objects. A byte-only budget of the same size would let
+// this through — which is why the module charges STORE_NODE_COST_BYTES per node
+// and why this probe sizes itself from that constant rather than from a byte
+// total it made up.
+
+const STORE_MARKER = 'budget-marker';
+const STORE_MARKS  = 5;
+
+/** One maximally node-heavy extra value, still inside every per-field cap. */
+const nodeBombValue = () => Array.from({ length: MAX_EXTRA_ITEMS }, () =>
+  Array.from({ length: MAX_EXTRA_ITEMS }, () => []));
+
+const BOMB_CHARS = JSON.stringify(nodeBombValue()).length;
+// 1 outer array + MAX_EXTRA_ITEMS inner arrays + their MAX_EXTRA_ITEMS² leaves.
+const BOMB_NODES = 1 + MAX_EXTRA_ITEMS + MAX_EXTRA_ITEMS ** 2;
+const BOMB_COST  = MAX_EXTRA_FIELDS * (BOMB_CHARS + BOMB_NODES * NODE_COST);
+// 1.5x the budget, so the marker session cannot merely be "nearly" evicted.
+const BOMB_SHOTS = Math.ceil((MAX_STORE_BYTES / BOMB_COST) * 1.5) + 2;
+
+function nodeBombEntry(i) {
+  const e = { level: 'log', ts: Date.now(), msg: `bomb ${i}` };
+  for (let k = 0; k < MAX_EXTRA_FIELDS; k++) e[`n${k}`] = nodeBombValue();
+  return e;
+}
+
+/**
+ * Seed an EARLY session, then POST ~1.5 budgets' worth of node-heavy entries
+ * under rotating session ids (the unauthenticated shape §4.2 describes), and
+ * report what is left.
+ *
+ * What it measures is the BUDGET being enforced — the oldest entries evicted
+ * while the newest stay readable — not resident bytes: this process cannot read
+ * the child's RSS portably, and Hub.js already documents the measured
+ * accounted-to-resident multipliers for this unit.
+ */
+async function probeStoreBudget() {
+  const seed = await post({
+    sessionId: STORE_MARKER, clientId: 'c', nick: 'n',
+    entries: Array.from({ length: STORE_MARKS }, (_, i) => ({ level: 'log', ts: Date.now() + i, msg: `marker ${i}` })),
+  });
+  const newestId = `bomb-${String(BOMB_SHOTS - 1).padStart(3, '0')}`;
+  let accepted = 0;
+  for (let i = 0; i < BOMB_SHOTS; i++) {
+    const r = await post({ sessionId: `bomb-${String(i).padStart(3, '0')}`, clientId: 'c', nick: 'n',
+                           entries: [nodeBombEntry(i)] });
+    if (r.status === 204) accepted++;
+  }
+  const marker = JSON.parse((await get(`/logs.json?session=${STORE_MARKER}`)).text);
+  const newest = JSON.parse((await get(`/logs.json?session=${newestId}`)).text);
+  return {
+    seeded:        seed.status === 204,
+    accepted,
+    markerEntries: marker.entries.length,
+    markerListed:  marker.sessions.includes(STORE_MARKER),
+    newestEntries: newest.entries.length,
+  };
+}
+
+/** POST `n` distinct session ids, i.e. force `n` NDJSON files into the log dir. */
+async function probeDirBudget(n) {
+  for (let i = 0; i < n; i++) {
+    await post({ sessionId: `dircap-${String(i).padStart(3, '0')}`, clientId: 'c', nick: 'n',
+                 entries: [{ level: 'log', ts: Date.now(), msg: 'D'.repeat(256) }] });
+  }
+  await sleep(500);   // let the write streams flush
+}
+
+const DIRCAP_N = MAX_LOG_FILES + 60;
+const logFiles = (dir) => walk(dir).map((p) => p.slice(dir.length + 1)).filter((n) => n.endsWith('.log'));
+
 /**
  * Give the server back the connection slots THIS process is still holding.
  *
@@ -510,6 +603,23 @@ if (PRE_FIX.absent) {
   const preCors = await get('/logs.json?session=xss-room', { Origin: 'https://evil.example' });
   ok(preCors.acao === '*',
      `negative control: pre-fix answered GET /logs.json with Access-Control-Allow-Origin: * (got ${preCors.acao}) — any page could read every session`);
+
+  // 0e2. No aggregate budgets: the store keeps every byte an attacker sends and
+  //      the log directory keeps every file forever. These are the measured
+  //      pre-fix failures behind PHASE 1's 1j/1k.
+  const preStore = await probeStoreBudget();
+  ok(preStore.seeded && preStore.accepted === BOMB_SHOTS,
+     `negative control: pre-fix accepted all ${BOMB_SHOTS} node-heavy POSTs (${preStore.accepted}) — the probe is inside every per-axis cap`);
+  ok(preStore.markerEntries === STORE_MARKS && preStore.markerListed,
+     `negative control: pre-fix RETAINED the earliest session's ${STORE_MARKS} entries after ~${Math.round(BOMB_SHOTS * BOMB_COST / (1024 * 1024))} MB accounted was posted ` +
+     `(got ${preStore.markerEntries}) — nothing sums bytes, so the store only ever grows`);
+
+  await probeDirBudget(DIRCAP_N);
+  const preDir = logFiles(PRE_LOG);
+  ok(preDir.length > MAX_LOG_FILES,
+     `negative control: pre-fix left ${preDir.length} .log files in the log dir (cap is ${MAX_LOG_FILES}) — no file-count budget`);
+  ok(preDir.includes('dircap-000.log'),
+     'negative control: the FIRST file of that flood is still on disk pre-fix — nothing ever deletes a log file');
 
   // 0f. No connection cap: 70 concurrent sockets are all served.
   const preCap = await probeConnectionCap(MAX_CONN + 6);
@@ -837,6 +947,65 @@ const compatHtml = await get('/logs?session=smoke-shape');
 ok(compatHtml.text.includes('<table>') && compatHtml.text.includes('SmokeBot') && compatHtml.text.includes('[boot]'),
    'compat: HTML viewer still renders table, nick and message');
 ok((await get('/nope')).status === 404, 'compat: unknown path still 404');
+
+// ── 1j. Log-directory budget (MAX_LOG_FILES / MAX_LOG_DIR_BYTES) ─────────────
+// CODEX SEC-2's remaining half: closing a file HANDLE was never the same thing
+// as bounding the DISK. Pre-fix (PHASE 0) every invented session id left a file
+// behind forever — ~1 GB and ~8,000 inodes per 8,000 unauthenticated POSTs, on
+// the same filesystem as the room-server unit and Apache.
+//
+// Runs late in the phase on purpose: it evicts files the earlier sections
+// (1d/1e) asserted on, so it must not run before them.
+//
+// HONEST SCOPE: this exercises the FILE-COUNT half of the budget. The
+// MAX_LOG_DIR_BYTES half shares the same enforceDirBudget() loop but would need
+// half a gigabyte of POSTs to trip, so it is not measured here — and it cannot
+// be shrunk for a test, because these limits are deliberately hardcoded rather
+// than env knobs (a knob without a server/README.md row fails test-room-limits).
+
+await probeDirBudget(DIRCAP_N);
+const dirNow = logFiles(LOG_DIR);
+ok(dirNow.length <= MAX_LOG_FILES,
+   `dir budget: ${DIRCAP_N} distinct sessions settle at ${dirNow.length} .log files (cap ${MAX_LOG_FILES}, pre-fix kept every one)`);
+ok(dirNow.includes('dircap-000.log') === false,
+   'dir budget: the OLDEST file of the flood was unlinked, not merely closed');
+ok(dirNow.includes(`dircap-${String(DIRCAP_N - 1).padStart(3, '0')}.log`),
+   `dir budget: the NEWEST session's file survives (dircap-${String(DIRCAP_N - 1).padStart(3, '0')}.log) — eviction is oldest-first, not "drop everything"`);
+ok(dirNow.every((n) => /^[A-Za-z0-9._-]+\.log$/.test(n)),
+   `dir budget: every surviving name is still in the safe alphabet (${dirNow.length} files)`);
+ok(srv.log.exited === false, 'dir budget: process alive through the whole flood');
+const afterDir = await post({ sessionId: 'dircap-after', clientId: 'c', nick: 'n',
+                              entries: [{ level: 'log', ts: Date.now(), msg: 'still ingesting' }] });
+await sleep(200);
+ok(afterDir.status === 204 && existsSync(join(LOG_DIR, 'dircap-after.log')),
+   `dir budget: a NEW session still gets a file after the cap is reached (POST ${afterDir.status})`);
+
+// ── 1k. In-memory store budget (MAX_STORE_BYTES, accounted) ──────────────────
+// CLAUDE_REVIEW §4.2's remaining half. The one-request TypeError kill is fixed
+// (1b), but MAX_SESSIONS x SESSION_RING_MAX are COUNTS: multiplied out with the
+// per-entry field caps they permit ~52 GB of retained heap, and a V8 OOM is an
+// abort that room-server.mjs's uncaughtException net cannot catch — so netplay
+// dies exactly as §4.2 described, by a different route.
+//
+// The payload attacks the ACCOUNTING UNIT (see the probe's comment): if the
+// budget ever goes back to counting characters only, these go red.
+
+ok(BOMB_CHARS <= MAX_EXTRA_BYTES,
+   `store budget: the node-bomb extra (${BOMB_CHARS} chars, ${BOMB_NODES} nodes) is inside MAX_EXTRA_BYTES=${MAX_EXTRA_BYTES}, so it is STORED as a container and not degraded to a string`);
+ok(JSON.stringify({ sessionId: 'x', clientId: 'c', nick: 'n', entries: [nodeBombEntry(0)] }).length < MAX_BODY,
+   `store budget: one bomb entry is still under MAX_BODY=${MAX_BODY} (this measures the store budget, not the body cap)`);
+
+const store1 = await probeStoreBudget();
+ok(store1.accepted === BOMB_SHOTS,
+   `store budget: all ${BOMB_SHOTS} node-heavy POSTs accepted (${store1.accepted}) — nothing here is refused at the door`);
+ok(store1.markerEntries === 0 && store1.markerListed === false,
+   `store budget: the earliest session was EVICTED once ~${Math.round(BOMB_SHOTS * BOMB_COST / (1024 * 1024))} MB accounted (1.5x the ${Math.round(MAX_STORE_BYTES / (1024 * 1024))} MiB budget) had been posted ` +
+   `(marker entries ${store1.markerEntries}, listed ${store1.markerListed}) — pre-fix kept all ${STORE_MARKS}`);
+ok(store1.newestEntries === 1,
+   `store budget: the NEWEST session is still readable (${store1.newestEntries} entry) — the budget evicts oldest-first, it does not empty the store`);
+ok(srv.log.exited === false, 'store budget: process alive after ~1.5 budgets of node-heavy POSTs');
+const afterStore = await get('/logs.json?session=smoke-shape&tail=0');
+ok(afterStore.status === 200, `store budget: server still SERVING reads afterwards (got ${afterStore.status})`);
 
 await stopServer(srv);
 

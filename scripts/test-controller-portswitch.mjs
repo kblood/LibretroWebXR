@@ -77,12 +77,23 @@ console.log('--- free hand follows the held controller across a console switch -
   const freeSet = new Set([freeCtrl]);
   const acc = accessorsFor(pb, { heldMap, freeSet });
 
+  // CARDINALITY FIRST, then the predicates. `[].every(p)` is true and
+  // `![].some(p)` is true, so without these two guards all four assertions below
+  // are vacuous the moment computeRouting returns []. That is not a hypothetical
+  // shape: the whole point of this block is the free hand, and a regression that
+  // drops the held/free PAIR (an isControllerFree accessor that stops reporting
+  // after a re-plug, say) yields exactly `r = []` — 4/4 green while the named
+  // feature is completely dead. Block 1 above avoids the hole by going through
+  // `eq(..., r[0]?.consoleId, ...)`, which fails on undefined; this block uses
+  // set-wide predicates, so it has to state the count itself.
   let r = computeRouting({ controllers: [holdCtrl, freeCtrl], ...acc });
+  ok(`before move: both hands are routed (got ${r.length})`, r.length === 2);
   ok('before move: both hands on console0', r.every(e => e.consoleId === 'console0'));
 
   pb.plugController('gp-1', 'console1', 2); // move to console1, port 2 (player 3)
 
   r = computeRouting({ controllers: [holdCtrl, freeCtrl], ...acc });
+  ok(`after move: both hands are still routed (got ${r.length})`, r.length === 2);
   ok('after move: both hands now on console1', r.every(e => e.consoleId === 'console1'));
   ok('after move: both hands player 3', r.every(e => e.player === 3));
   ok('after move: nothing left on console0', !r.some(e => e.consoleId === 'console0'));

@@ -9,7 +9,9 @@
 //      attempts a roms/<file> server fetch (which would 404 for a local ROM).
 //   4. The window.__pickLocalRom() debug hook produces the same result end-to-end,
 //      exercising the full romInput handler path (without the OS picker).
-//   5. Special characters (spaces, &) in filenames don't corrupt OPFS keys.
+//   5. The OPFS key is content-addressed (`sha1-<hex>`) and the filename never
+//      enters it — checked by enumerating the real OPFS directory, not by
+//      round-tripping an awkward filename (which cannot fail; see Part 4).
 //
 // Usage:
 //   node scripts/probe-local-rom.mjs [url]
@@ -172,11 +174,13 @@ const result = await page.evaluate(async () => {
       rom: cart.userData.rom,
     };
 
-    // Record rom fetches before resolve() so we can check the delta.
-    // (Fetches from Part 1-2 are excluded by the snapshot taken before evaluate.)
-    const requestsBefore = window.__romFetchLog ? [...window.__romFetchLog] : [];
-    window.__romFetchLog = [];
-
+    // NOTE: the "no roms/<file> fetch" half of this part is proved on the NODE
+    // side, by the `page.on('request')` listener + the `romFetches.slice(
+    // fetchesBefore)` delta in Part 5. Two lines here used to read and reset a
+    // `window.__romFetchLog`; a repo-wide grep found those were its only two
+    // mentions — nothing has ever written it — so they were dead scaffolding that
+    // made the delta look like it was captured in-page. Removed rather than
+    // re-implemented: the request listener sees fetches the page can't.
     let resolvedBuf = null;
     let resolveError = null;
     try {
@@ -203,12 +207,24 @@ const result = await page.evaluate(async () => {
   }
 
   // -------------------------------------------------------------------------
-  // Part 4: Special characters — spaces and & in filename don't break OPFS key
+  // Part 4: the OPFS key is CONTENT-addressed — the filename never enters it
   // -------------------------------------------------------------------------
+  // This part used to be titled "special characters in a filename don't break
+  // the OPFS key" and consisted of a cacheRom + resolve round trip with an
+  // awkward filename. It could not fail: RomResolver's `cacheKey()` is
+  // `sha1-<hex>` and `meta.file` is not an input to it, so no filename-escaping
+  // bug could ever turn it red — it was a duplicate of the Part 1 round trip
+  // wearing a different name.
+  //
+  // Assert the property that actually holds instead, against the real OPFS
+  // directory: the stored entry is named exactly `sha1-<hex>`, and NO entry name
+  // carries any fragment of the filename. That goes red the moment someone
+  // "improves" the key by mixing the filename in — which is the change that
+  // would genuinely break special characters, and the one this part is here for.
   {
     const specialBytes = new Uint8Array(64).fill(0xAB);
     const specialSha1 = await window.__rom.cacheRom(specialBytes.buffer);
-    assert('special-char filename: cacheRom works', typeof specialSha1 === 'string' && specialSha1.length === 40,
+    assert('content-addressed key: cacheRom returns a sha1', typeof specialSha1 === 'string' && specialSha1.length === 40,
       `got: ${specialSha1}`);
 
     const specialMeta = {
@@ -221,8 +237,31 @@ const result = await page.evaluate(async () => {
 
     let specialBuf = null;
     try { specialBuf = await window.__rom.resolve(specialMeta); } catch {}
-    assert('special-char: resolve from OPFS works', specialBuf instanceof ArrayBuffer,
+    assert('content-addressed key: resolve from OPFS works', specialBuf instanceof ArrayBuffer,
       `resolvedBuf = ${specialBuf}`);
+
+    // Enumerate what is REALLY on disk in the origin-private file system.
+    let names = null;
+    try {
+      const root = await navigator.storage.getDirectory();
+      names = [];
+      for await (const name of root.keys()) names.push(name);
+    } catch (e) {
+      names = null;
+      R.fail.push(`could not enumerate OPFS to check the stored key — ${String(e?.message || e)}`);
+    }
+    if (names) {
+      assert('content-addressed key: stored under exactly sha1-<hex>',
+        names.includes(`sha1-${specialSha1}`),
+        `OPFS root holds ${JSON.stringify(names.slice(0, 8))}, expected an entry named sha1-${specialSha1}`);
+      // 'Chrono', 'Trigger', 'FF6', 'Hack', 'smc' — none of them may appear.
+      const leaked = names.filter((n) => /chrono|trigger|ff6|hack|\.smc/i.test(n));
+      assert('content-addressed key: the filename does not leak into the OPFS key',
+        leaked.length === 0,
+        `these OPFS entries carry the filename: ${JSON.stringify(leaked)} — the key is supposed `
+        + 'to be sha1-only (RomResolver cacheKey), so a filename in it means the cache is no '
+        + 'longer content-addressed and IS exposed to filename-escaping bugs');
+    }
   }
 
   return R;

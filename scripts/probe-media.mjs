@@ -74,7 +74,14 @@ const result = await page.evaluate(async () => {
   };
   const sleep = (ms) => new Promise((s) => setTimeout(s, ms));
 
-  const countBefore = window.__grab.grabbables.filter((o) => o.userData?.kind === 'cartridge').length;
+  // SNAPSHOT THE SHELF BEFORE WE TOUCH IT. Sections 6 and 8 below are about what
+  // the APP minted from the collection; if they measure the live grabbable list
+  // they also count the five carts this probe is about to inject in steps 1-5, so
+  // their ">= 1" thresholds are satisfied by the probe's own side effects and stay
+  // green with shelf minting completely broken. Keep the pre-existing set, and
+  // assert the shelf claims against THAT.
+  const shelfBefore = window.__grab.grabbables.filter((o) => o.userData?.kind === 'cartridge');
+  const countBefore = shelfBefore.length;
 
   // -------------------------------------------------------------------------
   // 1. C64 disk game (.prg) → floppy medium
@@ -197,15 +204,18 @@ const result = await page.evaluate(async () => {
   //    and nes/snes/gb/etc which should be cartridges.
   // -------------------------------------------------------------------------
   const allGrabbables = window.__grab.grabbables.filter((o) => o.userData?.kind === 'cartridge');
-  const floppyCount  = allGrabbables.filter((o) => o.userData?.medium === 'floppy').length;
-  const cartCount    = allGrabbables.filter((o) => o.userData?.medium === 'cartridge').length;
+  // Counted over the PRE-EXISTING shelf only (see the snapshot at the top): the
+  // manifest ships 3 floppy games (lwx-demo.prg, lwx-snake.prg, lwx-vic20-demo.prg)
+  // and a dozen cartridges, so both counts are real claims about shelf minting.
+  // Counting `allGrabbables` here instead made both thresholds unfalsifiable —
+  // steps 1-5 above inject a floppy AND a cartridge before this line runs.
+  const floppyCount  = shelfBefore.filter((o) => o.userData?.medium === 'floppy').length;
+  const cartCount    = shelfBefore.filter((o) => o.userData?.medium === 'cartridge').length;
 
-  // From the manifest: 3 floppy games (lwx-demo.prg, lwx-snake.prg, lwx-vic20-demo.prg)
-  // + 3 we just added (c64, vic20, crt) = at least those. Plus 4+ cartridges from shelf + ours.
-  assert('at least one floppy-medium object exists', floppyCount >= 1,
-    `floppyCount = ${floppyCount}`);
-  assert('at least one cartridge-medium object exists', cartCount >= 1,
-    `cartCount = ${cartCount}`);
+  assert('the shelf minted at least one floppy-medium object', floppyCount >= 1,
+    `floppyCount = ${floppyCount} of ${shelfBefore.length} pre-existing shelf carts`);
+  assert('the shelf minted at least one cartridge-medium object', cartCount >= 1,
+    `cartCount = ${cartCount} of ${shelfBefore.length} pre-existing shelf carts`);
 
   // All grabbables of kind cartridge must have a medium field.
   const missingMedium = allGrabbables.filter((o) => !o.userData?.medium);
@@ -221,12 +231,23 @@ const result = await page.evaluate(async () => {
   // 7. Grab simulation: simulate the GrabMgr dispatching on kind='cartridge'.
   //    Both our floppy and cartridge objects must match kind === 'cartridge'.
   // -------------------------------------------------------------------------
+  // These four used to be byte-identical re-reads of `userData.kind`/`pinAxis`
+  // already asserted in sections 1 and 3, under a heading claiming to "simulate
+  // the GrabMgr dispatching" while invoking no GrabMgr code at all — so a floppy
+  // that GrabMgr refused to consider grabbable passed the "grab dispatch" check.
+  // Call the REAL predicate (GrabMgr#_isCandidate, the play-mode/edit-mode
+  // dispatcher every grab goes through) and the real registration list instead.
   if (c64Cart && snesCart) {
-    assert('grab dispatch: c64 floppy dispatches as cartridge',
-      c64Cart.userData?.kind === 'cartridge');
-    assert('grab dispatch: snes cartridge dispatches as cartridge',
-      snesCart.userData?.kind === 'cartridge');
-    // Both have pinAxis set correctly for insert mechanics.
+    assert('grab dispatch: GrabMgr accepts the c64 floppy as a play-mode target',
+      window.__grab._isCandidate(c64Cart) === true,
+      'GrabMgr#_isCandidate said no — a minted floppy that cannot be picked up');
+    assert('grab dispatch: GrabMgr accepts the snes cartridge as a play-mode target',
+      window.__grab._isCandidate(snesCart) === true,
+      'GrabMgr#_isCandidate said no — a minted cartridge that cannot be picked up');
+    assert('grab dispatch: both minted media are registered with GrabMgr',
+      window.__grab.grabbables.includes(c64Cart) && window.__grab.grabbables.includes(snesCart));
+    // pinAxis is what the insert mechanic aligns on; assert it on the objects
+    // GrabMgr just agreed are grabbable, so the two facts are checked together.
     assert('insert axis: c64 floppy has pinAxis', c64Cart.userData?.pinAxis != null);
     assert('insert axis: snes cartridge has pinAxis', snesCart.userData?.pinAxis != null);
   }
@@ -235,21 +256,30 @@ const result = await page.evaluate(async () => {
   // 8. Shelf games from __games list: check the minted shelf carts (pre-built
   //    from manifest when the room loaded) also have the correct mediums.
   // -------------------------------------------------------------------------
+  // Shelf carts only — `shelfBefore`, not `allGrabbables`, or the c64 floppy and
+  // the SNES cartridge this probe injected in steps 1 and 3 satisfy both claims
+  // on their own.
   const games = window.__games || [];
-  const c64ShelfCarts = allGrabbables.filter((o) => o.userData?.system === 'c64'
-                                                   && o.userData?.medium === 'floppy');
-  const snesShelfCarts = allGrabbables.filter((o) => o.userData?.system === 'snes'
-                                                    && o.userData?.medium === 'cartridge');
-  // The manifest has c64 games → should have been minted as floppies on the shelf.
+  const c64ShelfCarts = shelfBefore.filter((o) => o.userData?.system === 'c64'
+                                                  && o.userData?.medium === 'floppy');
+  const snesShelfCarts = shelfBefore.filter((o) => o.userData?.system === 'snes'
+                                                   && o.userData?.medium === 'cartridge');
+  // The default manifest ships 2 c64 and 3 snes titles. The old form was
+  // `c64GameCount === 0 || c64ShelfCarts.length > 0`, which is green when shelf
+  // minting is entirely broken AND when the collection is empty — a fixture that
+  // loaded no games passed the shelf-minting test. A collection with no c64/snes
+  // game is a broken fixture, so say so and fail on it instead of escaping.
   const c64GameCount = games.filter((g) => g.system === 'c64').length;
-  assert('shelf: c64 games are minted as floppy medium',
-    c64GameCount === 0 || c64ShelfCarts.length > 0,
-    `c64 games in collection: ${c64GameCount}, with floppy medium: ${c64ShelfCarts.length}`);
-  // Same for SNES.
+  assert('fixture: the loaded collection has c64 games to mint', c64GameCount > 0,
+    'no c64 game in window.__games — wrong/empty collection, the shelf claim below would be vacuous');
+  assert('shelf: c64 games are minted as floppy medium', c64ShelfCarts.length > 0,
+    `c64 games in collection: ${c64GameCount}, shelf carts with floppy medium: ${c64ShelfCarts.length}`);
+
   const snesGameCount = games.filter((g) => g.system === 'snes').length;
-  assert('shelf: snes games are minted as cartridge medium',
-    snesGameCount === 0 || snesShelfCarts.length > 0,
-    `snes games in collection: ${snesGameCount}, with cartridge medium: ${snesShelfCarts.length}`);
+  assert('fixture: the loaded collection has snes games to mint', snesGameCount > 0,
+    'no snes game in window.__games — wrong/empty collection, the shelf claim below would be vacuous');
+  assert('shelf: snes games are minted as cartridge medium', snesShelfCarts.length > 0,
+    `snes games in collection: ${snesGameCount}, shelf carts with cartridge medium: ${snesShelfCarts.length}`);
 
   return R;
 });

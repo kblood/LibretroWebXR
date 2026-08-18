@@ -32,10 +32,24 @@
 // node:child_process is reported as MISCLASSIFIED and fails the run, with the fix
 // spelled out. That check is static (it reads the source, it does not run it), so
 // it costs nothing and cannot itself hang.
+//
+// INERT SUITES. Discovery fixed "a test nobody runs", but it cannot see the other
+// half of the same problem: a suite that runs, exits 0, and asserted nothing about
+// the thing it names. scripts/test-patched-cores.mjs is the live example — its
+// subject, public/cores/, is gitignored, so on a hosted runner and on a fresh
+// clone it fires one vacuously-true assertion over an empty array and reports a
+// green suite for the light-gun core-patch protection. So a suite may declare
+// itself INERT by writing `inert <reason>` to the path in $SUITE_STATUS_FILE,
+// which this runner sets per suite; the summary then reads
+// "N/N suites passed (1 inert)" and names them. Inert is NOT a failure — the
+// suite is meaningful on a developer machine with cores fetched — it is a refusal
+// to let a vacuous run read as coverage. A file, not a stdout marker, so suites
+// keep `stdio: 'inherit'` and their output keeps its natural ordering.
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPTS = dirname(fileURLToPath(import.meta.url));
@@ -92,21 +106,40 @@ if (!serverTier) {
   }
 }
 
+// One scratch dir for the whole run; each suite gets its own file inside it so a
+// suite can report what its exit code cannot (see INERT SUITES above).
+const STATUS_DIR = mkdtempSync(join(tmpdir(), 'lwx-suite-status-'));
+let statusSeq = 0;
+
 const run = (cmd, cmdArgs, label) => new Promise((res) => {
   const t0 = Date.now();
   console.log(`\n=== ${label} ===`);
-  const child = spawn(cmd, cmdArgs, { cwd: ROOT, stdio: 'inherit' });
+  const statusPath = join(STATUS_DIR, `s${statusSeq++}.txt`);
+  const child = spawn(cmd, cmdArgs, {
+    cwd: ROOT,
+    stdio: 'inherit',
+    env: { ...process.env, SUITE_STATUS_FILE: statusPath },
+  });
   const timer = setTimeout(() => {
     console.error(`  !! ${label} exceeded ${SUITE_TIMEOUT_MS / 1000}s — killed`);
     child.kill('SIGKILL');
   }, SUITE_TIMEOUT_MS);
+  const finish = (r) => {
+    // Absent file = the suite has nothing to declare, which is the normal case.
+    let inert = null;
+    if (existsSync(statusPath)) {
+      const txt = readFileSync(statusPath, 'utf8').trim();
+      if (txt.startsWith('inert')) inert = txt.slice('inert'.length).trim() || 'no reason given';
+    }
+    res({ ...r, inert });
+  };
   child.on('exit', (code, signal) => {
     clearTimeout(timer);
-    res({ label, ok: code === 0 && !signal, code: signal ? `signal ${signal}` : code, ms: Date.now() - t0 });
+    finish({ label, ok: code === 0 && !signal, code: signal ? `signal ${signal}` : code, ms: Date.now() - t0 });
   });
   child.on('error', (e) => {
     clearTimeout(timer);
-    res({ label, ok: false, code: e.message, ms: Date.now() - t0 });
+    finish({ label, ok: false, code: e.message, ms: Date.now() - t0 });
   });
 });
 
@@ -121,11 +154,21 @@ if (!serverTier && wanted('test:node')) {
   results.push(await run(process.execPath, ['--test', ...NODE_TEST_FILES], 'node --test (test/*.test.js)'));
 }
 
+rmSync(STATUS_DIR, { recursive: true, force: true });
+
 // --- Summary ---------------------------------------------------------------
 const failed = results.filter((r) => !r.ok);
+const inert = results.filter((r) => r.ok && r.inert);
 console.log(`\n${'='.repeat(60)}`);
-console.log(`${serverTier ? 'SERVER' : 'LOGIC'} tier: ${results.length - failed.length}/${results.length} suites passed`);
+console.log(
+  `${serverTier ? 'SERVER' : 'LOGIC'} tier: ${results.length - failed.length}/${results.length} suites passed`
+  + (inert.length ? `  (${inert.length} INERT — passed without asserting anything)` : ''),
+);
 for (const r of failed) console.error(`  FAILED  ${r.label}  (exit ${r.code}, ${Math.round(r.ms / 1000)}s)`);
+// Printed on stdout, not stderr: an inert suite is not a failure and must not
+// colour a green run red. It IS the difference between "the gate proved this" and
+// "the gate ran this", so it does not get to hide either.
+for (const r of inert) console.log(`  INERT   ${r.label}  — ${r.inert}`);
 for (const m of misclassified) {
   console.error(`  MISCLASSIFIED  scripts/${m.file} imports ${m.bad.join(', ')} — it is not pure logic.`);
   console.error(`                 Add it to SERVER_SUITES in scripts/run-tests.mjs (and to the`);

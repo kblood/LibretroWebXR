@@ -20,9 +20,33 @@ export class PresenceState {
     this.selfId = selfId == null ? null : String(selfId);
     this.ttlMs = ttlMs;
     this._peers = new Map(); // id -> { id, nick, color, pose, lastSeen }
+    // PERF-4(b): the ROSTER half of the per-frame memo key. Bumped when WHO is
+    // here changes (join / leave / prune / self-id / clear) — never on a POSE,
+    // which is the overwhelming majority of traffic and changes a peer's
+    // contents, not the set. Consumers that only care about the set (the four
+    // ghost-sync ticks, each of which built its own `new Set(peers().map(...))`
+    // every rendered frame) memoise on this.
+    //
+    // This axis is load-bearing on its own: a peer LEAVING changes the present
+    // set without touching a single STATE key, and the ghost managers' sweep
+    // over the shrunken hold list is what unhides a LOCAL prop that peer was
+    // holding (COR-2/COR-8). Memoise on room state alone and that prop stays
+    // invisible for the rest of the build.
+    this._rosterVersion = 0;
+    this._idsCache = null;      // { version, ids: string[], set: Set<string> }
   }
 
-  setSelfId(id) { this.selfId = id == null ? null : String(id); }
+  /** Bumped when the set of peers (or our own id) changes — not on pose. */
+  get rosterVersion() { return this._rosterVersion; }
+
+  _bumpRoster() { this._rosterVersion++; this._idsCache = null; }
+
+  setSelfId(id) {
+    const next = id == null ? null : String(id);
+    // Our own id decides which holds are OURS (parseHolds drops them), so a
+    // change here invalidates every memoised view exactly like a join does.
+    if (next !== this.selfId) { this.selfId = next; this._bumpRoster(); }
+  }
 
   _isSelf(id) { return this.selfId != null && String(id) === this.selfId; }
 
@@ -32,6 +56,7 @@ export class PresenceState {
     if (!p) {
       p = { id: key, nick: 'Player', color: '#88aaff', pose: null, lastSeen: nowMs };
       this._peers.set(key, p);
+      this._bumpRoster();
     }
     return p;
   }
@@ -69,7 +94,7 @@ export class PresenceState {
 
   applyLeave(id) {
     if (id == null) return;
-    this._peers.delete(String(id));
+    if (this._peers.delete(String(id))) this._bumpRoster();
   }
 
   applyPose(msg, nowMs = 0) {
@@ -86,15 +111,39 @@ export class PresenceState {
     for (const [id, p] of this._peers) {
       if (nowMs - p.lastSeen > this.ttlMs) { this._peers.delete(id); removed.push(id); }
     }
+    if (removed.length) this._bumpRoster();
     return removed;
   }
 
   /** All remote peers (self already excluded). */
   peers() { return [...this._peers.values()]; }
 
+  /**
+   * The peer ids, as arrays/sets that are REBUILT ONLY WHEN THE ROSTER CHANGES
+   * — the callers below run every rendered frame and each used to build its own
+   * copy (PERF-4(b)). Treat both as READ-ONLY: they are shared between every
+   * caller until the next join/leave, so mutating either corrupts the others.
+   */
+  _ids() {
+    if (!this._idsCache || this._idsCache.version !== this._rosterVersion) {
+      const ids = [...this._peers.keys()];
+      this._idsCache = { version: this._rosterVersion, ids, set: new Set(ids) };
+    }
+    return this._idsCache;
+  }
+
+  /** Read-only array of peer ids (see _ids). */
+  ids() { return this._ids().ids; }
+
+  /** Read-only Set of peer ids (see _ids) — what parseHolds wants for presentIds. */
+  idSet() { return this._ids().set; }
+
   get(id) { return this._peers.get(String(id)) || null; }
 
   get size() { return this._peers.size; }
 
-  clear() { this._peers.clear(); }
+  clear() {
+    if (this._peers.size) this._bumpRoster();
+    this._peers.clear();
+  }
 }

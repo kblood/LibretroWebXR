@@ -4,6 +4,7 @@ import {
   RETROARCH_CORE_OPTIONS_PATH,
 } from '../RetroArchConfig.js';
 import { DiscControlBridge } from '../DiscControl.js';
+import { FramePump } from './FramePump.js';
 import { JitRuntimeBridge } from './JitRuntimeBridge.js';
 import { locateCoreAsset } from './assetUrls.js';
 import { classifyCoreLog } from './coreLog.js';
@@ -32,7 +33,7 @@ const REMAP_DIR = '/home/web_user/retroarch/userdata/config/remaps';
 
 let canvas = null;
 let moduleInstance = null;
-let frameTimer = null;
+let framePump = null;
 let metricsTimer = null;
 let framePending = false;
 let startedAt = 0;
@@ -403,35 +404,39 @@ function clearFrameAckWatchdog() {
   frameAckWatchdog = null;
 }
 
+// Capture-and-post one frame, if there is one to send. Called by the FramePump.
+function produceFrame() {
+  // Paused (B5, 2026-07-25 review): stop producing/transferring frames
+  // entirely rather than keep pumping into a core the JS side believes is
+  // stopped — RackBudget's auto-pause-idle-cores feature relies on a paused
+  // console actually going quiet, not just accepting a no-op pause command.
+  // The pump itself now stops waking while paused (PERF-4(a)); this stays as
+  // the defence-in-depth half, for a pause that lands mid-wake.
+  if (paused || !canvas || framePending || typeof canvas.transferToImageBitmap !== 'function') {
+    if (framePending) metrics.framesSkipped++;
+    return;
+  }
+  try {
+    const bitmap = canvas.transferToImageBitmap();
+    framePending = true;
+    metrics.framesProduced++;
+    postMessage({
+      protocol: RUNTIME_PROTOCOL_VERSION,
+      type: WorkerMessage.FRAME,
+      bitmap,
+      width: canvas.width,
+      height: canvas.height,
+    }, [bitmap]);
+    armFrameAckWatchdog();
+  } catch (error) {
+    metrics.errors++;
+    postMessage(eventMessage('error', serializeError(error)));
+  }
+}
+
 function startFramePump(interval) {
-  const pump = () => {
-    frameTimer = setTimeout(pump, interval);
-    // Paused (B5, 2026-07-25 review): stop producing/transferring frames
-    // entirely rather than keep pumping into a core the JS side believes is
-    // stopped — RackBudget's auto-pause-idle-cores feature relies on a paused
-    // console actually going quiet, not just accepting a no-op pause command.
-    if (paused || !canvas || framePending || typeof canvas.transferToImageBitmap !== 'function') {
-      if (framePending) metrics.framesSkipped++;
-      return;
-    }
-    try {
-      const bitmap = canvas.transferToImageBitmap();
-      framePending = true;
-      metrics.framesProduced++;
-      postMessage({
-        protocol: RUNTIME_PROTOCOL_VERSION,
-        type: WorkerMessage.FRAME,
-        bitmap,
-        width: canvas.width,
-        height: canvas.height,
-      }, [bitmap]);
-      armFrameAckWatchdog();
-    } catch (error) {
-      metrics.errors++;
-      postMessage(eventMessage('error', serializeError(error)));
-    }
-  };
-  pump();
+  framePump ||= new FramePump({ intervalMs: interval, onTick: produceFrame });
+  framePump.start(interval);
 }
 
 function forwardInput(payload) {
@@ -777,6 +782,12 @@ function postMetrics() {
   postMessage(eventMessage('metrics', {
     ...metrics,
     uptimeMs: performance.now() - startedAt,
+    // Is the frame pump actually asleep while this console is parked? "Paused"
+    // used to mean "produces nothing" while still waking 62x/second (PERF-4(a)),
+    // and the difference was invisible from outside the worker — a probe or a
+    // headset log can now see it. framesProduced staying flat proves the first
+    // half; this proves the second.
+    pumpRunning: !!framePump?.running,
     jit: jit?.snapshot() || null,
     // Light-gun routing snapshot. `multiport` is the tri-state resolution of the
     // per-port setter (null = never looked up because no ported gun call has
@@ -799,10 +810,9 @@ function postMetrics() {
 }
 
 function stop() {
-  clearTimeout(frameTimer);
+  framePump?.stop();
   clearInterval(metricsTimer);
   clearFrameAckWatchdog();
-  frameTimer = null;
   metricsTimer = null;
   jit?.clear();
   moduleInstance?._cmd_unload_core?.();
@@ -907,6 +917,14 @@ function setPaused(next) {
     else throw new Error('core has no resume command');
   }
   paused = next;
+  // PERF-4(a): stop the WAKEUPS too, not just the production. Until this, a
+  // paused console's worker thread still woke ~62x/second to look at `paused`
+  // and return — for the whole time RackBudget kept it parked, which on a rack
+  // is most of the session and on a headset is battery for nothing. Set AFTER
+  // `paused` so the pump can never wake into a stale flag, and only after the
+  // core command above succeeded (a core that throws on pause keeps running,
+  // and its frames must keep flowing).
+  framePump?.setPaused(next);
 }
 
 self.addEventListener('message', async (event) => {

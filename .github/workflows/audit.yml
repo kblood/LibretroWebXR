@@ -1,0 +1,103 @@
+# Scheduled dependency audit — the workflow ci.yml says it is deliberately NOT.
+#
+# WHY THIS IS SEPARATE FROM ci.yml
+# --------------------------------
+# `npm audit` talks to the registry, so its result depends on a network call and
+# on an advisory database that changes without any commit here. Both properties
+# disqualify it from the push/PR gate: a red PR caused by an advisory published
+# an hour ago is not a signal about that PR, and — the reason ci.yml calls it out
+# by name (CODEX_REVIEW TST-4) — a registry-unreachable run must be reported as
+# UNKNOWN, never as clean. A gate that can go green on a network error is worse
+# than no gate.
+#
+# So: its own workflow, on a schedule, with the unknown/clean distinction actually
+# implemented. `npm audit --json` writes a JSON document on success AND on
+# "vulnerabilities found" (it signals the latter with a nonzero exit), but a DNS
+# failure, a 5xx, or a proxy interception produces something that is not JSON at
+# all. Parsing the output is therefore the check: parse fails => infrastructure
+# problem => FAIL LOUDLY rather than pass.
+#
+# BOTH PACKAGE TREES. The root app and server/ have separate package.json +
+# lockfiles, and server/ is the one that runs unattended on a public box, so
+# skipping it would audit the half that matters least.
+#
+# WHAT IT DOES NOT DO: it does not fail on `low`/`moderate`. This is a WebXR
+# frontend plus a small WebSocket relay; a moderate advisory in a build-time dev
+# dependency is not worth waking anyone for, and a threshold that cries wolf gets
+# muted, which is how a real one gets missed. `high` and `critical` fail.
+
+name: audit
+
+on:
+  schedule:
+    # 06:20 UTC every Monday. Deliberately not :00 — GitHub's cron queue is
+    # heavily contended on the hour and runs get delayed or dropped.
+    - cron: '20 6 * * 1'
+  workflow_dispatch:
+  # Also on any change to a manifest or lockfile: that is the moment a new
+  # dependency actually enters the tree, and the moment the result is about
+  # THIS change rather than about the calendar.
+  push:
+    paths:
+      - 'package.json'
+      - 'package-lock.json'
+      - 'server/package.json'
+      - 'server/package-lock.json'
+      - '.github/workflows/audit.yml'
+
+permissions:
+  contents: read
+
+env:
+  # Keep in step with ci.yml's NODE_VERSION — the audit should describe the
+  # dependency tree the gate actually installs.
+  NODE_VERSION: "24.7.0"
+  # Fail on this severity or worse. See the header for why it is not `moderate`.
+  AUDIT_LEVEL: high
+
+jobs:
+  audit:
+    name: npm audit — root + server
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up the pinned Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # One script, run over both trees. `npm audit` needs only the lockfile, so
+      # there is no install step and nothing is executed from the dependency tree.
+      - name: Audit both package trees
+        run: |
+          set -u
+          status=0
+          for tree in . server; do
+            echo "=== npm audit ($tree) ==="
+            out="$(npm audit --json --audit-level="$AUDIT_LEVEL" --prefix "$tree" 2>&1)" && rc=0 || rc=$?
+
+            # UNKNOWN != CLEAN. If the output is not parseable JSON, npm never got
+            # a verdict from the registry (DNS, 5xx, proxy, rate limit). Report the
+            # raw text and fail, rather than let an infrastructure error read as
+            # "no vulnerabilities".
+            if ! printf '%s' "$out" | jq -e 'type == "object"' >/dev/null 2>&1; then
+              echo "::error title=audit UNKNOWN ($tree)::npm audit produced no parseable JSON (exit $rc) — treating as UNKNOWN, not clean."
+              printf '%s\n' "$out" | head -40
+              status=1
+              continue
+            fi
+
+            printf '%s' "$out" | jq '.metadata.vulnerabilities'
+            high="$(printf '%s' "$out" | jq '(.metadata.vulnerabilities.high // 0) + (.metadata.vulnerabilities.critical // 0)')"
+            if [ "$high" -gt 0 ]; then
+              echo "::error title=audit FAIL ($tree)::$high high/critical advisory(ies). Run: npm audit --prefix $tree"
+              printf '%s' "$out" | jq -r '.vulnerabilities | to_entries[] | select(.value.severity == "high" or .value.severity == "critical") | "  \(.value.severity)\t\(.key)\t\(.value.via | map(if type == "object" then .title else . end) | join("; "))"'
+              status=1
+            else
+              echo "  no high/critical advisories in $tree"
+            fi
+          done
+          exit $status

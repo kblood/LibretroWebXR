@@ -122,6 +122,47 @@ also frequently does not even own the ROM, so it cannot be authoritative.
   the HOST attaches the libretro device to the running game. Then the client's
   forwarded aim has somewhere to land.
 
+### What the relay refuses — the trust model (RELAY-4 / RELAY-6)
+
+The room server stamps the real sender id onto every rebroadcast, so a peer can
+never *impersonate* another one. Who may say **what** is a separate question, and
+these are the three rules that answer it. All three are server-side on purpose:
+older builds are still deployed on dionysus.dk, and a rule only the client
+enforces is a rule a stale client does not enforce.
+
+| Message | Rule | On refusal |
+| --- | --- | --- |
+| `STATE` on `tv`/`room`/`shelf:*` | Host only (`Hub.isHostOwnedKey`) — and *nobody* during a reclaim window, when the absent host still owns them. | Writer gets the authoritative value back. |
+| `STATE` clearing `hold:*`/`gamepad:*` | The key's **current owner** or the host (`Hub.isOwnerScopedKey`). Overwriting stays open to anyone. | Writer gets the authoritative value back. |
+| `INPUT` | Relayed to the **elected host** and nowhere else (`Hub.input`). | Dropped (`input-not-host`). |
+
+Why `hold:` clears are gated but `hold:` **writes** are not: a cartridge changing
+hands *is* a write by a different peer id, and gamepads are deliberately grab-any,
+so an owner ACL on the write would break both. A *clear* is different — it is the
+only one of the two the victim cannot undo, because a client writes that key only
+on its own grab/release events and its next write is the release. Before this,
+any member could send `{key:'hold:<cartId>', value:null}` and take a cartridge out
+of another player's hand. `prop:`/`power:`/`gun:`/`mouse:` stay fully
+collaborative: those are room furniture and cable routing, not a grip.
+
+Why `INPUT` is host-only: the relay used to require only that the target was *a
+member*, though its own docstring said "the host peer". A peer that had booted a
+game and then joined as a non-host would have its core driven by anyone in the
+room — the desktop client applies an incoming `INPUT` without a host check of its
+own. **During a reclaim window there is no host, so every `INPUT` is dropped for
+up to `HOST_RECLAIM_MS`.** That is the intended reading of that window, not a side
+effect: nobody is running the room's core, and the peer about to be promoted must
+not start receiving inputs before it holds the role — which is the transient
+stand-in bug the window exists to prevent. Held buttons re-assert themselves on
+the next `GameInputMgr` tick once a host exists again.
+
+`NetProtocol.validate()` also bounds an `INPUT`'s `player` to an integer port slot
+(1..`MAX_INPUT_PLAYER`) and its `btn` to `MAX_INPUT_BTN_LEN` characters. Every
+shipped sender derives both from fixed tables (1..4, longest name `Select`), so
+nothing in the field is refused by them — but without them `player: -1e9` was
+legal on the wire, landed on player 1, and gave the receiving host an unbounded
+Map key per message.
+
 ### "Runs zero cores" is enforced at the runtime layer, not just at the boot gates
 Gating every *boot* path is necessary but not sufficient: a peer may already have
 been playing (even with a whole multi-console rack up) when it joins, and then the
@@ -351,7 +392,10 @@ what the headset connects to.
 `scripts/test-multiplayer.mjs` (in `npm test`) covers the host-side keycode
 injection (`GameInputMgr.setRemoteButton`) and the controller→logical capture;
 `scripts/test-net.mjs` covers the election/reclaim/host-owned-key rules in
-`server/Hub.js` and `src/net/HostElection.js` as pure units.
+`server/Hub.js` and `src/net/HostElection.js` as pure units — including the whole
+relay trust model above (host-only `INPUT`, owner-only owner-scoped clears) and
+the per-kind body caps, each with the negative control that shows the refusal
+comes from that check and not from something further up.
 
 ### On-headset / two-browser test
 

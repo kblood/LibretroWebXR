@@ -130,9 +130,29 @@ narrowly with `#if defined(HAVE_THREADS)` so N64/PSX's non-threaded
 `EM_TIMING_RAF` path (which works fine as-is — RAF has no such round-trip
 requirement) is completely untouched. This is a local patch to the shared
 WSL2 RetroArch checkout, not upstreamed — re-applying it is a prerequisite
-for any *future* HAVE_THREADS=1 core rebuild in this repo (see the `LWX:`
-comments at each call site for exact patch text if the checkout ever gets
-reset/re-cloned).
+for any *future* HAVE_THREADS=1 core rebuild in this repo.
+
+**Where the patch text actually lives (ARC-3 fix, 2026-08-17).** This paragraph
+used to end "see the `LWX:` comments at each call site for exact patch text if
+the checkout ever gets reset/re-cloned" — which pointed at a directory that
+exists on exactly one WSL2 box and in no clone of this repo. `grep -rl "LWX:"`
+over the repo matched this document and nothing else, so if
+`~/amiga-build/RetroArch` were ever reset, the recipe for the DOS core would
+have been gone. It is no longer prose:
+
+`scripts/cores/dos/build.sh` now runs `git diff` over the shared checkout
+BEFORE the link and writes the whole local patch set — the LWX
+`platform_emscripten.c` timing fix, the rwebaudio bridge, the rwebinput
+light-gun diffs, all of it — to `$WORK_DIR/retroarch-worktree.patch`, stages a
+copy beside the build artifacts, and records its sha256 in the generated
+`build.json` as `pins.RETROARCH_LOCAL_PATCH_SHA256`. It also FAILS the build if
+that diff comes back empty, because a pristine shared checkout means the
+frontend patches are missing and the link would emit a working-looking core with
+no light gun and no worker audio.
+
+Keep that `.patch` file with the artifacts. To recover after a reset:
+`git -C ~/amiga-build/RetroArch checkout <RETROARCH_COMMIT from build.json>`
+then `git apply retroarch-worktree.patch`.
 
 Also confirmed along the way, in case future pthread-core work re-treads this
 ground: `PTHREAD_POOL_SIZE` already defaults to 4 in `Makefile.emscripten`
@@ -149,11 +169,17 @@ the working core this doc's older sections say doesn't exist yet; it was just
 never plugged in. Status as of this session (2026-07-30/31):
 
 - **Installed** into `public/cores/dosbox_pure_libretro.{js,wasm,worker.js}`
-  (gitignored, as with every other core) with a matching `.build.json`
-  manifest (also gitignored — no core manifest in this repo is git-tracked,
-  see `git ls-files public/cores/`; verify a core is real by hash/behavior,
-  not by the manifest, per the gitignored-artifact-regression lesson from the
-  PSX work).
+  (gitignored, as with every other core binary) with a matching `.build.json`
+  manifest. **The manifest IS git-tracked as of 2026-08-17** (ARC-3): `.gitignore`
+  ignores `public/cores/*` and then force-includes `!public/cores/*.build.json`,
+  so a clean clone now carries every commit SHA, emsdk version and per-artifact
+  sha256 for the deployed cores, and `scripts/fetch-cores.mjs`'s existing
+  verifier has something to verify against. The binaries themselves stay out
+  (size + licensing, docs/LICENSING.md), and so does `PATCHED.json` — its
+  ABSENCE is load-bearing, see `scripts/test-patched-cores.mjs`. The old advice
+  still stands for the binaries: verify a core is real by hash/behaviour, per the
+  gitignored-artifact-regression lesson from the PSX work — that is exactly what
+  the tracked sha256s make possible.
 - **Headless boot infra built and working**: `test/dos-core-e2e/{index.html,harness.js}`
   + `scripts/probe-dos-core.js`, following the exact N64/PSX pattern.
 - **The pthread worker-in-worker risk flagged at build time is retired.**

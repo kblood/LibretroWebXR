@@ -13,6 +13,7 @@ import {
   makeLeave, makeSignal, makeState, makeInput, makeWire, makeHost, hostInputTarget, validate, encode, decode,
   buildIceServers,
   PROTOCOL_VERSION, PROTOCOL_CLOSE_CODE, parseProtocolVersion, checkProtocol, judgeServerVersion, isPermanentClose,
+  MAX_INPUT_PLAYER, MAX_INPUT_BTN_LEN,
 } from '../src/net/NetProtocol.js';
 import { DesktopNet } from '../src/desktop/DesktopNet.js';
 // The VR client, driven for real (over a fake global WebSocket) further down. It
@@ -23,8 +24,17 @@ import { NetMgr } from '../src/net/NetMgr.js';
 import { PresenceState } from '../src/net/PresenceState.js';
 import { RoomObjects } from '../src/net/RoomObjects.js';
 import { makeHoldKey, isHoldKey, parseHolds } from '../src/net/HoldState.js';
-import { Hub, HOST_RECLAIM_MS, isHostOwnedKey } from '../server/Hub.js';
+import { Hub, HOST_RECLAIM_MS, HUB_LIMITS, isHostOwnedKey, isOwnerScopedKey } from '../server/Hub.js';
 import { FALLBACK_HOST_KEY, claimWins, normaliseClaim, resolveFallbackHost } from '../src/net/HostElection.js';
+// node:fs/node:path only — the RELAY-2 caps are calibrated against REAL files in
+// this tree (a committed room descriptor), the same way the STATE budgets are in
+// scripts/test-room-limits.mjs. Neither is on run-tests.mjs's impure list, so
+// this stays a pure logic-tier suite: no socket, no port, no browser.
+import { readFileSync } from 'node:fs';
+import { dirname, join as pathJoin, resolve as pathResolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = pathResolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 let passed = 0;
 let failed = 0;
@@ -608,15 +618,89 @@ section('M1.1: hostInputTarget — who a peer forwards its captured input to', (
 });
 
 // === Hub: input is a DIRECTED relay to the host, sender-id stamped ==========
+// The host is the FIRST peer in (Hub elects by seniority), so 'host' connects
+// first here — before RELAY-4 the order didn't matter, because `to` only had to
+// be a member.
 section('Hub: input is a DIRECTED relay to the host, sender-id stamped', () => {
   const hub = new Hub();
-  hub.connect('r', 'client');
   hub.connect('r', 'host');
-  const { direct } = hub.input('r', 'client', makeInput({ to: 'host', player: 2, btn: 'faceB', down: true }));
+  hub.connect('r', 'client');
+  const { direct } = hub.input('r', 'client', makeInput({ to: 'host', player: 2, btn: 'B', down: true }));
   ok(direct && direct.to === 'host', 'input is routed directly to the host peer');
-  ok(direct.msg.from === 'client' && direct.msg.player === 2 && direct.msg.btn === 'faceB', 'input stamped with the real sender id');
+  ok(direct.msg.from === 'client' && direct.msg.player === 2 && direct.msg.btn === 'B', 'input stamped with the real sender id');
   ok(hub.input('r', 'client', makeInput({ to: 'ghost', player: 1, btn: 'Up', down: true })).direct === undefined, 'input to an absent host is dropped');
   ok(hub.input('r', 'x', makeInput({ to: 'host', player: 1, btn: 'Up', down: true })).direct === undefined, 'input from an absent peer is dropped');
+  // `seq` survives (makeInput sends it); a junk field does not.
+  const seqd = hub.input('r', 'client', { ...makeInput({ to: 'host', player: 1, btn: 'A', down: true, seq: 7 }), junk: 'x'.repeat(4096) });
+  ok(seqd.direct.msg.seq === 7, 'a real INPUT field (seq) is carried through the relay');
+  ok(seqd.direct.msg.junk === undefined, 'RELAY-2: a junk field attached to an INPUT is NOT forwarded to the host');
+});
+
+// === RELAY-4: INPUT reaches the ELECTED HOST or nobody =======================
+// `Hub.input`'s docstring said "directed to the host peer" from the start; the
+// code checked only that `to` was A MEMBER, so any peer could drive any other
+// peer's core (the desktop client applies an INPUT with no host check of its own)
+// and feed it unbounded distinct `player` values to key a Map on.
+section('RELAY-4: INPUT reaches the ELECTED HOST or nobody', () => {
+  const hub = new Hub();
+  hub.connect('r', 'host', { sid: 'host-sid' });   // first in → elected host
+  hub.connect('r', 'alice');
+  hub.connect('r', 'bob');
+  ok(hub.hostOf('r') === 'host', 'setup: the first peer in is the elected host');
+
+  const atHost = hub.input('r', 'alice', makeInput({ to: 'host', player: 2, btn: 'A', down: true }));
+  ok(atHost.direct?.to === 'host' && !atHost.rejected, 'a client INPUT aimed at the host is relayed');
+
+  const atPeer = hub.input('r', 'alice', makeInput({ to: 'bob', player: 1, btn: 'A', down: true }));
+  ok(atPeer.direct === undefined, 'an INPUT aimed at a NON-HOST member is not relayed');
+  // The reason is returned but NOT logged: unlike STATE, the room-server dispatcher
+  // destructures only `{ direct }` from hub.input(). That is deliberate — INPUT is a
+  // per-button-press message, so an unconditional console.log here is a log-flood
+  // primitive for exactly the misbehaving client this rejection exists to stop.
+  ok(atPeer.rejected === 'input-not-host', '…and says why (input-not-host), for the caller to act on');
+
+  // The host driving another member is the same injection, so it is refused too:
+  // being the host is authority over the room's core, not over a peer's tab.
+  ok(hub.input('r', 'host', makeInput({ to: 'alice', player: 1, btn: 'A', down: true })).rejected === 'input-not-host',
+    'even the HOST cannot aim an INPUT at another member');
+
+  // …and during the host-reclaim window there is deliberately NO host, so INPUT
+  // is dropped rather than delivered to the peer that is about to be promoted.
+  // Nobody is running the core in that window — see HOST_RECLAIM_MS.
+  const t0 = 1_000_000;
+  hub.disconnect('r', 'host', { now: t0 });
+  ok(hub.hostOf('r') === null, 'setup: the room is hostless inside the reclaim window');
+  const inWindow = hub.input('r', 'alice', makeInput({ to: 'bob', player: 1, btn: 'A', down: true }));
+  ok(inWindow.direct === undefined && inWindow.rejected === 'input-not-host',
+    'inside the reclaim window every INPUT is dropped (no host = nothing to drive)');
+  // …and the moment the window expires and a host exists again, it flows.
+  hub.expireHostGrace('r', { now: t0 + HOST_RECLAIM_MS + 1 });
+  const promoted = hub.hostOf('r');
+  ok(promoted === 'alice', 'setup: the longest-present remaining peer is promoted');
+  ok(hub.input('r', 'bob', makeInput({ to: promoted, player: 1, btn: 'A', down: true })).direct?.to === promoted,
+    'once the window expires, INPUT to the newly promoted host is relayed again');
+});
+
+// === RELAY-4: validate() bounds an INPUT's player slot and button name =======
+section('RELAY-4: validate() bounds an INPUT\'s player slot and button name', () => {
+  const base = { type: MSG.INPUT, to: 'h', btn: 'A', down: true };
+  ok(validate({ ...base, player: 1 }).ok && validate({ ...base, player: MAX_INPUT_PLAYER }).ok,
+    `player 1..${MAX_INPUT_PLAYER} (every slot the app can route to) validates`);
+  ok(!validate({ ...base, player: 0 }).ok, 'player 0 rejected (slots are 1-based)');
+  ok(!validate({ ...base, player: -1e9 }).ok, 'a huge negative player is rejected (it used to land on player 1)');
+  ok(!validate({ ...base, player: 0.5 }).ok, 'a fractional player is rejected (it used to land on player 1)');
+  ok(!validate({ ...base, player: MAX_INPUT_PLAYER + 1 }).ok, 'a player past the last slot is rejected');
+  ok(!validate({ ...base, player: NaN }).ok, 'NaN player still rejected');
+  ok(validate({ ...base, player: 2, btn: 'x'.repeat(MAX_INPUT_BTN_LEN) }).ok, 'a btn at the length cap validates');
+  ok(!validate({ ...base, player: 2, btn: 'x'.repeat(MAX_INPUT_BTN_LEN + 1) }).ok, 'an over-long btn is rejected');
+  // The bounds must not be able to refuse anything a shipped client sends: every
+  // RetroPad name the routing table can produce, on every port it can produce.
+  for (const btn of ['A', 'B', 'X', 'Y', 'L', 'R', 'L2', 'R2', 'Start', 'Select', 'Up', 'Down', 'Left', 'Right']) {
+    for (const player of [1, 2, 3, 4]) {
+      if (!validate(makeInput({ to: 'h', player, btn, down: true })).ok) ok(false, `real INPUT ${btn}/P${player} must validate`);
+    }
+  }
+  ok(true, 'every real RetroPad button on every real port slot still validates');
 });
 
 // === NetProtocol: WIRE (transient relay) builder + validation ===============
@@ -643,6 +727,125 @@ section('Hub: wire is a BROADCAST relay, sender-id stamped, NOT persisted', () =
   // A late joiner's snapshot must NOT include any transient wire data.
   const snap = hub.connect('r', 'c').state;
   ok(snap.length === 0, 'wire is never persisted into the late-join state snapshot');
+});
+
+// === RELAY-2: per-kind body caps on the RELAYED (never-retained) messages ====
+// The STATE budgets bound retained memory and say nothing at all about WIRE,
+// SIGNAL or POSE, whose only bound was `ws`'s 1 MiB maxPayload — 4x the largest
+// STATE VALUE the same server accepts. A 1 MiB WIRE is broadcast to every other
+// peer in the room, which is the ingress half of RELAY-1's outbound blow-up.
+section('RELAY-2: per-kind body caps on the RELAYED (never-retained) messages', () => {
+  const hub = new Hub();
+  hub.connect('r', 'a');
+  hub.connect('r', 'b');
+
+  // --- POSE: projected, so its size is the protocol's choice, not the sender's.
+  const fat = hub.pose('r', 'a', { ...makePose({ head: HEAD, t: 42 }), junk: 'x'.repeat(500_000) });
+  ok(fat.broadcast.msg.junk === undefined, 'a junk field attached to a POSE is NOT rebroadcast');
+  ok(JSON.stringify(fat.broadcast.msg).length < 512, `a POSE body stays ~fixed-size whatever is attached (${JSON.stringify(fat.broadcast.msg).length} B)`);
+  ok(fat.broadcast.msg.t === 42, '…while a real POSE field (t) still crosses');
+  ok(hub.pose('r', 'a', { ...makePose({ head: HEAD }), t: 'x'.repeat(100_000) }).broadcast.msg.t === undefined,
+    'a non-numeric `t` is dropped rather than relayed (it is only ever a timestamp)');
+
+  // --- WIRE: capped, because `data` is opaque AND the message is broadcast.
+  const bigWire = makeWire({ ch: 'gun', data: { pad: 'x'.repeat(HUB_LIMITS.wireBytes) } });
+  ok(hub.wire('r', 'a', bigWire).broadcast === undefined, 'an over-cap WIRE is not relayed');
+  ok(hub.wire('r', 'a', bigWire).rejected === 'wire-too-large', '…and says why (wire-too-large)');
+  ok(hub.wire('r', 'a', makeWire({ ch: 'gun', data: { u: 0.5, v: 0.5, trigger: true, port: 1 } })).broadcast !== undefined,
+    'a real gun-aim WIRE is relayed untouched');
+  ok(hub.wire('r', 'a', { ...makeWire({ ch: 'gp', data: { buttons: 3 } }), junk: 'x'.repeat(4096) }).broadcast.msg.junk === undefined,
+    'a junk field attached to a WIRE is NOT rebroadcast');
+  // NEGATIVE CONTROL: the identical frame with the cap lifted IS relayed, so the
+  // refusal above is this code and not some other check further up.
+  const loose = new Hub({ limits: { wireBytes: 4 * 1024 * 1024 } });
+  loose.connect('r', 'a'); loose.connect('r', 'b');
+  ok(loose.wire('r', 'a', bigWire).broadcast !== undefined, 'control: with ROOM_MAX_WIRE_BYTES raised, the same frame is relayed');
+
+  // …and the cap is nowhere near real traffic. These are the shapes the app
+  // actually sends (src/main.js sendWire call sites), with the 'drag' payload
+  // built from the biggest prop in a committed room descriptor.
+  const props = JSON.parse(readFileSync(pathJoin(ROOT, 'public/roms/bedroom.room.json'), 'utf8')).props || [];
+  const biggestProp = props.map((p) => JSON.stringify(p)).sort((x, y) => y.length - x.length)[0];
+  const REAL_WIRES = [
+    makeWire({ ch: 'gun', data: { cableId: 'gun-1', u: 0.5, v: 0.5, trigger: true, port: 1 } }),
+    makeWire({ ch: 'mouse', data: { cableId: 'mouse-1', dx: 3, dy: -2, buttons: 1, port: 1 } }),
+    makeWire({ ch: 'gp', data: { cableId: 'gp-1', buttons: 5, axes: [0, 0, 0.5, -0.5] } }),
+    makeWire({ ch: 'kbd', data: { type: 'keydown', code: 'KeyZ', key: 'z', keyCode: 90, location: 0 } }),
+    makeWire({ ch: 'drag', data: { id: 'prop-7', payload: JSON.parse(biggestProp) } }),
+    makeWire({ ch: 'insert', data: { file: 'roms/local/some-fairly-long-game-name.sfc', core: 'snes9x', system: 'snes', title: 'Some Fairly Long Game Name (USA) (Rev 1)', consoleId: null } }),
+  ];
+  const worst = Math.max(...REAL_WIRES.map((w) => JSON.stringify(w).length));
+  for (const w of REAL_WIRES) {
+    if (hub.wire('r', 'a', w).broadcast === undefined) ok(false, `real WIRE '${w.ch}' must be relayed`);
+  }
+  ok(worst * 8 < HUB_LIMITS.wireBytes,
+    `the largest real WIRE in the tree is ${worst} B — the cap is ${HUB_LIMITS.wireBytes} B (${Math.floor(HUB_LIMITS.wireBytes / worst)}x)`);
+
+  // --- SIGNAL: capped, because an SDP is opaque and passed through verbatim.
+  const bigSignal = makeSignal({ to: 'b', kind: 'offer', data: { sdp: 'x'.repeat(HUB_LIMITS.signalBytes) } });
+  ok(hub.signal('r', 'a', bigSignal).direct === undefined, 'an over-cap SIGNAL is not relayed');
+  ok(hub.signal('r', 'a', bigSignal).rejected === 'signal-too-large', '…and says why (signal-too-large)');
+  // A realistic WebRTC offer — a few kB of SDP — must be nowhere near the cap: a
+  // dropped offer costs a whole call, not one frame.
+  const realSdp = makeSignal({ to: 'b', kind: 'offer', channel: 'video', data: { type: 'offer', sdp: 'v=0\r\n'.repeat(600), epoch: 3 } });
+  ok(JSON.stringify(realSdp).length * 8 < HUB_LIMITS.signalBytes,
+    `a ~${JSON.stringify(realSdp).length} B video offer is ${Math.floor(HUB_LIMITS.signalBytes / JSON.stringify(realSdp).length)}x inside the SIGNAL cap`);
+  ok(hub.signal('r', 'a', realSdp).direct?.msg.channel === 'video', '…and it is relayed with its channel intact');
+  ok(hub.signal('r', 'a', { ...makeSignal({ to: 'b', kind: 'ice', data: { candidate: 'x' } }), junk: 'y'.repeat(4096) }).direct.msg.junk === undefined,
+    'a junk field attached to a SIGNAL is NOT forwarded');
+});
+
+// === RELAY-6: an owner-scoped STATE key may only be CLEARED by its owner =====
+// Any member could send `{key:'hold:<cartId>', value:null}` and rip a cartridge
+// out of another player's hand — broadcast to the room as authoritative, and
+// unrecoverable from the victim's side (a client writes that key only on its own
+// grab/release events, and its next write is the release).
+section('RELAY-6: an owner-scoped STATE key may only be CLEARED by its owner', () => {
+  const hub = new Hub();
+  hub.connect('r', 'host', { sid: 'h' });
+  hub.connect('r', 'alice');
+  hub.connect('r', 'bob');
+  const KEY = makeHoldKey('roms/zelda.nes');
+  ok(isOwnerScopedKey(KEY) && isOwnerScopedKey('gamepad:gp-1'), 'hold: and gamepad: are the owner-scoped namespaces');
+  ok(!isOwnerScopedKey('prop:p1') && !isOwnerScopedKey('power:console:c0') && !isOwnerScopedKey('tv'),
+    'prop:/power:/tv are NOT owner-scoped — they stay collaborative / host-owned');
+
+  hub.setState('r', 'alice', { key: KEY, value: { holder: 'alice', hand: 'right' } });
+  const stolen = hub.setState('r', 'bob', { key: KEY, value: null });
+  ok(stolen.broadcast === undefined && stolen.rejected === 'not-key-owner', "bob cannot clear alice's hold");
+  ok(stolen.direct?.to === 'bob' && stolen.direct.msg.value?.holder === 'alice',
+    '…and bob gets the authoritative value back, so his local copy re-converges');
+  ok(hub.roomState.get('r').get(KEY)?.id === 'alice', "…and the key still belongs to alice");
+
+  // The two writes that MUST keep working, because the shipped clients make them:
+  // a handoff (an overwrite by a different peer — a cartridge changing hands, a
+  // grab-any gamepad) and the owner's own release.
+  const handoff = hub.setState('r', 'bob', { key: KEY, value: { holder: 'bob', hand: 'left' } });
+  ok(handoff.broadcast?.msg.value?.holder === 'bob', 'an OVERWRITE by another peer is still allowed (cartridge handoff / grab-any pad)');
+  ok(hub.setState('r', 'bob', { key: KEY, value: null }).broadcast !== undefined, 'the current owner can clear its own key');
+
+  // The host may clear anything owner-scoped (room reset / cleaning up a ghost).
+  hub.setState('r', 'alice', { key: 'gamepad:gp-1', value: { port: 0 } });
+  ok(hub.setState('r', 'host', { key: 'gamepad:gp-1', value: null }).broadcast !== undefined,
+    "the elected host may clear another peer's owner-scoped key");
+
+  // A clear on a key nobody owns is not an ownership question — a client that
+  // releases an object whose hold the server already auto-cleared (its previous
+  // owner disconnected) must not be refused.
+  ok(hub.setState('r', 'bob', { key: makeHoldKey('roms/never-held.nes'), value: null }).broadcast !== undefined,
+    'clearing a key that has no current owner is allowed');
+
+  // Collaborative namespaces are deliberately untouched by this rule.
+  hub.setState('r', 'alice', { key: 'prop:p1', value: { pos: [0, 0, 0] } });
+  ok(hub.setState('r', 'bob', { key: 'prop:p1', value: null }).broadcast !== undefined,
+    'prop: stays fully collaborative — anyone may clear it (props are room furniture, not a grip)');
+
+  // The disconnect auto-clear and this ACL read the SAME namespace list, which is
+  // the invariant that keeps a key clearable by its owner and by the server on
+  // that owner's behalf.
+  hub.setState('r', 'alice', { key: KEY, value: { holder: 'alice', hand: 'right' } });
+  const cleared = hub.disconnect('r', 'alice').stateClears.map((m) => m.key);
+  ok(cleared.includes(KEY), 'a departed peer\'s owner-scoped keys are still auto-cleared on disconnect');
 });
 
 // === NetMgr onPeerLeave: fires when a LEAVE message is applied ================
@@ -922,6 +1125,12 @@ section('`v` MUST NEVER MAKE A MESSAGE UNDECODABLE (COR-9 regression, 2026-08-15
 // VideoMgr, but none of that touches the DOM until a capture/mic starts, so a
 // stub scene is enough to reach its real connect()/message/close handlers.
 section('Client reconnect gate: 4010 is permanent, everything else is retried', () => {
+  // The relay's "try again later" close. Spelled out rather than imported:
+  // NetProtocol owns the codes that are part of the CONTRACT, and 1013 is
+  // deliberately not one of them — it must never join PERMANENT_CLOSE_CODES,
+  // because the whole point of it is that the client comes back. Both client
+  // classes spell it the same way, for the same reason.
+  const TRY_AGAIN = 1013;
   // Minimal WebSocket stand-in: both classes look `WebSocket` up on globalThis at
   // connect() time, so this substitution exercises their real code path.
   class FakeWS {
@@ -994,6 +1203,110 @@ section('Client reconnect gate: 4010 is permanent, everything else is retried', 
         `${name} control: a 1006 (Wi-Fi blip / server restart) schedules a reconnect`);
       ok(b._fatal === null, `${name} control: and is not treated as fatal`);
       b.disconnect();
+
+      // 2b. A FIRST-CONNECT failure is retried too, and it says WHY (2026-08-18).
+      //     The gate used to be `if (wasConnected || this._reconnectTries)`, and
+      //     on a fresh client's first connect BOTH are falsy — so a socket that
+      //     never opened scheduled nothing, and (only 4010 producing status text)
+      //     said nothing either. That went from theoretical to live the moment
+      //     the relay grew per-address admission caps: those refused the UPGRADE
+      //     with 503/429, which in the browser is precisely a close with no open
+      //     before it. A user behind a busy NAT got "Offline" for the rest of the
+      //     page's life with nothing retrying behind it — the COR-9 dead end,
+      //     reached from the other side. Both ends of it are closed now: the
+      //     relay soft-refuses instead (1013 after an open, see
+      //     server/room-server.mjs refuseSoftly) AND this gate is gone.
+      //     Driven exactly as a browser drives it: construct, never accept, drop.
+      const retries = [];
+      const n = build({ onRetry: (r) => retries.push(r) });
+      const nws = FakeWS.last;
+      ok(n._connected === false && n._reconnectTries === 0,
+        `${name} (2b precondition): the socket never opened — the exact state the old gate refused to retry from`);
+      nws.drop(1013, 'too many connections from this address (16/16)');
+      ok(n._reconnectTimer !== null && n._reconnectTries === 1,
+        `${name}: a close BEFORE the first open still schedules a reconnect`);
+      ok(n._fatal === null, `${name}: and a transient refusal is not latched as fatal`);
+      ok(retries.length === 1 && retries[0]?.code === 1013,
+        `${name}: onRetry fires with the close code the relay sent (got ${JSON.stringify(retries[0] ?? null)})`);
+      ok(!!retries[0]?.reason?.includes('too many connections'),
+        `${name}: and with the relay's own reason — the UI can say WHY instead of only "Offline"`);
+      ok(retries[0]?.attempt === 1 && retries[0]?.delayMs > 0,
+        `${name}: and with which attempt this is and how long until it happens`);
+      ok(n.debugApi().lastClose?.()?.code === 1013,
+        `${name}: the same reaches debugApi().lastClose, which is how a headless probe reads it`);
+      n.disconnect();
+
+      // CONTROL for 2b: OUR OWN disconnect() before an open must stay silent.
+      // Without this pair, "retry every close" could equally mean "the user
+      // pressing Leave now reconnects forever", which is a worse bug than the
+      // one 2b fixes.
+      const q = build({ onRetry: (r) => retries.push(r) });
+      q.disconnect();
+      ok(retries.length === 1 && q._reconnectTimer === null,
+        `${name} control: a deliberate disconnect() before the open schedules nothing (still ${retries.length} onRetry call)`);
+
+      // 2c. The backoff resets on a SESSION, not on an 'open' (2026-08-18).
+      //     `_reconnectTries = 0` lived in the socket's 'open' handler, which was
+      //     right while the only way to get an 'open' was to be admitted — and
+      //     wrong from the moment the relay started refusing capacity SOFTLY, i.e.
+      //     by accepting the upgrade and closing it with 1013 so a deployed client
+      //     retries at all. A refusal now MAKES 'open' fire, so resetting there
+      //     reset the backoff on every refusal: 500 ms, open, refused, 500 ms,
+      //     for the life of the page. Two of those behind one NAT drained that
+      //     address's entire upgrade budget and locked out the household,
+      //     already-connected headsets included. Move the reset one message later
+      //     — to the HELLO, which is the first proof a SESSION exists — and the
+      //     chain advances the way it was always meant to.
+      const t = build();
+      const tws = FakeWS.last;
+      tws.accept();
+      tws.drop(TRY_AGAIN, 'room "r" full (16/16)');
+      ok(t._reconnectTries === 1, `${name}: a soft refusal advances the backoff to attempt 1`);
+      // The retry's socket opens — and is refused again before any HELLO. This is
+      // the exact state the old reset fired in.
+      tws.accept();
+      ok(t._reconnectTries === 1,
+        `${name}: an 'open' with no HELLO behind it does NOT reset the backoff — 'open' means the handshake completed, not that we have a session`);
+      // …and a real session does reset it, or a headset that reconnects after an
+      // hour of good play would start its next blip deep in the backoff chain.
+      tws.deliver(makeHello({ selfId: 'me', room: 'r', peers: [], host: 'me' }));
+      ok(t._reconnectTries === 0 && t.lastClose === null,
+        `${name}: a HELLO does reset it, and clears the transient "why are we offline" with it`);
+      t.disconnect();
+
+      // 2d. A soft refusal gets its OWN, slower backoff table.
+      //     1013 is "we are busy", not "the network broke", and retrying it on the
+      //     500 ms table is what turns one refused client into a 2 Hz knock on a
+      //     relay that just said it was full.
+      const fast = build();
+      FakeWS.last.drop(1006);
+      const slow = build();
+      FakeWS.last.drop(TRY_AGAIN, 'server at capacity (256/256 sockets)');
+      ok(fast.lastClose.delayMs === 500,
+        `${name}: an ordinary drop still retries fast (${fast.lastClose.delayMs}ms) — a Wi-Fi blip must not cost the user 5 s`);
+      ok(slow.lastClose.delayMs >= 5000 && slow.lastClose.delayMs >= fast.lastClose.delayMs * 10,
+        `${name}: a 1013 waits at least 10x longer (${slow.lastClose.delayMs}ms vs ${fast.lastClose.delayMs}ms) — ~12 upgrades a minute instead of 120`);
+      fast.disconnect();
+
+      // 2e. …and it STAYS on the slow table until a session exists. The relay's
+      //     second-tier refusal (an address over its soft-refusal budget) kills
+      //     the upgrade outright, which reaches a browser as a bare 1006 —
+      //     indistinguishable from a Wi-Fi blip. Without the sticky flag a client
+      //     that had just been told 1013 would drop straight back to 500 ms and
+      //     hammer the exact relay that asked it not to.
+      clearTimeout(slow._reconnectTimer); slow._reconnectTimer = null;
+      slow._scheduleReconnect({ code: 1006, reason: '' });
+      ok(slow.lastClose.delayMs >= 10000,
+        `${name}: the 1006 that a killed upgrade produces stays on the slow table after a 1013 (${slow.lastClose.delayMs}ms)`);
+      // A session clears it, so a genuine blip AFTER we got in is fast again.
+      const sws = FakeWS.last;
+      clearTimeout(slow._reconnectTimer); slow._reconnectTimer = null;
+      sws.accept();
+      sws.deliver(makeHello({ selfId: 'me', room: 'r', peers: [], host: 'me' }));
+      sws.drop(1006);
+      ok(slow.lastClose.delayMs === 500,
+        `${name}: and once a session has existed, an ordinary drop is fast again (${slow.lastClose.delayMs}ms)`);
+      slow.disconnect();
 
       // 3. THE FIX — the same handler, same instance shape, close code 4010.
       const c = build();

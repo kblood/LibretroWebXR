@@ -240,18 +240,34 @@ try {
   await shot(B, 'client-watching-after-host-reboot');
 
   // --- 5. a client inserting a cart asks the host ---------------------------
-  const other = await B.evaluate(() => {
+  // THIS SECTION MUST ALWAYS RUN. It used to end in `ok(true, '(skipped
+  // client-insert: only one NES cart in this collection)')` whenever __games held
+  // no second NES title — a literal pass for a section that executed none of its
+  // own assertions, i.e. the collection's contents silently decided whether the
+  // headline invariant ("a client's insert travels to the host") was checked at
+  // all. The insert only needs a cart meta that DIFFERS from the running one, and
+  // this repo ships four CC0 NES ROMs, so synthesise one rather than skip.
+  const FALLBACK_NES = ['lwx-nes-bomberman.nes', 'lwx-nes-gallery.nes', 'lwx-nes-pong.nes']
+    .map((f) => ({ abs: resolve('public/roms/freeware', f), file: `freeware/${f}` }))
+    .filter((c) => existsSync(c.abs) && c.file !== game.file)[0] ?? null;
+
+  const other = await B.evaluate((fb) => {
     const g = window.__games.find((x) => x.system === 'nes' && !/pong/i.test(x.title || x.file));
-    return g ? { file: g.file, core: g.core, system: g.system, title: g.title } : null;
-  });
+    if (g) return { file: g.file, core: g.core, system: g.system, title: g.title };
+    // Not in the collection — insert the shipped ROM directly. loadCartridge
+    // resolves `file` against roms/, so a meta the shelf never minted works.
+    return fb ? { file: fb.file, core: 'fceumm', system: 'nes', title: 'smoke fallback cart' } : null;
+  }, FALLBACK_NES);
+
+  // No second cart AND no shipped fallback on disk is a broken fixture, not a
+  // reason to be green: fail loudly so someone repairs the checkout.
+  ok(!!other, `a second NES cart is available for the client-insert check (${other?.file ?? 'NONE — public/roms/freeware/ is missing its CC0 NES ROMs'})`);
   if (other) {
     await B.evaluate((g) => window.__insertCartridge(g), other);
     ok(await waitFor(A, (f) => window.__net.objectState('tv')?.file === f, 40000, other.file),
       'a client cartridge insert is applied by the HOST (game switched on the host)');
     await sleep(2500);
     ok((await liveCores(B)) === 0, 'the client STILL runs no core after its own insert');
-  } else {
-    ok(true, '(skipped client-insert: only one NES cart in this collection)');
   }
 
   // --- 5b. every OTHER client boot path is suppressed too --------------------

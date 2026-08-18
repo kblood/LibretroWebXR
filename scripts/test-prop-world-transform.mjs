@@ -34,6 +34,7 @@
 // Pure logic: THREE runs headless, no DOM, no sockets.
 // Run: node scripts/test-prop-world-transform.mjs   (also in `npm test`)
 
+import { readFileSync } from 'node:fs';
 import * as THREE from 'three';
 import { serializePropState, diffPropBaseline } from '../src/net/PropSync.js';
 import { propWorldPayload } from '../src/net/PropTransform.js';
@@ -269,12 +270,74 @@ section('a prop in a hand is left to the drag wire', () => {
     'unguarded, the baseline would publish the held prop too');
 });
 
+// TEARDOWN-1: the SECOND hosting stint. `published` is the host's own memory of
+// what it sent, and that memory outlives the room state it describes — leaving a
+// room empty destroys every `prop:*` key server-side, so after Leave → Join the
+// dedupe compares each payload against itself, publishes nothing, and the next
+// peer to join builds the room as AUTHORED. That is the join-layout bug at the top
+// of this file, back after one rejoin cycle. The forced pass is the fix.
+section('a forced baseline republishes everything after a leave/rejoin', () => {
+  const current = new Map([
+    ['poster-1', { type: 'poster', pos: [0, 1.6, 3.9], rot: [0, 180, 0] }],
+    ['gamepad-1', { type: 'gamepad', pos: [0.55, 0.78, -2.15], rot: [0, -25, 0] }],
+  ]);
+  // The host's dedupe map still holds exactly what it published last stint…
+  const remembered = new Map(current);
+
+  // NEGATIVE CONTROL, and the shipped bug: without the force the room gets nothing.
+  eq(diffPropBaseline({ current, published: remembered }), [],
+    'un-forced, a rejoined host publishes NOTHING — the stale memory suppresses the whole baseline');
+
+  const out = diffPropBaseline({ current, published: remembered, force: true });
+  eq(out.map((e) => e.propId).sort(), ['gamepad-1', 'poster-1'],
+    'forced, every prop is republished into the room state that no longer has any');
+  eq(out.find((e) => e.propId === 'gamepad-1')?.payload, current.get('gamepad-1'),
+    'with the pose the host actually has, not the authored one');
+
+  // A prop in a hand still belongs to the live-drag wire, forced pass or not.
+  const held = diffPropBaseline({ current, published: remembered, force: true, skip: new Set(['gamepad-1']) });
+  eq(held.map((e) => e.propId), ['poster-1'], 'the forced pass still leaves a held prop alone');
+});
+
 section('the baseline ignores entries with no payload', () => {
   const out = diffPropBaseline({
     current: new Map([['ghost-1', null], ['poster-1', { type: 'poster', pos: [0, 0, 0], rot: [0, 0, 0] }]]),
     published: new Map(),
   });
   eq(out.map((e) => e.propId), ['poster-1'], 'a prop that failed to serialize is skipped, not published as null');
+});
+
+// The force flag is only worth anything if main.js actually raises it on the two
+// teardown/promotion paths. main.js can't be imported here (THREE + DOM at module
+// scope), so pin the wiring in the source — this is the half of TEARDOWN-1 that a
+// reasonable-looking edit would silently drop.
+section('main.js arms a forced baseline wherever it resets the sibling signatures', () => {
+  const src = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  const fnBody = (header) => {
+    const start = src.indexOf(header);
+    if (start < 0) return '';
+    const end = src.indexOf('\n}\n', start);
+    return end < 0 ? src.slice(start) : src.slice(start, end);
+  };
+
+  ok(/diffPropBaseline\(\{[^}]*force[^}]*\}\)/.test(fnBody('function _publishHostPropBaseline('))
+     || /force,?\s*\}\);/.test(fnBody('function _publishHostPropBaseline(')),
+    'the host baseline publisher passes the force flag through to diffPropBaseline');
+
+  ok(/_forcePropBaseline = true/.test(fnBody('function disconnectFromRoom(')),
+    'Leave arms it: the room we walked out of may be destroyed the moment we go');
+
+  const applyHostRole = fnBody('function _applyHostRole(');
+  ok(/_forcePropBaseline = true/.test(applyHostRole),
+    'promotion arms it too, next to the room/shelf signature resets it belongs with');
+  ok(applyHostRole.indexOf('_forcePropBaseline = true') > applyHostRole.indexOf('_lastPublishedRoom = \'\''),
+    'and does so in the PROMOTED branch (the one that already forces a room/shelf republish)');
+
+  // Do NOT let this become a `.clear()`: _knownPropPayloads is dual-purpose
+  // (publish dedupe AND "props we know about" for diffPropSync's removal loop),
+  // so clearing it would arm a mass removal of every non-static prop.
+  ok(!/^(?!\s*(\/\/|\*)).*_knownPropPayloads\.clear\(\)/m.test(src),   // code, not the comment saying not to
+    'the dedupe map is never cleared outright — see _forcePropBaseline\'s declaration for why');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

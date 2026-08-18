@@ -407,11 +407,21 @@ topology to PSX).
 
 ### 8. Deploy
 
-Copy the three artifacts into `public/cores/` (gitignored — never
-committed, matches every other core here) plus a hand-authored
+Copy the three artifacts into `public/cores/` (the BINARIES are gitignored —
+never committed, matches every other core here) plus a
 `mupen64plus_next_libretro.build.json` manifest (sha256 + pins, same shape
 as the PSX one) so `RuntimeEmulatorClient`'s save-state compatibility
 check has a real build hash to key off.
+
+**The manifest is git-TRACKED** as of 2026-08-17 (ARC-3). `.gitignore` ignores
+`public/cores/*` and force-includes `!public/cores/*.build.json`, so this file is
+the one thing about a shipped core that a clean clone can read and review: the
+upstream repos + commit SHAs, the emsdk/emscripten commits, the build flags, and
+a sha256 per emitted artifact. `scripts/fetch-cores.mjs` verifies those sha256s
+against the bytes on disk before adopting a manifest, so committing it turns the
+verifier from a self-consistency check into a real one. Treat the manifest as
+part of the deliverable, not as a note-to-self: install it in the same step as
+the binaries, and never let it describe a build that is not the one on disk.
 
 ## Phase N0 item 3: fps measurement against a real 3D scene
 

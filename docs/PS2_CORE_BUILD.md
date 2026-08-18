@@ -183,9 +183,22 @@ cd ~/amiga-build/RetroArch   # reuse the same RetroArch checkout as the Amiga bu
 emmake make -f Makefile.emscripten LIBRETRO=play HAVE_THREADS=1 HAVE_CHD=0 HAVE_OPENGLES3=1 -j$(nproc)
 # → play_libretro.js + play_libretro.wasm + play_libretro.worker.js
 
-# 10. Vendor into the project (cores are gitignored — never committed)
+# 10. Vendor into the project (core BINARIES are gitignored — never committed)
 cp play_libretro.js play_libretro.wasm play_libretro.worker.js <repo>/public/cores/
 ```
+
+**Provenance gap, stated plainly (ARC-3).** Unlike PSX, N64 and DOS, this core
+ships with NO `play_libretro.build.json`, so nothing on disk records which
+RetroArch commit, which Play! commit or which emsdk produced the `.wasm` that is
+deployed. `.gitignore` now force-includes `!public/cores/*.build.json`, so the
+moment such a manifest exists it becomes part of the repo and part of review —
+authoring one is a follow-up worth doing on the next PS2 rebuild, mirroring
+`public/cores/mednafen_psx_jit_libretro.build.json`. Do not back-fill it by
+guessing: a manifest that describes a build nobody can confirm is worse than an
+admitted gap, because `scripts/fetch-cores.mjs` will then verify the wrong thing
+confidently. Record the SHAs at the moment of the build, as
+`scripts/cores/dos/build.sh` and `scripts/cores/amiga/build-puae-lightgun.sh`
+now do automatically.
 
 Also required, in this repo (not the WSL2 build trees): `EmulatorClient.js`'s
 `locateFile` callback redirected only `.wasm` requests to `coreBase`, not

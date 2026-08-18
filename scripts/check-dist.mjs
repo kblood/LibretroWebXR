@@ -77,6 +77,36 @@
  * The size budgets deliberately EXCLUDE the private tree: it is the user's own
  * multi-GB library and measuring the app against it would make the budget useless.
  *
+ * PER-CHUNK JS BUDGETS  (BUNDLE_BUDGETS, below)
+ * ---------------------------------------------
+ * The three budgets above are ASSET budgets — they catch a stray 40 MiB video,
+ * not a bundle regression. The whole of `dist/assets/` is ~1.05 MiB of JS, so the
+ * only ceiling it ever faced was the generic 32 MiB per-file rule: an import
+ * regression pulling `three` into the desktop chunk, or an eager Collection/TestApi
+ * import tripling main.js, cleared every gate in the project (`npm test` does not
+ * build; rollup's chunk-size warning is advisory and was at its default). Nothing
+ * measured the compressed size at all — the number that actually governs how long
+ * a Quest stares at a black screen on a first load.
+ *
+ * So each named chunk gets a raw AND a gzip ceiling, seeded from measured sizes
+ * with ~20% headroom, and gzip is the one to care about. Unnamed/lazy chunks fall
+ * back to DEFAULT_BUNDLE_BUDGET.
+ *
+ * RAISING A BUDGET IS A DELIBERATE, REVIEWED ACT. A number bumped in the same
+ * commit as the growth that broke it is not a budget, it is a changelog. If a
+ * chunk legitimately grew, say why in the commit message; if it grew by accident,
+ * the violation message names the chunk and the overage — go find the import.
+ * `checkDist(dir, { chunkBudgets: false })` turns just this rule off — for
+ * auditing a dist/ that came from somewhere else, where a bundle policy about
+ * OUR chunk names means nothing. There is no env var for it on purpose: the
+ * build and the deploy must not be able to opt out.
+ *
+ * `vite.config.js` sets `build.chunkSizeWarningLimit` to the LARGEST budget here,
+ * because rollup only has one global threshold: at anything lower it warns about
+ * `three` on every single build, and an advisory that fires on a known-good chunk
+ * teaches people to ignore it. The per-chunk policy lives here, where it can be
+ * per-chunk and can actually fail.
+ *
  * Used as a postbuild step AND as the pre-upload gate in scripts/deploy.ps1 —
  * a deploy aborts before the first scp if this exits nonzero. vite.config.js also
  * calls checkDist() on the RESOLVED build.outDir and throws, so a build into a
@@ -85,6 +115,7 @@
  */
 
 import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -94,6 +125,58 @@ export const DEFAULT_MAX_FILE_MB = 32;
 export const DEFAULT_MAX_TOTAL_MB = 400;
 /** Per-file ceiling for anything under roms/freeware/. Biggest today is ~1.0 MiB. */
 export const DEFAULT_MAX_ROM_MB = 16;
+
+/**
+ * Per-chunk JS/CSS budgets for `dist/assets/`, keyed by rollup CHUNK NAME (the
+ * part before the content hash). See the header for why these exist and what
+ * raising one means.
+ *
+ * Seeded 2026-08-17 from a real build, with ~20% headroom:
+ *
+ *   chunk                   raw       gzip     ← measured
+ *   three                 616,936   157,976
+ *   main                  307,845    98,658
+ *   Collection            107,271    33,720
+ *   EmulatorWorkerRuntime  29,960     8,664
+ *   desktop                25,554     9,429
+ *   DiscIdentity            3,218     1,511
+ *   RackSpike               3,256     1,598
+ *
+ * Only the first five get named budgets below. `DiscIdentity` and `RackSpike` are
+ * ~3 KB and deliberately fall through to DEFAULT_BUNDLE_BUDGET — pinning a 3 KB
+ * chunk buys nothing and would fail the build on any honest edit to it.
+ *
+ * `desktop` is the tight one on purpose: the flat-screen entry never imports
+ * three, and its budget is what turns "the desktop chunk quietly swallowed the
+ * renderer" from a 25x size regression nobody notices into a failed build.
+ */
+export const BUNDLE_BUDGETS = {
+  three: { bytes: 740_000, gzip: 190_000 },
+  main: { bytes: 380_000, gzip: 120_000 },
+  Collection: { bytes: 140_000, gzip: 45_000 },
+  EmulatorWorkerRuntime: { bytes: 60_000, gzip: 20_000 },
+  desktop: { bytes: 60_000, gzip: 20_000 },
+};
+
+/** Ceiling for a chunk with no entry above — i.e. any new or lazy-split chunk. */
+export const DEFAULT_BUNDLE_BUDGET = { bytes: 200_000, gzip: 64_000 };
+
+/**
+ * Rollup chunk name for a hashed asset filename, or null if it doesn't look like
+ * one. `three-CQREgBuk.js` -> `three`; `EmulatorWorkerRuntime-DdW6BZJd.js` ->
+ * `EmulatorWorkerRuntime`. Only `.js`/`.css` are budgeted — a hashed .png in
+ * assets/ is an asset, and the per-file budget already covers it.
+ */
+export function chunkNameOf(rel) {
+  if (!rel.startsWith('assets/')) return null;
+  const base = path.posix.basename(rel);
+  const m = /^(.+)-[A-Za-z0-9_-]{6,12}\.(js|css)$/.exec(base);
+  return m ? m[1] : null;
+}
+
+export function bundleBudgetFor(name) {
+  return BUNDLE_BUDGETS[name] ?? DEFAULT_BUNDLE_BUDGET;
+}
 
 /** Repo root = parent of this scripts/ dir. Used to read the TRACKED descriptors. */
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -384,6 +467,7 @@ export function checkDist(distDir, opts = {}) {
   const violations = [];
   const entries = walk(distDir, distDir, []);
   const privatePaths = [];
+  const chunkSizes = [];
   let totalBytes = 0;
   let privateBytes = 0;
 
@@ -454,6 +538,50 @@ export function checkDist(distDir, opts = {}) {
 
     if (e.size > fileBudget) {
       violations.push({ rule: 'oversize-file', rel: e.rel, size: e.size, why: `exceeds the ${(fileBudget / MiB).toFixed(0)} MiB per-file budget` });
+      continue;
+    }
+
+    // Per-chunk JS budget. Deliberately AFTER the per-file check: if a chunk is
+    // already over the 32 MiB asset ceiling, gzipping it to report a second
+    // number about the same file is pointless work on a build that is failing
+    // anyway.
+    const chunk = e.kind === 'file' ? chunkNameOf(e.rel) : null;
+    if (chunk && opts.chunkBudgets !== false) {
+      const budget = bundleBudgetFor(chunk);
+      const named = Object.hasOwn(BUNDLE_BUDGETS, chunk);
+      if (e.size > budget.bytes) {
+        violations.push({
+          rule: 'oversize-chunk',
+          rel: e.rel,
+          size: e.size,
+          why: `chunk '${chunk}' is ${fmt(e.size)}, over its ${fmt(budget.bytes)} raw budget by ` +
+            `${fmt(e.size - budget.bytes)}${named ? '' : ' (no named budget — DEFAULT_BUNDLE_BUDGET applies)'}. ` +
+            'Find the import that grew it before raising the number in scripts/check-dist.mjs.',
+        });
+        continue;
+      }
+      // GZIP IS THE PRIMARY SIGNAL: it is what crosses the wire to the headset,
+      // and raw size can stay flat while compressed size doubles (a minifier
+      // change, an inlined data: URI, duplicated code that no longer dedupes).
+      let gz = 0;
+      try {
+        gz = gzipSync(readFileSync(path.join(distDir, e.rel.split('/').join(path.sep))), { level: 9 }).length;
+      } catch {
+        // Unreadable is somebody else's violation to raise; don't invent one.
+        gz = 0;
+      }
+      if (gz > budget.gzip) {
+        violations.push({
+          rule: 'oversize-chunk',
+          rel: e.rel,
+          size: e.size,
+          why: `chunk '${chunk}' gzips to ${fmt(gz)}, over its ${fmt(budget.gzip)} gzip budget by ` +
+            `${fmt(gz - budget.gzip)}${named ? '' : ' (no named budget — DEFAULT_BUNDLE_BUDGET applies)'}. ` +
+            'Compressed size is what a Quest actually downloads on a cold load.',
+        });
+        continue;
+      }
+      chunkSizes.push({ rel: e.rel, chunk, bytes: e.size, gzip: gz, budget });
     }
   }
 
@@ -478,6 +606,7 @@ export function checkDist(distDir, opts = {}) {
     strict,
     privatePaths,
     privateBytes,
+    chunkSizes,
   };
 }
 
@@ -533,6 +662,20 @@ function main(argv) {
         `${res.privateBytes ? `; roms/local/ excluded from the totals` : ''})`,
     );
     console.log(`            ${roms} freeware ROM file(s), each matched by name against the ${res.allowNames.size}-title allowlist.`);
+    // Print the bundle table on every green run. A budget you only see when it
+    // breaks tells you nothing about the trend that is about to break it.
+    if (res.chunkSizes.length) {
+      const total = res.chunkSizes.reduce((a, c) => a + c.bytes, 0);
+      const totalGz = res.chunkSizes.reduce((a, c) => a + c.gzip, 0);
+      console.log(`            JS chunks: ${fmt(total)} raw / ${fmt(totalGz)} gzip`);
+      for (const c of [...res.chunkSizes].sort((a, b) => b.gzip - a.gzip)) {
+        const pct = c.budget.gzip ? Math.round((c.gzip / c.budget.gzip) * 100) : 0;
+        console.log(
+          `              ${c.chunk.padEnd(22)} ${fmt(c.bytes).padStart(10)} raw  ` +
+            `${fmt(c.gzip).padStart(10)} gzip  (${String(pct).padStart(3)}% of its gzip budget)`,
+        );
+      }
+    }
     return 0;
   }
 
@@ -559,6 +702,16 @@ function main(argv) {
     console.error('  exact filename to FREEWARE_ALLOW in scripts/check-dist.mjs. If it is a private');
     console.error('  dump, move it to public/roms/local/ instead — that tree is the sideload path,');
     console.error('  ships only to the user\'s own box, and is never git-tracked.');
+  }
+  if (res.violations.some((v) => v.rule === 'oversize-chunk')) {
+    console.error('');
+    console.error('  [oversize-chunk] a JS bundle grew past its budget in scripts/check-dist.mjs');
+    console.error('  (BUNDLE_BUDGETS). Diagnose BEFORE you raise the number — the usual cause is an');
+    console.error('  import that pulled a heavy module into a chunk that had no business with it');
+    console.error('  (three in desktop, Collection eagerly imported from main). `npx vite build` then');
+    console.error('  reading dist/assets/<chunk>-*.js for the unexpected symbol finds it in a minute.');
+    console.error('  If the growth is real and wanted, raise the budget in its own reviewed commit and');
+    console.error('  say why. Gzip is the number that matters: it is what a Quest downloads cold.');
   }
   if (res.violations.some((v) => v.rule === 'private-roms')) {
     console.error('');

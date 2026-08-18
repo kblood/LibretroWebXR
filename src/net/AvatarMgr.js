@@ -14,6 +14,10 @@ export class AvatarMgr {
   constructor({ scene }) {
     this.scene = scene;            // SceneMgr (addObject/removeObject)
     this._avatars = new Map();     // peerId -> Avatar
+    // sync() runs every rendered frame; its reconcile Set was a fresh
+    // allocation each time (PERF-4(b)). Reused and cleared instead — it never
+    // escapes sync(), so nothing else can observe it.
+    this._seen = new Set();
   }
 
   /**
@@ -21,7 +25,8 @@ export class AvatarMgr {
    * the latest pose to existing ones, and remove avatars whose peer is gone.
    */
   sync(peers) {
-    const seen = new Set();
+    const seen = this._seen;
+    seen.clear();
     for (const peer of peers) {
       seen.add(peer.id);
       let av = this._avatars.get(peer.id);

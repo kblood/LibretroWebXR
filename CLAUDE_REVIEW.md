@@ -14,6 +14,52 @@
 
 ---
 
+## 0. STATUS AS OF 2026-08-18 — read this before acting on anything below
+
+**The review text below is left exactly as written on 2026-08-13. It is a
+snapshot, not a to-do list.** This block is the current state. A remediation
+pass ran 2026-08-17; where a finding is marked closed here, the finding's own
+section is out of date and the code is right.
+
+**Two findings are settled REJECTIONS. Do not re-litigate them** — both have
+already been re-argued and reverted more than once, which is the whole reason
+this block exists:
+
+| Rejected | Why |
+|---|---|
+| **§4.7 / P0 item 0 — "the deploy can publish the private ROM library"** (ranked the #1 critical finding) | Publishing `public/roms/local/` to dionysus.dk is **deliberate**. It is the user's own box and the only practical way to test light guns on a real Quest; the redistributable light-gun game universe is essentially empty. A strip guard has been added and reverted **twice** (`0df8aeb` → `b192911`, and again 2026-08-14). `scripts/check-dist.mjs` *reports* the private tree on every build and refuses it only under `--strict`, which is for a genuinely public release. Read that file's header, `CLAUDE.md` and `README.md` before touching it. The rest of §4.7 — backup cores, credentials, scratch, symlinks, unlisted ROMs — **is** implemented and refused in both modes. |
+| **§5.5 — "the host state watcher does redundant work"** | §10 of this same review answers it: a structural version counter reintroduces the "a new call site forgets to publish" bug the watcher was written to fix. §5.5 already calls it "genuinely a trade-off, not an obvious win". Treated as closed-by-decision, not as work. |
+
+### Closed
+
+| § | Finding | Closed by |
+|---|---|---|
+| 4.1 | Stored XSS in the log viewer | Every interpolation escaped (`esc()`, 19 call sites in `server/log-server.mjs`). |
+| 4.2 | Remote crash of the room server via the log endpoint | Ingest validation + wrapped viewer handler + `uncaughtException` net; and 2026-08-17 the **aggregate** budget that the per-axis caps still left open — `MAX_STORE_BYTES` (64 MiB *accounted*, charging per JSON node, not per character), which is what stops ~52 GB of retainable heap turning into an OOM **abort** the exception net cannot catch. |
+| 4.3 | Unauthenticated public read of all logs | `LOG_TOKEN` read gate, and — the actual gap — the **deployment** now switches it on: `deploy/libretrowebxr-room.service` carries `EnvironmentFile=-/etc/default/libretrowebxr-room`. `POST /log` stays ungated, so the Quest carries no secret. Recipe: `docs/HANDOFF.md` → "Reading headset logs (the token)". |
+| 4.4 | Room server has no admission control | `maxPayload`, per-room peer cap, per-peer/-room/-total STATE budgets, message rate limit, **per-address** socket + upgrade caps, per-socket *and* aggregate outbound-buffer budgets with backpressure eviction, optional `Origin` allow-list, `ROOM_HOST` bind. Every knob has a row in `server/README.md` — `scripts/test-room-limits.mjs` fails the run if one doesn't. Plus a server-side **trust model** the review didn't reach: host-only `INPUT`, owner-only clears of `hold:*`/`gamepad:*` (see `docs/MULTIPLAYER.md`). |
+| 4.6 | Dev-server dependency advisories | `vite@^7.3.5`; dev/preview bind loopback with an explicit `LAN=1` opt-in (`README.md`); plus a scheduled `npm audit` over both package trees (`.github/workflows/audit.yml`) that reports an unreachable registry as UNKNOWN, never clean, and monthly grouped Dependabot PRs. |
+| 5.1 | Per-frame exceptions after leaving a room | `ba0426b`. The residual found on re-review — the host prop **baseline** staying suppressed after leave/rejoin, because the dual-purpose `_knownPropPayloads` map was never reset — was closed 2026-08-17 with a one-shot `_forcePropBaseline` republish per hosting stint. |
+| 5.2 | The video `bye` teardown signal can never arrive | `'bye'` is in `NetProtocol.SIGNAL_KINDS`, with a round-trip test over every kind. |
+| 5.3 | `SceneMgr` has no tick deregistration | `SceneMgr.removeTickCallback()`; `addTickCallback` returns its own remover. |
+| 5.4 | Same-core cartridge swaps never attach the new peripheral | Boot configuration is part of runtime identity. 2026-08-17 closed the leftover bullet — `EmulatorClient.start()` now **throws** instead of resolving a failed boot into a "playing" state published to the room — and added `scripts/test-boot-config.mjs`, which is the first test that pins any of this. |
+| 6 | There is no CI | `.github/workflows/ci.yml`: an **app** job (`npm ci` / `npm test` / `npm run build`, uploads `dist/`) and a **server** job (locked `server/` install, `node --check`, `npm run test:servers`). A suite that runs but asserts nothing now declares itself INERT rather than reporting a green. |
+| 7 | Unconditional TV texture uploads | PERF-1, shipped. Worker-side frame/audio costs were re-measured 2026-08-17: see CODEX_REVIEW PERF-3/PERF-4. |
+| 8 | Doc drift | `README.md`, `CLAUDE.md`, `DEBUGGING.md`, `docs/ROADMAP.md`, `server/README.md` and the source comments were reconciled 2026-08-17/18. **Still open from §8:** there is no `docs/README.md` index marking which of the files in `docs/` are current vs. historical. |
+| 9 | P0 1-4 | All four done (see 4.1, 4.2, the `uncaughtException` net, and 6). |
+| 9 | P1 5-11 | All seven done: 5 → 5.1/5.3; 6 → 4.4; 7 → 4.3; 8 → 4.6; 9 → 5.2; 10 → 5.4; 11 → the README's system/gating text now defers to `src/systems.js` as the single source of truth. |
+| 9 | P2 13-14 | 13 → `scripts/run-tests.mjs` discovers every suite and reports all failures (the `scripts/{test,probe,make}/` split was **not** done and is not planned). 14 → PERF-1. |
+
+### Still open
+
+| § | Finding | Note |
+|---|---|---|
+| 3.1 / 9 P2 12 | `src/main.js` is the one real structural problem | **It has grown**, 7,974 → 8,820 lines. Nothing was extracted. Read CODEX_REVIEW's ARC-1 and "P2 #12" notes first: three of P2's five size estimates and the whole proposed *order* are wrong, and "tests green between" is vacuous today because **no test imports `main.js`**. |
+| 3.3 / 9 P2 15 | The peripherals are four copies of one idea | Untouched, and the duplication now reaches into `systems.js` too. Still the right call to do it *before* the next peripheral is added. |
+| 3.4 / 9 P2 16 | Client/desktop duplication | Untouched — and it cost real work: the 2026-08-17 relay hardening had to be written twice, once in `src/net/NetMgr.js` and once in `src/desktop/DesktopNet.js`. |
+
+---
+
 ## 1. Executive summary
 
 This is an unusually **well-engineered hobby-scale project**. The parts that

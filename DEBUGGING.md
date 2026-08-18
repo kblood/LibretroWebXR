@@ -50,7 +50,10 @@ selection overrides ROM-extension auto-detection. Useful when:
 - Multiple cores can run the same system and you want to A/B them
   (e.g. `picodrive` vs `genesis_plus_gx` for SMS — picodrive wins).
 
-Two core styles live in `src/main.js`'s `CORES` map:
+Two core styles live in the `CORES` map, which is exported from
+**`src/systems.js`** (`main.js` only imports it — it was defined inline in
+`main.js` until the R.1 registry refactor, and this line still said so long
+afterwards):
 
 - `style: 'classic'` — older WebEmu-era cores that auto-init against
   `window.Module` when their `<script>` tag loads. Cheap, but the
@@ -60,6 +63,15 @@ Two core styles live in `src/main.js`'s `CORES` map:
   `export default <factory>`. Loaded via dynamic `import()` and
   instantiated with `mod.default(moduleArg)` — exactly how upstream
   `retroarch/libretro.js` does it.
+
+`style` is about how the core module is *loaded*. A separate axis, `execution`,
+is about where it *runs*: the heavy cores (`mednafen_psx_hw`, `play`,
+`mupen64plus_next`, `dosbox_pure`) carry `execution: 'worker'` and run in a
+dedicated execution worker via `RuntimeEmulatorClient` /
+`src/runtime/EmulatorWorkerRuntime.js`, not on the main thread like everything
+else. When a symptom is "no frames" rather than "wrong frames", check which of
+the two topologies you are in first — see "Architectural lesson learned the hard
+way" below.
 
 Adding a new core means downloading from
 `https://buildbot.libretro.com/nightly/emscripten/RetroArch.7z` (760MB
@@ -103,10 +115,13 @@ out of version control and pass them explicitly per invocation.
 
 ## Server-side checks (when the harness suggests an infra problem)
 
+The live deploy is **`/webxr/libretrowebxr2/`**; `/webxr/libretrowebxr/` is the
+older prototype, deliberately left untouched. Point every command at the `2`.
+
 ```bash
 # Headers actually being served?
-curl -sI https://dionysus.dk/webxr/libretrowebxr/ | grep -iE 'cross-origin|cache-control'
-curl -sI https://dionysus.dk/webxr/libretrowebxr/cores/snes9x_libretro.wasm | grep -i content-type
+curl -sI https://dionysus.dk/webxr/libretrowebxr2/ | grep -iE 'cross-origin|cache-control'
+curl -sI https://dionysus.dk/webxr/libretrowebxr2/cores/snes9x_libretro.wasm | grep -i content-type
 
 # Apache error log on the box
 ssh -i <your-ssh-key> <user>@<host> \
@@ -114,15 +129,35 @@ ssh -i <your-ssh-key> <user>@<host> \
 
 # What's actually deployed
 ssh -i <your-ssh-key> <user>@<host> \
-    "ls -la /var/www/html/webxr/libretrowebxr/ /var/www/html/webxr/libretrowebxr/cores/"
+    "ls -la /var/www/html/webxr/libretrowebxr2/ /var/www/html/webxr/libretrowebxr2/cores/"
+
+# The room/log server unit (multiplayer + the log receiver share one process)
+ssh -i <your-ssh-key> <user>@<host> \
+    "sudo systemctl status libretrowebxr-room; sudo journalctl -u libretrowebxr-room -n 50"
 ```
 
 The .htaccess in `dist/.htaccess` is the source of truth for headers. If
 COOP/COEP aren't applied after deploy, the most likely cause is Apache's
-default `AllowOverride None` swallowing the .htaccess — `deploy/libretrowebxr.conf`
+default `AllowOverride None` swallowing the .htaccess — `deploy/libretrowebxr2.conf`
 fixes that by scope-enabling `AllowOverride FileInfo Indexes` for this
 project's dir. It must be present in `/etc/apache2/conf-available/` and
-enabled with `a2enconf libretrowebxr`.
+enabled with `a2enconf libretrowebxr2`. (`deploy/libretrowebxr.conf` is the same
+snippet for the old prototype folder — enabling one does **not** cover the
+other; `AllowOverride` is per-`<Directory>`.)
+
+### The headset log viewer needs a token
+
+`https://dionysus.dk/logs?session=<room>` is still the headset debugging loop,
+but **reads are token-gated in production**: append `&token=<yours>`, or send
+`X-Log-Token`. `POST /log` is *not* gated, so the app and the Quest are
+unaffected — only the reader needs the secret. It lives in
+`/etc/default/libretrowebxr-room` on the box (`sudo cat` it), is pulled in by the
+systemd unit's `EnvironmentFile=-…`, and is not in the repo. Without it,
+`GET /logs.json?tail=0` handed every session's room names, nicks and
+private-library ROM filenames to anyone on the internet. Bookmark the URL
+**with** the token — the viewer's 5 s meta-refresh and its filter form both carry
+whatever was in the query string. Full recipe: `docs/HANDOFF.md` → "Reading
+headset logs (the token)".
 
 ## Things the harness cannot debug
 
@@ -155,6 +190,14 @@ enabled with `a2enconf libretrowebxr`.
 | `crossOriginIsolated: false` on the deployed site | `AllowOverride None` in Apache's default config swallows the project's `.htaccess` | Enable `AllowOverride FileInfo Indexes` for the project dir via `conf-available/libretrowebxr.conf` |
 
 ## Architectural lesson learned the hard way
+
+> **Scope note (still true, no longer universal).** This section describes the
+> **main-thread** topology, which is how 16 of the 20 systems still boot. The
+> four heavy cores flagged `execution: 'worker'` in `src/systems.js` (PSX, PS2,
+> N64, DOS) *do* run in a dedicated worker — a purpose-built one
+> (`src/runtime/EmulatorWorkerRuntime.js` + `RuntimeEmulatorClient`) with its own
+> frame/audio/ACK protocol, not webretro's broken `emulator-worker.js`. The
+> lesson below is about that file, and it stands.
 
 The libretro core runs on the **main thread** via a `<script>` tag, not in a
 Web Worker. This matches webretro's own working pattern (see
@@ -259,9 +302,19 @@ foreach ($l in 'node_modules','public') {
 Remove-Item C:\LLM\_scratch -Recurse -Force   # only after both junctions are gone
 ```
 
-Afterwards verify the real tree: `public/cores/` should hold **52 files /
-122,547,567 bytes**, and `node scripts/test-patched-cores.mjs` should report
-**40 passed, 0 failed**.
+Afterwards verify the real tree is intact. **Take the fingerprint before you
+start, not from this file** — it was written down here once as "52 files /
+122,547,567 bytes / 40 passed" and every one of those three numbers is now wrong
+(the tree grows whenever a core is fetched or rebuilt), which makes a hardcoded
+figure a false alarm rather than a check:
+
+```powershell
+(Get-ChildItem public/cores -File | Measure-Object Length -Sum) |
+  Select-Object Count, Sum        # run BEFORE and AFTER; they must match
+node scripts/test-patched-cores.mjs   # must report 0 failed, and must NOT
+                                      # print SUITE-STATUS: inert (that means
+                                      # it found no cores to inspect at all)
+```
 
 ### Two harness hazards that void a run entirely
 

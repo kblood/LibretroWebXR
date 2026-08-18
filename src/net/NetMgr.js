@@ -33,6 +33,41 @@ const FALLBACK_ELECT_MS = 1200;
 // restart). The server remembers a departed host's sid for HOST_RECLAIM_MS, so a
 // reconnect inside that window gets the host role — and the running game — back.
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
+// The relay's "try again later" close (RFC 6455 1013). Spelled out here rather
+// than imported from NetProtocol ON PURPOSE: NetProtocol owns the codes that are
+// part of the client/server CONTRACT, and 1013 is deliberately not one of them —
+// it must never join PERMANENT_CLOSE_CODES, because the whole point of it is that
+// we come back. What it means to THIS class is only "pick the slower table", a
+// client-local policy, so that is where it lives.
+const TRY_AGAIN_CLOSE_CODE = 1013;
+// Backoff for a relay that refused us on purpose (1013 + a reason: room full,
+// address at its socket cap, relay at capacity). Deliberately an order of
+// magnitude slower than the drop table above, and it is a SERVER-LOAD fix as much
+// as a client one.
+//
+// A capacity refusal is soft — the relay accepts the upgrade and closes it, so
+// 'open' fires — and the shipped clients used to reset `_reconnectTries` there.
+// The backoff chain therefore never advanced past its first step and a refused
+// client knocked at 2 Hz for the life of the page; two of them behind one NAT
+// exhausted that address's whole upgrade budget and locked out the household,
+// already-connected headsets included. Both halves are fixed: the counter now
+// resets when a SESSION exists (the HELLO), not when a handshake completes, and a
+// refusal picks this table. A full room polled at 5-30 s costs the relay ~2
+// upgrades a minute per device instead of 120.
+//
+// What that costs the user, stated honestly rather than as "within seconds":
+// ~10-30 s after a seat actually opens, in the case this table exists for. A
+// household that drops off Wi-Fi without a clean close leaves ghost sockets the
+// relay only reaps a heartbeat sweep after the ping they missed, so the seats
+// free at ~18-20 s; each device's first retry is on the FAST table (a blip is a
+// 1006), is refused 1013 because the ghosts still hold both the address slots and
+// the room seats, and from there this table applies — the 10 s attempt is still
+// too early and the room reassembles on the 20 s one. A peer that leaves CLEANLY
+// frees its seat at once, so there the next scheduled attempt is the whole wait.
+// This is also why the refusal reason has to reach the UI (src/main.js): during
+// that gap the only honest thing to show is what the relay said and when we will
+// ask again.
+const RETRY_LATER_DELAYS_MS = [5000, 10000, 20000, 30000, 30000];
 
 const _p = new THREE.Vector3();
 const _q = new THREE.Quaternion();
@@ -50,7 +85,7 @@ function defaultServerUrl() {
 }
 
 export class NetMgr {
-  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, onWire = null, onPeerLeave = null, onHostChange = null, onFatal = null, videoCanvas = null, videoAudio = null, onHostVideo = null, onHostVideoEnded = null, iceServers = null, sessionId = null, now = () => performance.now() }) {
+  constructor({ scene, room, serverUrl, nick, color, sendHz = 12, onObjectState = null, onGameInput = null, onWire = null, onPeerLeave = null, onHostChange = null, onFatal = null, onRetry = null, videoCanvas = null, videoAudio = null, onHostVideo = null, onHostVideoEnded = null, iceServers = null, sessionId = null, now = () => performance.now() }) {
     this.scene = scene;
     this.room = room || 'lobby';
     this.nick = nick || 'Player';
@@ -78,6 +113,14 @@ export class NetMgr {
     this._closing = false;
     this._reconnectTries = 0;
     this._reconnectTimer = null;
+    // Sticky "the relay is refusing us, not dropping us": set by a 1013 close and
+    // cleared only once a session exists. Sticky because the relay's SECOND-tier
+    // refusal (an address over its soft-refusal budget) kills the upgrade
+    // outright, which in a browser is a bare 1006 — indistinguishable from a
+    // Wi-Fi blip. Without this flag a client that had just been told 1013 would
+    // drop straight back to the fast table on the next attempt and hammer the
+    // exact relay that asked it not to.
+    this._retryLater = false;
     // COR-9 protocol handshake. `_fatal` is set once, and once it is set this
     // NetMgr is DONE: the pair is incompatible, so retrying the same build can
     // only produce the same refusal. `onFatal({code, reason})` is the app's hook
@@ -87,6 +130,20 @@ export class NetMgr {
     // case 3c of the "Client reconnect gate" section, against this real class.
     this._fatal = null;
     this._onFatal = onFatal;
+    // The TRANSIENT counterpart of `_fatal`: why we are currently offline and
+    // when we will try again. `onFatal` covers "never coming back"; this covers
+    // the far commoner "not right now" — a relay restart, a Wi-Fi blip, or an
+    // admission cap saying come back in a moment (the room server closes those
+    // with 1013 + a reason rather than killing the upgrade, precisely so the
+    // reason arrives). Written on every scheduled retry, and handed to `onRetry`
+    // if the app supplied one — src/main.js does, and mpOfflineStatus() there
+    // paints BOTH the header widget and the in-VR panel from this object rather
+    // than latching the callback's copy, precisely because _noteSessionEstablished
+    // clears it and the line then has to go away by itself. Without it a
+    // first-connect failure is indistinguishable from an idle client that was
+    // never asked to connect.
+    this.lastClose = null;       // { code, reason, attempt, delayMs } | null
+    this._onRetry = onRetry;
     this.serverVersion = null;   // what the room server said in HELLO (null = pre-COR-9)
     // M0 hardening: optional TURN/STUN config for the WebRTC meshes (voice +
     // video). null → each manager uses its built-in STUN-only default. A full
@@ -443,7 +500,9 @@ export class NetMgr {
     ws.addEventListener('open', () => {
       this._connected = true;
       this._closing = false;
-      this._reconnectTries = 0;
+      // NOT `_reconnectTries = 0` — see _noteSessionEstablished(). An 'open' is
+      // now also what a soft capacity refusal looks like, one close frame before
+      // it arrives.
       this._joinedAt = Date.now();
       ws.send(encode(makeJoin({ nick: this.nick, color: this.color })));
       console.log(`[net] connected to "${this.room}" as ${this.nick}`);
@@ -457,6 +516,9 @@ export class NetMgr {
       // acting on the roster, because an incompatible HELLO's contents are
       // exactly what we must not trust.
       if (msg.type === MSG.HELLO && !this._checkServerProtocol(msg.v)) return;
+      // A compatible HELLO is the first proof we have a SESSION and not merely a
+      // socket — which is what the backoff must key on. See below.
+      if (msg.type === MSG.HELLO) this._noteSessionEstablished();
       if (msg.type === MSG.SIGNAL) {                                  // WebRTC negotiation
         if (msg.channel === 'video') this.video.handleSignal(msg);   // host↔client game video
         else this.voice.handleSignal(msg);                           // voice mesh (default)
@@ -510,7 +572,6 @@ export class NetMgr {
     // can't keep running + publishing as a second host (the exact "two
     // simultaneous hosts" bug), then try to reconnect and reclaim.
     ws.addEventListener('close', (ev) => {
-      const wasConnected = this._connected;
       this._connected = false;
       // CONNECTION LOST (or our own close, already announced above): the socket
       // is gone, so a 'bye' cannot reach anyone — tear the capture down locally
@@ -525,25 +586,76 @@ export class NetMgr {
         this._setHost(null);
         return;
       }
+      // EVERY non-permanent close is retried, INCLUDING one on the very first
+      // connect. The gate here used to be `wasConnected || this._reconnectTries`,
+      // and on a fresh NetMgr's first connect both are falsy — so a relay that
+      // was momentarily unreachable, or that refused the upgrade outright (its
+      // admission caps used to answer 503/429 at the handshake), left the widget
+      // on "Offline" for the rest of the page's life with no reason shown and
+      // nothing retrying behind it. That is the same dead end COR-9 fixed for
+      // 4010, reached from the other direction. `_fatal` — checked just above and
+      // again inside _scheduleReconnect — is what stops a hopeless retry loop;
+      // "we have not managed to connect yet" never was a reason to give up.
       if (!this._closing) {
         this._setHost(null);
-        if (wasConnected || this._reconnectTries) this._scheduleReconnect();
+        this._scheduleReconnect({ code: ev?.code, reason: ev?.reason });
       }
     });
     ws.addEventListener('error', () => { /* close follows */ });
     return this;
   }
 
+  /**
+   * A SESSION exists: the relay answered our JOIN with a HELLO, so we have a peer
+   * id, a roster and (in a moment) the room's replayed state.
+   *
+   * This is where the reconnect backoff resets, and the distinction is not
+   * academic. It used to reset in the socket's 'open' handler, which was correct
+   * when the only way to get an 'open' was to be admitted — and stopped being
+   * correct the moment the relay started refusing capacity SOFTLY (accept the
+   * upgrade, then close 1013 + a reason, so a deployed client retries at all).
+   * A refusal now MAKES 'open' fire, so resetting there meant every refusal reset
+   * the backoff: 500 ms, open, refused, 500 ms, forever. 'open' means "the
+   * handshake completed"; only a HELLO means "we are in".
+   *
+   * `lastClose` is cleared for the same reason — it is the TRANSIENT "why are we
+   * offline right now", and we are not.
+   */
+  _noteSessionEstablished() {
+    this._reconnectTries = 0;
+    this._retryLater = false;
+    this.lastClose = null;
+  }
+
   // Re-open the socket with backoff after an unexpected close. Presence/avatars
   // are cleared first (the server assigns a NEW peer id on reconnect, so the old
   // roster is meaningless); the shared object state is replayed by the server.
-  _scheduleReconnect() {
+  _scheduleReconnect(why = null) {
     // `_fatal` is checked here as well as in the close handler on purpose: this
     // is the only place that re-opens a socket, so the "never retry a permanent
     // refusal" rule holds even if some future caller reaches it another way.
     if (this._closing || this._fatal || this._reconnectTimer) return;
-    const delay = RECONNECT_DELAYS_MS[Math.min(this._reconnectTries, RECONNECT_DELAYS_MS.length - 1)];
+    // A close code of 0 means the socket never opened at all, which is not a code
+    // worth showing, so it is normalised to null rather than printed as "(0)".
+    const code = Number(why?.code ?? 0) || null;
+    // 1013 = "we are busy, come back later", not "the network broke". Retrying it
+    // on the 500 ms table is what turns one refused client into a 2 Hz flood.
+    if (code === TRY_AGAIN_CLOSE_CODE) this._retryLater = true;
+    const table = this._retryLater ? RETRY_LATER_DELAYS_MS : RECONNECT_DELAYS_MS;
+    const delay = table[Math.min(this._reconnectTries, table.length - 1)];
     this._reconnectTries++;
+    // Record and announce WHY before arming the timer.
+    this.lastClose = {
+      code,
+      reason: String(why?.reason || ''),
+      attempt: this._reconnectTries,
+      delayMs: delay,
+    };
+    const { reason } = this.lastClose;
+    console.warn(`[net] disconnected from "${this.room}"${code ? ` (${code}${reason ? `: ${reason}` : ''})` : ''} — retrying in ${delay}ms (attempt ${this._reconnectTries})`);
+    if (this._onRetry) {
+      try { this._onRetry({ ...this.lastClose }); } catch (e) { console.warn('[net] onRetry', e); }
+    }
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
       if (this._closing) return;
@@ -612,11 +724,15 @@ export class NetMgr {
     const peers = this.presence.peers();
     this.avatars.sync(peers);
     this.avatars.tick(dtMs);
+    // Both consumers below want the ids, not the peer records, and both only
+    // READ them — so take the roster-versioned cached array instead of mapping
+    // the peer list twice more every rendered frame (PERF-4(b)).
+    const peerIds = this.presence.ids();
     // Keep the voice mesh in step with the roster (no-op until voice enabled).
-    if (this.voice.enabled) this.voice.syncPeers(peers.map((p) => p.id));
+    if (this.voice.enabled) this.voice.syncPeers(peerIds);
     // Reconcile the host→client video connections against the roster + who the
     // server-elected host is. No-op for a non-host with no host streaming.
-    this.video.update({ peerIds: peers.map((p) => p.id), selfId: this.presence.selfId, hostId: this._hostId });
+    this.video.update({ peerIds, selfId: this.presence.selfId, hostId: this._hostId });
 
     // Throttle the local pose out.
     if (!this._connected || !this.ws) return;
@@ -718,6 +834,10 @@ export class NetMgr {
       protocolVersion: () => PROTOCOL_VERSION,
       serverProtocol: () => this.serverVersion,
       fatal: () => (this._fatal ? { ...this._fatal } : null),
+      // …and the TRANSIENT half: why the last socket went away and which retry
+      // we are on. A probe (or a future widget) that sees `fatal() === null` but
+      // a `lastClose()` needs to say "reconnecting", not "Offline".
+      lastClose: () => (this.lastClose ? { ...this.lastClose } : null),
     };
   }
 }

@@ -117,7 +117,46 @@ the AROS boot screen (verified). A bootable public-domain `.adf` is needed to
 show an actual program — that's the per-system test-game authoring goal, not a
 code gap.
 
+## Provenance — what this recipe still cannot reproduce (ARC-3)
+
+Read this before trusting the recipe above to give you the same binary twice.
+
+The commands in step 2 are `git clone --depth 1` at branch HEAD, of two
+repositories that move. Nothing in this document, and nothing that shipped with
+the core, records which commit of `EmulatorJS/libretro-uae` or of
+`libretro/RetroArch` the deployed `puae_libretro.wasm` was actually built from.
+The other custom cores each carry a `public/cores/<core>.build.json` manifest —
+upstream repos + SHAs, emsdk version, build flags, a sha256 per artifact — and
+**those manifests are git-tracked as of 2026-08-17**: `.gitignore` ignores
+`public/cores/*` and force-includes `!public/cores/*.build.json`, so a clean
+clone carries them. The Amiga core is the one with no manifest at all.
+
+Closing that is a one-run job, and `scripts/cores/amiga/build-puae-lightgun.sh`
+now does the recording for you. On its next run it:
+
+* reads the HEAD of both checkouts and prints them, then writes
+  `puae_libretro.build.json` into `$STAGE_DIR` with those SHAs, the emsdk
+  version, the link flags and a sha256 per artifact — copy it into
+  `public/cores/` **and commit it**;
+* captures the shared checkout's local patch set (the un-upstreamed rwebinput
+  light-gun and rwebaudio diffs) to `retroarch-worktree.patch` and fingerprints
+  it into the manifest, so a rebuild after `~/amiga-build/RetroArch` is reset has
+  something to reapply instead of a prose description;
+* prints the two SHAs in a form you can paste into its `RETROARCH_COMMIT_EXPECTED`
+  and `LIBRETRO_UAE_COMMIT_EXPECTED` variables, which turns today's record into
+  tomorrow's enforced pin. Both default to empty — deliberately, because inventing
+  a SHA nobody verified would be worse than an admitted gap. `ALLOW_UNPINNED=1`
+  downgrades any pin mismatch back to a warning.
+
+It also stopped being able to lie about the light gun. It used to `grep -c
+rwebinput_set_lightgun` and print the answer; a `0` — the frontend patch missing
+from the shared checkout — carried straight on to produce a healthy-looking Amiga
+core whose gun input reads 0 for ever, and `echo "BUILD_EXIT=$?"` recorded a
+failed link and then exited 0 anyway. All three are hard failures now, including
+a final check that the linked `puae_libretro.js` really exports the setter.
+
 ## Deploy
 
-`public/cores/` is gitignored; `npm run deploy` rehosts cores on dionysus.dk.
-The 18 MB `puae_libretro.wasm` must be uploaded with the other cores.
+`public/cores/` binaries are gitignored (`*.build.json` is not — see above);
+`npm run deploy` rehosts cores on dionysus.dk. The 18 MB `puae_libretro.wasm`
+must be uploaded with the other cores.

@@ -308,8 +308,14 @@ Highlights, newest first:
      server's `boot-attempt` event (logged in both `loadCartridge` and
      `loadCartridgeIntoConsole`) carries `{file, system, core, plan:{sha1,
      cacheKey, order, url}, opfs}` and is the right first stop:
-     `curl https://dionysus.dk/logs.json?tail=0` (careful — no `session` filter
-     returns EVERY session; `tail=0` disables the 200-entry default cap too).
+     `curl "https://dionysus.dk/logs.json?tail=0&token=$LOG_TOKEN"` (careful — no
+     `session` filter returns EVERY session; `tail=0` disables the 200-entry
+     default cap too). **Reads are token-gated in production** — that is exactly
+     why: without a token this one call hands every session's room names, nicks
+     and private-library ROM filenames to anyone on the internet. The value is
+     generated on the box and lives in `/etc/default/libretrowebxr-room`
+     (`sudo cat` it); `POST /log` is never gated, so the Quest is unaffected.
+     See [Reading headset logs](#reading-headset-logs-the-token).
   2. While chasing a related desktop-only report ("mouse movement becomes
      very different" after loading an external ROM), found and fixed a real,
      separate bug: `MouseMgr.attachDesktop()`'s click listener called
@@ -1018,7 +1024,9 @@ flat-screen build is also live at
 **`/webxr/libretrowebxr2/desktop.html`**. **The in-headset smoke-test
 checklist is live at `/webxr/libretrowebxr2/headset-test.html`** (linked from
 the app header — "🧪 Headset Test"). Headset logs viewable at
-**`https://dionysus.dk/logs?session=<room>`**. The original
+**`https://dionysus.dk/logs?session=<room>&token=<yours>`** (reads are
+token-gated in production — see [Reading headset logs](#reading-headset-logs-the-token)).
+The original
 https://dionysus.dk/webxr/libretrowebxr/ is the older prototype and is left
 untouched — `libretrowebxr2` is a deliberate separate folder.
 
@@ -1247,6 +1255,40 @@ pwsh scripts/deploy.ps1 -DryRun -SkipBuild   # see remote actions, touch nothing
   for `libretrowebxr2`. Verify after deploy:
   `curl -sI https://dionysus.dk/webxr/<name>/ | grep -i cross-origin`.
 
+### Reading headset logs (the token)
+
+`https://dionysus.dk/logs?session=<room>` is the headset debugging loop and it
+still works exactly as before — with `&token=<yours>` on the end. **Reads** are
+gated in production; **`POST /log` is not and never will be**, so the Quest
+carries no secret and nothing in the app changes.
+
+```
+https://dionysus.dk/logs?session=<room>&token=<yours>          # the viewer
+curl "https://dionysus.dk/logs.json?session=<room>&token=$LOG_TOKEN"   # raw JSON
+curl -H "X-Log-Token: $LOG_TOKEN" https://dionysus.dk/logs.json?tail=0 # header form
+```
+
+The token is generated **on the box** and lives in
+`/etc/default/libretrowebxr-room`, which the systemd unit pulls in via
+`EnvironmentFile=-…` (the `-` keeps the unit starting if the file is absent —
+then reads are open again, as they were before 2026-08-17). Read it back with
+`sudo cat /etc/default/libretrowebxr-room`; create it with
+`sudo sh -c 'umask 077; echo "LOG_TOKEN=$(openssl rand -hex 24)" > /etc/default/libretrowebxr-room'`
+followed by `sudo systemctl restart libretrowebxr-room`. It is **not** in the
+repo, same rule as `deploy/coturn.conf.example`.
+
+Why it is worth the suffix: `GET /logs.json?tail=0` with no `session` filter
+returns every session's entries *and* enumerates the session ids, and the entries
+carry room names, nicks and the ROM filenames of the private library — shipped
+automatically by every visitor to the production host (`src/Logger.js`
+auto-enables remote logging on `dionysus.dk`). Two independent whole-repo reviews
+flagged it; the gate was already implemented in `server/log-server.mjs`, the
+deployment just never switched it on.
+
+Once a token is in a URL, the viewer keeps it: the 5 s meta-refresh re-requests
+the current URL query string and all, and the filter form re-submits it as a
+hidden field. Bookmark the URL **with** the token.
+
 ## Hard invariants (don't break these)
 
 - **The gamepad is grabbable in BOTH play and edit mode.** It's a room prop (so
@@ -1453,7 +1495,16 @@ server/
   log-server.mjs     ★LOG POST /log receiver + GET /logs (auto-refreshing HTML
                      viewer) + GET /logs.json. Per-session ring buffer + optional
                      NDJSON append. Mounted by room-server.mjs (port 8788).
+                     READS are token-gated (LOG_TOKEN, set on the box); POST is
+                     not — see "Reading headset logs (the token)" above.
 deploy/
+  libretrowebxr-room.service
+                     ★MP systemd unit. Ships ROOM_HOST=127.0.0.1 (Apache proxies
+                     /ws/ from loopback, so :8787 needs no public interface) +
+                     ROOM_TRUST_PROXY=1 (required by it — the per-address caps
+                     would otherwise bill every headset to 127.0.0.1) +
+                     EnvironmentFile=-/etc/default/libretrowebxr-room for
+                     LOG_TOKEN. The env file is created on the box, never here.
   log-proxy.conf     ★LOG Apache reverse-proxy snippet for /log + /logs + /logs.json.
                      Note: ProxyPass matches on whole path segments — /logs alone
                      does NOT cover /logs.json; an explicit rule for /logs.json
@@ -1568,7 +1619,8 @@ inline. If you're picking up stale-looking doc claims again, check `git log
 - **Controls bug (open item):** Quest users sometimes can't control the console
   after a cross-core reload. The input pipeline is now **instrumented** (`logger`
   'input' + 'input-state' events in main.js) but the bug is not confirmed fixed.
-  Diagnose from `https://dionysus.dk/logs?session=<room>` during a headset session:
+  Diagnose from `https://dionysus.dk/logs?session=<room>&token=<yours>` during a
+  headset session ([the token](#reading-headset-logs-the-token)):
   `held:false` → gamepad not grabbed; `held:true xr:0` → no XR gamepad visible;
   'input-state' reading but no 'input' events → dispatch issue.
 - ~~Picked poster images are blob: URLs~~ **✅ already fixed (`0d8a75d`,
@@ -1753,7 +1805,8 @@ that are still real:
 1. **Diagnose + fix the controls bug on a real Quest.** Unchanged from the prior
    handoff — still open, still just instrumented, not reproduced or fixed since.
    The input pipeline emits Logger 'input'/'input-state' events; reproduce on a
-   headset, watch `https://dionysus.dk/logs?session=<room>` from a desktop, read
+   headset, watch `https://dionysus.dk/logs?session=<room>&token=<yours>`
+   ([the token](#reading-headset-logs-the-token)) from a desktop, read
    the state log to pin the failure mode. Fix → `npm run deploy`.
 2. **Real-headset validation backlog** — several features have shipped logic-
    verified but headset-unverified: light-gun aim/fire in VR (checklist:
@@ -1892,8 +1945,9 @@ diagnosis actually went (not just the fix):
    pull `boot-attempt`'s `bytes` field and sanity-check it against a known
    ROM size *before* chasing wiring/code theories — it's a 30-second check
    that would have shortened this investigation considerably. Fetching logs:
-   `curl https://dionysus.dk/logs.json?tail=0 -o out.json` (all sessions, no
-   truncation — large; add `?session=<id>` once you know which one), then
+   `curl "https://dionysus.dk/logs.json?tail=0&token=$LOG_TOKEN" -o out.json`
+   (all sessions, no truncation — large; add `&session=<id>` once you know which
+   one; [the token](#reading-headset-logs-the-token)), then
    filter `entries` by `sessionId` and sort by `ts`.
 5. **Follow-up: fixed the real-but-irrelevant arming-leak bug from step 1.**
    The user opted for a "disarm" option over leaving it or a stricter

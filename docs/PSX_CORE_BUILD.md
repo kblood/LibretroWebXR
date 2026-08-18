@@ -66,6 +66,16 @@ cp scripts/cores/psx/core-build/dist/mednafen_psx_jit_libretro.{js,wasm,worker.j
 (`play_libretro.*`, etc.): build once, place on disk, never commit the
 binary.
 
+**One exception, added 2026-08-17 (ARC-3): `*.build.json` IS committed.**
+`.gitignore` ignores `public/cores/*` and force-includes
+`!public/cores/*.build.json`. That manifest is a few KB of reviewable text and
+it is the entire provenance record for a binary nobody can see in the repo —
+upstream repos + SHAs (RetroArch, beetle-psx, Play--CodeGen, Play--Framework),
+the emsdk/emscripten commits, the link flags, and a sha256 per artifact. Copy it
+into `public/cores/` with the binaries and commit it; `scripts/fetch-cores.mjs`
+checks those sha256s against the bytes on disk. `PATCHED.json` stays ignored —
+see `scripts/test-patched-cores.mjs` for why its absence has to mean something.
+
 ### Light-gun (GunCon) support — REQUIRED, easy to lose on a rebuild
 
 **Fixed 2026-07-27.** `core-build/build.sh`, as published, applies exactly

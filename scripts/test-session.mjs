@@ -58,10 +58,21 @@ const eq = (name, got, want) => {
   ok(s.length === 4,                      'returns exactly 4 chars');
   ok(/^[a-z0-9]+$/.test(s),              'only lowercase alphanumeric');
 
-  // Two calls should (almost certainly) differ — collision probability is 1/1296.
-  const s2 = randomRoomSuffix();
-  // We just check they're valid, not that they differ (flaky for pure randomness).
-  ok(typeof s2 === 'string' && s2.length === 4, 'second call also valid');
+  // RANDOMNESS HAS TO BE ASSERTED, not assumed. This used to draw a second
+  // suffix and check only that it was "also valid", with a comment declining to
+  // compare them because two draws collide 1 time in 1296. That left the only
+  // failure that matters — an implementation that returns a CONSTANT, so every
+  // auto-named room in the world is `lobby-abcd` and two unrelated players land
+  // in each other's session — passing every assertion here.
+  //
+  // Eight draws, demand at least two distinct values. A correct implementation
+  // fails this only if all eight collide: 1296^-7 ≈ 2e-22, i.e. never. A
+  // constant-returning one fails it every single run.
+  const draws = Array.from({ length: 8 }, () => randomRoomSuffix());
+  ok(draws.every((d) => typeof d === 'string' && d.length === 4 && /^[a-z0-9]+$/.test(d)),
+     `all 8 draws are valid 4-char suffixes (got ${JSON.stringify(draws)})`);
+  ok(new Set(draws).size >= 2,
+     `8 draws yield at least 2 distinct suffixes (got ${JSON.stringify(draws)})`);
 }
 
 // === spawnSeatOffset =======================================================

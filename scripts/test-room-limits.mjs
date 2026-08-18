@@ -23,9 +23,12 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join as pathJoin } from 'node:path';
 import { readFileSync, readdirSync } from 'node:fs';
+import { networkInterfaces } from 'node:os';
+import { createServer, connect } from 'node:net';
 import { WebSocket } from 'ws';
 import {
   encode, decode, makeJoin, makePose, makeState, makeSignal, makeInput, makeWire, MSG,
+  isPermanentClose,
 } from '../src/net/NetProtocol.js';
 import { Hub, HUB_LIMITS, measureValue } from '../server/Hub.js';
 
@@ -48,10 +51,34 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- server harness --------------------------------------------------------
 
+// Applied to EVERY spawned relay, before that server's own env.
+//
+// This suite drives dozens of sockets from ONE address — 127.0.0.1 for all of
+// them — and section 0b alone opens 64, four times the RELAY-3 per-address
+// concurrency cap (16 sockets, 256 upgrades/minute at the shipped defaults —
+// both derived from ROOM_MAX_PEERS, and printed verbatim in the boot line
+// section 14g asserts on). Left alone those caps would refuse most of the run and
+// every measurement above would silently become a measurement of THAT. They are
+// raised out of the way here and set back DOWN by section 14, which is the
+// section that tests them; anything that overrides them wins, because this
+// spreads first.
+const BASE_ENV = {
+  ROOM_MAX_SOCKETS_PER_IP: '512',
+  ROOM_MAX_UPGRADES_PER_IP: '100000',
+  // …and the per-address SOFT-REFUSAL budget, for the same reason: every
+  // refusal this suite provokes is billed to 127.0.0.1, and past that budget a
+  // refusal arrives as a killed upgrade (429) instead of the 1013 + reason the
+  // sections above assert on. Section 14e is where it is turned back DOWN and
+  // tested; a section that wants the SHIPPED default passes an empty string,
+  // which parses as "unset" and restores it (see 14g).
+  ROOM_MAX_SOFT_REFUSALS_PER_IP: '100000',
+};
+
 function startServer(port, env, { entry = SERVER, args = [] } = {}) {
+  const full = { ...process.env, PORT: String(port), ...BASE_ENV, ...env };
   const child = args.length
-    ? spawn(process.execPath, args, { cwd: ROOT, env: { ...process.env, PORT: String(port), ...env } })
-    : spawn(process.execPath, [entry], { cwd: ROOT, env: { ...process.env, PORT: String(port), ...env } });
+    ? spawn(process.execPath, args, { cwd: ROOT, env: full })
+    : spawn(process.execPath, [entry], { cwd: ROOT, env: full });
   const out = [];
   let exited = null;
   child.stdout.on('data', (d) => out.push(String(d)));
@@ -64,15 +91,60 @@ function startServer(port, env, { entry = SERVER, args = [] } = {}) {
       if (exited != null) { clearInterval(tick); clearTimeout(t); reject(new Error(`server :${port} exited ${exited}\n${out.join('')}`)); }
     }, 40);
   });
-  return { child, out, ready, get exited() { return exited; }, log: () => out.join('') };
+  // Wait for a line to APPEAR in the child's output, rather than sampling
+  // `log()` the instant `ready` resolves. `ready` fires on "listening on :PORT",
+  // which is only the FIRST of four lines the 'listening' handler prints — the
+  // limits/per-address/state-budget banners follow in the same tick in the child
+  // but arrive here in separate stdout chunks. Sampling raced them, and an
+  // assertion on a boot line that is merely LATE is a flake, not a finding.
+  const waitLog = (re, ms = 3000) => new Promise((resolve) => {
+    const t0 = Date.now();
+    const tick = setInterval(() => {
+      if (re.test(out.join('')) || Date.now() - t0 > ms) { clearInterval(tick); resolve(re.test(out.join(''))); }
+    }, 25);
+  });
+  return { child, out, ready, port, waitLog, get exited() { return exited; }, log: () => out.join('') };
 }
 
-const stop = (s) => new Promise((r) => {
-  if (!s || s.exited != null) return r();
-  s.child.once('exit', () => r());
-  s.child.kill();                       // by PID — never by process name
-  setTimeout(r, 1500);
-});
+async function stop(s) {
+  if (!s) return;
+  if (s.exited == null) {
+    await new Promise((r) => {
+      s.child.once('exit', () => r());
+      s.child.kill();                   // by PID — never by process name
+      setTimeout(r, 1500);
+    });
+  }
+  // …and do not return until the port is actually reusable (see waitPortFree).
+  if (s.port) await waitPortFree(s.port);
+}
+
+/**
+ * Wait until nothing is listening on `port` — i.e. until the port can be bound.
+ *
+ * `stop()` resolves on the child's 'exit', which is NOT the same instant the OS
+ * releases its listening socket, and several sections below now re-spawn on the
+ * SAME port back to back. Without this the next server loses the bind race, and
+ * the failure is silent in the worst possible way: the assertions that follow
+ * connect to whatever IS still listening on that port (the previous section's
+ * relay, with the previous section's env) and quietly measure the wrong process.
+ * That produced impossible readings — a section reporting more refusals than it
+ * had sent writes, and RSS read from an already-dead pid.
+ */
+async function waitPortFree(port, ms = 4000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const free = await new Promise((resolve) => {
+      const probe = createServer();
+      probe.once('error', () => resolve(false));
+      // Wildcard, like the relay itself: a probe bound to 127.0.0.1 could succeed
+      // while a server still holds 0.0.0.0 on the same port.
+      probe.listen(port, () => probe.close(() => resolve(true)));
+    });
+    if (free || Date.now() > deadline) return free;
+    await sleep(60);
+  }
+}
 
 /**
  * Resident set size of another process, in MiB, or null if it can't be read.
@@ -98,9 +170,17 @@ function rssMiB(pid) {
 
 // --- client harness (same shape as server/smoke.mjs) -----------------------
 
-function client(port, room, name, { sid = null, headers = null } = {}) {
+function client(port, room, name, { sid = null, headers = null, autoPong = true } = {}) {
   const url = `ws://127.0.0.1:${port}/?room=${encodeURIComponent(room)}${sid ? `&sid=${sid}` : ''}`;
-  const ws = new WebSocket(url, headers ? { headers } : undefined);
+  // `autoPong: false` turns this client into a GHOST: the socket stays open at
+  // the TCP level and simply stops answering the relay's heartbeat, which is
+  // exactly what a Quest that sleeps (or an app killed without a clean close)
+  // looks like from the server. `ws` answers pings from inside its receiver, so
+  // there is no way to reproduce that from the outside of the client object.
+  const opts = {};
+  if (headers) opts.headers = headers;
+  if (!autoPong) opts.autoPong = false;
+  const ws = new WebSocket(url, Object.keys(opts).length ? opts : undefined);
   const msgs = [];
   const waiters = [];
   const c = {
@@ -145,6 +225,43 @@ function client(port, room, name, { sid = null, headers = null } = {}) {
   return c;
 }
 
+/**
+ * A WebSocket upgrade driven over a RAW socket that then answers NOTHING —
+ * not the close frame, not a ping.
+ *
+ * The `ws` client library replies to a close frame at once, so a softly refused
+ * `ws` client leaves the relay's client set within one RTT and CANNOT reproduce
+ * the residency section 14d is about. An attacker does not reply. These sockets
+ * stay in wss.clients until the relay's own ROOM_REFUSAL_GRACE_MS terminate
+ * timer fires — which is exactly the condition under which `wss.clients.size`
+ * was the wrong number for the global capacity gate to compare against.
+ *
+ * Resolves the HTTP status the relay answered with, which is also how the two
+ * refusal TIERS are told apart from the outside: 101 = the upgrade was accepted
+ * (a soft refusal, costing the relay a real socket), 429 = the cheap door, no
+ * WebSocket at all.
+ */
+function rawUpgrade(port, room) {
+  return new Promise((resolve) => {
+    const sock = connect(port, '127.0.0.1');
+    let buf = '';
+    let done = false;
+    const finish = (status) => { if (done) return; done = true; resolve({ sock, status }); };
+    sock.on('connect', () => {
+      sock.write(`GET /?room=${encodeURIComponent(room)} HTTP/1.1\r\n`
+        + `Host: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n`
+        + 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n');
+    });
+    // The status line is the first thing on the wire either way, so the first
+    // chunk is enough — and we deliberately never read past it.
+    sock.on('data', (d) => { buf += d.toString('latin1'); if (buf.includes('\r\n')) finish(Number(buf.slice(9, 12))); });
+    sock.on('error', () => finish(0));
+    sock.on('close', () => finish(0));
+    const t = setTimeout(() => finish(0), 3000);
+    if (typeof t.unref === 'function') t.unref();
+  });
+}
+
 /** Connect and settle: resolves with the peer once its HELLO has landed. */
 async function join(port, room, name, opts) {
   const c = client(port, room, name, opts);
@@ -158,6 +275,43 @@ async function tryJoin(port, room, name, opts) {
   const c = client(port, room, name, opts);
   try { await c.open(); } catch (e) { return { ok: false, reason: e.message, c }; }
   return { ok: true, c };
+}
+
+/**
+ * Attempt a connection and report how the relay ANSWERED it.
+ *
+ * `tryJoin` above asks a narrower question — did the HTTP upgrade survive — and
+ * that stopped being the same question. A capacity cap normally does NOT kill
+ * the upgrade: it accepts the socket and closes it with 1013 + a reason, because
+ * the clients already deployed to headsets only retry a socket that opened at
+ * least once, so a killed upgrade left them on "Offline" forever with nothing
+ * retrying behind it (server/README.md, "How a cap refuses"). So admission is
+ * now decided by what arrives AFTER the open: a HELLO, or a close.
+ *
+ * `opened` is what tells the two refusal TIERS apart, and sections 14d/14e rely
+ * on it: `opened: true` is the soft tier (the relay spent a handshake to say why),
+ * `opened: false` with a 429 in the reason is the cheap door an address gets once
+ * it has burned its soft-refusal budget.
+ *
+ * Both are awaited in the same race, so a slow HELLO can never be misreported
+ * as a refusal — and a relay that answers with neither says so explicitly
+ * rather than resolving one way by default.
+ */
+async function admit(port, room, name, opts) {
+  const c = client(port, room, name, opts);
+  // A KILLED upgrade still has to be reportable — `opened:false` is what an
+  // assertion tests when it wants "the handshake itself was refused".
+  try { await c.open(); }
+  catch (e) { return { admitted: false, opened: false, code: null, reason: e.message, c }; }
+  const verdict = await new Promise((resolve) => {
+    const t = setTimeout(() => resolve({ admitted: false, code: null, reason: 'neither HELLO nor close arrived' }), 3000);
+    const done = (v) => { clearTimeout(t); resolve(v); };
+    if (c.selfId) return done({ admitted: true, code: null, reason: '' });
+    if (c.ws.readyState === c.ws.CLOSED) return done({ admitted: false, code: c.closeCode, reason: c.closeReason });
+    c.ws.on('message', () => { if (c.selfId) done({ admitted: true, code: null, reason: '' }); });
+    c.ws.on('close', (code, reason) => done({ admitted: false, code, reason: String(reason || '') }));
+  });
+  return { ...verdict, opened: true, c };
 }
 
 // --- the caps under test, tightened on :8892 -------------------------------
@@ -197,6 +351,16 @@ const LOOSE_ENV = {
 const BIG_VALUE = 'x'.repeat(4000);          // > 2048 tight, < 256 KiB loose
 const HUGE_FRAME = 'y'.repeat(20000);        // > 8192 tight, < 1 MiB loose
 const HEAD = [1, 1.6, -2, 0, 0, 0, 1];
+
+// The backpressure sections (12, 13, 13b) queue ~13 MB at ONE stalled socket by
+// aiming big DIRECTED frames at it. SIGNAL is the vehicle — a broadcast would
+// back up the healthy observer too — and a SIGNAL body is now capped by the
+// relay at HUB_LIMITS.signalBytes (RELAY-2). Sizing the frame from that cap is
+// not cosmetic: a body OVER it is refused, so nothing would queue at all and
+// three sections would quietly stop testing backpressure while still passing
+// their negative controls. Half the cap, twice the frames, same total bytes.
+const FAT = 'f'.repeat(Math.floor(HUB_LIMITS.signalBytes / 2));
+const FAT_FRAMES = Math.ceil((13 * 1024 * 1024) / FAT.length);   // ~13 MB queued
 
 /**
  * The largest STATE value the shipped app actually sends, built from the REAL
@@ -407,9 +571,9 @@ try {
   // processes started but that each one took ITS OWN env: every pair below is
   // meaningless if TIGHT silently came up on the shipped defaults. Both relays
   // print their effective limits at boot, so assert on those.
-  ok(/payload 8192B, 4 peers\/room/.test(tight.log()),
+  ok(await tight.waitLog(/payload 8192B, 4 peers\/room/),
     'TIGHT came up with the TIGHTENED env it was given (payload 8192B, 4 peers/room in its own boot line)');
-  ok(/payload 1048576B, 16 peers\/room/.test(loose.log()),
+  ok(await loose.waitLog(/payload 1048576B, 16 peers\/room/),
     'LOOSE came up with the SHIPPED payload/rate defaults (payload 1048576B, 16 peers/room) — the control is a real control');
 
   // ---------------------------------------------------------------- 1. peers
@@ -419,15 +583,29 @@ try {
     const held = [];
     for (let i = 0; i < 4; i++) held.push(await join(TIGHT_PORT, room, `T${i}`));
     ok(held.every((c) => c.selfId), 'TIGHT: 4 peers (a full shipped 4-player room) all join');
-    const fifth = await tryJoin(TIGHT_PORT, room, 'T4');
-    ok(!fifth.ok && /429/.test(fifth.reason), `TIGHT: 5th peer refused at handshake — "${fifth.reason}"`);
+    const fifth = await admit(TIGHT_PORT, room, 'T4');
+    ok(!fifth.admitted && /full/.test(fifth.reason), `TIGHT: the 5th peer is refused — "${fifth.reason}"`);
+    // --- and refused in a way the DEPLOYED client survives ------------------
+    // This trio is the regression guard, not decoration. The caps used to answer
+    // cb(false, 429) — a killed upgrade — and the shipped clients only retry a
+    // socket that has been OPEN at least once (`wasConnected || _reconnectTries`,
+    // both falsy on a fresh client's first connect), while only 4010 produces any
+    // status text. So a transient "room is full" put the multiplayer widget on
+    // "Offline" for the rest of the page's life with no reason and no retry —
+    // the exact COR-9 dead end. Put the 503/429 back in verifyClient and all
+    // three of these go red.
+    ok(fifth.opened, 'TIGHT: …by ACCEPTING the upgrade and then closing it — a deployed client only retries a socket that opened once');
+    ok(fifth.code === 1013 && !isPermanentClose(fifth.code),
+      `TIGHT: …with 1013 "try again later", which NetProtocol.isPermanentClose does NOT treat as final (got ${fifth.code})`);
+    ok(fifth.reason.length > 0,
+      `TIGHT: …and with a human-readable reason on the close, so a client can say why instead of just "Offline" — "${fifth.reason}"`);
     ok(held[0].closeCode === null, 'TIGHT: the refusal did not disturb the peers already in the room');
 
     // control: same 5th client, cap raised
     const heldL = [];
     for (let i = 0; i < 4; i++) heldL.push(await join(LOOSE_PORT, room, `L${i}`));
-    const fifthL = await tryJoin(LOOSE_PORT, room, 'L4');
-    ok(fifthL.ok, 'LOOSE (control): the identical 5th peer connects when the cap is 16');
+    const fifthL = await admit(LOOSE_PORT, room, 'L4');
+    ok(fifthL.admitted, 'LOOSE (control): the identical 5th peer connects when the cap is 16');
     for (const c of [...held, ...heldL, fifthL.c]) c.ws.close();
     await sleep(120);
   }
@@ -754,6 +932,17 @@ try {
     const wire = await p[0].waitFor((m) => m.type === MSG.WIRE);
     ok(wire.id === p[3].selfId && wire.ch === 'gp', 'WIRE relayed and id-stamped');
 
+    // RELAY-2, end to end on the shipped defaults: an over-cap WIRE is refused by
+    // the RELAY (not by `ws`'s 1 MiB maxPayload — this frame is 8 kB) and never
+    // reaches the room, while the socket keeps working. The marker frame is sent
+    // second on the same socket, so TCP ordering makes "the big one is missing"
+    // an assertion rather than a race.
+    p[3].send(makeWire({ ch: 'gp', data: { pad: 'x'.repeat(HUB_LIMITS.wireBytes) } }));
+    p[3].send(makeWire({ ch: 'gp', data: { buttons: 7 } }));
+    const marker = await p[0].waitFor((m) => m.type === MSG.WIRE && m.data?.buttons === 7).catch(() => null);
+    ok(!!marker && p[0].count((m) => m.type === MSG.WIRE && typeof m.data?.pad === 'string') === 0,
+      `an over-cap WIRE (> ${HUB_LIMITS.wireBytes} B) is dropped by the relay and the sender keeps working`);
+
     // A late joiner still converges on the room's persisted state.
     const late = await join(LOOSE_PORT, room, 'LATE');
     // The state replay follows HELLO on the same socket, but not necessarily in
@@ -1006,7 +1195,6 @@ try {
       ROOM_MAX_BUFFERED_BYTES: '65536',                 // evict a socket at 64 kB queued
       ROOM_MSG_RATE: '2000', ROOM_MSG_BURST: '2000',    // the sender must not be rate-limited
     };
-    const FAT = 'f'.repeat(64 * 1024);
 
     const stall = async (port, graceMs, label) => {
       const s = startServer(port, { ...BP_ENV, ROOM_BACKPRESSURE_GRACE_MS: String(graceMs) });
@@ -1020,7 +1208,7 @@ try {
       // would push the same 13 MB at the observer too, and at a 64 kB eviction
       // threshold even a healthy reader gets evicted mid-blast — which would make
       // "the room saw it leave" untestable and the whole section ambiguous.
-      for (let i = 0; i < 200; i++) {
+      for (let i = 0; i < FAT_FRAMES; i++) {
         sender.send(makeSignal({ to: victim.selfId, kind: 'offer', data: { sdp: FAT } }));
       }
       await sleep(900);
@@ -1065,7 +1253,6 @@ try {
   // paused peer eventually, and "the socket closed" alone cannot tell them apart.
   console.log('\n--- aggregate outbound budget (ROOM_MAX_BUFFERED_TOTAL_BYTES) ---');
   {
-    const FAT = 'f'.repeat(64 * 1024);
     const AGG_ENV = {
       LOG_PORT: '8896',
       ROOM_MAX_BUFFERED_BYTES: String(100 * 1024 * 1024),   // per-socket cap effectively off
@@ -1080,7 +1267,7 @@ try {
       const victim = await join(port, 'agg', 'VICTIM');
       const sender = await join(port, 'agg', 'SENDER');
       victim.ws._socket.pause();
-      for (let i = 0; i < 200; i++) sender.send(makeSignal({ to: victim.selfId, kind: 'offer', data: { sdp: FAT } }));
+      for (let i = 0; i < FAT_FRAMES; i++) sender.send(makeSignal({ to: victim.selfId, kind: 'offer', data: { sdp: FAT } }));
       await sleep(2200);                       // one heartbeat tick (1500 ms), not two
       const swept = /aggregate backpressure/.test(s.log());
       victim.ws._socket.resume();
@@ -1100,6 +1287,678 @@ try {
       'NEGATIVE CONTROL: identical stall, budget raised to 1 GiB — the sweep does not fire, so it is the budget doing the work and not the heartbeat\'s dead-socket path');
     ok(under.code !== 4009,
       `NEGATIVE CONTROL: …and nothing evicts the socket (got ${under.code})`);
+  }
+
+  // ------- 13b. the aggregate budget WITHOUT a heartbeat to hide behind (RELAY-1)
+  // Section 13 above passes only because it shortens ROOM_HEARTBEAT_MS to 1500 ms.
+  // Production runs 10 s, and the aggregate budget used to be enforced ONLY in
+  // that sweep — so the real transient ceiling was ROOM_MAX_SOCKETS x
+  // ROOM_MAX_BUFFERED_BYTES (256 x 4 MiB ≈ 1.25 GiB), reachable in well under a
+  // second, and the advertised 32 MiB was a ten-second AVERAGE rather than a
+  // ceiling. The check now also runs on the send path, where the bytes are
+  // actually queued.
+  //
+  // So: the same stall, with the heartbeat set LONGER THAN THE WHOLE RUN. Anything
+  // that evicts here can only be the send-path check. The negative control puts
+  // ROOM_BUFFER_SWEEP_MS past the run too — which IS the pre-fix build, heartbeat
+  // only — and must not evict. The third case is the regression that matters more
+  // than the DoS: a legitimate late joiner draining a big room-state replay must
+  // survive a sweep that now runs on every send.
+  console.log('\n--- aggregate budget enforced ON SEND, not once per heartbeat (RELAY-1) ---');
+  {
+    const NOHB_ENV = {
+      LOG_PORT: '8896',
+      ROOM_MAX_BUFFERED_BYTES: String(100 * 1024 * 1024),    // per-socket cap effectively off
+      ROOM_MAX_BUFFERED_TOTAL_BYTES: String(4 * 1024 * 1024),
+      ROOM_HEARTBEAT_MS: '60000',                            // longer than this whole section
+      ROOM_BACKPRESSURE_GRACE_MS: '4000',
+      ROOM_MSG_RATE: '2000', ROOM_MSG_BURST: '2000',
+    };
+
+    const stall = async (port, sweepMs, label) => {
+      const s = startServer(port, { ...NOHB_ENV, ROOM_BUFFER_SWEEP_MS: String(sweepMs) });
+      await s.ready;
+      const victim = await join(port, 'nohb', 'VICTIM');
+      const sender = await join(port, 'nohb', 'SENDER');
+      victim.ws._socket.pause();
+      for (let i = 0; i < FAT_FRAMES; i++) sender.send(makeSignal({ to: victim.selfId, kind: 'offer', data: { sdp: FAT } }));
+      await sleep(1200);                       // 1/50th of the heartbeat period
+      const swept = /aggregate backpressure \(send\)/.test(s.log());
+      victim.ws._socket.resume();
+      const closed = await victim.closed(5000);
+      console.log(`       ${label}: sendPathSweep=${swept} closeCode=${closed.code} (the 60 s heartbeat never ran)`);
+      sender.ws.close();
+      await stop(s);
+      return { swept, code: closed.code };
+    };
+
+    const onSend = await stall(TIGHT_PORT, 0, 'ROOM_BUFFER_SWEEP_MS=0 (the fix, unthrottled)');
+    ok(onSend.swept,
+      '~13 MB queued past a 4 MiB total budget is caught ON THE SEND PATH within 1.2 s — no heartbeat has run');
+    ok(onSend.code === 4009,
+      `…and the stalled socket is evicted with the same 4009/"slow client" contract (got ${onSend.code})`);
+
+    const hbOnly = await stall(LOOSE_PORT, 3600000, 'ROOM_BUFFER_SWEEP_MS=1 h (negative control = heartbeat-only enforcement)');
+    ok(!hbOnly.swept,
+      'NEGATIVE CONTROL: with the send-path check throttled past the run, the identical stall goes unnoticed — which is exactly what the shipped build did for up to 10 s at a time');
+    ok(hbOnly.code !== 4009,
+      `NEGATIVE CONTROL: …and nothing evicts the socket (got ${hbOnly.code})`);
+
+    // The eviction is not allowed to become trigger-happy: the sweep now runs
+    // during ordinary sends, and the biggest legitimate queue in this app is a
+    // late joiner's room-state replay (server/README.md keeps the per-socket cap
+    // ABOVE the per-room STATE budget for precisely this reason).
+    const s = startServer(TIGHT_PORT, { ...NOHB_ENV, ROOM_BUFFER_SWEEP_MS: '0' });
+    await s.ready;
+    const host = await join(TIGHT_PORT, 'latejoin', 'HOST');
+    const CHUNK = 'c'.repeat(120000);
+    for (let i = 0; i < 6; i++) host.send(makeState({ key: `prop:big${i}`, value: CHUNK }));
+    await sleep(500);
+    const late = await join(TIGHT_PORT, 'latejoin', 'LATE');
+    const replay = await late.waitFor((m) => m.type === MSG.STATE && m.key === 'prop:big5', 4000).catch(() => null);
+    const lateClose = await late.closed(700);
+    ok(!!replay, 'a late joiner still receives the whole ~720 kB room-state replay with the send-path sweep running on every frame of it');
+    ok(lateClose.code === null,
+      `…and is NOT evicted by it (closeCode ${lateClose.code}) — the sweep only acts when the PROCESS total is over budget, and then only on the biggest queue`);
+    host.ws.close(); late.ws.close();
+    await stop(s);
+  }
+
+  // ------------------------------- 14. per-address admission control (RELAY-3)
+  // Before this, `verifyClient` capped only GLOBAL sockets/rooms and per-room
+  // peers: one client could hold all 256 sockets (every later headset gets a 503)
+  // and — worse — could CHURN for free, because the per-socket token bucket is
+  // created fresh in the connection handler, so reconnecting reset it. Each of
+  // those upgrades makes the server replay the room's whole STATE map, so a TCP
+  // handshake buys up to ~2 MiB of serialization on a single-threaded relay.
+  //
+  // The two hazards this must not introduce are both asserted below: a spoofable
+  // key (any client could then buy a fresh budget with a header) and, in the other
+  // direction, billing every proxied headset in the world to 127.0.0.1.
+  console.log('\n--- per-address caps: concurrent sockets (RELAY-3) ---');
+  {
+    const s = startServer(TIGHT_PORT, {
+      LOG_PORT: '8896', ROOM_MAX_SOCKETS_PER_IP: '4', ROOM_MAX_UPGRADES_PER_IP: '1000',
+      // Raised for the residency assertion below only: a refused socket has to
+      // still BE there when the next upgrade is judged, or the claim it makes is
+      // vacuous. Harmless to everything else here — the `ws` clients answer their
+      // close frame and leave regardless of how long the terminate timer is.
+      ROOM_REFUSAL_GRACE_MS: '5000',
+    });
+    await s.ready;
+    // Assert the relay we are about to talk to is the one we just configured.
+    // Not paranoia: when a spawn lost a bind race the clients below silently
+    // talked to the PREVIOUS section's server and every cap "failed to fire".
+    ok(await s.waitLog(/per-address: 4 sockets/), 'the relay under test came up with the tightened per-address cap in its own boot line');
+    const held = [];
+    for (let i = 0; i < 4; i++) held.push(await join(TIGHT_PORT, `ip${i}`, `H${i}`));
+    ok(held.length === 4, 'control: the first 4 sockets from one address connect normally (a household of headsets is not the target)');
+    const fifth = await admit(TIGHT_PORT, 'ip-extra', 'FIFTH');
+    ok(!fifth.admitted && fifth.code === 1013 && /too many connections/.test(fifth.reason),
+      `the 5th is refused with a retryable 1013 — "${fifth.reason}"`);
+    // Spoof control: with ROOM_TRUST_PROXY unset the header is ignored outright,
+    // so a client cannot buy itself a fresh budget by inventing a forwarded hop.
+    const spoof = await admit(TIGHT_PORT, 'ip-spoof', 'SPOOF', { headers: { 'X-Forwarded-For': '9.9.9.9' } });
+    ok(!spoof.admitted && /too many connections/.test(spoof.reason),
+      `…and an X-Forwarded-For header buys nothing while ROOM_TRUST_PROXY is unset — still "${spoof.reason}"`);
+    // A refused socket must not itself hold a slot: if surveyClients() counted
+    // one the refusals would compound, and one turned-away headset would make the
+    // next one likelier to be turned away too.
+    //
+    // Proving that needs a refused socket that is STILL RESIDENT when the next
+    // upgrade is judged, and a `ws` client is not one — it answers the close frame
+    // within a loopback RTT and is out of wss.clients before the next attempt
+    // (see rawUpgrade()'s docstring). The version of this assertion that used
+    // `admit()` for both halves therefore passed against a deliberately broken
+    // build whose surveyClients() counted `_refused` sockets, because by the time
+    // it asked there was nothing left to miscount. A raw socket answers nothing
+    // and sits in the client set for the whole 5 s grace this server was started
+    // with, so the count below is taken while a refusal is genuinely resident.
+    const stuck = await rawUpgrade(TIGHT_PORT, 'ip-stuck');
+    ok(stuck.status === 101,
+      'control: the extra upgrade was refused the SOFT way (101), so it really is a resident socket and not a killed handshake');
+    const fifthAgain = await admit(TIGHT_PORT, 'ip-extra2', 'FIFTH2');
+    ok(!fifthAgain.admitted && /\(4\/4\)/.test(fifthAgain.reason),
+      `a socket that was itself refused does not count toward the cap — with one still resident the next refusal reads 4/4, not 5/4 ("${fifthAgain.reason}")`);
+    try { stuck.sock.destroy(); } catch { /* gone */ }
+    // Freeing a slot must free the cap, or a headset that reconnects after a
+    // Wi-Fi drop would be locked out by its own ghost.
+    held.pop().ws.close();
+    await sleep(300);
+    const again = await admit(TIGHT_PORT, 'ip-again', 'AGAIN');
+    ok(again.admitted, 'control: closing one socket frees the slot and the same address connects again');
+    again.c?.ws?.close();
+    for (const c of held) c.ws.close();
+    await stop(s);
+  }
+
+  console.log('\n--- per-address caps: upgrade rate, the churn amplifier (RELAY-3) ---');
+  {
+    const s = startServer(TIGHT_PORT, {
+      LOG_PORT: '8896', ROOM_MAX_SOCKETS_PER_IP: '64',
+      ROOM_MAX_UPGRADES_PER_IP: '3', ROOM_UPGRADE_WINDOW_MS: '60000',
+    });
+    await s.ready;
+    ok(await s.waitLog(/per-address: 64 sockets, 3 upgrades per 60000ms/),
+      'the relay under test came up with a 3-upgrade budget and the concurrent cap out of the way — so only the RATE can refuse anything below');
+    for (let i = 0; i < 3; i++) {
+      const c = await join(TIGHT_PORT, 'churn', `C${i}`);
+      c.ws.close();
+      await sleep(80);
+    }
+    const fourth = await admit(TIGHT_PORT, 'churn', 'C4');
+    ok(!fourth.admitted && fourth.code === 1013 && /too many connection attempts/.test(fourth.reason),
+      `connect/disconnect churn is throttled even though it holds NO sockets — the 4th upgrade in the window is refused ("${fourth.reason}")`);
+    await stop(s);
+
+    const l = startServer(LOOSE_PORT, { LOG_PORT: '8897', ROOM_MAX_UPGRADES_PER_IP: '100' });
+    await l.ready;
+    let cycles = 0;
+    for (let i = 0; i < 6; i++) {
+      const r = await admit(LOOSE_PORT, 'churn', `L${i}`);
+      if (!r.admitted) break;
+      cycles++;
+      r.c.ws.close();
+      await sleep(60);
+    }
+    ok(cycles === 6,
+      `NEGATIVE CONTROL: with the budget at 100/min the identical loop is never throttled (${cycles}/6 reconnects accepted) — a headset that flaps its Wi-Fi is not the target`);
+    await stop(l);
+  }
+
+  console.log('\n--- per-address caps behind a proxy (ROOM_TRUST_PROXY) ---');
+  {
+    // On the deployed box Apache proxies from 127.0.0.1, so keying on the socket
+    // address would bill the entire internet to one key and refuse the 3rd
+    // connection to the whole site. Keyed on X-Forwarded-For instead — the LAST
+    // hop, which is the one the proxy itself appended.
+    const s = startServer(TIGHT_PORT, {
+      LOG_PORT: '8896', ROOM_TRUST_PROXY: '1', ROOM_MAX_SOCKETS_PER_IP: '2', ROOM_MAX_UPGRADES_PER_IP: '1000',
+    });
+    await s.ready;
+    ok(await s.waitLog(/keyed on the last X-Forwarded-For hop/),
+      'the relay under test says in its boot line that it is keyed on the forwarded address, not the socket address');
+    const xff = (v) => ({ headers: { 'X-Forwarded-For': v } });
+    const a1 = await admit(TIGHT_PORT, 'prox', 'A1', xff('203.0.113.7'));
+    const a2 = await admit(TIGHT_PORT, 'prox', 'A2', xff('203.0.113.7'));
+    ok(a1.admitted && a2.admitted, 'two connections from one forwarded address are accepted');
+    const a3 = await admit(TIGHT_PORT, 'prox', 'A3', xff('203.0.113.7'));
+    ok(!a3.admitted && /too many connections/.test(a3.reason), `…and the 3rd from that same forwarded address is refused ("${a3.reason}")`);
+    // A client that fabricates a first hop still has the proxy append the address
+    // it really came from, so the LAST entry is the one it cannot forge. Reading
+    // the FIRST (the usual "original client" convention) is what would make this
+    // cap free to evade.
+    const chained = await admit(TIGHT_PORT, 'prox', 'CHAIN', xff('1.2.3.4, 203.0.113.7'));
+    ok(!chained.admitted && /too many connections/.test(chained.reason),
+      `a spoofed first hop does not escape the cap — "1.2.3.4, 203.0.113.7" is billed to the LAST hop ("${chained.reason}")`);
+    const b1 = await admit(TIGHT_PORT, 'prox', 'B1', xff('198.51.100.9'));
+    ok(b1.admitted, 'control: a DIFFERENT forwarded address has its own budget — one household cannot lock out another');
+    // Header absent while trusting the proxy ⇒ exempt, never lumped into one
+    // bucket: a proxy that turns out not to send XFF must degrade to the old
+    // global-caps-only behaviour, not to a site-wide outage at the 3rd visitor.
+    const bare = [];
+    for (let i = 0; i < 3; i++) bare.push(await admit(TIGHT_PORT, 'prox', `N${i}`));
+    ok(bare.every((r) => r.admitted),
+      'with no X-Forwarded-For at all, connections are EXEMPT rather than all billed to one key — a proxy that does not forward the header degrades to no per-IP cap, not to an outage');
+    for (const r of [a1, a2, b1, ...bare]) r.c?.ws?.close();
+    await stop(s);
+  }
+
+  // ------- 14b. the JOIN-TIME REPLAY goes through the outbound budget too
+  // RELAY-1 put the aggregate check on the send path, but the biggest single
+  // outbound write in the relay did not use that path: the connection handler
+  // did `ws.send(encode(hello))` and then one raw `ws.send()` per key of the
+  // room's STATE map. So the one write RELAY-3's own comment calls "the
+  // expensive thing a handshake buys" — up to a room's whole 2 MiB — passed
+  // NEITHER the per-socket cap NOR the process total, and sockets that join and
+  // then read nothing could pile up hundreds of MiB with only the 10 s heartbeat
+  // behind them. Both halves are asserted here against a real replay, each with
+  // the control that shows the same replay is untouched when the budget is fine.
+  console.log('\n--- the join-time HELLO + STATE replay is budgeted like every other send (RELAY-1) ---');
+  {
+    const OFF = String(100 * 1024 * 1024);      // "this cap is not the one under test"
+    const REPLAY_ENV = {
+      LOG_PORT: '8896',
+      ROOM_HEARTBEAT_MS: '60000',               // longer than this whole section: no sweep can rescue anything
+      ROOM_MSG_RATE: '2000', ROOM_MSG_BURST: '2000',
+      ROOM_BACKPRESSURE_GRACE_MS: '5000',
+      // The STATE budgets are raised out of the way: this section is about the
+      // OUTBOUND queue, and on the shipped 1 MiB-per-peer budget the host's 5th
+      // 200 kB write is refused, so there would be no big replay to measure.
+      ROOM_MAX_STATE_VALUE_BYTES: String(256 * 1024),
+      ROOM_MAX_STATE_BYTES_PER_PEER: String(8 * 1024 * 1024),
+      ROOM_MAX_STATE_BYTES_PER_ROOM: String(16 * 1024 * 1024),
+    };
+    const CHUNK = 'r'.repeat(200000);
+    const KEYS = 8;                             // ~1.6 MB of replay handed to one joiner
+
+    // Fill a room, then join it and report what the joiner got: the LAST replayed
+    // key (i.e. the whole replay) and how — or whether — the socket was closed.
+    const replayInto = async (env, label) => {
+      const s = startServer(TIGHT_PORT, { ...REPLAY_ENV, ...env });
+      await s.ready;
+      const host = await join(TIGHT_PORT, 'replay', 'HOST');
+      for (let i = 0; i < KEYS; i++) host.send(makeState({ key: `prop:r${i}`, value: CHUNK }));
+      await sleep(700);
+      const late = client(TIGHT_PORT, 'replay', 'LATE');
+      // Stop draining the instant the handshake lands. A joiner that is handed a
+      // big replay and does not read it is the whole hazard — a suspended tab, a
+      // headset mid-sleep — and on loopback a reading client absorbs 1.6 MB
+      // faster than the relay can queue it, so without this every arm below
+      // measures nothing. `ws` emits 'open' synchronously from setSocket, before
+      // any 'data' event has been processed, so no part of the replay has been
+      // consumed yet.
+      late.ws.once('open', () => { try { late.ws._socket.pause(); } catch { /* gone */ } });
+      await late.open();
+      await sleep(1500);           // the relay writes the whole replay into a socket nobody is reading
+      const swept = /aggregate backpressure \(send\)/.test(s.log());
+      try { late.ws._socket.resume(); } catch { /* already destroyed */ }
+      const whole = await late.waitFor((m) => m.type === MSG.STATE && m.key === `prop:r${KEYS - 1}`, 3000).catch(() => null);
+      const closed = await late.closed(3000);
+      console.log(`       ${label}: wholeReplay=${!!whole} closeCode=${closed.code} sendPathSweep=${swept}`);
+      host.ws.close(); try { late.ws.close(); } catch { /* already gone */ }
+      await stop(s);
+      return { whole: !!whole, code: closed.code, swept };
+    };
+
+    // (a) PER-SOCKET cap. 1.6 MB of replay written in one tick against a 64 kB
+    //     cap: the second frame already sees the first still queued.
+    const capped = await replayInto(
+      { ROOM_MAX_BUFFERED_BYTES: '65536', ROOM_MAX_BUFFERED_TOTAL_BYTES: OFF },
+      'per-socket cap 64 kB');
+    ok(!capped.whole && capped.code === 4009,
+      `the replay obeys ROOM_MAX_BUFFERED_BYTES: a joiner that outruns its own queue is evicted with 4009 mid-replay (whole=${capped.whole}, code=${capped.code})`);
+
+    // (b) CONTROL for (a): the identical replay to the identical client with the
+    //     cap out of the way. Without this, "evicted" could mean "the join path
+    //     is broken", not "the join path is now budgeted".
+    const roomy = await replayInto(
+      { ROOM_MAX_BUFFERED_BYTES: OFF, ROOM_MAX_BUFFERED_TOTAL_BYTES: OFF },
+      'both caps out of the way');
+    ok(roomy.whole && roomy.code === null,
+      `CONTROL: the same joiner receives the entire ~1.6 MB replay and is never closed when the budget is fine (whole=${roomy.whole}, code=${roomy.code})`);
+
+    // (c) AGGREGATE budget. Per-socket cap off, so ONLY the process total can
+    //     act — and the heartbeat is 60 s away, so only the SEND path can run it.
+    const total = await replayInto(
+      { ROOM_MAX_BUFFERED_BYTES: OFF, ROOM_MAX_BUFFERED_TOTAL_BYTES: String(512 * 1024), ROOM_BUFFER_SWEEP_MS: '0' },
+      'aggregate 512 kB, send-path sweep on');
+    ok(total.swept,
+      'the replay runs the AGGREGATE check from the send path — the relay logs "aggregate backpressure (send)" during a join, which it could never do while the replay used a raw ws.send()');
+    ok(!total.whole && total.code === 4009,
+      `…and the over-budget joiner is evicted by it (whole=${total.whole}, code=${total.code})`);
+
+    // (d) NEGATIVE CONTROL for (c): identical budget, send-path sweep throttled
+    //     past the end of the run, heartbeat 60 s away. Nothing enforces the
+    //     total, so the same over-budget replay sails through — which is what the
+    //     relay did on EVERY join before this fix.
+    const unswept = await replayInto(
+      { ROOM_MAX_BUFFERED_BYTES: OFF, ROOM_MAX_BUFFERED_TOTAL_BYTES: String(512 * 1024), ROOM_BUFFER_SWEEP_MS: '600000' },
+      'aggregate 512 kB, send-path sweep throttled off');
+    ok(!unswept.swept && unswept.whole && unswept.code === null,
+      `NEGATIVE CONTROL: with the send-path sweep throttled out, the identical over-budget replay is delivered whole and nothing is evicted (swept=${unswept.swept}, whole=${unswept.whole}, code=${unswept.code}) — so (c) measures the check, not the client`);
+  }
+
+  // ------- 14c. a slept headset's ghost must not hold its household's slot
+  // MAX_SOCKETS_PER_IP counts sockets, and a Quest that sleeps leaves one that
+  // answers nothing until the heartbeat reaps it — up to TWO ping periods later.
+  // For that whole window a ghost was billed to a live household's address, so
+  // the very common "my headset woke up / I relaunched the app" rejoin could be
+  // refused by the user's own dead socket. billable() stops counting a socket
+  // that has ignored a ping for a quarter of the period, long before the sweep
+  // agrees.
+  console.log('\n--- a slept headset\'s ghost socket stops holding its address\'s slot ---');
+  {
+    // One socket per address makes the household's whole budget observable in a
+    // single client. The heartbeat is short enough to run in a test and long
+    // enough that a quarter of it is genuinely shorter than the period.
+    const s = startServer(TIGHT_PORT, {
+      LOG_PORT: '8896', ROOM_MAX_SOCKETS_PER_IP: '1', ROOM_MAX_UPGRADES_PER_IP: '1000',
+      ROOM_HEARTBEAT_MS: '4800',
+    });
+    await s.ready;
+    ok(await s.waitLog(/per-address: 1 sockets/),
+      'the relay under test came up with a one-socket-per-address budget, so one client is the whole household');
+    const ghost = await join(TIGHT_PORT, 'ghost', 'GHOST', { autoPong: false });
+    // CONTROL, taken BEFORE the relay has asked this socket anything: a socket
+    // that has failed nothing holds its slot. Without this pair, the assertion
+    // below could equally pass on a cap that stopped counting altogether.
+    const early = await admit(TIGHT_PORT, 'ghost', 'EARLY');
+    ok(!early.admitted && /too many connections/.test(early.reason),
+      `control: a socket that has not been asked anything yet still holds the address's only slot ("${early.reason}")`);
+    await new Promise((r) => ghost.ws.once('ping', r));   // the sweep has just pinged the ghost
+    await sleep(1500);                                    // > PING_GRACE_MS (4800 / 4 = 1200)
+    const rejoin = await admit(TIGHT_PORT, 'ghost', 'REJOIN');
+    ok(rejoin.admitted,
+      'the same address is admitted once the ghost has ignored a ping for a quarter of the heartbeat — a slept headset cannot lock its own household out for two whole ping periods while the sweep catches up');
+    ok(ghost.closeCode === null,
+      'and the ghost is still open at this point, so the slot was freed by the liveness check and not merely by the sweep having already reaped it');
+    rejoin.c?.ws?.close(); early.c?.ws?.close();
+    try { ghost.ws.terminate(); } catch { /* already gone */ }
+    await stop(s);
+  }
+
+
+  // ===================== 14d. a flood of REFUSALS must not deny service (I1)
+  // Round 2 of this fix made every capacity refusal SOFT — accept the upgrade,
+  // close 1013 + reason — so the clients already on headsets would retry instead
+  // of sitting on "Offline" forever. It did not account for what a soft refusal
+  // IS: a real entry in wss.clients for ROOM_REFUSAL_GRACE_MS. The global gate
+  // was `wss.clients.size >= MAX_SOCKETS`, which counts those, so one address
+  // sending upgrades faster than the grace period could hold the relay at
+  // capacity with ZERO peers in any room — a total outage, and neither per-IP cap
+  // could shed it because a rate refusal was itself a full accept.
+  //
+  // Two things close it, and this section asserts both: the gate counts only
+  // sockets that can BECOME a session, and the number of refused sockets
+  // resident at once is itself capped (MAX_REFUSALS_IN_FLIGHT = MAX_SOCKETS / 8,
+  // derived — the rest get the cheap door).
+  console.log('\n--- a flood of soft refusals does not consume the global capacity (I1) ---');
+  {
+    const s = startServer(TIGHT_PORT, {
+      LOG_PORT: '8896', ROOM_MAX_SOCKETS: '6', ROOM_MAX_PEERS: '64',
+      // Long enough that a refused socket is unambiguously still resident when
+      // the assertions below run. A real attacker gets this for free by never
+      // answering the close frame, which is what rawUpgrade() does.
+      ROOM_REFUSAL_GRACE_MS: '5000',
+    });
+    await s.ready;
+    ok(await s.waitLog(/6 sockets, /), 'the relay under test came up with a 6-socket global cap');
+    const held = [];
+    for (let i = 0; i < 6; i++) held.push(await join(TIGHT_PORT, `glob${i}`, `G${i}`));
+    ok(held.every((c) => c.selfId), 'control: 6 real peers fill the 6-socket relay');
+    const atCap = await admit(TIGHT_PORT, 'glob-x', 'OVER');
+    ok(!atCap.admitted && /at capacity/.test(atCap.reason),
+      `control: the gate still works — a 7th peer at a genuinely full relay is refused ("${atCap.reason}")`);
+
+    // 20 upgrades from one address that never answer anything. Only
+    // MAX_REFUSALS_IN_FLIGHT of them are worth a polite answer; the rest must cost
+    // a status line. At the 6-socket cap this section needs, that number is the
+    // Math.max FLOOR of 8 — ceil(6/8) is 1 — so this assertion pins the floor and
+    // ONLY the floor. The ratio is pinned by the sub-section after this one; the
+    // two are separate because no single ROOM_MAX_SOCKETS can be binding for both.
+    const flood = [];
+    for (let i = 0; i < 20; i++) flood.push(await rawUpgrade(TIGHT_PORT, 'glob-flood'));
+    const accepted = flood.filter((f) => f.status === 101).length;
+    const cheap = flood.filter((f) => f.status === 429).length;
+    ok(accepted === 8 && cheap === 12,
+      `MAX_REFUSALS_IN_FLIGHT never drops below its floor of 8: 8 of 20 flood upgrades at a 6-socket cap were answered the EXPENSIVE way and the other 12 got a 429 with no WebSocket (101s=${accepted}, 429s=${cheap})`);
+
+    // …and now the point of the whole section. Free ONE real slot. The relay is
+    // still holding 8 refused sockets that answer nothing, so under the old gate
+    // wss.clients.size is 5 + 8 = 13 against a cap of 6 and this join is refused
+    // — a legitimate peer denied service by sockets that can never become one.
+    held.pop().ws.close();
+    await sleep(200);
+    const legit = await admit(TIGHT_PORT, 'glob-legit', 'LEGIT');
+    ok(legit.admitted,
+      'a legitimate peer is admitted into the slot that just freed, while 8 unanswering refused sockets are still resident — the capacity gate counts only sockets that can become a session');
+    legit.c?.ws?.close();
+    for (const c of held) c.ws.close();
+    for (const f of flood) { try { f.sock.destroy(); } catch { /* gone */ } }
+    await stop(s);
+  }
+
+  // ---- …and the same bound where the RATIO, not the floor, is the binding half.
+  // MAX_REFUSALS_IN_FLIGHT = Math.max(8, ceil(MAX_SOCKETS / 8)), and the section
+  // above runs at MAX_SOCKETS=6, where that is 8 — the floor. A floor is satisfied
+  // by ANY divisor, so on its own it pins nothing: a build with `/2` instead of
+  // `/8` (which at the shipped MAX_SOCKETS=256 quadruples resident refused sockets
+  // from 32 to 128 — a material loosening of the only bound that makes MAX_SOCKETS
+  // a real ceiling) still reads 8 there and still passes. Nothing else in the tree
+  // checks the derivation, so this is the assertion that has to. 96 sockets puts
+  // the ratio clear of the floor: ceil(96/8) = 12 vs 8.
+  //
+  // The refusals are provoked by a ONE-PEER ROOM rather than by a full relay:
+  // filling 96 global sockets would cost 96 handshakes to measure a number that
+  // does not depend on which cap said no — refuse() is reached the same way from
+  // every cap, and section 14d above already proves the global one reaches it.
+  console.log('\n--- MAX_REFUSALS_IN_FLIGHT tracks MAX_SOCKETS/8, not just its floor (I1) ---');
+  {
+    const s = startServer(TIGHT_PORT, {
+      LOG_PORT: '8896', ROOM_MAX_SOCKETS: '96', ROOM_MAX_PEERS: '1',
+      ROOM_REFUSAL_GRACE_MS: '5000',
+    });
+    await s.ready;
+    ok(await s.waitLog(/96 sockets, /), 'the relay under test came up with a 96-socket global cap');
+    const one = await join(TIGHT_PORT, 'ratio', 'ONE');
+    ok(!!one.selfId, 'control: the one-peer room takes its peer, so every upgrade after this one is refused');
+    const flood = [];
+    for (let i = 0; i < 16; i++) flood.push(await rawUpgrade(TIGHT_PORT, 'ratio'));
+    const accepted = flood.filter((f) => f.status === 101).length;
+    const cheap = flood.filter((f) => f.status === 429).length;
+    ok(accepted === 12 && cheap === 4,
+      `exactly ceil(96/8) = 12 of 16 refusals were answered the EXPENSIVE way and the other 4 got a 429 (101s=${accepted}, 429s=${cheap}) — change the divisor and this number moves, which is the whole point of asserting it above the floor`);
+    one.ws.close();
+    for (const f of flood) { try { f.sock.destroy(); } catch { /* gone */ } }
+    await stop(s);
+  }
+
+  // ================== 14e. the cheap door: a per-address soft-refusal budget
+  // A soft refusal costs a handshake, a socket, a log line and a timer; the
+  // clients already deployed reset their backoff on the 'open' a soft refusal
+  // itself produces, so a refused one knocks at 2 Hz for the life of its page and
+  // no client-side fix can reach it. The bound therefore lives here: an address
+  // gets MAX_SOFT_REFUSALS_PER_IP expensive answers per window and cheap ones
+  // after that.
+  console.log('\n--- refusals are rationed: soft while the address has budget, 429 after (I5/I6) ---');
+  {
+    const s = startServer(TIGHT_PORT, {
+      LOG_PORT: '8896', ROOM_MAX_PEERS: '1', ROOM_MAX_SOFT_REFUSALS_PER_IP: '3',
+      ROOM_UPGRADE_WINDOW_MS: '600000',
+    });
+    await s.ready;
+    ok(await s.waitLog(/3 soft refusals per 600000ms/),
+      'the relay under test came up with a 3-refusal soft budget in its own boot line');
+    const one = await join(TIGHT_PORT, 'onefull', 'ONE');
+    ok(!!one.selfId, 'control: the room takes its one peer');
+    const answers = [];
+    for (let i = 0; i < 6; i++) {
+      const r = await admit(TIGHT_PORT, 'onefull', `X${i}`);
+      answers.push(r);
+      r.c?.ws?.close();
+    }
+    const soft = answers.filter((r) => r.opened && r.code === 1013 && /full/.test(r.reason));
+    const hard = answers.filter((r) => !r.opened && /429/.test(r.reason));
+    ok(soft.length === 3 && hard.length === 3,
+      `the first 3 refusals are soft (1013 + reason) and the next 3 are killed upgrades (429): soft=${soft.length}, hard=${hard.length}`);
+    ok(answers.slice(0, 3).every((r) => r.opened) && answers.slice(3).every((r) => !r.opened),
+      'and in that order — the budget is spent before the door gets cheap, so a real user always learns WHY before anyone stops explaining');
+    // (the key is whatever the OS reports — `::ffff:127.0.0.1` on a dual-stack
+    // listener — so the assertion is that the LINE names an address and the
+    // tier, not that it names one particular spelling of loopback.)
+    ok(await s.waitLog(/x HARD refused [^\n]*127\.0\.0\.1[^\n]*answered 429/),
+      'the transition into the cheap tier is logged once, with the address — an operator can see which address went abusive without a line per attempt');
+    one.ws.close();
+    await stop(s);
+
+    // NEGATIVE CONTROL: the identical loop with the budget out of the way stays
+    // soft all six times, so the assertion above measures the budget and not
+    // "this relay refuses upgrades".
+    const l = startServer(LOOSE_PORT, { LOG_PORT: '8897', ROOM_MAX_PEERS: '1' });
+    await l.ready;
+    const oneL = await join(LOOSE_PORT, 'onefull', 'ONEL');
+    let softL = 0;
+    for (let i = 0; i < 6; i++) {
+      const r = await admit(LOOSE_PORT, 'onefull', `Y${i}`);
+      if (r.opened && r.code === 1013) softL++;
+      r.c?.ws?.close();
+    }
+    ok(softL === 6,
+      `NEGATIVE CONTROL: with the soft budget raised, all 6 identical refusals are still answered with 1013 + a reason (${softL}/6)`);
+    oneL.ws.close();
+    await stop(l);
+  }
+
+  // ============ 14f. a refusal loop must not lock out its own household (I3/I6)
+  // The reported failure, exactly: a room reaches MAX_PEERS and two more devices
+  // at the same address press Join. Each is refused, each retries, and because
+  // the old bucket charged EVERY attempt — admitted or refused — those retries
+  // drove the address over its upgrade budget. From then on every upgrade from
+  // that address was refused, including a device joining a different half-empty
+  // room and including any of the sixteen already-connected headsets reconnecting
+  // after a Wi-Fi blip. The refusal loop fed itself, so it never stopped.
+  //
+  // The fix is a budget split, and this is what proves it: only ADMISSIONS are
+  // charged to the churn budget, so a refusal can never make the next attempt
+  // likelier to be refused. The second half of the section proves the churn
+  // budget is still a real bound — the protection was split, not removed.
+  console.log('\n--- a client stuck in a refusal loop cannot lock out its own household (I3) ---');
+  {
+    const s = startServer(TIGHT_PORT, {
+      LOG_PORT: '8896', ROOM_MAX_PEERS: '2', ROOM_MAX_UPGRADES_PER_IP: '6',
+      // A window far longer than the run, so the counts below are exact rather
+      // than "exact, plus however much the score drained while we measured".
+      ROOM_UPGRADE_WINDOW_MS: '600000',
+    });
+    await s.ready;
+    ok(await s.waitLog(/6 upgrades per 600000ms/), 'the relay under test came up with a 6-admission churn budget');
+    const packed = [];
+    for (let i = 0; i < 2; i++) packed.push(await join(TIGHT_PORT, 'packed', `P${i}`));   // 2 admissions
+    let refusals = 0;
+    for (let i = 0; i < 20; i++) {
+      const r = await admit(TIGHT_PORT, 'packed', `R${i}`);
+      if (!r.admitted && /full/.test(r.reason)) refusals++;
+      r.c?.ws?.close();
+    }
+    ok(refusals === 20, `20 attempts at the full room are all refused for being full (${refusals}/20)`);
+    // 20 refusals, 3.3x the whole churn budget. If any of them were charged to
+    // it, everything below this line fails.
+    const other = await admit(TIGHT_PORT, 'elsewhere', 'OTHER');
+    ok(other.admitted,
+      'a third device joining a DIFFERENT, empty room is still admitted after 20 refusals at the same address — a refused attempt is not charged to the churn budget');
+    packed.pop().ws.close();
+    await sleep(200);
+    const back = await admit(TIGHT_PORT, 'packed', 'BACK');
+    ok(back.admitted,
+      'and a device already in the room reconnects into it after a drop — the Wi-Fi-blip case the old bucket locked out');
+    other.c?.ws?.close(); back.c?.ws?.close();
+    await sleep(200);
+
+    // …and the churn budget still bites. 4 admissions are spent (2 + OTHER +
+    // BACK), so exactly 2 more fit and the 7th admission attempt is refused.
+    let admitted = 0, churnRefusal = null;
+    for (let i = 0; i < 10 && !churnRefusal; i++) {
+      const r = await admit(TIGHT_PORT, `chn${i}`, `C${i}`);
+      if (r.admitted) { admitted++; r.c?.ws?.close(); }
+      else churnRefusal = r;
+    }
+    ok(admitted === 2 && churnRefusal && /too many connection attempts/.test(churnRefusal.reason),
+      `the churn budget is still a real bound — 6 admissions in the window and the 7th is refused for churn ("${churnRefusal?.reason}"), so the protection was split, not removed`);
+    for (const c of packed) c.ws.close();
+    await stop(s);
+  }
+
+  // ========= 14g. the shipped defaults, against the case they are derived from
+  // I3: a legitimate room of up to MAX_PEERS_PER_ROOM behind ONE NAT must work,
+  // including everyone reconnecting after a Wi-Fi blip. This runs on the SHIPPED
+  // numbers — the three per-address knobs are passed as EMPTY STRINGS, which
+  // parse as "unset" and therefore defeat BASE_ENV's overrides and restore the
+  // real defaults. The boot line is asserted first so the section cannot quietly
+  // measure some other configuration.
+  console.log('\n--- the shipped per-address defaults against a 16-peer room behind one NAT (I3) ---');
+  {
+    const SHIPPED = {
+      LOG_PORT: '8896',
+      ROOM_MAX_SOCKETS_PER_IP: '', ROOM_MAX_UPGRADES_PER_IP: '', ROOM_MAX_SOFT_REFUSALS_PER_IP: '',
+    };
+    const s = startServer(TIGHT_PORT, SHIPPED);
+    await s.ready;
+    ok(await s.waitLog(/per-address: 16 sockets, 256 upgrades per 60000ms, 64 soft refusals per 60000ms/),
+      'the shipped defaults are 16 sockets / 256 upgrades / 64 soft refusals per address per minute');
+    const nat = [];
+    for (let i = 0; i < 16; i++) nat.push(await join(TIGHT_PORT, 'nat', `N${i}`));
+    ok(nat.every((c) => c.selfId),
+      'all 16 peers of a full room assemble from ONE address — the concurrency cap starts AT ROOM_MAX_PEERS, so it can never bite before the per-room cap does');
+    const seventeenth = await admit(TIGHT_PORT, 'nat', 'N16');
+    // WHICH of the two 16s answers is decided by check order, and it is worth
+    // pinning: the per-address concurrency cap DEFAULTS to ROOM_MAX_PEERS, so
+    // with the whole room behind one NAT both caps are reached in the same
+    // breath and the per-address one is checked first. Either way it is a SOFT
+    // 1013 with a human-readable reason, which is the property that matters —
+    // being turned away from a full room must never look like being blocked.
+    ok(!seventeenth.admitted && seventeenth.opened && seventeenth.code === 1013
+      && /too many connections from this address \(16\/16\)/.test(seventeenth.reason),
+      `the 17th is refused softly, with 1013 and a reason — a full room is a legitimate state, not an abusive one ("${seventeenth.reason}")`);
+    seventeenth.c?.ws?.close();
+    // The Wi-Fi blip: every device drops and comes back. 32 admissions and one
+    // refusal, all billed to one address.
+    for (const c of nat) c.ws.close();
+    await sleep(300);
+    const again = [];
+    for (let i = 0; i < 16; i++) again.push(await admit(TIGHT_PORT, 'nat', `M${i}`));
+    ok(again.every((r) => r.admitted),
+      'and the whole room reassembles after every device drops at once — the relay-restart shape, on the shipped budget');
+    for (const r of again) r.c?.ws?.close();
+    await stop(s);
+  }
+
+  // The arithmetic the old default failed. The client's backoff chain is
+  // 500/1000/2000/4000/8000 ms, so a device that keeps failing spends 7.5 s on
+  // its first four attempts and 8 s on each one after — ~10.5 upgrades in the
+  // first minute, not the 7.5 the x8 default was justified with. Sixteen of them
+  // behind one NAT is ~168/minute against a budget of 128: the shipped relay
+  // refused the exact case its own comment claimed to cover. This drives those
+  // 160 upgrades for real.
+  console.log('\n--- 16 devices x 10 reconnects in one window fit the shipped upgrade budget (I3/I5) ---');
+  {
+    const s = startServer(TIGHT_PORT, {
+      LOG_PORT: '8896',
+      ROOM_MAX_SOCKETS_PER_IP: '', ROOM_MAX_UPGRADES_PER_IP: '', ROOM_MAX_SOFT_REFUSALS_PER_IP: '',
+    });
+    await s.ready;
+    let ok160 = 0, firstRefusal = null;
+    for (let i = 0; i < 160 && !firstRefusal; i++) {
+      const r = await admit(TIGHT_PORT, 'blip', `B${i}`);
+      if (r.admitted) { ok160++; r.c?.ws?.close(); } else firstRefusal = r;
+    }
+    ok(ok160 === 160 && !firstRefusal,
+      `160 reconnects from one address inside one window are all admitted (${ok160}/160${firstRefusal ? `, first refusal "${firstRefusal.reason}"` : ''}) — under the previous x8 default this failed at 129`);
+    // …and it is still a budget: keep going and it closes. (Charged only on
+    // admission, so this counts real joins, not knocks.)
+    let extra = 0, churn = null;
+    for (let i = 0; i < 160 && !churn; i++) {
+      const r = await admit(TIGHT_PORT, 'blip', `E${i}`);
+      if (r.admitted) { extra++; r.c?.ws?.close(); } else churn = r;
+    }
+    ok(!!churn && /too many connection attempts/.test(churn.reason) && extra < 140,
+      `and the budget still closes on sustained churn — refused after ${160 + extra} admissions in the window ("${churn?.reason}")`);
+    await stop(s);
+  }
+
+  // --------------------------------------------- 15. bind address (RELAY-5)
+  // The relay listened on every interface with no way to change that, so on the
+  // production box :8787 was reachable DIRECTLY from the internet as well as
+  // through Apache — bypassing TLS termination and everything the vhost enforces.
+  // The deployed unit now sets ROOM_HOST=127.0.0.1 (Apache proxies from loopback);
+  // LAN dev leaves it unset, because a Quest connects straight to the dev box.
+  console.log('\n--- bind address (ROOM_HOST) ---');
+  {
+    const anyIf = startServer(TIGHT_PORT, { LOG_PORT: '8896' });
+    await anyIf.ready;
+    const loop = await tryJoin(TIGHT_PORT, 'bind', 'LOOP');
+    ok(loop.ok, 'control: unset (the shipped default) still binds every interface — LAN dev and the headset path are unchanged');
+    loop.c?.ws?.close();
+    await stop(anyIf);
+
+    const lan = Object.values(networkInterfaces()).flat()
+      .find((n) => n && n.family === 'IPv4' && !n.internal)?.address;
+    if (!lan) {
+      console.log('       (no non-internal IPv4 on this box — the restricted-bind half is skipped)');
+    } else {
+      // Bound to the LAN address ONLY, so a LOOPBACK connect must be refused.
+      // Asserted this way round on purpose: a refused connect to 127.0.0.1 is
+      // deterministic, where probing the LAN address would drag the host firewall
+      // into the test.
+      const bound = startServer(TIGHT_PORT, { LOG_PORT: '8896', ROOM_HOST: lan });
+      await bound.ready;
+      ok(bound.log().includes(`bind ${lan}`), `the relay reports its bind address in the journal (bind ${lan})`);
+      const blocked = await tryJoin(TIGHT_PORT, 'bind', 'LOOP2');
+      ok(!blocked.ok,
+        `ROOM_HOST=${lan} really restricts the listener — a 127.0.0.1 connect is refused ("${blocked.reason}"), which is the same mechanism that keeps the deployed ROOM_HOST=127.0.0.1 relay off the public interface`);
+      blocked.c?.ws?.close();
+      await stop(bound);
+    }
   }
 } catch (e) {
   failed++;
