@@ -104,7 +104,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up the pinned Node toolchain
         uses: actions/setup-node@v4
@@ -141,7 +141,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up the pinned Node toolchain
         uses: actions/setup-node@v4
