@@ -19,6 +19,7 @@
     "make-snes-demo": "node scripts/make-snes-demo.mjs",
     "make-gba-paint": "node scripts/make-gba-paint.mjs",
     "make-vb-demo": "node scripts/make-vb-demo.mjs",
+    "lint": "node scripts/test-lint.mjs",
     "test": "node scripts/run-tests.mjs",
     "test:node": "node --test test/psx-foundations.test.js test/runtime.test.js test/disc-identity.test.js",
     "test:servers": "node scripts/run-tests.mjs --servers",
@@ -104,9 +105,11 @@
     "test:runtime-dispose": "node scripts/test-runtime-dispose.mjs"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.13.0"
   },
   "devDependencies": {
+    "eslint": "^10.8.1",
+    "globals": "^17.11.0",
     "jsnes": "^2.1.0",
     "puppeteer-core": "^25.0.2",
     "vite": "^7.3.5",

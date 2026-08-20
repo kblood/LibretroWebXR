@@ -153,9 +153,6 @@ const phase1 = await page.evaluate(async () => {
 // Phase 2: reload the page and assert the cart reappears
 // ---------------------------------------------------------------------------
 
-// Collect fetches from reload onward separately.
-const fetchesBeforeReload = romFetches.length;
-
 await page.reload({ waitUntil: 'load' });
 
 // Wait for the world and restoreLocalRoms to run.

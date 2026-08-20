@@ -6,7 +6,7 @@
 // ---------------
 // Every rule below was, until now, either a comment or nothing at all:
 //
-//   * WHICH NODE. `package.json` declares `engines.node >= 22.12.0` — the true
+//   * WHICH NODE. `package.json` declares `engines.node >= 22.13.0` — the true
 //     transitive floor from the lockfile, not a guess — and ci.yml pins ONE exact
 //     interpreter. Nothing checked that the pin was inside the declared range, or
 //     that the declared floor was actually high enough for every dependency. Both

@@ -22,7 +22,7 @@ import { createLightGun } from './LightGun.js';
 import { createMouse } from './Mouse.js';
 import {
   createBookcase, createCupboard, createTable,
-  bookcaseShelfSurfaceYs, BOOKCASE_W, BOOKCASE_H, BOOKCASE_T,
+  bookcaseShelfSurfaceYs, BOOKCASE_W, BOOKCASE_H,
 } from './Furniture.js';
 import { fitModeUV as _fitModeUV, FIT_MODES as _FIT_MODES, DEFAULT_FIT_MODE as _DEFAULT_FIT_MODE } from './PosterFit.js';
 
@@ -264,7 +264,6 @@ const MAX_CARTS_PER_BOOKCASE_ROW = 5;
  */
 function buildBookcaseCarts(bookcaseGroup, games) {
   const shelfYs = bookcaseShelfSurfaceYs();   // top-surface Y for each level
-  const innerW = BOOKCASE_W - 2 * BOOKCASE_T; // usable width per row
   const CART_W = 0.12, CART_H = 0.13;         // from Cartridge.js CARTRIDGE_DIMS
   const SLOT = CART_W + 0.04;                  // same spacing as Shelf.js
   const BACK_LEAN = -0.08;                     // same back-lean as Shelf.js

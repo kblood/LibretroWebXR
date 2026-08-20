@@ -31,11 +31,6 @@ const eq = (name, got, want) => {
   else { fail++; console.error(`FAIL  ${name}\n  got:  ${g}\n  want: ${w}`); }
 };
 
-const near = (name, got, want, tol = 1e-9) => {
-  if (Math.abs(got - want) <= tol) { pass++; }
-  else { fail++; console.error(`FAIL  ${name}  got=${got}  want=${want}`); }
-};
-
 // ---------------------------------------------------------------------------
 // LAYOUT_NAMES
 // ---------------------------------------------------------------------------

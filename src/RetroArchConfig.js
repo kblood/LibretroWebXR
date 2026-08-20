@@ -226,4 +226,213 @@ export const PLAYER_KEYBINDS = playerKeybinds();
 export const RETROARCH_CFG = NUL_KEYS + DEFAULT_KEYBINDS + PLAYER_KEYBINDS + EXTRA_CONFIG;
 export const RETROARCH_CFG_DIR = '/home/web_user/retroarch/userdata';
 export const RETROARCH_CFG_PATH = RETROARCH_CFG_DIR + '/retroarch.cfg';
+// Legacy single-file libretro core options. We point RA at this explicitly
+// (core_options_path) and write `<key> = "<value>"` lines into it for cores
+// that need a non-default option — e.g. PUAE's `puae_kickstart = "aros"`, which
+// selects the built-in AROS Kickstart so the Amiga boots with no proprietary BIOS.
 export const RETROARCH_CORE_OPTIONS_PATH = RETROARCH_CFG_DIR + '/retroarch-core-options.cfg';
+
+// Per-core input remap directory. RetroArch reads a controller-port device
+// override (input_libretro_device_pN) from a core-specific remap file at
+// <remap_dir>/<LibraryName>/<LibraryName>.rmp — and, critically, HONOURS it at
+// boot when the main cfg's input_libretro_device_pN is ignored (verified during
+// the light-gun bring-up; see docs/LIGHTGUN_SUPPORT.md). This is how a light gun
+// gets its console to connect the Zapper / Super Scope / Light Phaser on a port.
+// Worker-executed cores (PSX, N64) never had this plumbing before.
+//
+// Both execution backends used to declare their own copy of this path
+// (EmulatorClient.js's REMAP_DIR and EmulatorWorkerRuntime.js's own literal); it
+// lives here now for the same reason RETROARCH_SYSTEM_DIR does — one definition,
+// so the two can no longer drift.
+export const RETROARCH_REMAP_DIR = RETROARCH_CFG_DIR + '/config/remaps';
+
+// libretro device-id classification. A device id carries its base class in the
+// low byte plus an optional subclass above it, so the base class is what says
+// "this port is a gun / a mouse".
+const RETRO_DEVICE_MASK = 0xff, RETRO_DEVICE_MOUSE = 2, RETRO_DEVICE_LIGHTGUN = 4, RETRO_DEVICE_POINTER = 6;
+
+// ⚠ THE BUILDER DOES NOT NORMALIZE `{}`. Both pre-extraction functions tested
+// their maps with PLAIN TRUTHINESS (`if (this._coreOptions)`, `if
+// (payload.inputDevices)`), and `{}` is truthy — so this builder does the same,
+// verbatim. Whether an empty map means "nothing requested" is the CALLER's
+// question, and at HEAD (c48db3d) the two backends answered it differently:
+//
+//   • EmulatorClient normalizes in start() (`normalizeBootMap`, still there),
+//     so `{}` is already null by the time _writeRetroArchConfig runs. An empty
+//     map emits nothing on the main thread.
+//   • EmulatorWorkerRuntime forwards the raw start payload, so `{}` emits: the
+//     two remap-header lines with no device line under them, the "inputDevices
+//     set without remapName" log, and a bare newline on the core-options file.
+//
+// That difference is REAL and reached in production — systems.js hands out
+// `coreOptions: tg.coreOptions || {}` and SYSTEMS.ps2.lightgun literally
+// carries `coreOptions: {}` — and PSX / PS2 / N64 / Amiga guns and mice all run
+// on the worker backend. An earlier draft of this extraction collapsed `{}`
+// here, for both backends at once; that quietly changed the worker's emitted
+// bytes and dropped a diagnostic log on the one code path this project keeps
+// re-fixing, so it was reverted. If the worker's empty-map output should
+// change, change it in the worker (or in the payload it is handed) as its own
+// named fix — not as a side effect of two callers sharing a text assembler.
+// scripts/test-retroarch-config.mjs pins BOTH answers, per backend, and treats
+// `{}` and undefined as distinct inputs.
+
+/**
+ * Assemble everything a libretro launch needs written into the core's
+ * filesystem — the retroarch.cfg body, the per-core .rmp remap, and the
+ * core-options file — as PURE TEXT. No filesystem, no Emscripten Module, no
+ * DOM: importable under plain node, which is what lets
+ * scripts/test-retroarch-config.mjs golden-test the exact bytes.
+ *
+ * WHY THIS IS SHARED (CODEX ARC-2 (b)). This assembly used to exist twice, hand
+ * copied line for line: src/EmulatorClient.js's `_writeRetroArchConfig` for
+ * main-thread cores and src/runtime/EmulatorWorkerRuntime.js's `writeConfig` for
+ * worker-execution cores (PSX, N64, DOS). Light-gun and mouse port binding is
+ * the single area this project keeps re-fixing (the gun/mouse arming leak, the
+ * Amiga beam fix, the GunCon2 port+1 key), and a fix applied to one copy left
+ * every core on the other backend on the old binding — invisibly, because
+ * nothing tested either backend's emitted text. The two callers keep only the
+ * part that legitimately differs: writing these strings through their own FS
+ * API (Emscripten `FS` on the main thread, the worker's own mount).
+ *
+ * @param {object}  opts
+ * @param {object|null} opts.inputDevices  { player: libretroDeviceId }, player
+ *        1-based (systems.js builds it as `gun.port + 1` — the GunCon2 "port+1"
+ *        key). null/undefined mean "no port overrides"; `{}` does NOT — it is a
+ *        present-but-empty map and emits the remap header plus `warning`, which
+ *        is what the worker backend has always done. See the note above.
+ * @param {string|null} opts.remapName     the core's RA library_name, which names
+ *        the remap dir AND the .rmp inside it. Without it a port override cannot
+ *        connect at boot, hence `warning` below.
+ * @param {string|null} opts.libraryName   alias for remapName — the .rmp is named
+ *        after the core's library_name and some callers know it by that name.
+ *        `remapName` wins when both are given. Nothing in the app passes it today.
+ * @param {object|null} opts.coreOptions   per-launch `<key> = "<value>"` core
+ *        options, appended after `coreOptionsBaseline`. `{}` is present-but-
+ *        empty and appends a bare newline, as both HEAD backends did with a
+ *        truthy empty map; null/undefined append nothing.
+ * @param {Array|null}  opts.systemFiles   BIOS/firmware descriptors. They do NOT
+ *        appear in any emitted text — the cfg's `system_directory` is already in
+ *        RETROARCH_CFG — so this is passed straight back next to `systemDir` for
+ *        whichever FS writer provisions them.
+ * @param {string}  opts.coreOptionsBaseline  text prepended to the core-options
+ *        body. The worker runtime passes RETROARCH_CORE_OPTIONS (the PSX/DOS
+ *        settings that must be in the file before content loads); the main-thread
+ *        path passes nothing, which is what it has always written.
+ * @param {boolean} opts.emitCoreOptionsPathLine  append a `core_options_path`
+ *        line to the cfg when there are core options. Only the main-thread path
+ *        has ever done this, and the line it appends is byte-identical to the one
+ *        EXTRA_CONFIG already carries — RetroArch keeps the FIRST occurrence of a
+ *        duplicated key, so it is inert. Kept verbatim rather than quietly
+ *        dropped: this refactor changes no emitted byte it does not have to.
+ * @returns {{cfgText:string, cfgPaths:Array<Array<string>>, rmpText:string|null,
+ *            rmpPath:string|null, rmpDir:string|null, coreOptionsText:string|null,
+ *            coreOptionsPath:string, systemDir:string, systemFiles:Array|null,
+ *            warning:string|null}}
+ */
+export function buildRetroArchLaunchConfig({
+  inputDevices = null,
+  remapName = null,
+  libraryName = null,
+  coreOptions = null,
+  systemFiles = null,
+  coreOptionsBaseline = '',
+  emitCoreOptionsPathLine = false,
+} = {}) {
+  // Plain truthiness, exactly as both HEAD functions had it — see the
+  // "DOES NOT NORMALIZE `{}`" note above: `{}` is a PRESENT map here, and it is
+  // each caller's job (not this builder's) to collapse it first if that is the
+  // behaviour that backend shipped.
+  const devices = inputDevices || null;
+  const options = coreOptions || null;
+  const remap = remapName || libraryName || null;
+
+  // When the core needs non-default options, point RA at an explicit
+  // single-file core-options path and write the requested key/values there.
+  let coreOptionsText = coreOptionsBaseline || '';
+  if (options) {
+    coreOptionsText += Object.entries(options)
+      .map(([k, v]) => `${k} = "${v}"`).join('\n') + '\n';
+  }
+  if (!coreOptionsText) coreOptionsText = null;
+
+  // NOTE: no `system_directory` line here. RETROARCH_CFG already carries it,
+  // and RetroArch keeps the FIRST occurrence of a duplicated key — an appended
+  // second one is inert, which is exactly how BIOS provisioning was silently
+  // broken until 2026-08-15 (see RETROARCH_SYSTEM_DIR's comment).
+  let cfg = RETROARCH_CFG;
+  if (options && emitCoreOptionsPathLine) {
+    cfg += `core_options_path = "${RETROARCH_CORE_OPTIONS_PATH}"\n`;
+  }
+
+  let rmpText = null, rmpPath = null, rmpDir = null, warning = null;
+  if (devices) {
+    // Port device overrides + light-gun input wiring. RetroArch's libretro
+    // lightgun reads its absolute aim from the MOUSE pointer (rwebinput maps
+    // the canvas-relative cursor to gun X/Y — the rwebinput patch in
+    // docs/patches/) and its buttons from mouse buttons, so for any gun port we
+    // bind trigger→LMB and the off-screen/reload shot→RMB. sendLightgun() emits
+    // those synthetic mouse events. A "gun" port is one whose device base class
+    // is LIGHTGUN (4) — or POINTER (6), which covers nestopia's Zapper (id 262 =
+    // SUBCLASS(POINTER,0)) that is nonetheless read via the LIGHTGUN path.
+    const validPorts = Object.entries(devices)
+      .filter(([player]) => Number.isInteger(Number(player)) && Number(player) >= 1);
+    // Main cfg: enable the per-core remap dir (so the .rmp below is honoured at
+    // boot) + the device line (belt-and-suspenders; ignored at boot but correct
+    // for any runtime re-read) + the gun mouse-button binds.
+    cfg += `input_remap_binds_enable = "true"\n`;
+    cfg += `input_remapping_directory = "${RETROARCH_REMAP_DIR}"\n`;
+    for (const [player, dev] of validPorts) {
+      const p = Number(player);
+      cfg += `input_libretro_device_p${p} = "${dev}"\n`;
+      const base = Number(dev) & RETRO_DEVICE_MASK;
+      if (base === RETRO_DEVICE_LIGHTGUN || base === RETRO_DEVICE_POINTER) {
+        cfg += `input_player${p}_mouse_index = "0"\n`;
+        cfg += `input_player${p}_gun_trigger_mbtn = "1"\n`;
+        cfg += `input_player${p}_gun_offscreen_shot_mbtn = "2"\n`;
+      } else if (base === RETRO_DEVICE_MOUSE) {
+        // A MOUSE port reads its motion + buttons from a physical mouse index.
+        // In a web build there is only one (index 0); sendMouse() feeds the
+        // canvas-targeted DOM mouse events (movementX/Y + L/R buttons) the core
+        // integrates. Two mice on one console reading distinct pointers needs a
+        // multiport rwebinput patch (see sendMouse / docs/MOUSE_SUPPORT.md).
+        cfg += `input_player${p}_mouse_index = "0"\n`;
+      }
+    }
+    // The per-core remap FILE is what actually connects the device at boot.
+    // <REMAP_DIR>/<LibraryName>/<LibraryName>.rmp with input_libretro_device_pN.
+    if (remap && validPorts.length) {
+      rmpText = validPorts.map(([p, dev]) => `input_libretro_device_p${Number(p)} = "${dev}"`).join('\n') + '\n';
+      rmpDir = `${RETROARCH_REMAP_DIR}/${remap}`;
+      rmpPath = `${rmpDir}/${remap}.rmp`;
+    } else {
+      // Returned, not logged: this module has no logger, and the two backends
+      // report it differently (console.warn vs a posted 'log' event), so each
+      // caller prefixes its own tag. Reachable with a non-empty device map and
+      // no remapName, or with device keys that are all invalid (player < 1).
+      warning = 'inputDevices set without remapName — port device will not connect at boot';
+    }
+  }
+
+  return {
+    cfgText: cfg,
+    // Write the cfg to every path RA might consult: the webretro
+    // userdata path (explicit -c target), and the three default paths
+    // RA searches ($HOME/.config/retroarch/, $HOME/.retroarch.cfg, and
+    // $XDG_CONFIG_HOME/retroarch/). $HOME is /home/web_user in
+    // emscripten. We don't know which one this RA build will actually
+    // honour, so we cover all of them.
+    cfgPaths: [
+      [RETROARCH_CFG_DIR, RETROARCH_CFG_PATH],
+      ['/home/web_user/.config/retroarch', '/home/web_user/.config/retroarch/retroarch.cfg'],
+      ['/home/web_user',                   '/home/web_user/.retroarch.cfg'],
+    ],
+    rmpText,
+    rmpPath,
+    rmpDir,
+    coreOptionsText,
+    coreOptionsPath: RETROARCH_CORE_OPTIONS_PATH,
+    systemDir: RETROARCH_SYSTEM_DIR,
+    systemFiles: (Array.isArray(systemFiles) && systemFiles.length) ? systemFiles : null,
+    warning,
+  };
+}

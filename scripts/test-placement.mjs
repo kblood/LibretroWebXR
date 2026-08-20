@@ -30,12 +30,6 @@ const near = (name, got, want, tol = 1e-9) => {
   else { fail++; console.error(`FAIL  ${name}  got=${got}  want=${want}`); }
 };
 
-const eq = (name, got, want) => {
-  const g = JSON.stringify(got), w = JSON.stringify(want);
-  if (g === w) { pass++; }
-  else { fail++; console.error(`FAIL  ${name}\n  got:  ${g}\n  want: ${w}`); }
-};
-
 // ---------------------------------------------------------------------------
 // roomBoundsFromDims
 // ---------------------------------------------------------------------------

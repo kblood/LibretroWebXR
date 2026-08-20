@@ -138,7 +138,6 @@ function handleMessage(raw) {
     }
 
     case MSG.POSE: {
-      const prev = presence.get(msg.id);
       presence.apply(msg, now);
       const peer = presence.get(msg.id);
       const nick = peer?.nick ?? msg.id?.slice(0,8) ?? '?';

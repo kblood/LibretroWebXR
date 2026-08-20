@@ -342,7 +342,13 @@ await section('an UNLABELLED bump abandons — the default is fail-safe', () => 
 // main.js cannot be imported (THREE + DOM at module scope), so these read the
 // source. Each one pins a specific way the fix could be undone by an edit that
 // still looks reasonable in review.
-const MAIN = readFileSync(fileURLToPath(new URL('../src/main.js', import.meta.url)), 'utf8');
+// Normalised to LF: fnBody() below terminates a body on '\n}\n', and a Windows
+// checkout (core.autocrlf=true, no .gitattributes) hands main.js over as CRLF,
+// where that never matches. It does not throw — fnBody falls back to slice(start),
+// so every body scan silently widened to the whole REST OF THE FILE and the
+// section-C assertions stopped being scoped to the function they name. Same root
+// cause that crashed scripts/test-boot-transaction.mjs outright.
+const MAIN = readFileSync(fileURLToPath(new URL('../src/main.js', import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
 // Slice a top-level function body: from its header to the first line-start `}`.
 const fnBody = (header) => {
   const start = MAIN.indexOf(header);

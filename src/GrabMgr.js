@@ -21,6 +21,7 @@ import {
   clampToRoom, snapToSurface, footprintForKind, SURFACE_KIND,
 } from './Placement.js';
 import { nearestAnchorAlongRay } from './Snap.js';
+import { CABLED_PERIPHERALS } from './CabledPeripheral.js';
 
 const ARM_RANGE  = 0.45;  // metres — fallback close-range grab when nothing aimed
 const RAY_RANGE  = 5.0;   // metres — how far the aim ray reaches
@@ -42,9 +43,13 @@ const LASER_SOCKET = 0x55ff88;
 const HOVER_BOX_PAD = 1.08; // fraction over the target's bounds so the outline clears its surface
 
 // Prop kinds that can be exclusively locked by a remote peer's hold (see
-// _isRemotelyHeld / GhostGamepadMgr / GhostLightGunMgr / GhostMouseMgr) — only
-// cabled peripherals shared across the network need this; cartridges etc. don't.
-const NETWORK_LOCKABLE_KINDS = new Set(['gamepad', 'lightgun', 'mouse']);
+// _isRemotelyHeld / [[src/GhostPeripheralMgr.js]]) — only cabled peripherals
+// shared across the network need this; cartridges etc. don't. DERIVED from the
+// descriptor table ([[src/CabledPeripheral.js]]) rather than hand-listed, so a
+// fourth port-bound peripheral is lockable the moment it is described, instead
+// of silently grabbable by two players at once until someone edits this line
+// too (CLAUDE_REVIEW §3.3). Today it is exactly {'gamepad','lightgun','mouse'}.
+const NETWORK_LOCKABLE_KINDS = new Set(CABLED_PERIPHERALS.map((d) => d.kind));
 
 export class GrabMgr {
   constructor({ scene, controllers, console: consoleObj, getConsoles, cable, onCartridgeInserted, onGamepadHeldChanged, onMemoryCardInserted, onGamepadPlugged, onPlugReleased, isEditMode, onEditRelease, getMode, onSelectProp, onCartridgeGrabbed, onCartridgeReleased, onGamepadGrabbed, onGamepadReleased, onObjectGrabbed, onObjectReleased, isRemotelyHeld, getRoomBounds, isPreviewEnabled }) {
@@ -98,7 +103,7 @@ export class GrabMgr {
     // its ghost.
     this.onObjectReleased = onObjectReleased || (() => {});
     // isRemotelyHeld(obj): returns true when a gamepad or light gun is held by a
-    // remote peer (supplied by main.js from GhostGamepadMgr / GhostLightGunMgr).
+    // remote peer (supplied by main.js from GhostPeripheralMgr, one per kind).
     // When true the object is NOT grabbable locally. No-op when null
     // (single-player or pre-net).
     this._isRemotelyHeld = isRemotelyHeld || (() => false);
@@ -175,7 +180,7 @@ export class GrabMgr {
     // placement ghost treat them as normal editable props once in edit mode —
     // only the play-mode candidacy needs this override, since the generic rule
     // below would otherwise make an editable prop invisible to play-mode grabs.
-    // Hidden (remotely held, see GhostLightGunMgr/GhostMouseMgr) → inert.
+    // Hidden (remotely held, see [[src/GhostPeripheralMgr.js]]) → inert.
     if (obj.userData?.kind === 'lightgun' || obj.userData?.kind === 'mouse') return obj.visible !== false;
     // Patch-cord plugs are grabbable while playing (repatch cords any time) and
     // visible, but inert in edit mode so they don't compete with prop arranging.

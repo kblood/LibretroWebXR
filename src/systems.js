@@ -740,6 +740,20 @@ export function isKeyboardCapable(systemId) {
   return SYSTEMS[systemId]?.keyboard === true;
 }
 
+// --- The port-bound peripheral registry pairs --------------------------------
+// The light-gun functions below and their mouse mirrors further down
+// (lightgunForSystem/mouseForSystem, isLightgunCapable/isMouseCapable,
+// twoGunPortsForSystem/twoMousePortsForSystem, lightgunLoadConfig/mouseLoadConfig,
+// libretroGunPortFor/libretroMousePortFor) are five PAIRS that say the same
+// thing about two devices. They stay here — this is where the hardware
+// knowledge is documented and it would be buried anywhere else — but callers
+// no longer pick one of each pair by hand: [[src/CabledPeripheral.js]]'s
+// LIGHTGUN/MOUSE descriptors reference them as capableFor / deviceFor /
+// loadConfigFor / twoPortsFor / libretroPortFor, and main.js goes through the
+// descriptor (CLAUDE_REVIEW §3.3). A new port-bound device adds one descriptor
+// entry pointing at its own functions here; it must not add a sixth pair to
+// every caller.
+
 /**
  * Light-gun descriptor for a system, or null. Shape:
  *   { label, core, device, port, coreOptions }

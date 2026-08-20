@@ -1,7 +1,6 @@
 import {
-  RETROARCH_CFG,
   RETROARCH_CORE_OPTIONS,
-  RETROARCH_CORE_OPTIONS_PATH,
+  buildRetroArchLaunchConfig,
 } from '../RetroArchConfig.js';
 import { DiscControlBridge } from '../DiscControl.js';
 import { FramePump } from './FramePump.js';
@@ -22,14 +21,10 @@ const STATE_DIR = '/home/web_user/retroarch/userdata/states';
 const SYSTEM_DIR = '/home/web_user/retroarch/userdata/system';
 const SAVE_DIR = '/home/web_user/retroarch/userdata/saves';
 const RA_CFG_PATH = '/home/web_user/retroarch/userdata/retroarch.cfg';
-// Per-core input remap directory — mirrors EmulatorClient.js's REMAP_DIR
-// (RETROARCH_CFG_DIR + '/config/remaps'). RetroArch only honours a
-// controller-port device override (input_libretro_device_pN, e.g. GunCon on
-// port 1) from this per-core <LibraryName>/<LibraryName>.rmp file at boot —
-// the main cfg's value is ignored (verified during the original light-gun
-// bring-up, see docs/LIGHTGUN_SUPPORT.md). Worker-executed cores (PSX, N64)
-// never had this plumbing before — see writeConfig() below.
-const REMAP_DIR = '/home/web_user/retroarch/userdata/config/remaps';
+// The per-core remap directory this file used to mirror by hand from
+// EmulatorClient.js's REMAP_DIR is RETROARCH_REMAP_DIR in RetroArchConfig.js
+// now, with its "why" comment; writeConfig() below gets the built remap path
+// back from buildRetroArchLaunchConfig rather than spelling it again.
 
 let canvas = null;
 let moduleInstance = null;
@@ -296,62 +291,61 @@ function detectCapabilities() {
 function writeConfig(payload = {}) {
   if (!moduleInstance?.FS) return;
 
-  // Core options: this worker's static PSX-required baseline (cpu_dynarec /
-  // renderer — see RetroArchConfig.js's long comment on why those values are
-  // load-bearing) plus any per-launch overrides appended after (e.g. GunCon's
-  // gun_input_mode/gun_cursor). New keys only; nothing here collides with the
-  // static baseline's keys.
-  let coreOptionsBody = RETROARCH_CORE_OPTIONS;
-  if (payload.coreOptions) {
-    coreOptionsBody += Object.entries(payload.coreOptions)
-      .map(([k, v]) => `${k} = "${v}"`).join('\n') + '\n';
-  }
-
-  // Main cfg: static keybinds/base config, plus — when a controller-port
-  // device override is requested (a light gun on some port) — the SAME
-  // remap + gun-mouse-bind wiring EmulatorClient.js's _writeRetroArchConfig
-  // writes for every main-thread gun (PS2 GunCon2, SNES Super Scope/
-  // Justifier, NES Zapper, Genesis Menacer, SMS Light Phaser). Mirrored
-  // line-for-line from that function; see its comments for the "why" of each
-  // line (RETRO_DEVICE_MASK/LIGHTGUN/POINTER classification, why the remap
-  // FILE — not the main cfg's input_libretro_device_pN — is what actually
-  // connects the device at boot).
-  let cfg = RETROARCH_CFG;
+  // The cfg / .rmp / core-options TEXT is assembled by the shared, pure
+  // buildRetroArchLaunchConfig (src/RetroArchConfig.js) — the same builder the
+  // main-thread backend (EmulatorClient.js's _writeRetroArchConfig) calls. What
+  // is left in this function is the half that legitimately differs: writing
+  // those strings through this worker's own mounted FS. The remap +
+  // gun-mouse-bind wiring used to be mirrored here line-for-line from that
+  // other function (PS2 GunCon2, SNES Super Scope/Justifier, NES Zapper,
+  // Genesis Menacer, SMS Light Phaser on the main thread; PSX GunCon, DOS mouse
+  // here), which meant a binding fixed on one backend silently missed every
+  // core on the other, with no test able to see it (CODEX ARC-2 (b)). The "why"
+  // of each emitted line (RETRO_DEVICE_MASK/LIGHTGUN/POINTER classification, why
+  // the remap FILE — not the main cfg's input_libretro_device_pN — is what
+  // actually connects the device at boot) lives on the builder now.
+  const built = buildRetroArchLaunchConfig({
+    // Raw, un-normalized, exactly as this function has always used them: unlike
+    // EmulatorClient (which collapses `{}` to null in start()), this backend has
+    // never had a normalization step, so a present-but-empty `{}` map still
+    // emits the remap header + the "inputDevices set without remapName" log
+    // below, and `coreOptions: {}` still appends its bare newline. Inert for
+    // RetroArch, but the log is a real diagnostic on the gun/mouse binding path
+    // every worker-hosted core (PSX, PS2, N64, Amiga) depends on, and
+    // `seatedInputDevices` just below tests the same raw value — collapsing one
+    // and not the other is how the two would start disagreeing again.
+    inputDevices: payload.inputDevices,
+    remapName: payload.remapName,
+    // Core options: this worker's static PSX-required baseline (cpu_dynarec /
+    // renderer — see RetroArchConfig.js's long comment on why those values are
+    // load-bearing) plus any per-launch overrides appended after (e.g. GunCon's
+    // gun_input_mode/gun_cursor). New keys only; nothing here collides with the
+    // static baseline's keys. The main-thread path passes no baseline, which is
+    // what it has always written — these keys are for worker-only cores.
+    coreOptionsBaseline: RETROARCH_CORE_OPTIONS,
+    coreOptions: payload.coreOptions,
+  });
+  const cfg = built.cfgText;
   seatedInputDevices = payload.inputDevices ? { ...payload.inputDevices } : null;
-  if (payload.inputDevices) {
-    const RETRO_DEVICE_MASK = 0xff, RETRO_DEVICE_MOUSE = 2, RETRO_DEVICE_LIGHTGUN = 4, RETRO_DEVICE_POINTER = 6;
-    const validPorts = Object.entries(payload.inputDevices)
-      .filter(([player]) => Number.isInteger(Number(player)) && Number(player) >= 1);
-    cfg += `input_remap_binds_enable = "true"\n`;
-    cfg += `input_remapping_directory = "${REMAP_DIR}"\n`;
-    for (const [player, dev] of validPorts) {
-      const p = Number(player);
-      cfg += `input_libretro_device_p${p} = "${dev}"\n`;
-      const base = Number(dev) & RETRO_DEVICE_MASK;
-      if (base === RETRO_DEVICE_LIGHTGUN || base === RETRO_DEVICE_POINTER) {
-        cfg += `input_player${p}_mouse_index = "0"\n`;
-        cfg += `input_player${p}_gun_trigger_mbtn = "1"\n`;
-        cfg += `input_player${p}_gun_offscreen_shot_mbtn = "2"\n`;
-      } else if (base === RETRO_DEVICE_MOUSE) {
-        cfg += `input_player${p}_mouse_index = "0"\n`;
-      }
-    }
-    if (payload.remapName && validPorts.length) {
-      const rmp = validPorts.map(([p, dev]) => `input_libretro_device_p${Number(p)} = "${dev}"`).join('\n') + '\n';
-      const dir = `${REMAP_DIR}/${payload.remapName}`;
-      try { moduleInstance.FS.mkdirTree(dir); } catch (_) {}
-      try { moduleInstance.FS.writeFile(`${dir}/${payload.remapName}.rmp`, rmp); }
-      catch (e) { postMessage(eventMessage('log', { level: 'error', text: `[EmulatorWorkerRuntime] failed to write remap: ${e?.message || e}` })); }
-    } else {
-      postMessage(eventMessage('log', { level: 'error', text: '[EmulatorWorkerRuntime] inputDevices set without remapName — port device will not connect at boot' }));
-    }
+  if (built.rmpPath) {
+    try { moduleInstance.FS.mkdirTree(built.rmpDir); } catch (_) {}
+    try { moduleInstance.FS.writeFile(built.rmpPath, built.rmpText); }
+    catch (e) { postMessage(eventMessage('log', { level: 'error', text: `[EmulatorWorkerRuntime] failed to write remap: ${e?.message || e}` })); }
+  }
+  if (built.warning) {
+    postMessage(eventMessage('log', { level: 'error', text: `[EmulatorWorkerRuntime] ${built.warning}` }));
   }
 
+  // Same three cfg search paths the builder hands back, in the same order, with
+  // the core-options file interleaved where this function has always written it.
+  // `|| ''` only matters if the static baseline is ever emptied: the old code
+  // wrote an empty body in that case rather than skipping the file.
+  const [cfgUserdata, cfgXdg, cfgHome] = built.cfgPaths;
   const targets = [
-    ['/home/web_user/retroarch/userdata', RA_CFG_PATH, cfg],
-    ['/home/web_user/retroarch/userdata', RETROARCH_CORE_OPTIONS_PATH, coreOptionsBody],
-    ['/home/web_user/.config/retroarch', '/home/web_user/.config/retroarch/retroarch.cfg', cfg],
-    ['/home/web_user', '/home/web_user/.retroarch.cfg', cfg],
+    [cfgUserdata[0], cfgUserdata[1], cfg],
+    [cfgUserdata[0], built.coreOptionsPath, built.coreOptionsText || ''],
+    [cfgXdg[0], cfgXdg[1], cfg],
+    [cfgHome[0], cfgHome[1], cfg],
   ];
   for (const [dir, path, contents] of targets) {
     try { moduleInstance.FS.mkdirTree(dir); } catch (_) {}

@@ -11,10 +11,6 @@ const eq = (name, got, want) => {
   if (g === w) { pass++; }
   else { fail++; console.error(`FAIL ${name}\n  got:  ${g}\n  want: ${w}`); }
 };
-const ok = (name, cond, extra = '') => {
-  if (cond) { pass++; }
-  else { fail++; console.error(`FAIL ${name}${extra ? ' — ' + extra : ''}`); }
-};
 
 // --- SYSTEMS.medium fields ---------------------------------------------------
 eq('snes medium = cartridge',  SYSTEMS.snes.medium,  'cartridge');

@@ -105,10 +105,6 @@
 export const COLS = 20;
 export const ROWS = 5;
 
-// Cell size in normalised [0,1] UV space.
-const CELL_W = 1 / COLS;
-const CELL_H = 1 / ROWS;
-
 // ------------------------------------------------------------------
 // ROW DEFINITIONS
 // Each entry: { id, label, col, row, w?, h?, code, key, keyCode,

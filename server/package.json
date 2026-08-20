@@ -8,7 +8,7 @@
     "start": "node room-server.mjs"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "ws": "^8.21.1"

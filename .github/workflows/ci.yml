@@ -58,6 +58,20 @@
 # Adding a vacuously-green browser tier here would be worse than omitting it.
 # See CODEX_REVIEW.md TST-1 for the full tiered plan this is tier 1+2 of.
 #
+# THE LINT GATE RIDES IN `npm test`, WITH NO STEP OF ITS OWN. `eslint.config.js`
+# enables five correctness rules and nothing stylistic — no-undef, no-unreachable,
+# no-dupe-keys, no-const-assign, no-unused-vars — and `scripts/test-lint.mjs` runs
+# them over src/,
+# scripts/, test/ and the root configs through ESLint's programmatic API. It is a
+# `scripts/test-*.mjs`, so discovery puts it in this gate with nothing to append
+# here; that is deliberate, and the head of that file argues it. It exists because
+# a deleted import left `makeGamepadHoldKey` called-but-undefined at four sites in
+# src/main.js and `node --check`, `npm test`, `npm run build` AND a headless boot
+# of the real app were all green over it — the call sites sit behind a `net &&`
+# guard, so the ReferenceError only fired in a multiplayer room, i.e. on a headset.
+# It honours all three conditions of the maintenance rule below: no browser, no
+# core, no port. Runtime is ~2s for ~290 files.
+#
 # MAINTENANCE RULE: the `app` job runs `npm test`, and that tier is discovered,
 # so a new `scripts/test-*.mjs` lands here the moment it exists — nothing to
 # append, and nothing to forget. Whatever you add must (a) need
@@ -75,10 +89,11 @@
 #
 # NODE VERSION: pinned to the exact interpreter this repo is developed and
 # verified on (`node -v` -> v24.7.0). package.json declares
-# `engines.node >= 22.12.0`, the true transitive floor from the lockfile
-# (vite 7 wants ^20.19 || >=22.12, puppeteer-core >=22.12). The engines field is
-# the SUPPORTED range; NODE_VERSION here is the single version the gate actually
-# proves. Bump them together, and keep NODE_VERSION inside the engines range.
+# `engines.node >= 22.13.0`, the true transitive floor from the lockfile
+# (eslint 10 wants ^20.19 || ^22.13 || >=24 — it is the binding one; vite 7 wants
+# ^20.19 || >=22.12, puppeteer-core >=22.12). The engines field is the SUPPORTED
+# range; NODE_VERSION here is the single version the gate actually proves. Bump
+# them together, and keep NODE_VERSION inside the engines range.
 
 name: CI
 

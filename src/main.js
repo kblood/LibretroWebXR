@@ -25,9 +25,6 @@ import { createLightGun } from './LightGun.js';
 import { LightGunMgr } from './LightGunMgr.js';
 import { createMouse } from './Mouse.js';
 import { MouseMgr } from './MouseMgr.js';
-import { Cord } from './Cord.js';
-import { Plug } from './Plug.js';
-import { nearestAnchor, nearestAnchorAlongRay } from './Snap.js';
 import { GrabMgr } from './GrabMgr.js';
 import { LocomotionMgr } from './LocomotionMgr.js';
 import { DesktopControls } from './DesktopControls.js';
@@ -35,8 +32,11 @@ import { GameInputMgr } from './GameInputMgr.js';
 import { createTestApi } from './TestApi.js';
 import { installXRRafShim } from './XRRafShim.js';
 import { installSpatialAudio } from './SpatialAudio.js';
-import { createMemoryCard } from './MemoryCard.js';
-import { saveState, loadState, listStates, checkSaveStateCompatibility } from './SaveState.js';
+import { createMemoryCardUI } from './MemoryCardUI.js';
+import { createConsoleRegistry } from './ConsoleRegistry.js';
+import { createPowerMgr } from './PowerMgr.js';
+import { createPropChangeMode } from './PropChangeMode.js';
+import { createPeripheralCords } from './PeripheralCords.js';
 import { createDebugHud } from './DebugHud.js';
 import { createNowPlayingPanel } from './NowPlayingPanel.js';
 import { createDiscSwapPanel } from './DiscSwapPanel.js';
@@ -44,7 +44,12 @@ import { tvStateValue, mergeDiscIntoTv, discStatusFromTv } from './net/TvState.j
 import { createControlsPanel } from './ControlsPanel.js';
 import { createMenuPanel } from './MenuPanel.js';
 import { MenuMgr } from './MenuMgr.js';
-import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, isLightgunCapable, lightgunForSystem, lightgunLoadConfig, isTwoGunCapable, twoGunForSystem, libretroGunPortFor, twoGunPortsForSystem, isMouseCapable, mouseLoadConfig, isTwoMouseCapable, libretroMousePortFor, twoMousePortsForSystem, fourScoreLoadConfig, extOf, pickPrimaryFile } from './systems.js';
+// The peripheral registry pairs (isLightgunCapable/lightgunForSystem/…and their
+// four mouse mirrors) are reached through the GAMEPAD/LIGHTGUN/MOUSE descriptors
+// now — see [[src/CabledPeripheral.js]]. Only the ones this file still calls
+// DIRECTLY, on paths that are inherently single-device (the two-gun boot
+// decision, the boot-config builder), are imported by name.
+import { CORES, coreForFile, systemForFile, portsForSystem, MAX_PORTS, isKeyboardCapable, lightgunLoadConfig, isTwoGunCapable, twoGunForSystem, isMouseCapable, mouseLoadConfig, isTwoMouseCapable, fourScoreLoadConfig, extOf, pickPrimaryFile } from './systems.js';
 import { Patchbay } from './Patchbay.js';
 import { RackMgr } from './RackMgr.js';
 import { ConsoleRuntime, clientNeedsFreshBoot } from './ConsoleRuntime.js';
@@ -57,12 +62,19 @@ import { buildIceServers } from './net/NetProtocol.js';
 import { FALLBACK_HOST_KEY } from './net/HostElection.js';
 import { sanitiseRoom, randomRoomSuffix } from './net/SessionUtils.js';
 import { GhostCartMgr } from './GhostCartMgr.js';
-import { GhostGamepadMgr, GP_HOLD_PREFIX, makeGamepadHoldKey, cableIdFromHoldKey } from './GhostGamepadMgr.js';
-import { GhostLightGunMgr, GUN_HOLD_PREFIX, makeGunHoldKey, cableIdFromGunHoldKey } from './GhostLightGunMgr.js';
-import { GhostMouseMgr, MOUSE_HOLD_PREFIX, makeMouseHoldKey, cableIdFromMouseHoldKey } from './GhostMouseMgr.js';
+// The three port-bound peripherals are ONE description + ONE manager now
+// (CLAUDE_REVIEW §3.3). GAMEPAD/LIGHTGUN/MOUSE carry every per-device fact —
+// hold-key prefix, cableId prefix, ghost mesh + tint, the systems.js registry
+// functions, the sessionStorage arm key — and the helpers below take a
+// descriptor as their first argument instead of existing once per device.
+import {
+  GAMEPAD, LIGHTGUN, MOUSE, CABLED_PERIPHERALS, ARMABLE_PERIPHERALS,
+  makeHoldKeyFor, cableIdFromHoldKeyFor, peripheralForKind,
+} from './CabledPeripheral.js';
+import { GhostPeripheralMgr } from './GhostPeripheralMgr.js';
 import { HOLD_PREFIX, HoldView, makeHoldKey } from './net/HoldState.js';
 import {
-  makeGamepadStateKey, isGamepadStateKey, cableIdFromStateKey,
+  makeGamepadStateKey, isGamepadStateKey,
   makePeerGamepadId, parseGamepadEntries, diffGamepadSync,
 } from './net/GamepadSync.js';
 import {
@@ -90,22 +102,21 @@ import {
 } from './RoomPersistence.js';
 import { saveRack, loadRack, clearRack } from './RackPersistence.js';
 import {
-  addEntry as lrlAddEntry, removeEntry as lrlRemoveEntry,
+  addEntry as lrlAddEntry,
   toCartMeta as lrlToCartMeta,
   loadLocalRoms, saveLocalRoms,
 } from './LocalRomLibrary.js';
-import { buildRoom, buildProp, buildPortal, applyPosterTexture, FIT_MODES, DEFAULT_FIT_MODE, lockBookcaseHomes } from './RoomBuilder.js';
+import { buildRoom, buildProp, buildPortal, applyPosterTexture, DEFAULT_FIT_MODE } from './RoomBuilder.js';
 import { createShelf, addCartridgeToShelf } from './Shelf.js';
 import { createMedia } from './Media.js';
-import { createCoverPlaque } from './CoverPlaque.js';
 import { RoomEditor } from './RoomEditor.js';
-import { cycleSurface, cycleTimeOfDay, cyclePosterTexture, cycleShelfCollection, cyclePortalTarget, cycleFitMode, stepScale } from './EnvEditor.js';
+import { cycleSurface, cycleTimeOfDay, cycleFitMode, stepScale } from './EnvEditor.js';
 import {
   createProp, createPortal,
   addProp as appendProp, addPortal as appendPortal,
 } from './PropCreator.js';
 import {
-  clampToRoom, snapToSurface, SURFACE_KIND, placeInRoom, fanSlot,
+  SURFACE_KIND, placeInRoom, fanSlot,
 } from './Placement.js';
 import { createKeyboardDevice } from './Keyboard.js';
 
@@ -181,18 +192,115 @@ let currentMeta = null;
 // boot) can re-resolve and reload the SAME game. Unlike currentMeta this keeps
 // the rom-resolution fields (rom.source / sha1). null until a game loads.
 let _lastLoadedMeta = null;
-// Bumped once per loadCartridge() call, on the PRIMARY console specifically.
-// Picking a second cartridge before the first's fetch/boot has finished used
+// --- Boot-transaction epochs (CODEX ARC-2(c)) -------------------------------
+//
+// "Is this continuation still the boot that started it?" — bumped once per boot
+// TRANSACTION, per console, and captured by anything that awaits across one.
+//
+// A DIFFERENT AXIS from the room-authority epoch declared just below
+// (hostAuthority / captureBootAuthority, COR-3), which answers a question this
+// one never asks: "may this machine run a core at all?". Both are consulted
+// after the same awaits and either can abandon the same boot, but they are not
+// interchangeable — a solo player who is in no room at all has no authority
+// transitions to observe and still needs THIS guard, and a peer demoted with
+// exactly one boot in flight needs THAT one. They are deliberately kept as two
+// separate counters with two separate names so a reader never has to work out
+// which of the two meanings a given `epoch` carries.
+//
+// This generalises what a single `_primaryLoadGeneration` counter used to do for
+// loadCartridge() alone. The original bug it was written for, unchanged:
+// picking a second cartridge before the first's fetch/boot has finished used
 // to let BOTH resolve+boot independently — whichever finished LAST won,
 // regardless of which was requested last, so a big/slow ROM picked FIRST
 // could clobber a small/fast one picked afterward once its own fetch finally
 // caught up (observed: DOS Tools booted, then a still-resolving PS2 disc
 // picked moments earlier finished and replaced it — "two games booting on
-// top of each other"). loadCartridge captures its own generation and bails
-// after every await that could have been outlived by a newer call.
-let _primaryLoadGeneration = 0;
-// COR-3: the generation above orders competing LOADS; it says nothing about who
-// is allowed to boot. This is the other half of the same boot transaction — the
+// top of each other").
+// What is new is that loadCartridge() was only ONE of five ways to boot: the two
+// local-ROM pickers (via bootOnPrimary), rebootPrimaryConsole (the light-gun /
+// mouse arm-reboot), loadCartridgeIntoConsole and spawnConsole all committed
+// shared state after their own awaits with nothing ordering them against each
+// other. Every one of them now opens a transaction, so a stale continuation from
+// ANY of them is refused instead of only a stale cartridge load.
+//
+// KEYED BY CONSOLE, not global: a boot on console2 must not abandon a boot in
+// flight on console0. A global counter would drop legitimate boots on a busy
+// rack, which is a worse bug than the one this closes.
+const _bootEpochs = new Map();     // consoleId -> boot transaction counter
+/**
+ * Capture the current transaction WITHOUT starting one. For work that merely
+ * awaits across a possible boot (the memory-card load below) rather than being
+ * a boot itself.
+ * @returns {() => boolean} "a newer boot for this console has begun since"
+ */
+function captureBootEpoch(consoleId) {
+  const at = _bootEpochs.get(consoleId) || 0;
+  return () => (_bootEpochs.get(consoleId) || 0) !== at;
+}
+/**
+ * Open a boot transaction for a console and capture it in one step. Callers
+ * consult the returned predicate after every await that could be outlived by a
+ * newer boot, and bail when it is true.
+ *
+ * WHAT MAY AND MAY NOT BE GUARDED BY IT: only continuations that COMMIT shared
+ * state (currentMeta/currentCore, the room's `tv` key, SaveRAM identity,
+ * persisted rack metas). Never a cleanup or a disposal — dropping one of those
+ * is how COR-5 (a retired console that never released its core) happened — and
+ * never a half-finished install, which is why the checkpoints below sit before
+ * the runtime is stood up rather than between standing it up and binding it.
+ * @returns {() => boolean} same predicate as captureBootEpoch
+ */
+function beginBootTransaction(consoleId, reason = '') {
+  const next = (_bootEpochs.get(consoleId) || 0) + 1;
+  _bootEpochs.set(consoleId, next);
+  logger?.event?.('boot-epoch', { consoleId, epoch: next, reason });
+  return captureBootEpoch(consoleId);
+}
+
+// THE OTHER HALF OF "ALL FIVE ENTRY POINTS SHARE ONE EPOCH": ordering is not the
+// same thing as competing, and one pair of paths must NOT compete.
+//
+// Widening the epoch from "only loadCartridge bumps it" to "every boot bumps it"
+// closed the reboot-restamps-the-wrong-game race — and opened a worse one at the
+// other end. rebootPrimaryConsole is how a light gun or mouse ATTACHES (a
+// libretro peripheral only seats at a fresh core boot), and the natural flow for
+// exactly the gun carts this project exists for is: drop the cart in, then pick
+// the gun up. Over a headset's Wi-Fi the ROM is still downloading when the gun
+// leaves the shelf, so the arm-reboot bumped the epoch, the in-flight
+// loadCartridge saw 'newer-load' and abandoned — and 'newer-load' deliberately
+// prints NOTHING, because normally the newer load owns the status line. Result:
+// the console reboots the PREVIOUS game with the gun on it, the cart the player
+// just inserted is gone, and the cart mesh is still sitting in the slot. Silent.
+//
+// The arm path therefore JOINS the load instead of superseding it: it waits for
+// the load to land and then re-reads the world. It costs nothing when nothing is
+// loading, and it is strictly better than a second boot even when it does wait —
+// `window.__lightgunArmed` is set BEFORE the wait and every primary boot path
+// resolves its peripherals AFTER its fetch (resolveBootPeripherals), so the load
+// we are waiting for usually attaches the device itself and no reboot is needed
+// at all. This tracks the PRIMARY cartridge load specifically because that is the
+// path with the multi-MB fetch; the two local-ROM pickers already hold their
+// bytes in memory, so their window is a frame, not seconds.
+let _primaryLoadInFlight = null;
+/**
+ * Wait for the primary cartridge load (if any) to finish. Never rejects — a
+ * failing load reports its own error, and an arm must not inherit it.
+ * @returns {Promise<boolean>} whether it actually had to wait
+ */
+async function awaitPrimaryLoad() {
+  let waited = false;
+  // A load can be followed straight away by another (a queued insert replayed on
+  // promotion), so drain rather than awaiting once. The bound is a safety net,
+  // not an expectation: it degrades to the old racy behaviour instead of leaving
+  // a grabbed gun waiting for ever on a console that keeps re-loading.
+  for (let i = 0; _primaryLoadInFlight && i < 8; i++) {
+    waited = true;
+    try { await _primaryLoadInFlight; } catch (_) { /* the load owns its own error status */ }
+  }
+  return waited;
+}
+// COR-3: the boot epoch above orders competing BOOTS; it says nothing about who
+// is allowed to boot at all. This is the other half of the same boot transaction — the
 // room-authority epoch, bumped wherever this machine LOSES the room (a settled
 // demotion, and Leave). A boot captures it at entry and abandons after any await
 // that outlived our hosting stint, so a peer demoted mid-fetch stops instead of
@@ -462,11 +570,20 @@ function _attachNetTickCallbacks() {
 //     the set the unfiltered entries() used to hand them),
 //   • each peripheral takes its own namespace and remaps the parsed objId
 //     ('gp:<cableId>') down to the bare <cableId> its manager keys on.
+//
+// The three peripheral slices are generated from the descriptor table, so a
+// fourth port-bound device gets its slice from its descriptor rather than a
+// fourth hand-written copy of the same remap lambda. Only the plural slice
+// NAME is per-device (the ghost wiring below reads `.gamepads` / `.guns` /
+// `.mice`), and the order matches CABLED_PERIPHERALS exactly as before.
+const _HOLD_SLICE_NAME = { gamepad: 'gamepads', lightgun: 'guns', mouse: 'mice' };
 const _holdView = new HoldView([
   { name: 'carts', prefix: HOLD_PREFIX },
-  { name: 'gamepads', prefix: `${HOLD_PREFIX}${GP_HOLD_PREFIX}`, remap: (id) => cableIdFromHoldKey(`${HOLD_PREFIX}${id}`) },
-  { name: 'guns', prefix: `${HOLD_PREFIX}${GUN_HOLD_PREFIX}`, remap: (id) => cableIdFromGunHoldKey(`${HOLD_PREFIX}${id}`) },
-  { name: 'mice', prefix: `${HOLD_PREFIX}${MOUSE_HOLD_PREFIX}`, remap: (id) => cableIdFromMouseHoldKey(`${HOLD_PREFIX}${id}`) },
+  ...CABLED_PERIPHERALS.map((desc) => ({
+    name: _HOLD_SLICE_NAME[desc.id],
+    prefix: `${HOLD_PREFIX}${desc.holdKeyPrefix}`,
+    remap: (id) => cableIdFromHoldKeyFor(desc, `${HOLD_PREFIX}${id}`),
+  })),
 ]);
 
 /** The current holds, parsed at most once per state/roster change. */
@@ -478,7 +595,7 @@ function _netHolds() { return _holdView.update(net.objects, net.presence); }
 // the session that just ended. Detaching the tick callbacks stops the managers
 // being asked anything, which is exactly why whatever they were holding at that
 // moment never gets released — most visibly a LOCAL prop hidden because a peer
-// was holding it (GhostGamepadMgr._hidden and friends). Leave, and your own
+// was holding it (GhostPeripheralMgr._hidden and friends). Leave, and your own
 // gamepad/gun/mouse is invisible for the rest of the build: the sweep that would
 // unhide it lives in sync(), and sync() is never called again.
 //
@@ -672,12 +789,11 @@ window.__testApi = createTestApi({
     holdKeyFor: (object) => {
       const cableId = object?.userData?.cableId;
       if (!cableId) return null;
-      switch (object.userData.kind) {
-        case 'gamepad': return makeGamepadHoldKey(cableId);
-        case 'lightgun': return makeGunHoldKey(cableId);
-        case 'mouse': return makeMouseHoldKey(cableId);
-        default: return null;
-      }
+      // Any described port-bound peripheral has a hold key; anything else
+      // (cartridges, room props) has none — same three-kind answer the hand-
+      // written switch here used to give, now from the descriptor table.
+      const desc = peripheralForKind(object.userData.kind);
+      return desc ? makeHoldKeyFor(desc, cableId) : null;
     },
   },
   content: {
@@ -692,8 +808,8 @@ window.__testApi = createTestApi({
     get primaryConsoleId() { return CONSOLE_ID; },
   },
   gun: {
-    arm: () => armLightGunAndReload(),
-    disarm: () => disarmLightGunAndReload(),
+    arm: () => armPeripheral(LIGHTGUN),
+    disarm: () => disarmPeripheral(LIGHTGUN),
     state: () => _needHook('gunArmedState', 'the light gun')(),
     port: (cableId) => _needHook('gunPort', 'the light gun')(cableId),
     fire: ({ u, v, trigger = true, pos, look, tvId }) => {
@@ -705,8 +821,8 @@ window.__testApi = createTestApi({
     },
   },
   mouse: {
-    arm: () => armMouseAndReload(),
-    disarm: () => disarmMouseAndReload(),
+    arm: () => armPeripheral(MOUSE),
+    disarm: () => disarmPeripheral(MOUSE),
     state: () => _needHook('mouseArmedState', 'the mouse')(),
     port: (cableId) => _needHook('mousePort', 'the mouse')(cableId),
     move: (dx, dy, buttons) => _needHook('moveMouse', 'the mouse')(dx, dy, buttons),
@@ -1415,13 +1531,18 @@ let gameInput = null;
 // scope (assigned in buildCartridgeWorld) so spawnConsole can register a freshly
 // spawned console's power/reset switches with it.
 let menuMgr = null;
-// Per-console / per-TV power state for the in-world on/off switches. Absent or
-// true = on; false = powered off (core paused + its TV blanked to the idle
-// screen). routeVideo() is the single place that honours these.
-const consolePowered = new Map();  // consoleId -> bool
-const tvPowered = new Map();       // tvId -> bool
-const isConsoleOn = (id) => consolePowered.get(id) !== false;
-const isTvOn = (id) => tvPowered.get(id) !== false;
+// The rack's shared registries — per-console / per-TV power state, the console
+// objects themselves, what each console is running, and the movable-prop helper
+// — moved VERBATIM to [[src/ConsoleRegistry.js]] (P2 #12 step 0, the
+// prerequisite hoist). They are the most widely-shared state in this file and
+// they are general, so they came out on their own rather than travelling inside
+// the first specific module that happened to touch them ([[src/PowerMgr.js]]
+// below, and the cord blocks after it, both consume this one registry).
+// `grabMgr` is passed as a GETTER because it is still null on this line and is
+// only assigned once buildCartridgeWorld runs — capturing its value here would
+// make registerMovableProp silently register nothing.
+const consoleRegistry = createConsoleRegistry({ getGrabMgr: () => grabMgr });
+const { isConsoleOn, isTvOn, consoleObjs, _consoleSystems, registerMovableProp } = consoleRegistry;
 // Physical keyboard device — created in buildCartridgeWorld, shown/hidden
 // when a keyboard-capable game boots or via the "Keyboard" menu/header toggle.
 // `c64kbd` kept as the module-level handle so existing per-frame / toggle code
@@ -1451,22 +1572,7 @@ const _lightGunObjs = new Set();
 // by its cableId. The default boot gun is `gun-1` on every peer (deterministic,
 // local-only — like the default gamepad gp-1).
 const _lightGunObjsById = new Map();
-let _gunCableCount = 0;
 const DEFAULT_GUN_IDS = new Set(['gun-1']);
-// Register a gun object so it aims (LightGunMgr) and is grabbable (GrabMgr arms
-// gun-capable games on pickup via onObjectGrabbed's kind==='lightgun' check), and
-// joins the cable system. Assigns a stable cableId if the caller didn't (the
-// addProp / remote-create paths pre-assign a peer-scoped or prop-derived id so all
-// peers agree). The gun's controller PORT now flows from the Patchbay
-// (LightGunMgr.portForGun reads cable.portOf), not from registration order.
-function _registerLightGun(obj) {
-  if (!obj) return;
-  if (obj.userData.cableId == null) obj.userData.cableId = `gun-${++_gunCableCount}`;
-  _lightGunObjs.add(obj);
-  _lightGunObjsById.set(obj.userData.cableId, obj);
-  cable.addController(obj.userData.cableId);
-  grabMgr?.addGrabbable(obj);
-}
 
 // --- In-world mouse: a first-class cabled peripheral (mirrors the light gun) --
 let mouseObj = null;       // the default grabbable mouse prop ([[src/Mouse.js]])
@@ -1476,39 +1582,70 @@ let mouseMgr = null;       // per-frame motion → console mouse input ([[src/Mo
 // find a mouse by its cableId. The default boot mouse is `mouse-1` on every peer.
 const _mouseObjs = new Set();
 const _mouseObjsById = new Map();
-let _mouseCableCount = 0;
 const DEFAULT_MOUSE_IDS = new Set(['mouse-1']);
-// Register a mouse object so it drives input (MouseMgr), is grabbable, and joins
-// the cable system. Assigns a stable cableId if the caller didn't (addProp /
-// remote-create pre-assign a peer-scoped id so all peers agree). Its libretro
-// mouse PORT flows from the Patchbay (MouseMgr.portForMouse reads cable.portOf).
-function _registerMouse(obj) {
+
+// --- The per-device registries, keyed by descriptor (CLAUDE_REVIEW §3.3) ----
+// The gun and the mouse each kept a Set (iteration order), a cableId Map (index)
+// and a cableId counter, plus a register / slot-index / two-port trio that were
+// line-for-line mirrors of each other. One table + three descriptor-taking
+// helpers now. The GAMEPAD is not in here: its index (_gamepadObjs) is built by
+// registerGamepad on the prop path, and it has no two-port device.
+const _PERIPHERAL_REG = {
+  [LIGHTGUN.id]: { objs: _lightGunObjs, byId: _lightGunObjsById, count: 0, livePorts: () => _twoGunPorts },
+  [MOUSE.id]:    { objs: _mouseObjs,    byId: _mouseObjsById,    count: 0, livePorts: () => _twoMousePorts },
+};
+
+/** The cableId -> Object3D index for a peripheral kind (guns / mice). */
+function _peripheralObjsById(desc) { return _PERIPHERAL_REG[desc.id].byId; }
+
+// Register a gun/mouse object so it drives input (LightGunMgr / MouseMgr) and is
+// grabbable (GrabMgr arms capable games on pickup via onObjectGrabbed's
+// descriptor lookup), and so it joins the cable system. Assigns a stable cableId
+// if the caller didn't (the addProp / remote-create paths pre-assign a
+// peer-scoped or prop-derived id so all peers agree). The controller PORT now
+// flows from the Patchbay (LightGunMgr.portForGun / MouseMgr.portForMouse read
+// cable.portOf), not from registration order.
+function _registerPeripheral(desc, obj) {
   if (!obj) return;
-  if (obj.userData.cableId == null) obj.userData.cableId = `mouse-${++_mouseCableCount}`;
-  _mouseObjs.add(obj);
-  _mouseObjsById.set(obj.userData.cableId, obj);
+  const reg = _PERIPHERAL_REG[desc.id];
+  if (obj.userData.cableId == null) obj.userData.cableId = `${desc.cableIdPrefix}${++reg.count}`;
+  reg.objs.add(obj);
+  reg.byId.set(obj.userData.cableId, obj);
   cable.addController(obj.userData.cableId);
   grabMgr?.addGrabbable(obj);
 }
 
-// Which mouse-in-jack-order this mouse is among the MICE plugged into a console
-// (0,1,…), or -1 if not plugged there. Mirrors _gunSlotIndex.
-function _mouseSlotIndex(mouse, consoleId) {
-  const myId = mouse?.userData?.cableId;
+// Which gun/mouse-in-jack-order this prop is among the peripherals OF ITS OWN
+// KIND plugged into a console (0,1,…), or -1 if it isn't plugged there.
+// cable.controllersOf returns occupants sorted by port, so filtering to one kind
+// gives a stable jack-order index → desc.libretroPortFor maps it to the device's
+// libretro port. This is what makes the LOWER jack gun drive port 1 and the next
+// drive port 2 (and swapping jacks swap players).
+function _peripheralSlotIndex(desc, obj, consoleId) {
+  const myId = obj?.userData?.cableId;
   if (myId == null || consoleId == null) return -1;
-  const mice = cable.controllersOf(consoleId).filter((c) => _mouseObjsById.has(c.controllerId));
-  return mice.findIndex((c) => c.controllerId === myId);
+  const byId = _peripheralObjsById(desc);
+  const mine = cable.controllersOf(consoleId).filter((c) => byId.has(c.controllerId));
+  return mine.findIndex((c) => c.controllerId === myId);
 }
 
-// The ordered libretro mouse PORTs the two-mouse device on `consoleId` seats its
-// mice on (Amiga → [0,1]), or [] when single-mouse / no-mouse. Mirrors
-// _twoGunPortsForConsole: PRIMARY returns the live per-boot _twoMousePorts; a
-// SECONDARY derives from its console runtime's loaded system.
-function _twoMousePortsForConsole(consoleId) {
+// The ordered libretro PORTs the two-gun / two-mouse device on `consoleId` seats
+// its devices on (SNES Justifier → [1, 2]; Amiga two-mouse → [0, 1]), or []
+// when that console's core is single-device / has none. This is what makes a gun
+// (or mouse) plugged into ANY console drive that console's OWN game, not just
+// the primary's. For the PRIMARY console we return the live per-boot
+// _twoGunPorts / _twoMousePorts verbatim, so the shipped primary behaviour is
+// byte-for-byte unchanged (their value already encodes the per-game
+// twoGun/armed decision via _twoGunActiveFor at boot/reboot). For a SECONDARY
+// console we derive the ports from that console runtime's loaded system: a
+// two-gun-capable core yields its lightgun2 ports, anything else yields [] →
+// desc.libretroPortFor returns null → the proven single-device DOM-mouse path
+// (so a non-gun secondary simply doesn't route aim).
+function _twoPortsForConsole(desc, consoleId) {
   if (consoleId == null) return [];
-  if (consoleId === CONSOLE_ID) return _twoMousePorts;
+  if (consoleId === CONSOLE_ID) return _PERIPHERAL_REG[desc.id].livePorts();
   const system = rackMgr.get(consoleId)?.system ?? _consoleSystems.get(consoleId) ?? null;
-  return twoMousePortsForSystem(system);
+  return desc.twoPortsFor(system);
 }
 
 // Decide whether a boot should connect the TWO-gun co-op peripheral: the game
@@ -1560,7 +1697,7 @@ function logLightgunBoot(where, meta, gun, extra = {}) {
 }
 
 // The libretro gun PORT each gun drives is now derived live from the cable
-// (which jack the gun's plug sits in) → see _gunSlotIndex + LightGunMgr.portForGun.
+// (which jack the gun's plug sits in) → see _peripheralSlotIndex + LightGunMgr.portForGun.
 // `_twoGunPorts` (set per boot) lists the active two-gun device's libretro ports;
 // the Kth gun in cable-port order drives the Kth of them (libretroGunPortFor).
 // This replaced the old registration-order `_assignGunPorts` stamping so that
@@ -1748,101 +1885,54 @@ function updateFocus() {
   refreshAudioFocus();
 }
 
-// ── Video patch cords (console → TV) ────────────────────────────────────────
-// Each console has ONE physical video-out cable whose grabbable plug
-// ([[src/Plug.js]]) seats into a TV's video-in jack. Seating rewires the patch
-// graph (cable.connectVideo) and re-routes the texture; pulling the plug out and
-// dropping it in mid-air clears the console's video edge (EmuVR repatch). The
-// pure snap decision is [[src/Snap.js]]; the graph is [[src/Patchbay.js]].
-const PLUG_SNAP_RADIUS = 0.26;                     // m — jack acceptance radius
-// Point-and-place (Mechanism B): released-while-aiming tolerance for plugs,
-// mirroring GrabMgr's own SOCKET_RAY_MAX_PERP/RAY_RANGE for the other socket
-// kinds (cart slot, controller port, memory card).
-const PLUG_RAY_MAX_PERP = 0.25;
-const PLUG_RAY_MAX_DIST = 5.0;
-const consoleObjs = new Map();                     // consoleId -> physical Console Object3D
-const videoPlugs = new Map();                      // consoleId -> { plug:Plug, cord:Cord }
-const _vp = new THREE.Vector3();
-const _vq = new THREE.Quaternion();
-
-// Snap a console's video plug onto a TV's video-in jack (world transform), so it
-// visually sits in the socket. tvId null leaves the plug where it is (dangling).
-function seatVideoPlug(consoleId, tvId) {
-  const rec = videoPlugs.get(consoleId);
-  const tv = tvId ? scene.getTV(tvId) : null;
-  if (!rec || !tv?.videoIn) return;
-  tv.videoIn.getWorldPosition(_vp);
-  tv.videoIn.getWorldQuaternion(_vq);
-  rec.plug.group.position.copy(_vp);
-  rec.plug.group.quaternion.copy(_vq);
-}
-
-// Build the video-out plug + cord for a console and seat it at its starting TV.
-function addVideoPlug(consoleId, tvId) {
-  if (videoPlugs.has(consoleId)) return;
-  const plug = new Plug({ id: `vplug-${consoleId}`, plugKind: 'video', sourceId: consoleId });
-  scene.addObject(plug.group);
-  grabMgr?.addGrabbable(plug.group);
-  const cord = new Cord({ color: 0xccaa22 });
-  scene.addObject(cord.mesh);
-  videoPlugs.set(consoleId, { plug, cord });
-  seatVideoPlug(consoleId, tvId);
-}
-
-// GrabMgr release handler: snap the plug to the nearest TV jack and repatch, or
-// pull the console's video if dropped away from every jack. `ray` (the
-// releasing controller's aim ray, from GrabMgr._controllerRay) lets a plug be
-// point-and-placed into a jack it's aimed at even when far from it.
-const _plugWorld = new THREE.Vector3();
-function handlePlugReleased(plugObj, ray) {
-  const ud = plugObj.userData || {};
-  if (ud.plugKind === 'controller') { handleControllerPlugReleased(plugObj, ray); return; }
-  if (ud.plugKind === 'keyboard')   { handleKeyboardPlugReleased(plugObj, ray);   return; }
-  if (ud.plugKind !== 'video') return;
-  const consoleId = ud.sourceId;
-  plugObj.getWorldPosition(_plugWorld);
-  const anchors = scene._tvs.map((tv) => {
-    const p = new THREE.Vector3();
-    tv.videoIn.getWorldPosition(p);
-    return { id: tv.id, x: p.x, y: p.y, z: p.z };
-  });
-  let hit = nearestAnchor({ x: _plugWorld.x, y: _plugWorld.y, z: _plugWorld.z }, anchors, PLUG_SNAP_RADIUS);
-  if (!hit && ray) {
-    hit = nearestAnchorAlongRay(ray.origin, ray.dir, anchors, {
-      maxDist: PLUG_RAY_MAX_DIST, maxPerp: PLUG_RAY_MAX_PERP,
-    });
-  }
-  // One physical cable = one output: drop the console's prior TV edge(s) first.
-  for (const tvId of cable.displaysOf(consoleId)) cable.disconnectVideo(tvId);
-  if (hit) {
-    cable.connectVideo(consoleId, hit.id);
-    seatVideoPlug(consoleId, hit.id);
-  }
-  routeVideo();
-  persistRack();
-  logger?.event?.('video-repatch', { consoleId, tv: hit?.id || null });
-}
-
-// Per-frame: reshape each console's video cord from its console's video-out
-// anchor to its plug (seated in a jack or held in hand).
-const _cFrom = new THREE.Vector3();
-const _cTo = new THREE.Vector3();
-function syncVideoCords() {
-  for (const [consoleId, rec] of videoPlugs) {
-    const conObj = consoleObjs.get(consoleId);
-    const out = conObj?.userData?.videoOutAnchor;
-    if (!out) { rec.cord.setVisible(false); continue; }
-    // Re-snap the plug to its TV's video-in jack every frame (unless it's in
-    // hand) so the cord follows when the console OR the TV is repositioned in
-    // Edit mode. seatVideoPlug(_, undefined) no-ops for a dangling plug, so a
-    // disconnected cable just stays where it was dropped.
-    if (!grabMgr?.isHeld(rec.plug.group)) seatVideoPlug(consoleId, cable.displaysOf(consoleId)[0]);
-    out.getWorldPosition(_cFrom);
-    (rec.plug.cordAnchor || rec.plug.group).getWorldPosition(_cTo);
-    rec.cord.update(_cFrom, _cTo);
-    rec.cord.setVisible(true);
-  }
-}
+// ── Peripheral patch cords (video / controller / keyboard) ──────────────────
+// All THREE cord blocks — video (console → TV), controller (gamepad / light gun
+// / mouse → console port jack) and keyboard (keyboard → console DIN jack) —
+// moved VERBATIM to [[src/PeripheralCords.js]] (P2 #12 step 4), which consumes
+// the ConsoleRegistry hoisted above. They travel as ONE module because they are
+// one mechanism: they share the plug snap tolerances, and `handlePlugReleased`
+// is the single GrabMgr release callback for every plug in the world, which
+// dispatches on plugKind into the controller and keyboard handlers (those two
+// are module-private there now — nothing outside called them).
+//
+// Every name the rest of this file calls comes back out of the factory under its
+// ORIGINAL name, so no call site changed. `grabMgr`, `gameInput`, `c64kbd` and
+// `net` go in as getters because all four are reassigned after this line runs
+// (the first three when buildCartridgeWorld runs, `net` on every
+// connect/disconnect), and a value captured here would be a permanently-stale
+// null. `_kbdTargetConsoleId` stays a `let` in THIS file — it is read by
+// _hostApplyKbdWire / window.__kbdTarget / the Add-prop panel and written by
+// buildCartridgeWorld, all outside the cord blocks — so it is threaded in as a
+// getter/setter pair instead of moving. `cordColorForPlayer`, `_cabledObjFor`,
+// `amRoomHost` and `persistRack` are hoisted function declarations further down
+// this file; that is why they can be named here at all.
+const {
+  videoPlugs, seatVideoPlug, addVideoPlug, handlePlugReleased, syncVideoCords,
+  controllerPlugs, addControllerPlug, seatControllerPlug, _broadcastCablePort,
+  syncControllerCords,
+  addKeyboardPlug, syncKeyboardCord, _kbdSendInputFor, connectKeyboardTo,
+} = createPeripheralCords({
+  registry: consoleRegistry,
+  scene,
+  cable,
+  rackMgr,
+  routeVideo,
+  persistRack,
+  logger,
+  getGrabMgr: () => grabMgr,
+  getNet: () => net,
+  getGameInput: () => gameInput,
+  getC64kbd: () => c64kbd,
+  getKbdTarget: () => _kbdTargetConsoleId,
+  setKbdTarget: (v) => { _kbdTargetConsoleId = v; },
+  cordColorForPlayer,
+  _cabledObjFor,
+  _lightGunObjsById,
+  _mouseObjsById,
+  amRoomHost,
+  KBD_ID,
+  CONSOLE_ID,
+});
 
 // The ONE way to build a `prop:` payload. Reads the object's WORLD transform,
 // which is what every peer's copy of the prop is expressed in — a synced prop is
@@ -1853,7 +1943,7 @@ function syncVideoCords() {
 // few centimetres from the controller's origin. The live-drag wire (~20 Hz)
 // published that as a room position, which put the prop under the floor for
 // every other peer — and, for a gamepad, the wrong pose only became VISIBLE on
-// release, when GhostGamepadMgr un-hid the real mesh at whatever the last drag
+// release, when GhostPeripheralMgr un-hid the real mesh at whatever the last drag
 // packet had left it. Route every payload through here.
 function _propPayload(prop, obj) {
   return propWorldPayload(prop, obj, { root: scene.scene });
@@ -1883,183 +1973,33 @@ function _broadcastPropMove(obj) {
   if (!_syncedProps.has(prop.id)) _syncedProps.set(prop.id, { prop, object: obj });
 }
 
-// Item 6 — make a rack prop (TV cabinet / console) repositionable: register it
-// as an editable grabbable so it is inert during play but movable in the editor's
-// Move mode (released props keep their dropped pose, grid-snapped if grid is on).
-function registerMovableProp(obj, kind) {
-  if (!obj || !grabMgr) return;
-  if (!obj.userData.kind) obj.userData.kind = kind;
-  obj.userData.editable = true;
-  grabMgr.addGrabbable(obj);
-}
+// `registerMovableProp` (Item 6 — make a rack prop repositionable) moved with
+// the rest of the registry to [[src/ConsoleRegistry.js]]; destructured above.
 
-// ── In-world power / reset switches ─────────────────────────────────────────
-// Physical on/off switches on each console + TV and a reset button on each
-// console. They are MenuMgr items, so the SAME raycast that drives the menu
-// activates them — VR trigger, or desktop LEFT-CLICK (DesktopControls maps the
-// left mouse button to 'selectstart'). A tinted label mesh facing forward; hover
-// brightens it. Toggling power pauses/blanks via routeVideo()'s power check.
-const _ctrlBtnTextures = [];                       // for disposal completeness (none today)
-function makeControlButton(label, { w = 0.07, h = 0.032, color = '#2a6e2a' } = {}) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 256; canvas.height = 128;
-  const ctx = canvas.getContext('2d');
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.minFilter = THREE.LinearFilter;
-  let hovered = false;
-  let face = color;
-  let text = label;
-  const redraw = () => {
-    ctx.clearRect(0, 0, 256, 128);
-    ctx.fillStyle = hovered ? '#d8e8ff' : face;
-    ctx.fillRect(0, 0, 256, 128);
-    ctx.strokeStyle = hovered ? '#ffffff' : '#111';
-    ctx.lineWidth = 10; ctx.strokeRect(5, 5, 246, 118);
-    ctx.fillStyle = hovered ? '#10243f' : '#ffffff';
-    ctx.font = 'bold 56px monospace';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(text, 128, 68);
-    tex.needsUpdate = true;
-  };
-  redraw();
-  const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(w, h),
-    new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
-  );
-  mesh.userData.kind = 'menu-button';   // hover convention shared with MenuPanel
-  mesh.userData.setHover = (hv) => { if (hv !== hovered) { hovered = hv; redraw(); } };
-  mesh.userData.setLabel = (s) => { if (s !== text) { text = s; redraw(); } };
-  mesh.userData.setColor = (c) => { if (c !== face) { face = c; redraw(); } };
-  _ctrlBtnTextures.push(tex);
-  return mesh;
-}
-
-// Power a console on/off: pause/resume its core and re-route video so its TV
-// shows the idle screen while off. Updates the switch tint.
-function _tintPowerBtn(btn, on) {
-  btn?.userData.setColor?.(on ? '#2a6e2a' : '#7a2222');
-  btn?.userData.setLabel?.(on ? 'ON' : 'OFF');
-}
-
-function setConsolePower(consoleId, on, btn) {
-  const wasOn = isConsoleOn(consoleId);
-  consolePowered.set(consoleId, on);
-  const rt = rackMgr.get(consoleId);
-  if (on) {
-    // A power switch isn't a pause button: a real console has no battery
-    // backing its running state, so flipping OFF then ON again is a cold
-    // boot, not a resume-from-suspend. Only reset on an actual off->on
-    // transition — this also fires right after a fresh ROM load (which marks
-    // the console "on"), and re-resetting a console that never went off
-    // would be a surprise flicker. RESET stays the separate in-game action.
-    if (!wasOn) rt?.client?.reset?.();
-    rt?.resume?.();
-  } else {
-    rt?.pause?.();
-  }
-  // Force silence regardless of whether this core's build honours
-  // pauseMainLoop — a solo console never gets muted by audio focus (see
-  // [[src/SpatialAudio.js]]), so without this "off" could still be audible.
-  audioRouter?.setPower?.(consoleId, on);
-  _tintPowerBtn(btn, on);
-  routeVideo();
-  persistRack();
-  logger?.event?.('console-power', { consoleId, on });
-}
-
-function setTvPower(tvId, on, btn) {
-  tvPowered.set(tvId, on);
-  _tintPowerBtn(btn, on);
-  routeVideo();
-  persistRack();
-  logger?.event?.('tv-power', { tvId, on });
-}
-
-// ── Power / reset network sync (Phase 3) ────────────────────────────────────
-// Power rides the persisted STATE channel (last-writer-wins, replayed to late
-// joiners) so an on/off toggle by ANY peer reflects everywhere and a late joiner
-// sees the current state. Because the host's authoritative core obeys the same
-// toggle, its video stream shows the result to clients. Reset is a one-shot event
-// (not a state), so it rides the transient WIRE channel — relayed, never stored,
-// so a late joiner doesn't replay a stale reset onto a freshly-booted core.
-function powerStateKey(kind, id) { return `power:${kind}:${id}`; }
-function isPowerStateKey(k) { return typeof k === 'string' && k.startsWith('power:'); }
-
-function _broadcastPower(kind, id, on) { net?.setObjectState(powerStateKey(kind, id), { on: !!on }); }
-function _broadcastReset(consoleId) { net?.sendWire('reset', { consoleId }); }
-
-// Locally reset a console's core + flash its RESET button. Used by the in-world
-// button and the remote-apply ('reset' wire) path.
-function resetConsole(consoleId) {
-  rackMgr.get(consoleId)?.client?.reset?.();
-  const rst = consoleObjs.get(consoleId)?.userData?.resetBtn;
-  rst?.userData.setColor?.('#5a7fb0');
-  setTimeout(() => rst?.userData.setColor?.('#33506e'), 180);
-  logger?.event?.('console-reset', { consoleId });
-}
-
-// Apply a peer's power STATE (no re-broadcast — only the toggling peer broadcasts).
-function _applyRemotePower(key, value) {
-  if (value == null) return;
-  const rest = key.slice('power:'.length);   // 'console:<id>' | 'tv:<id>'
-  const sep = rest.indexOf(':');
-  if (sep < 0) return;
-  const kind = rest.slice(0, sep), id = rest.slice(sep + 1);
-  if (kind === 'console') {
-    if (isConsoleOn(id) !== !!value.on) setConsolePower(id, !!value.on, consoleObjs.get(id)?.userData?.powerBtn);
-  } else if (kind === 'tv') {
-    if (isTvOn(id) !== !!value.on) setTvPower(id, !!value.on, scene.getTV(id)?.group?.userData?.powerBtn);
-  }
-}
-
-// Mount a power switch + reset button on a console's top-back surface and wire
-// them through MenuMgr. Console box is CON_W 0.52 × CON_H 0.08 × CON_D 0.30
-// (origin-centred), so the top is y≈+0.041 and the back half is z<0 (free of the
-// cart/card slots at z≈0). Buttons face up-and-forward so a player looking at the
-// console can click them.
-function addConsoleControls(consoleId, conObj) {
-  if (!conObj || !menuMgr || conObj.userData._hasControls) return;
-  conObj.userData._hasControls = true;
-  const topY = 0.041, backZ = -0.085;
-  const on = isConsoleOn(consoleId);
-  const pwr = makeControlButton(on ? 'ON' : 'OFF', { w: 0.08, color: on ? '#2a6e2a' : '#7a2222' });
-  pwr.position.set(-0.11, topY, backZ);
-  pwr.rotation.x = -Math.PI / 2.4;                 // tilt face up toward the viewer
-  conObj.add(pwr);
-  conObj.userData.powerBtn = pwr;                  // so a load can keep the tint in sync
-  const rst = makeControlButton('RESET', { w: 0.11, color: '#33506e' });
-  rst.position.set(0.09, topY, backZ);
-  rst.rotation.x = -Math.PI / 2.4;
-  conObj.add(rst);
-  conObj.userData.resetBtn = rst;                  // so the 'reset' wire can flash it
-  menuMgr.addItem(pwr, () => {
-    const on = !isConsoleOn(consoleId);
-    setConsolePower(consoleId, on, pwr);
-    _broadcastPower('console', consoleId, on);     // sync to the room
-  });
-  menuMgr.addItem(rst, () => {
-    resetConsole(consoleId);
-    _broadcastReset(consoleId);                    // sync to the room (host re-runs its core)
-  });
-}
-
-// Mount a power switch on a TV's lower-right front face and wire it through
-// MenuMgr. TV cabinet is 2.2×1.65; the video-in jack sits lower-LEFT, so the
-// switch goes lower-right to avoid it.
-function addTvControls(tvId, tv) {
-  if (!tv?.group || !menuMgr || tv.group.userData._hasControls) return;
-  tv.group.userData._hasControls = true;
-  const on = isTvOn(tvId);
-  const pwr = makeControlButton(on ? 'ON' : 'OFF', { w: 0.16, h: 0.07, color: on ? '#2a6e2a' : '#7a2222' });
-  pwr.position.set(2.2 / 2 - 0.2, -1.65 / 2 + 0.14, 0.03);
-  tv.group.add(pwr);
-  tv.group.userData.powerBtn = pwr;
-  menuMgr.addItem(pwr, () => {
-    const on = !isTvOn(tvId);
-    setTvPower(tvId, on, pwr);
-    _broadcastPower('tv', tvId, on);               // sync to the room
-  });
-}
+// ── In-world power / reset switches + their power/reset network sync ─────
+// Both blocks moved VERBATIM to [[src/PowerMgr.js]] (P2 #12 step 2), which
+// consumes the ConsoleRegistry hoisted above. Every one of the nine names the
+// rest of this file calls comes back out of the factory under its ORIGINAL
+// name, so no call site changed. `net` and `menuMgr` go in as getters because
+// both are reassigned after this line runs (`net` on every connect/disconnect,
+// `menuMgr` when buildCartridgeWorld builds it); everything else here is a
+// const by this point and is passed by value. `persistRack` is a hoisted
+// function declaration further down this file — that is why it can be named
+// here at all.
+const {
+  setConsolePower, setTvPower, isPowerStateKey, _broadcastPower, _broadcastReset,
+  resetConsole, _applyRemotePower, addConsoleControls, addTvControls,
+} = createPowerMgr({
+  registry: consoleRegistry,
+  scene,
+  getNet: () => net,
+  getMenuMgr: () => menuMgr,
+  audioRouter,
+  rackMgr,
+  routeVideo,
+  persistRack,
+  logger,
+});
 
 // Phase 3 — spawn a SECOND (third, …) console end-to-end: its own
 // ConsoleRuntime (own canvas + EmulatorClient) booting a game for `system`,
@@ -2088,6 +2028,15 @@ async function spawnConsole(system, opts = {}) {
   const n = ++_spawnSeq;
   const consoleId = `console${n}`;
   const tvId = `tv${n}`;
+  // ARC-2(c): the fifth boot entry point opens a transaction too, so all five
+  // read the same way and any future path that re-boots a SPAWNED console
+  // inherits the ordering for free. Be honest about what it buys today: the id
+  // is minted on the line above, so nothing else can be booting it while this
+  // runs (loadCartridgeIntoConsole needs rackMgr.get(consoleId), which only
+  // resolves after the rackMgr.add() below, and there is no await between that
+  // add and this function's last commit). The guard is checked once, at the only
+  // shared state a spawn writes.
+  const supersededByNewerBoot = beginBootTransaction(consoleId, 'spawnConsole');
 
   // Own-mode runtime: fresh isolated core in its own canvas (Phase 0 proved N
   // module cores coexist). Boot the resolved ROM into it.
@@ -2170,7 +2119,7 @@ async function spawnConsole(system, opts = {}) {
   refreshAudioFocus();
   // Remember what was spawned (for persistence) unless this spawn is itself a
   // restore replay (which passes _restore to avoid re-saving mid-restore).
-  if (!opts._restore) {
+  if (!opts._restore && !supersededByNewerBoot()) {
     spawnedMetas.push({ system: meta.system, file: meta.file, core: meta.core, title: meta.title });
     persistRack();
   }
@@ -2528,312 +2477,33 @@ function _applyInsertNack(data) {
   logger?.event?.('mp-insert-nack', { file: data.file, reason: data.reason || null });
 }
 
-// Which gun-in-jack-order this gun is among the GUNS plugged into a console (0,1,…),
-// or -1 if it isn't plugged there. cable.controllersOf returns occupants sorted by
-// port, so filtering to guns gives a stable jack-order index → libretroGunPortFor
-// maps it to the device's libretro gun port. This is what makes the LOWER jack gun
-// drive port 1 and the next drive port 2 (and swapping jacks swap players).
-function _gunSlotIndex(gun, consoleId) {
-  const myId = gun?.userData?.cableId;
-  if (myId == null || consoleId == null) return -1;
-  const guns = cable.controllersOf(consoleId)
-    .filter((c) => _lightGunObjsById.has(c.controllerId));
-  return guns.findIndex((c) => c.controllerId === myId);
-}
-
-// The ordered libretro gun PORTs the two-gun device on `consoleId` seats its guns
-// on (e.g. SNES Justifier → [1, 2]), or [] when that console's core is single-gun /
-// no-gun. This is what makes a gun plugged into ANY console drive that console's
-// OWN game, not just the primary's. For the PRIMARY console we return the live
-// per-boot `_twoGunPorts` verbatim, so the shipped primary behaviour is byte-for-
-// byte unchanged (its value already encodes the per-game twoGun/armed decision via
-// _twoGunActiveFor at boot/reboot). For a SECONDARY console we derive the ports from
-// that console runtime's loaded system: a two-gun-capable core yields its lightgun2
-// ports, anything else yields [] → libretroGunPortFor returns null → the proven
-// single-gun DOM-mouse path (so a non-gun secondary simply doesn't route aim).
-function _twoGunPortsForConsole(consoleId) {
-  if (consoleId == null) return [];
-  if (consoleId === CONSOLE_ID) return _twoGunPorts;
-  const system = rackMgr.get(consoleId)?.system ?? _consoleSystems.get(consoleId) ?? null;
-  return twoGunPortsForSystem(system);
-}
+// _gunSlotIndex / _twoGunPortsForConsole stood here. They and their
+// _mouseSlotIndex / _twoMousePortsForConsole mirrors are now the single
+// descriptor-taking pair _peripheralSlotIndex(desc, obj, consoleId) and
+// _twoPortsForConsole(desc, consoleId), declared beside the peripheral
+// registries above (CLAUDE_REVIEW §3.3) — with both comment blocks carried
+// across. Call them as _peripheralSlotIndex(LIGHTGUN, gun, consoleId).
 
 function cordColorForPlayer(player) {
   return PLAYER_CORD_COLORS[(player - 1) % PLAYER_CORD_COLORS.length];
 }
 
 // ── Controller patch cords (gamepad → console port) ─────────────────────────
-// Each gamepad has a grabbable plug ([[src/Plug.js]], plugKind 'controller') on
-// the end of its cord — the EmuVR repatch handle, the controller analogue of the
-// video plugs. Seating the plug in a console's port jack plugs that controller
-// into that console+port ([[src/Patchbay.js]] plugController); dropping it in
-// mid-air unplugs it. The cord ([[src/Cord.js]]) runs gamepad → plug each frame.
-// Works across ALL consoles in the rack (the snap searches every console's
-// jacks), which is what makes a second console actually controllable.
-const controllerPlugs = new Map(); // cableId -> { plug:Plug, cord:Cord }
-const _cordFrom = new THREE.Vector3();
-const _cordTo = new THREE.Vector3();
-const _cpPos = new THREE.Vector3();
-const _cpQuat = new THREE.Quaternion();
-
-// Build the grabbable plug + cord for a gamepad and seat it at its current port.
-function addControllerPlug(gpObj) {
-  const cableId = gpObj?.userData?.cableId;
-  if (!cableId || controllerPlugs.has(cableId)) return;
-  const seat = cable.portOf(cableId);                // { consoleId, port } | null
-  const color = cordColorForPlayer((seat?.port ?? 0) + 1);
-  const plug = new Plug({ id: `cplug-${cableId}`, plugKind: 'controller', sourceId: cableId, color });
-  scene.addObject(plug.group);
-  grabMgr?.addGrabbable(plug.group);
-  const cord = new Cord({ color });
-  scene.addObject(cord.mesh);
-  controllerPlugs.set(cableId, { plug, cord });
-  seatControllerPlug(cableId);
-}
-
-// Snap a controller plug onto the jack of the port it's plugged into; if it's
-// unplugged, park it just above its gamepad so the loose cord reads clearly.
-function seatControllerPlug(cableId) {
-  const rec = controllerPlugs.get(cableId);
-  if (!rec) return;
-  const seat = cable.portOf(cableId);
-  const conObj = seat ? consoleObjs.get(seat.consoleId) : null;
-  const jack = conObj?.userData?.portJacks?.[seat?.port];
-  if (jack) {
-    jack.getWorldPosition(_cpPos);
-    jack.getWorldQuaternion(_cpQuat);
-    rec.plug.group.position.copy(_cpPos);
-    rec.plug.group.quaternion.copy(_cpQuat);
-  } else {
-    const gp = _cabledObjFor(cableId);
-    if (gp) {
-      (gp.userData.cordAnchor || gp).getWorldPosition(_cpPos);
-      rec.plug.group.position.copy(_cpPos);
-      rec.plug.group.position.y += 0.08;
-    }
-  }
-}
-
-// Re-broadcast a cabled peripheral's current port so every peer agrees on its
-// port→player mapping after it (or its patch-cord plug) is dragged to a different
-// jack. Picks the channel by which kind owns the cableId: a light gun rides the
-// gun:<cableId> STATE (port-only; its mesh rides prop:*), a gamepad rides
-// gamepad:<cableId>. Both carry { port } (-1 = unplugged); RoomObjects dedups, so
-// an unchanged port is a no-op, as is a call outside a session. Call at discrete
-// re-plug events only — NOT from seatControllerPlug (that runs every frame).
-function _broadcastCablePort(cableId) {
-  if (!net || !cableId) return;
-  const port = cable.portOf(cableId)?.port ?? -1;
-  const key = _lightGunObjsById.has(cableId)
-    ? makeGunStateKey(cableId)
-    : _mouseObjsById.has(cableId)
-      ? makeMouseStateKey(cableId)
-      : makeGamepadStateKey(cableId);
-  net.setObjectState(key, { port });
-}
-
-// GrabMgr release handler for a controller plug: snap to the nearest free port
-// jack across EVERY console and re-plug, or unplug if dropped in mid-air.
-const _ctrlPlugWorld = new THREE.Vector3();
-function handleControllerPlugReleased(plugObj, ray) {
-  const cableId = plugObj.userData?.sourceId;
-  if (!cableId) return;
-  plugObj.getWorldPosition(_ctrlPlugWorld);
-  const cur = cable.portOf(cableId);
-  const anchors = [];
-  const _j = new THREE.Vector3();
-  for (const [consoleId, conObj] of consoleObjs) {
-    const jacks = conObj.userData?.portJacks || [];
-    const active = conObj.userData?.activePorts ?? jacks.length;
-    for (let port = 0; port < jacks.length && port < active; port++) {
-      const free = cable.isPortFree(consoleId, port);
-      const mine = cur && cur.consoleId === consoleId && cur.port === port;
-      if (!free && !mine) continue;          // taken by another pad → skip
-      jacks[port].getWorldPosition(_j);
-      anchors.push({ id: `${consoleId}#${port}`, consoleId, port, x: _j.x, y: _j.y, z: _j.z });
-    }
-  }
-  let hit = nearestAnchor(
-    { x: _ctrlPlugWorld.x, y: _ctrlPlugWorld.y, z: _ctrlPlugWorld.z },
-    anchors, PLUG_SNAP_RADIUS,
-  );
-  if (!hit && ray) {
-    hit = nearestAnchorAlongRay(ray.origin, ray.dir, anchors, {
-      maxDist: PLUG_RAY_MAX_DIST, maxPerp: PLUG_RAY_MAX_PERP,
-    });
-  }
-  if (hit) cable.plugController(cableId, hit.anchor.consoleId, hit.anchor.port);
-  else cable.unplugController(cableId);
-  seatControllerPlug(cableId);
-  _broadcastCablePort(cableId);             // peers must agree on the new port→player
-  gameInput?.flushReleases();               // drop keys held under the old seat
-  logger?.event?.('controller-repatch', { cableId, seat: hit ? hit.id : null });
-}
-
-// Reshape each controller cord from its peripheral (gamepad OR light gun) to its
-// plug every frame.
-function syncControllerCords() {
-  for (const [cableId, rec] of controllerPlugs) {
-    const gp = _cabledObjFor(cableId);
-    if (!gp) { rec.cord.setVisible(false); continue; }
-    // Re-snap the plug to its port jack every frame (unless it's in hand) so the
-    // cord follows when the console it's plugged into is moved in Edit mode.
-    if (!grabMgr?.isHeld(rec.plug.group)) seatControllerPlug(cableId);
-    (gp.userData.cordAnchor || gp).getWorldPosition(_cordFrom);
-    (rec.plug.cordAnchor || rec.plug.group).getWorldPosition(_cordTo);
-    rec.cord.update(_cordFrom, _cordTo);
-    rec.cord.setVisible(true);
-  }
-}
+// Moved VERBATIM to [[src/PeripheralCords.js]] together with the video and
+// keyboard cords (P2 #12 step 4) — see the note at the createPeripheralCords
+// call above. `addControllerPlug`, `seatControllerPlug`, `_broadcastCablePort`
+// and `syncControllerCords` are destructured from it there under their original
+// names; `handleControllerPlugReleased` became module-private and is still
+// reached exactly as before, through handlePlugReleased's plugKind dispatch.
 
 // ── Keyboard patch cord (keyboard → console DIN jack) ───────────────────────
-// Mirrors the controller cord pattern: a Plug (plugKind 'keyboard') on the
-// end of a Cord from the keyboard's cordAnchor.  Seating it in a console's
-// keyboardJack calls connectKeyboardTo(consoleId); mid-air drop disconnects.
-const keyboardPlugs = new Map(); // kbdId -> { plug:Plug, cord:Cord }
-const _kbdFrom = new THREE.Vector3();
-const _kbdTo = new THREE.Vector3();
-const _kbdPlugPos = new THREE.Vector3();
-const _kbdPlugQuat = new THREE.Quaternion();
-
-// Build the grabbbable plug + cord for the keyboard device and seat it at the
-// connected console's keyboardJack (or dangling if not yet connected).
-function addKeyboardPlug(kbdObj) {
-  if (!kbdObj || keyboardPlugs.has(KBD_ID)) return;
-  const plug = new Plug({ id: `kplug-${KBD_ID}`, plugKind: 'keyboard', sourceId: KBD_ID });
-  scene.addObject(plug.group);
-  grabMgr?.addGrabbable(plug.group);
-  const cord = new Cord({ color: 0xddcc88 }); // cream/off-white, matches the plug tint
-  scene.addObject(cord.mesh);
-  keyboardPlugs.set(KBD_ID, { plug, cord });
-  seatKeyboardPlug();
-}
-
-// Snap the keyboard plug onto the keyboardJack of the connected console; if
-// disconnected, park it just behind the keyboard body so the loose cord reads clearly.
-function seatKeyboardPlug() {
-  const rec = keyboardPlugs.get(KBD_ID);
-  if (!rec) return;
-  const conObj = _kbdTargetConsoleId ? consoleObjs.get(_kbdTargetConsoleId) : null;
-  const jack = conObj?.userData?.keyboardJack;
-  if (jack) {
-    jack.getWorldPosition(_kbdPlugPos);
-    jack.getWorldQuaternion(_kbdPlugQuat);
-    rec.plug.group.position.copy(_kbdPlugPos);
-    rec.plug.group.quaternion.copy(_kbdPlugQuat);
-  } else if (c64kbd) {
-    (c64kbd.cordAnchor || c64kbd.object3d).getWorldPosition(_kbdPlugPos);
-    rec.plug.group.position.copy(_kbdPlugPos);
-    rec.plug.group.position.y += 0.08;
-  }
-}
-
-// GrabMgr release handler for a keyboard plug: snap to nearest keyboardJack
-// across all consoles (within keyboardJackRadius) and connect, else disconnect.
-const _kbdPlugWorld = new THREE.Vector3();
-function handleKeyboardPlugReleased(plugObj, ray) {
-  if (plugObj.userData?.sourceId !== KBD_ID) return;
-  plugObj.getWorldPosition(_kbdPlugWorld);
-  const anchors = [];
-  const _j = new THREE.Vector3();
-  for (const [consoleId, conObj] of consoleObjs) {
-    const jack = conObj.userData?.keyboardJack;
-    const radius = conObj.userData?.keyboardJackRadius ?? 0.19;
-    if (!jack) continue;
-    jack.getWorldPosition(_j);
-    anchors.push({ id: consoleId, consoleId, radius, x: _j.x, y: _j.y, z: _j.z });
-  }
-  // Use the per-console keyboardJackRadius for the snap.
-  let hit = null;
-  let hitDist = Infinity;
-  for (const a of anchors) {
-    const dx = _kbdPlugWorld.x - a.x, dy = _kbdPlugWorld.y - a.y, dz = _kbdPlugWorld.z - a.z;
-    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    if (dist < a.radius && dist < hitDist) { hitDist = dist; hit = a; }
-  }
-  // Point-and-place: aiming at a console's keyboard jack connects it even
-  // from far away (Mechanism B).
-  if (!hit && ray) {
-    const rayHit = nearestAnchorAlongRay(ray.origin, ray.dir, anchors, {
-      maxDist: PLUG_RAY_MAX_DIST, maxPerp: PLUG_RAY_MAX_PERP,
-    });
-    if (rayHit) hit = rayHit.anchor;
-  }
-  if (hit) {
-    connectKeyboardTo(hit.consoleId);
-  } else {
-    disconnectKeyboard();
-  }
-  seatKeyboardPlug();
-  logger?.event?.('keyboard-repatch', { seat: hit?.consoleId || null });
-}
-
-// Reshape the keyboard cord from the keyboard body to its plug every frame.
-function syncKeyboardCord() {
-  const rec = keyboardPlugs.get(KBD_ID);
-  if (!rec) return;
-  // The plug + cord only exist while the keyboard is shown — hide both (and the
-  // grabbable plug, so it can't be caught) when there's no keyboard on screen.
-  const kbShown = !!c64kbd && c64kbd.object3d.visible;
-  rec.plug.group.visible = kbShown;
-  rec.cord.setVisible(kbShown);
-  if (!kbShown) return;
-  // Re-snap the plug to the connected console's keyboard jack every frame
-  // (unless it's in hand) so the cord follows when that console is moved.
-  if (!grabMgr?.isHeld(rec.plug.group)) seatKeyboardPlug();
-  (c64kbd.cordAnchor || c64kbd.object3d).getWorldPosition(_kbdFrom);
-  (rec.plug.cordAnchor || rec.plug.group).getWorldPosition(_kbdTo);
-  rec.cord.update(_kbdFrom, _kbdTo);
-}
-
-// Route keyboard input to the given console's emulator core, updating the
-// Patchbay, sendInput closure, and the layout to match the booted system.
-// `currentConsoleSystems` tracks what each console is running (set by loadCartridge).
-const _consoleSystems = new Map(); // consoleId -> system string (set on each boot)
-
-// M1.3: build the primary keyboard's sendInput callback for `consoleId`. Always
-// dispatches locally (unchanged); when we're a non-host peer in a session, ALSO
-// forwards over the 'kbd' WIRE channel so the keystroke reaches the host's
-// authoritative core (mirrors clientForGun/clientForMouse's WIRE shim, and the
-// "still dispatch locally too" rationale of onLogicalInput's gamepad forwarding
-// — this peer keeps seeing its own game until host video replaces the canvas).
-// The host applies a received 'kbd' message to ITS OWN _kbdTargetConsoleId, not
-// the sender's, so no consoleId needs to ride along (see onWire in connectToRoom).
-function _kbdSendInputFor(consoleId) {
-  return (type, code, key, keyCode, location) => {
-    rackMgr.get(consoleId)?.sendInput(type, code, key, keyCode, location);
-    // !amRoomHost() implies we're in a session and not (yet) the host.
-    if (!amRoomHost()) net.sendWire('kbd', { type, code, key, keyCode, location });
-  };
-}
-
-function connectKeyboardTo(consoleId) {
-  if (!c64kbd) return;
-  // Flush any held keys on the old target before switching.
-  c64kbd.flushReleases();
-  _kbdTargetConsoleId = consoleId || CONSOLE_ID;
-  cable.plugKeyboard(KBD_ID, _kbdTargetConsoleId);
-  // Re-wire sendInput to target the new console.
-  c64kbd.setSendInput(_kbdSendInputFor(_kbdTargetConsoleId));
-  // Switch layout: c64 layout for keyboard-capable Commodore systems, standard otherwise.
-  const sys = _consoleSystems.get(_kbdTargetConsoleId);
-  c64kbd.setLayout(isKeyboardCapable(sys) ? 'c64' : 'standard');
-  seatKeyboardPlug();
-}
-
-function disconnectKeyboard() {
-  if (!c64kbd) return;
-  c64kbd.flushReleases();
-  cable.unplugKeyboard(KBD_ID);
-  // FIX C: a mid-air drop is a TRUE disconnect — null target + no-op sendInput
-  // so no console receives keystrokes until the keyboard is re-plugged. The
-  // startup path (buildCartridgeWorld) still calls connectKeyboardTo(CONSOLE_ID)
-  // so out-of-the-box the keyboard is wired; only an explicit unplug disconnects.
-  // seatKeyboardPlug() reads _kbdTargetConsoleId===null and parks the plug behind
-  // the keyboard body (safe: consoleObjs.get(null) returns undefined → no jack).
-  _kbdTargetConsoleId = null;
-  c64kbd.setSendInput(() => {});
-}
+// Moved VERBATIM to [[src/PeripheralCords.js]] together with the video and
+// controller cords (P2 #12 step 4) — see the note at the createPeripheralCords
+// call above. `addKeyboardPlug`, `syncKeyboardCord`, `_kbdSendInputFor` and
+// `connectKeyboardTo` are destructured from it there under their original names;
+// `seatKeyboardPlug`, `handleKeyboardPlugReleased` and `disconnectKeyboard`
+// became module-private (nothing outside the cord blocks called them).
+// `_kbdTargetConsoleId` deliberately did NOT move — see the note above.
 
 // Which player each hand drives this frame, for GameInputMgr ([[src/
 // GameInputMgr.js]]). Policy: one held gamepad → both hands forward to its
@@ -3398,7 +3068,7 @@ async function buildCartridgeWorld() {
   }
   // In-world mouse prop: a grabbable mouse you move to drive a console's libretro
   // MOUSE device (Amiga point-and-click, The Settlers). Rests on the desk; wired
-  // into the grab system + MouseMgr below (see _registerMouse / new MouseMgr).
+  // into the grab system + MouseMgr below (see _registerPeripheral / new MouseMgr).
   if (!mouseObj) {
     mouseObj = createMouse({ position: new THREE.Vector3(-0.30, 0.745, -2.05) });
     scene.addObject(mouseObj);
@@ -3468,7 +3138,10 @@ async function buildCartridgeWorld() {
     onGamepadPlugged: (gp) => { gameInput?.flushReleases(); seatControllerPlug(gp?.userData?.cableId); _broadcastCablePort(gp?.userData?.cableId); },
     // Patch-cord plug released → snap to nearest TV jack + repatch video.
     onPlugReleased: (plug, ray) => handlePlugReleased(plug, ray),
-    onMemoryCardInserted: handleMemoryCardInserted,
+    // Deferred like the editor arrows just below: memoryCardUI is constructed a
+    // few lines after this object literal (it needs the grabMgr being built by
+    // it), and an insert can only happen once its build() has made the cards.
+    onMemoryCardInserted: (card) => memoryCardUI.handleInsert(card),
     // Phase E: deferred arrows — `editor` is assigned just below and these are
     // only called at tick/release time, never during GrabMgr construction.
     isEditMode: () => editor?.isEditMode() || false,
@@ -3504,43 +3177,36 @@ async function buildCartridgeWorld() {
     onGamepadGrabbed: (gp, hand) => {
       const id = net?.presence?.selfId;
       const cableId = gp.userData?.cableId;
-      if (net && id && cableId) net.setObjectState(makeGamepadHoldKey(cableId), { holder: id, hand });
+      if (net && id && cableId) net.setObjectState(makeHoldKeyFor(GAMEPAD, cableId), { holder: id, hand });
     },
     onGamepadReleased: (gp) => {
       const cableId = gp.userData?.cableId;
-      if (net && cableId) net.setObjectState(makeGamepadHoldKey(cableId), null);
+      if (net && cableId) net.setObjectState(makeHoldKeyFor(GAMEPAD, cableId), null);
     },
-    // Picking up the light gun arms it: connect the gun device on the current
-    // (and future) gun-capable game. See armLightGunAndReload for the reload.
+    // Picking up the light gun (or the mouse) arms it: connect that device on
+    // the current (and future) capable game. See armPeripheral for the reboot.
+    // One branch for both, keyed by the descriptor — the gamepad is excluded
+    // because a pad is never armed and announces its own hold via
+    // onGamepadGrabbed above (GAMEPAD.sessionKey is null).
     onObjectGrabbed: (obj, hand) => {
-      if (obj?.userData?.kind === 'lightgun') {
-        logger?.event?.('lightgun-grab', { hand, system: currentMeta?.system || null, consoleId: CONSOLE_ID, alreadyArmed: _lightgunArmedConsole });
-        armLightGunAndReload();
-        // Shared-gun sync: announce which gun we're holding so remote peers see
-        // it locked and show a correctly-aimed ghost in our avatar's hand
-        // (mirrors onGamepadGrabbed).
-        const id = net?.presence?.selfId;
-        const cableId = obj.userData?.cableId;
-        if (net && id && cableId) net.setObjectState(makeGunHoldKey(cableId), { holder: id, hand });
-      } else if (obj?.userData?.kind === 'mouse') {
-        logger?.event?.('mouse-grab', { hand, system: currentMeta?.system || null, consoleId: CONSOLE_ID, alreadyArmed: _mouseArmedConsole });
-        armMouseAndReload();
-        // Shared-mouse sync: announce which mouse we're holding so remote peers
-        // see it locked and show a ghost in our avatar's hand (mirrors the gun).
-        const id = net?.presence?.selfId;
-        const cableId = obj.userData?.cableId;
-        if (net && id && cableId) net.setObjectState(makeMouseHoldKey(cableId), { holder: id, hand });
-      }
+      const desc = peripheralForKind(obj?.userData?.kind);
+      if (!desc || !desc.sessionKey) return;
+      logger?.event?.(`${desc.id}-grab`, { hand, system: currentMeta?.system || null, consoleId: CONSOLE_ID, alreadyArmed: _armedConsoleFor(desc) });
+      armPeripheral(desc);
+      // Shared-peripheral sync: announce which one we're holding so remote peers
+      // see it locked and show a ghost in our avatar's hand — correctly aimed,
+      // for the gun (mirrors onGamepadGrabbed).
+      const id = net?.presence?.selfId;
+      const cableId = obj.userData?.cableId;
+      if (net && id && cableId) net.setObjectState(makeHoldKeyFor(desc, cableId), { holder: id, hand });
     },
     // Symmetric counterpart to onObjectGrabbed — clears the gun's/mouse's network
     // hold state on release so remote peers drop the ghost and it's grabbable again.
     onObjectReleased: (obj) => {
-      if (obj?.userData?.kind === 'lightgun') {
+      const heldDesc = peripheralForKind(obj?.userData?.kind);
+      if (heldDesc && heldDesc.sessionKey) {
         const cableId = obj.userData?.cableId;
-        if (net && cableId) net.setObjectState(makeGunHoldKey(cableId), null);
-      } else if (obj?.userData?.kind === 'mouse') {
-        const cableId = obj.userData?.cableId;
-        if (net && cableId) net.setObjectState(makeMouseHoldKey(cableId), null);
+        if (net && cableId) net.setObjectState(makeHoldKeyFor(heldDesc, cableId), null);
       }
       // The authoritative resting pose, for a release in ANY mode. Until this,
       // only an EDIT-mode release broadcast one (via onEditRelease) — so a
@@ -3566,10 +3232,27 @@ async function buildCartridgeWorld() {
     isPreviewEnabled: () => !!(editor?.surfaceSnapEnabled() && editor?.isEditMode()),
   });
   window.__grabMgr = grabMgr; // debug hook: headless verification of distance-hold/point-and-place
+
+  // Memory cards: constructed here, the first point where grabMgr exists (the
+  // module registers each card as a grabbable) and long before any card can be
+  // inserted — the cards themselves are only made by build(), awaited later in
+  // this function. getClient/getMeta are GETTERS because `client`/`currentMeta`
+  // are reassigned by every boot path; handing over the values here would pin
+  // the module to whatever happened to be running at world-build time, and
+  // handing over a shared read is the save-identity race the module documents.
+  memoryCardUI = createMemoryCardUI({
+    scene,
+    getGrabMgr: () => grabMgr,
+    setStatus,
+    getClient: () => client,
+    getMeta: () => currentMeta,
+    captureBootEpoch,
+    CONSOLE_ID,
+  });
   cartridges.forEach((c) => grabMgr.addGrabbable(c));
   grabMgr.addGrabbable(gamepadObj);
-  _registerLightGun(lightGunObj);
-  _registerMouse(mouseObj);
+  _registerPeripheral(LIGHTGUN, lightGunObj);
+  _registerPeripheral(MOUSE, mouseObj);
 
   // Light-gun aiming: every frame, for each controller currently holding the gun,
   // raycast its barrel ray against the rack TV screens and drive the source
@@ -3595,7 +3278,7 @@ async function buildCartridgeWorld() {
     // (webgun_set), and lets swapping the two guns' jacks swap their players.
     // Routes to the gun's seated console's OWN two-gun device: the Kth gun on
     // WHATEVER console it's plugged into drives the Kth of THAT console's two-gun
-    // ports (_twoGunPortsForConsole). For the primary this equals the live
+    // ports (_twoPortsForConsole(LIGHTGUN, …)). For the primary this equals the live
     // _twoGunPorts (unchanged); for a secondary it derives from that console
     // runtime's loaded system. Returns null for every single-gun game ([] ports),
     // an unplugged gun, or a non-gun secondary console — all of which leave
@@ -3604,7 +3287,7 @@ async function buildCartridgeWorld() {
     portForGun: (gun) => {
       const seat = cable.portOf(gun?.userData?.cableId);
       if (!seat) return null;
-      return libretroGunPortFor(_gunSlotIndex(gun, seat.consoleId), _twoGunPortsForConsole(seat.consoleId));
+      return LIGHTGUN.libretroPortFor(_peripheralSlotIndex(LIGHTGUN, gun, seat.consoleId), _twoPortsForConsole(LIGHTGUN, seat.consoleId));
     },
     // Telemetry so a headset session is diagnosable from the logs without seeing
     // the screen (docs/HEADSET_LIGHTGUN_VALIDATION.md). Throttled aim + edge fire.
@@ -3632,7 +3315,7 @@ async function buildCartridgeWorld() {
     portForMouse: (mouse) => {
       const seat = cable.portOf(mouse?.userData?.cableId);
       if (!seat) return null;
-      return libretroMousePortFor(_mouseSlotIndex(mouse, seat.consoleId), _twoMousePortsForConsole(seat.consoleId));
+      return MOUSE.libretroPortFor(_peripheralSlotIndex(MOUSE, mouse, seat.consoleId), _twoPortsForConsole(MOUSE, seat.consoleId));
     },
     log: (name, fields) => logger?.event?.(name, fields),
   });
@@ -3649,7 +3332,7 @@ async function buildCartridgeWorld() {
     getPort: () => {
       const seat = cable.portOf(mouseObj?.userData?.cableId);
       if (!seat) return null;
-      return libretroMousePortFor(_mouseSlotIndex(mouseObj, seat.consoleId), _twoMousePortsForConsole(seat.consoleId));
+      return MOUSE.libretroPortFor(_peripheralSlotIndex(MOUSE, mouseObj, seat.consoleId), _twoPortsForConsole(MOUSE, seat.consoleId));
     },
     // Only auto-lock when the console this mouse is cabled to is CURRENTLY
     // booted with a real libretro MOUSE device on that port — not just because
@@ -3676,7 +3359,7 @@ async function buildCartridgeWorld() {
   addControllerPlug(lightGunObj);
   // The default mouse is a cabled peripheral too: seat it in the next free port and
   // give it a grabbable plug + cord that runs mouse → port jack. Its libretro mouse
-  // port is derived live from this jack. grabMgr.addGrabbable was done by _registerMouse.
+  // port is derived live from this jack. grabMgr.addGrabbable was done by _registerPeripheral.
   seatMouseInFreePort(mouseObj);
   addControllerPlug(mouseObj);
   // The primary keyboard gets its grabbable plug and auto-connects to the primary
@@ -3747,18 +3430,18 @@ async function buildCartridgeWorld() {
   // trigger state = `trigger`. Poses the gun at `pos` aiming at `look` (world).
   // Arm-on-grab debug hooks: __armGun runs the real arm+reload path;
   // __gunArmedState reports whether the gun device is connected this boot.
-  window.__armGun = () => armLightGunAndReload();
+  window.__armGun = () => armPeripheral(LIGHTGUN);
   window.__gunArmedState = () => ({ armed: !!window.__lightgunArmed, consoleArmed: _lightgunArmedConsole, system: currentMeta?.system || null, core: currentMeta?.core || null });
   // __disarmGun: clears the sticky arm flag so a LATER unrelated game on the
   // same gun-capable system stops silently inheriting the gun (see
   // [[gun-mouse-arming-leak-bug]] in project memory / docs/LIGHTGUN_SUPPORT.md).
-  window.__disarmGun = () => disarmLightGunAndReload();
+  window.__disarmGun = () => disarmPeripheral(LIGHTGUN);
   // --- Mouse debug hooks (mirror the gun hooks) ---
   window.__mouse = () => mouseObj;
   window.__mouseMgr = () => mouseMgr;
-  window.__armMouse = () => armMouseAndReload();
+  window.__armMouse = () => armPeripheral(MOUSE);
   window.__mouseArmedState = () => ({ armed: !!window.__mouseArmed, consoleArmed: _mouseArmedConsole, twoMousePorts: _twoMousePorts.slice(), system: currentMeta?.system || null });
-  window.__disarmMouse = () => disarmMouseAndReload();
+  window.__disarmMouse = () => disarmPeripheral(MOUSE);
   // Resolve the libretro mouse PORT a cabled mouse currently drives (the value
   // MouseMgr.portForMouse feeds to sendMouse). Returns null for single-mouse.
   window.__mouseLibretroPort = (cableId) => {
@@ -3774,14 +3457,14 @@ async function buildCartridgeWorld() {
     const cid = seat?.consoleId ?? CONSOLE_ID;
     const client = rackMgr.get(cid)?.client;
     if (!client) return 'no-client';
-    const port = seat ? libretroMousePortFor(_mouseSlotIndex(mouseObj, cid), _twoMousePortsForConsole(cid)) : null;
+    const port = seat ? MOUSE.libretroPortFor(_peripheralSlotIndex(MOUSE, mouseObj, cid), _twoPortsForConsole(MOUSE, cid)) : null;
     client.sendMouse(dx, dy, buttons, port);
     mouseObj?.userData?.setButtons?.(buttons & 0x3);
     return 'moved';
   };
   // Resolve the LIBRETRO gun port a cabled gun currently drives (the value the
   // LightGunMgr feeds to sendLightgun), derived live from the gun's cable jack
-  // order via libretroGunPortFor(_gunSlotIndex(...), _twoGunPorts). Returns null
+  // order via LIGHTGUN.libretroPortFor(_peripheralSlotIndex(...), _twoGunPorts). Returns null
   // for a single-gun config, an unplugged gun, or a gun on a non-primary console.
   // Headless hook for the two-gun cable-routing verifier.
   window.__gunLibretroPort = (cableId) => {
@@ -3946,12 +3629,12 @@ async function buildCartridgeWorld() {
       if (ghostGpMgr?.isRemotelyHeld(cableId)) return false; // locked
       // Simulate the broadcast directly (no real XR controller here).
       const id = net?.presence?.selfId;
-      if (net && id) net.setObjectState(makeGamepadHoldKey(cableId), { holder: id, hand: 'right' });
+      if (net && id) net.setObjectState(makeHoldKeyFor(GAMEPAD, cableId), { holder: id, hand: 'right' });
       return true;
     },
     // Headless: release a locally-held gamepad (clear the hold state).
     releaseGamepad: (cableId) => {
-      if (net && cableId) net.setObjectState(makeGamepadHoldKey(cableId), null);
+      if (net && cableId) net.setObjectState(makeHoldKeyFor(GAMEPAD, cableId), null);
       return true;
     },
     // Headless: spawn a new shared gamepad (same as the Add-menu button).
@@ -4188,63 +3871,45 @@ async function buildCartridgeWorld() {
       has: (file) => ghostMgr.hasGhost(file),
     };
 
-    // Shared-gamepad sync: show a ghost gamepad in the remote holder's hand and
-    // lock the local gamepad from being grabbed while it's held remotely.
-    // Uses the `hold:gp:<cableId>` STATE namespace (same Hub auto-clear as cart holds).
-    ghostGpMgr = new GhostGamepadMgr({ avatars: liveAvatars, gamepadObjs: _gamepadObjs });
-    _addSessionCleanup(() => ghostGpMgr?.removeAll());
-    // Holds are parsed once per change for all four managers (see _netHolds);
-    // `gamepads` is the hold:gp:* slice with objId already remapped to <cableId>.
-    _addNetTickCallback(() => {
-      if (!net) return;
-      ghostGpMgr.sync(_netHolds().gamepads);
-    });
-    window.__ghostGp = {
-      count: () => ghostGpMgr.ghostCount,
-      hidden: () => ghostGpMgr.hiddenCount,
-      has: (cableId) => ghostGpMgr.hasGhost(cableId),
-      isHidden: (cableId) => ghostGpMgr.isHidden(cableId),
-      heldBy: (cableId) => ghostGpMgr.heldBy(cableId),
-      isRemotelyHeld: (cableId) => ghostGpMgr.isRemotelyHeld(cableId),
-    };
-
-    // Shared-light-gun sync: show a ghost gun (correctly aimed — see
-    // GrabMgr's alignToController) in the remote holder's hand, and lock the
-    // local gun from being grabbed while it's held remotely. Uses the
-    // `hold:gun:<cableId>` STATE namespace (same Hub auto-clear as cart/gamepad
-    // holds). Mirrors the gamepad wiring immediately above.
-    ghostGunMgr = new GhostLightGunMgr({ avatars: liveAvatars, lightGunObjs: _lightGunObjsById });
-    _addSessionCleanup(() => ghostGunMgr?.removeAll());
-    _addNetTickCallback(() => {
-      if (!net) return;
-      ghostGunMgr.sync(_netHolds().guns);
-    });
-    window.__ghostGun = {
-      count: () => ghostGunMgr.ghostCount,
-      hidden: () => ghostGunMgr.hiddenCount,
-      has: (cableId) => ghostGunMgr.hasGhost(cableId),
-      isHidden: (cableId) => ghostGunMgr.isHidden(cableId),
-      heldBy: (cableId) => ghostGunMgr.heldBy(cableId),
-      isRemotelyHeld: (cableId) => ghostGunMgr.isRemotelyHeld(cableId),
-    };
-
-    // Shared-mouse sync: mirrors the light-gun wiring immediately above. Uses
-    // the `hold:mouse:<cableId>` STATE namespace (same Hub auto-clear as
-    // cart/gamepad/gun holds).
-    ghostMouseMgr = new GhostMouseMgr({ avatars: liveAvatars, mouseObjs: _mouseObjsById });
-    _addSessionCleanup(() => ghostMouseMgr?.removeAll());
-    _addNetTickCallback(() => {
-      if (!net) return;
-      ghostMouseMgr.sync(_netHolds().mice);
-    });
-    window.__ghostMouse = {
-      count: () => ghostMouseMgr.ghostCount,
-      hidden: () => ghostMouseMgr.hiddenCount,
-      has: (cableId) => ghostMouseMgr.hasGhost(cableId),
-      isHidden: (cableId) => ghostMouseMgr.isHidden(cableId),
-      heldBy: (cableId) => ghostMouseMgr.heldBy(cableId),
-      isRemotelyHeld: (cableId) => ghostMouseMgr.isRemotelyHeld(cableId),
-    };
+    // Shared-peripheral sync, once per port-bound device (CLAUDE_REVIEW §3.3 —
+    // this was three copies of the same twenty lines):
+    //   • gamepad — show a ghost gamepad in the remote holder's hand and lock
+    //     the local gamepad from being grabbed while it's held remotely.
+    //   • light gun — the ghost is correctly AIMED, for free: it hangs off the
+    //     holder's synced avatar hand and GrabMgr's alignToController put the
+    //     barrel along the hand's forward axis.
+    //   • mouse — same again, hand pose only.
+    // Each uses its own `hold:<prefix><cableId>` STATE namespace (same Hub
+    // auto-clear as cart holds). Holds are parsed once per change for all four
+    // managers (see _netHolds); each slice is that namespace with objId already
+    // remapped down to the bare <cableId> the manager keys on.
+    //
+    // The managers stay in their three module-level `let`s (ghostGpMgr /
+    // ghostGunMgr / ghostMouseMgr) because the rest of the file reads them, and
+    // every closure below goes through the get/set pair rather than capturing
+    // the instance — so a re-wire that replaces a manager is seen by the
+    // cleanup and the tick exactly as it was before this loop existed.
+    for (const [desc, objs, tap, set, get] of [
+      [GAMEPAD,  _gamepadObjs,      '__ghostGp',    (m) => { ghostGpMgr = m; },    () => ghostGpMgr],
+      [LIGHTGUN, _lightGunObjsById, '__ghostGun',   (m) => { ghostGunMgr = m; },   () => ghostGunMgr],
+      [MOUSE,    _mouseObjsById,    '__ghostMouse', (m) => { ghostMouseMgr = m; }, () => ghostMouseMgr],
+    ]) {
+      const slice = _HOLD_SLICE_NAME[desc.id];
+      set(new GhostPeripheralMgr(desc, { avatars: liveAvatars, objs }));
+      _addSessionCleanup(() => get()?.removeAll());
+      _addNetTickCallback(() => {
+        if (!net) return;
+        get().sync(_netHolds()[slice]);
+      });
+      window[tap] = {
+        count: () => get().ghostCount,
+        hidden: () => get().hiddenCount,
+        has: (cableId) => get().hasGhost(cableId),
+        isHidden: (cableId) => get().isHidden(cableId),
+        heldBy: (cableId) => get().heldBy(cableId),
+        isRemotelyHeld: (cableId) => get().isRemotelyHeld(cableId),
+      };
+    }
     // Headless test tap for the transient WIRE channel: returns a copy of the
     // last received messages on a channel (gp/drag/reset). See _wireRxLog.
     window.__wireRx = (ch) => (_wireRxLog[ch] ? _wireRxLog[ch].slice() : []);
@@ -4505,7 +4170,7 @@ async function buildCartridgeWorld() {
       // by the spawning peer, not chosen here).
       if (r.kind === 'lightgun') {
         if (payload.cableId != null) r.object.userData.cableId = payload.cableId;
-        _registerLightGun(r.object);
+        _registerPeripheral(LIGHTGUN, r.object);
         addControllerPlug(r.object);
         _reconcileGunState();
       }
@@ -4513,7 +4178,7 @@ async function buildCartridgeWorld() {
       // id its mouse:<cableId> port binding is keyed by; _reconcileMouseState seats it).
       if (r.kind === 'mouse') {
         if (payload.cableId != null) r.object.userData.cableId = payload.cableId;
-        _registerMouse(r.object);
+        _registerPeripheral(MOUSE, r.object);
         addControllerPlug(r.object);
         _reconcileMouseState();
       }
@@ -4710,7 +4375,7 @@ async function buildCartridgeWorld() {
     attachKeyboard: () => input.attach(window),
   };
 
-  await buildMemoryCards();
+  await memoryCardUI.build();
 
   const locomotion = new LocomotionMgr({
     renderer: scene.renderer,
@@ -4928,11 +4593,15 @@ async function buildCartridgeWorld() {
 
   // Restore the light-gun arm across a page reload (gun stays "out" for the
   // session) BEFORE the resume so the bridged game boots with the gun device.
-  try { if (sessionStorage.getItem(LIGHTGUN_ARM_KEY)) window.__lightgunArmed = true; }
-  catch (_) { /* sessionStorage unavailable */ }
-  // Same for the mouse arm: the in-world mouse stays "out" across a reload.
-  try { if (sessionStorage.getItem(MOUSE_ARM_KEY)) window.__mouseArmed = true; }
-  catch (_) { /* sessionStorage unavailable */ }
+  // The key comes from the DESCRIPTOR, not a local copy: arm/disarm now write
+  // and remove through `desc.sessionKey` ([[src/CabledPeripheral.js]]), and a
+  // second literal here would only match until someone renamed the key there —
+  // at which point a reload would silently drop the armed device, or resurrect
+  // a stale flag written by an older build.
+  for (const desc of ARMABLE_PERIPHERALS) {
+    try { if (sessionStorage.getItem(desc.sessionKey)) window[desc.armKey] = true; }
+    catch (_) { /* sessionStorage unavailable */ }
+  }
 
   // After everything's built, see if we're resuming a cross-system swap.
   await resumePendingLoad();
@@ -5110,7 +4779,7 @@ function addProp(type, opts = {}) {
       const selfId = net.presence.selfId || 'local';
       r.object.userData.cableId = makePeerGunId(selfId, ++_peerGunCounter);
     }
-    _registerLightGun(r.object);
+    _registerPeripheral(LIGHTGUN, r.object);
     const gunPort = seatGunInFreePort(r.object);
     addControllerPlug(r.object);
     // Carry the cableId on the descriptor so serializePropState ships it to peers.
@@ -5132,7 +4801,7 @@ function addProp(type, opts = {}) {
       const selfId = net.presence.selfId || 'local';
       r.object.userData.cableId = makePeerMouseId(selfId, ++_peerMouseCounter);
     }
-    _registerMouse(r.object);
+    _registerPeripheral(MOUSE, r.object);
     const mousePort = seatMouseInFreePort(r.object);
     addControllerPlug(r.object);
     prop.cableId = r.object.userData.cableId;
@@ -5316,166 +4985,35 @@ async function loadExtraCollection() {
 
 // --- Change mode: cycle a selected prop's options -------------------------
 
-// Drop the `builtin:` prefix for terse status lines.
-const short = (v) => String(v || '').replace(/^builtin:/, '');
-
-// Ordered list of collection keys a shelf can cycle through. The room's declared
-// refs (top-level `collections` + any shelf's `collection`) — these are exactly
-// the strings currentCollections.byKey was keyed with, so each resolves to a
-// loaded collection, and they match a shelf's `collection` field format (url or
-// id). A room that lists only one collection naturally can't cycle.
-function collectionKeys() {
-  return roomCollectionRefs(currentRoom);
-}
-
-// Rebuild a shelf in place after its `collection` changed: build the new shelf
-// FIRST (buildProp returns null + adds nothing for an empty collection, so we
-// can abort cleanly), then swap out the old object from scene + grab set +
-// editor, register the replacement, and re-select it. Returns true on success.
-function rebuildShelf(rec) {
-  const { prop, object } = rec;
-  const r = buildProp(prop, { scene, collections: currentCollections });
-  if (!r) return false; // empty collection — nothing built, old shelf untouched
-
-  scene.removeObject(object);
-  for (const child of object.children) {
-    if (child.userData?.kind === 'cartridge') grabMgr.removeGrabbable(child);
-  }
-  grabMgr.removeGrabbable(object);
-  editor.removePlaced(object);
-
-  editor.registerPlaced(prop, r.object);
-  r.cartridges.forEach((c) => grabMgr.addGrabbable(c));
-  editor.select(r.object); // re-highlight the rebuilt shelf
-  return true;
-}
-
-// Advance every poster in the room to its next art (the global "All Posters"
-// Change-mode action; distinct from cycling one selected poster).
-function cycleAllPosters() {
-  if (!roomPosters.length) { setStatus('no posters in this room'); return; }
-  let last;
-  for (const { prop, object } of roomPosters) {
-    last = cyclePosterTexture(prop);
-    // FIX D: cycling to a built-in texture must clear imageFile so a reload
-    // re-resolution doesn't override the user's chosen built-in art.
-    delete prop.imageFile;
-    applyPosterTexture(object.material, prop.texture);
-  }
-  setStatus(`All posters: ${short(last)}`);
-}
-
-// Rebuild a bookcase in place after its `collection` changed. Mirrors
-// rebuildShelf but for bookcases: removes old carts, builds new carts, and
-// re-locks homes. Returns true on success, false if the new collection is empty.
-function rebuildBookcase(rec) {
-  const { prop, object: bookcaseGroup } = rec;
-  // Remove old cartridges from grabMgr and the group.
-  for (const child of [...bookcaseGroup.children]) {
-    if (child.userData?.kind === 'cartridge') {
-      grabMgr.removeGrabbable(child);
-      bookcaseGroup.remove(child);
-    }
-  }
-  // Build new carts from the updated collection on the EXISTING bookcase object.
-  // We don't replace the group (unlike rebuildShelf) since the bookcase geometry
-  // doesn't change — only the carts on the shelves change.
-  const { buildBookcaseCarts: buildCarts } = { buildBookcaseCarts: null }; // avoid circular ref
-  // Call the helper through RoomBuilder via buildProp to get a temp new object,
-  // then steal its cart children. Actually, we import lockBookcaseHomes above;
-  // replicate the logic here directly (same as buildBookcaseCarts but inline):
-  const col = (prop.collection && currentCollections.byKey.get(prop.collection)) || currentCollections.list[0];
-  const games = col ? col.games.slice() : [];
-  if (!games.length) return false;
-
-  // Refresh the cover plaque to name the new collection (mirrors RoomBuilder's
-  // initial-build plaque; find-and-replace since the group itself persists).
-  const BOOKCASE_H_CONST = 1.8;
-  const oldPlaque = bookcaseGroup.children.find((c) => c.userData?.kind === 'coverPlaque');
-  if (oldPlaque) bookcaseGroup.remove(oldPlaque);
-  if (col) {
-    const plaque = createCoverPlaque(col.title, { width: 0.9 * 0.85 });
-    plaque.position.set(0, BOOKCASE_H_CONST + 0.02, 0);
-    bookcaseGroup.add(plaque);
-  }
-
-  // Reuse the exported function from RoomBuilder — but it's not exported as a
-  // standalone. Rebuild via a throw-away buildProp call: build a temp descriptor
-  // → steal carts → position them into the real bookcaseGroup.
-  // Simpler: rebuild directly using the same geometry constants.
-  const CART_W = 0.12, CART_H = 0.13;
-  const BOOKCASE_W_CONST = 0.9, BOOKCASE_T_CONST = 0.03;
-  const innerW = BOOKCASE_W_CONST - 2 * BOOKCASE_T_CONST;
-  const SLOT = CART_W + 0.04;
-  const BACK_LEAN = -0.08;
-  const MAX_ROW = 5;
-  const shelfYs = [1, 2, 3].map((i) => (1.8 * i) / 4 + BOOKCASE_T_CONST / 2);
-
-  const newCarts = [];
-  let gameIdx = 0;
-  for (const shelfY of shelfYs) {
-    const remaining = games.length - gameIdx;
-    if (remaining <= 0) break;
-    const count = Math.min(remaining, MAX_ROW);
-    const startX = -(count - 1) * SLOT / 2;
-    for (let i = 0; i < count; i++) {
-      const cart = createMedia(games[gameIdx++]);
-      cart.position.set(startX + i * SLOT, shelfY + CART_H / 2, 0);
-      cart.quaternion.identity();
-      cart.rotation.x = BACK_LEAN;
-      bookcaseGroup.add(cart);
-      newCarts.push(cart);
-    }
-  }
-  lockBookcaseHomes(bookcaseGroup);
-  newCarts.forEach((c) => grabMgr.addGrabbable(c));
-  return true;
-}
-
-// Advance the selected prop's primary property: poster→art, shelf/bookcase→
-// collection (with a live rebuild). Furniture/console have nothing to cycle.
-// Surfaced as a "Cycle Selected" menu button and the headless window.__change.
-function cycleSelected() {
-  const rec = editor?.selectedProp();
-  if (!rec) { setStatus('Change: grip a prop to select it first'); return; }
-  const { prop, object } = rec;
-  if (prop.type === 'poster') {
-    const v = cyclePosterTexture(prop);
-    // FIX D: cycling to a built-in texture must clear imageFile so reload
-    // re-resolution doesn't override the user's chosen built-in art.
-    delete prop.imageFile;
-    applyPosterTexture(object.material, prop.texture);
-    setStatus(`Poster art: ${short(v)}`);
-  } else if (prop.type === 'shelf') {
-    const keys = collectionKeys();
-    if (keys.length < 2) { setStatus('only one collection loaded'); return; }
-    const prev = prop.collection;
-    const v = cycleShelfCollection(prop, keys);
-    if (!rebuildShelf(rec)) { prop.collection = prev; setStatus(`"${v}" has no games`); return; }
-    setStatus(`Shelf collection: ${v}`);
-  } else if (prop.type === 'bookcase') {
-    const keys = collectionKeys();
-    if (keys.length < 2) { setStatus('only one collection loaded'); return; }
-    const prev = prop.collection;
-    const v = cycleShelfCollection(prop, keys);
-    if (!rebuildBookcase(rec)) { prop.collection = prev; setStatus(`"${v}" has no games`); return; }
-    setStatus(`Bookcase collection: ${v}`);
-  } else if (object.userData.kind === 'portal') {
-    // Portal descriptors live in room.portals[] (not room.props[]) and never
-    // get a `.type` field (see normalizePortal in RoomLoader.js) — the object's
-    // userData.kind (set by buildPortal) is the only reliable signal here.
-    if (KNOWN_ROOMS.length < 2) { setStatus('only one known room'); return; }
-    const v = cyclePortalTarget(prop, KNOWN_ROOMS);
-    object.userData.target = v;
-    // activePortals holds a denormalized snapshot the proximity-nav tick reads
-    // (see the addPortal() push below) — keep it in sync with prop.target.
-    const live = activePortals.find((p) => p.prop === prop);
-    if (live) live.target = v;
-    setStatus(`Portal target: ${v}`);
-  } else {
-    setStatus(`nothing to change for ${prop.type}`);
-  }
-}
+// Extracted VERBATIM to [[src/PropChangeMode.js]] (P2 #12 / §3.1 step 3, after
+// MemoryCardUI and ConsoleRegistry+PowerMgr). Only the four symbols something
+// else in this file calls come back: `short` (two Change-panel labels),
+// `collectionKeys` (the Add panel + pendingExtraCollections), `cycleAllPosters`
+// and `cycleSelected` (menu buttons and window.__change). `rebuildShelf` and
+// `rebuildBookcase` had no callers outside the block and are module-private
+// there now.
+//
+// The six bindings handed over are all `let`s THIS FILE REASSIGNS after this
+// line runs — currentRoom/currentCollections on every room load, roomPosters
+// once the room is built, grabMgr and editor inside buildCartridgeWorld,
+// activePortals once the portals are built — so they go across as GETTERS on one
+// editor-scoped context object, never by value. Pass a snapshot instead and
+// every one of them is the null that was there at construction, and Change mode
+// silently does nothing. `scene`, `setStatus` and `KNOWN_ROOMS` are consts by
+// this point and are passed by value.
+const { short, collectionKeys, cycleAllPosters, cycleSelected } = createPropChangeMode({
+  scene,
+  setStatus,
+  KNOWN_ROOMS,
+  ctx: {
+    get editor() { return editor; },
+    get grabMgr() { return grabMgr; },
+    get currentRoom() { return currentRoom; },
+    get currentCollections() { return currentCollections; },
+    get roomPosters() { return roomPosters; },
+    get activePortals() { return activePortals; },
+  },
+});
 
 // --- In-VR menu + controls panel -----------------------------------------
 
@@ -6042,8 +5580,8 @@ function buildMenuAndControlsPanel() {
   // clear the sticky flag, live-rebooting the current game off the device only
   // if that game doesn't itself declare it. syncPeripheralArmButtons() keeps
   // the labels in sync at every boot (see loadCartridge/rebootPrimaryConsole).
-  gunArmBtn.onActivate = () => disarmLightGunAndReload();
-  mouseArmBtn.onActivate = () => disarmMouseAndReload();
+  gunArmBtn.onActivate = () => disarmPeripheral(LIGHTGUN);
+  mouseArmBtn.onActivate = () => disarmPeripheral(MOUSE);
   syncPeripheralArmButtons();
 
   // In-VR folder grants: same File System Access flow as the desktop header
@@ -6403,10 +5941,10 @@ function setKbdVisibility(visible) {
 // --- Cartridge → load wiring ---------------------------------------------
 
 const PENDING_KEY = 'libretrowebxr.pending';
-// Set once the light gun has been picked up; survives the arm page-reload and
-// keeps later gun-capable boots armed for the rest of the session.
-const LIGHTGUN_ARM_KEY = 'libretrowebxr.lightgun';
-const MOUSE_ARM_KEY = 'libretrowebxr.mouse';
+// The sticky "this device has been picked up" flags used to live here as two
+// more literals. They are now ONE owner — LIGHTGUN.sessionKey / MOUSE.sessionKey
+// in [[src/CabledPeripheral.js]], which is also what every write and remove
+// uses — and the startup restore above reads them off the descriptor.
 
 // `echo` controls whether a successful load re-announces the TV state to the
 // room (M0.5). Local inserts echo (true, default); a load that is itself
@@ -6531,124 +6069,187 @@ function _forwardPeripheralArm(device, on) {
 function _hostApplyPeripheralWire(data) {
   if (!amRoomHost() || !data?.device) return;
   logger?.event?.('mp-peripheral-apply', { device: data.device, on: !!data.on });
-  if (data.device === 'gun') (data.on ? armLightGunAndReload() : disarmLightGunAndReload())?.catch?.(() => {});
-  else if (data.device === 'mouse') (data.on ? armMouseAndReload() : disarmMouseAndReload())?.catch?.(() => {});
+  // Same two devices as before ('gun' / 'mouse'), resolved from the descriptor
+  // table's wireDevice field instead of a hand-written if/else pair.
+  const desc = ARMABLE_PERIPHERALS.find((d) => d.wireDevice === data.device);
+  if (desc) (data.on ? armPeripheral(desc) : disarmPeripheral(desc))?.catch?.(() => {});
 }
 
-async function armLightGunAndReload() {
-  try { sessionStorage.setItem(LIGHTGUN_ARM_KEY, '1'); } catch (_) {}
-  window.__lightgunArmed = true;                 // arm future gun-capable boots
-  // Display-only client: the local flag above is enough for OUR gun prop to start
-  // forwarding aim; the device itself has to be attached on the host's core.
-  if (!amRoomHost()) { _forwardPeripheralArm('gun', true); syncPeripheralArmButtons(); return; }
-  if (_lightgunArmedConsole) return;             // current game already has the gun
+// ── Arming a port-bound peripheral ──────────────────────────────────────────
+//
+// ONE arm path and ONE disarm path for BOTH armable peripherals (the gun and
+// the mouse), parameterised by a [[src/CabledPeripheral.js]] descriptor —
+// CLAUDE_REVIEW §3.3. There used to be four functions here
+// (armLightGunAndReload / armMouseAndReload / disarmLightGunAndReload /
+// disarmMouseAndReload), two of which said "Mirrors <the other one>" in their
+// own header. That mirroring is the bug generator this collapse removes: the
+// arming-leak fix and the allowBroken threading each had to be hand-ported to
+// the second copy, and the mouse copy is still missing an allowBroken analogue.
+//
+// The SHAPE is identical for both devices and lives here: set the sticky
+// session flag → forward to the host if we're a display-only client → bail if
+// this console already booted with the device → bail if the running game's
+// system can't take it → run the device's plan → on failure, bridge the same
+// game across a page reload with the device flagged on.
+//
+// The DIFFERENCES live in _ARM_PLANS / _DISARM_HOOKS below, one entry per
+// device, each moved across verbatim. A libretro peripheral only attaches at a
+// fresh boot, so both plans LIVE-reboot the same game with the device on (XR +
+// net session survive); a persisted session flag keeps later capable boots
+// armed. Picking the prop up with no capable game running just sets the flag
+// for next time.
+//
+// The gamepad descriptor is never passed here: a pad is the core's default
+// device and needs no reboot to attach, which is why GAMEPAD.sessionKey is null.
+
+/** Whether the PRIMARY console's current boot actually has this device attached. */
+function _armedConsoleFor(desc) {
+  return desc === LIGHTGUN ? _lightgunArmedConsole : _mouseArmedConsole;
+}
+
+// The per-device half of arming: everything between "the host may arm this" and
+// "reboot". Each returns { boot, okStatus, pending } — or null to abort the arm
+// entirely — and owns its own status line, its own telemetry event and (mouse)
+// its own cable seating, in the order the shipped code did them.
+const _ARM_PLANS = {
+  lightgun: (desc, m, sys) => {
+    const lg = desc.deviceFor(sys);
+    // A light gun occupies a controller port (player = port + 1). When that port
+    // already drives a gamepad — e.g. the SMS Light Phaser on port 0 / player 1 —
+    // the gun supersedes the pad on that port while armed, matching real hardware
+    // (the gun plugs into a controller socket). Say so plainly. Other ports keep
+    // their pads (NES Zapper / SNES Super Scope / MD Menacer all sit on port 1).
+    const player = (lg?.port ?? 0) + 1;
+    const padSuperseded = !!cable.occupantOf?.(CONSOLE_ID, lg?.port ?? -1);
+    setStatus(padSuperseded
+      ? `connecting ${lg?.label || 'light gun'} on player ${player} (replaces that gamepad)…`
+      : `connecting ${lg?.label || 'light gun'} on player ${player}…`);
+    // Build the SAME gun boot config the load path uses, so the fresh boot seats the
+    // device on the right port(s). twoGun seats two guns on two-gun-capable games.
+    const twoGun = _twoGunActiveFor(m);
+    // `allowBroken` must be threaded here exactly as the two load-path call sites
+    // do it (see loadCartridge / rebootPrimaryConsole). _twoGunActiveFor honours
+    // the same flag, so passing it to one and not the other is not symmetric:
+    // with the flag set and a GATED lightgun2, _twoGunActiveFor returns true while
+    // a flag-less lightgunLoadConfig returns null, and this reboot would arm NO
+    // gun at all — strictly worse than the single-gun fallback the gate exists to
+    // provide. Real callers never set the flag.
+    const gun = desc.loadConfigFor(m.system, { twoGun, allowBroken: window.__allowBrokenLightgun });
+    logger?.event?.('lightgun-arm-reboot', { system: sys, gun: lg?.label || null, file: m.file, core: m.core, title: m.title, twoGun: !!(gun && gun.guns?.length > 1) });
+    // NOTE the asymmetry with the mouse plan below, preserved deliberately: a
+    // null `gun` does NOT abort. lightgunLoadConfig only returns null for a
+    // gated/absent device, and reaching here already means isLightgunCapable
+    // said yes, so aborting would be dead code that could only ever mask a
+    // registry mismatch by silently doing nothing.
+    return {
+      boot: () => rebootPrimaryConsole(m, gun),
+      okStatus: `${lg?.label || 'light gun'} connected`,
+      pending: { lightgun: true },
+    };
+  },
+
+  mouse: (desc, m, sys) => {
+    // Build the SAME mouse boot config the load path uses. A twoMouse game on a
+    // two-mouse-capable system (Amiga) seats a mouse on both ports (split-pointer).
+    const twoMouse = !!m.twoMouse && isTwoMouseCapable(m.system);
+    const mouse = desc.loadConfigFor(m.system, { twoMouse });
+    if (!mouse) return null;
+    // Seat the default mouse on its libretro port (Amiga mouse = port 0 / player 1),
+    // superseding whatever sat there, so the cable jack order matches the device's
+    // port and (for the patched two-mouse path) the 2nd mouse can take port 1. The
+    // single-mouse DOM path drives the console regardless of seat, but seating keeps
+    // the in-world cord + port-sync coherent. Best-effort.
+    try {
+      const port0 = mouse.mice?.[0]?.port ?? 0;
+      cable.plugController(mouseObj.userData.cableId, CONSOLE_ID, port0);
+      seatControllerPlug(mouseObj.userData.cableId);
+      _broadcastCablePort(mouseObj.userData.cableId);
+    } catch (_) {}
+    setStatus(`connecting mouse${twoMouse ? ' (2-player)' : ''}…`);
+    logger?.event?.('mouse-arm-reboot', { system: sys, file: m.file, core: m.core, title: m.title, twoMouse: !!(mouse && mouse.mice?.length > 1) });
+    return {
+      boot: () => rebootPrimaryConsole(m, null, mouse),
+      okStatus: 'mouse connected',
+      pending: { mouse: true, twoMouse: m.twoMouse || false },
+    };
+  },
+};
+
+async function armPeripheral(desc) {
+  try { sessionStorage.setItem(desc.sessionKey, '1'); } catch (_) {}
+  window[desc.armKey] = true;                    // arm future capable boots
+  // Display-only client: the local flag above is enough for OUR prop to start
+  // forwarding input; the device itself has to be attached on the host's core.
+  if (!amRoomHost()) { _forwardPeripheralArm(desc.wireDevice, true); syncPeripheralArmButtons(); return; }
+  // JOIN a cartridge that is still downloading instead of rebooting over it —
+  // see awaitPrimaryLoad()'s declaration for the failure this closes (insert a
+  // gun cart, pick the gun up, watch the cart silently vanish). The sticky arm
+  // flag above is already set, so the load in flight seats the device itself on
+  // the game that is actually arriving.
+  if (_primaryLoadInFlight) {
+    setStatus(`${desc.shortLabel} connects when the game finishes loading…`);
+    logger?.event?.(`${desc.id}-arm-awaits-load`, { consoleId: CONSOLE_ID });
+    await awaitPrimaryLoad();
+    if (_armedConsoleFor(desc)) {         // the load booted with the device on
+      syncPeripheralArmButtons();
+      setStatus(`${desc.label} connected`);
+      return;
+    }
+  }
+  if (_armedConsoleFor(desc)) return;            // current game already has the device
   const sys = currentMeta?.system;
-  if (!sys || !isLightgunCapable(sys) || !_lastLoadedMeta) return;
-  const lg = lightgunForSystem(sys);
-  // A light gun occupies a controller port (player = port + 1). When that port
-  // already drives a gamepad — e.g. the SMS Light Phaser on port 0 / player 1 —
-  // the gun supersedes the pad on that port while armed, matching real hardware
-  // (the gun plugs into a controller socket). Say so plainly. Other ports keep
-  // their pads (NES Zapper / SNES Super Scope / MD Menacer all sit on port 1).
-  const player = (lg?.port ?? 0) + 1;
-  const padSuperseded = !!cable.occupantOf?.(CONSOLE_ID, lg?.port ?? -1);
-  setStatus(padSuperseded
-    ? `connecting ${lg?.label || 'light gun'} on player ${player} (replaces that gamepad)…`
-    : `connecting ${lg?.label || 'light gun'} on player ${player}…`);
+  if (!sys || !desc.capableFor(sys) || !_lastLoadedMeta) return;
   const m = _lastLoadedMeta;
-  // Build the SAME gun boot config the load path uses, so the fresh boot seats the
-  // device on the right port(s). twoGun seats two guns on two-gun-capable games.
-  const twoGun = _twoGunActiveFor(m);
-  // `allowBroken` must be threaded here exactly as the two load-path call sites
-  // do it (see loadCartridge / rebootPrimaryConsole). _twoGunActiveFor honours
-  // the same flag, so passing it to one and not the other is not symmetric:
-  // with the flag set and a GATED lightgun2, _twoGunActiveFor returns true while
-  // a flag-less lightgunLoadConfig returns null, and this reboot would arm NO
-  // gun at all — strictly worse than the single-gun fallback the gate exists to
-  // provide. Real callers never set the flag.
-  const gun = lightgunLoadConfig(m.system, { twoGun, allowBroken: window.__allowBrokenLightgun });
-  logger?.event?.('lightgun-arm-reboot', { system: sys, gun: lg?.label || null, file: m.file, core: m.core, title: m.title, twoGun: !!(gun && gun.guns?.length > 1) });
+  const plan = _ARM_PLANS[desc.id](desc, m, sys);
+  if (!plan) return;
   try {
-    // LIVE reboot: re-boot the same ROM with the gun device attached, no reload.
-    await rebootPrimaryConsole(m, gun);
+    // LIVE reboot: re-boot the same ROM with the device attached, no reload.
+    const booted = await plan.boot();
+    // null means rebootPrimaryConsole abandoned at its checkpoint because a NEWER
+    // boot won the console (see its ARC-2(c) note). Nothing was stood up and
+    // nothing was committed, so there is nothing to snap back — and claiming
+    // "light gun connected" here would be a straight lie about a console that is
+    // now booting something else. Say nothing on purpose: the sticky arm flag is
+    // set, the newer boot resolves its peripherals after its own fetch and will
+    // seat the device, and that boot owns the status line (the same rule as
+    // loadCartridge's 'newer-load'). Logged so it is never invisible in a trace.
+    if (booted === null) {
+      logger?.event?.(`${desc.id}-arm-superseded`, { consoleId: CONSOLE_ID, file: m.file });
+      syncPeripheralArmButtons();
+      return;
+    }
     // Snap the matching cart back into the slot (the runtime swap doesn't touch
     // the visual cart state, but keep parity with the reload path's resume).
     const cart = cartridges.find((c) => c.userData.file === m.file);
     if (cart && grabMgr) grabMgr.setInsertedCart(cart);
-    setStatus(`${lg?.label || 'light gun'} connected`);
+    setStatus(plan.okStatus);
   } catch (e) {
     // Fallback: the old reload bridge so arming never hard-fails. Bridges the SAME
-    // game across a page reload with the gun flagged on (preserving ROM provenance
-    // + in-VR room edits + the net session/host role).
-    console.warn('[lightgun] live arm failed, falling back to reload:', e);
-    logger?.event?.('lightgun-arm-reboot-fallback', { error: String(e?.message || e) });
+    // game across a page reload with the device flagged on (preserving ROM
+    // provenance + in-VR room edits + the net session/host role).
+    console.warn(`[${desc.id}] live arm failed, falling back to reload:`, e);
+    logger?.event?.(`${desc.id}-arm-reboot-fallback`, { error: String(e?.message || e) });
     try {
       sessionStorage.setItem(PENDING_KEY, JSON.stringify({
-        file: m.file, core: m.core, system: m.system, title: m.title, rom: m.rom, lightgun: true,
+        file: m.file, core: m.core, system: m.system, title: m.title, rom: m.rom, ...plan.pending,
       }));
       if (editor) {
+        // DELIBERATE, not an accident of the merge: HEAD had two copies of this
+        // and they disagreed — armLightGunAndReload warned on a stash failure,
+        // armMouseAndReload swallowed it with `catch (_) {}`. One of the two had
+        // to win, and it is the gun's: this stash is the player's in-VR room
+        // edits, and losing them to a reload with no trace in the console is the
+        // harder failure to diagnose of the two. So the MOUSE arm now warns
+        // where it used to be silent. Console output only — control flow is
+        // identical for both devices.
         try { stashRoomBridge(JSON.stringify(editor.serialize())); }
         catch (e2) { console.warn('[main] room bridge stash failed:', e2); }
       }
       stashSessionRejoin();
       location.reload();
     } catch (e2) {
-      console.warn('[lightgun] arm reload fallback failed:', e2);
-      setStatus('could not connect the light gun');
-    }
-  }
-}
-
-// Mouse arming: picking up the in-world mouse connects the libretro MOUSE device.
-// Mirrors armLightGunAndReload — a libretro peripheral attaches only at a fresh
-// boot, so we LIVE-reboot the same game with the mouse device on (XR + net session
-// survive). A persisted session flag keeps later mouse-capable boots armed. Picking
-// up the mouse with no mouse-capable game running just sets the flag for next time.
-async function armMouseAndReload() {
-  try { sessionStorage.setItem(MOUSE_ARM_KEY, '1'); } catch (_) {}
-  window.__mouseArmed = true;                  // arm future mouse-capable boots
-  // Display-only client: forward to the host (see _forwardPeripheralArm).
-  if (!amRoomHost()) { _forwardPeripheralArm('mouse', true); syncPeripheralArmButtons(); return; }
-  if (_mouseArmedConsole) return;              // current game already has the mouse
-  const sys = currentMeta?.system;
-  if (!sys || !isMouseCapable(sys) || !_lastLoadedMeta) return;
-  const m = _lastLoadedMeta;
-  // Build the SAME mouse boot config the load path uses. A twoMouse game on a
-  // two-mouse-capable system (Amiga) seats a mouse on both ports (split-pointer).
-  const twoMouse = !!m.twoMouse && isTwoMouseCapable(m.system);
-  const mouse = mouseLoadConfig(m.system, { twoMouse });
-  if (!mouse) return;
-  // Seat the default mouse on its libretro port (Amiga mouse = port 0 / player 1),
-  // superseding whatever sat there, so the cable jack order matches the device's
-  // port and (for the patched two-mouse path) the 2nd mouse can take port 1. The
-  // single-mouse DOM path drives the console regardless of seat, but seating keeps
-  // the in-world cord + port-sync coherent. Best-effort.
-  try {
-    const port0 = mouse.mice?.[0]?.port ?? 0;
-    cable.plugController(mouseObj.userData.cableId, CONSOLE_ID, port0);
-    seatControllerPlug(mouseObj.userData.cableId);
-    _broadcastCablePort(mouseObj.userData.cableId);
-  } catch (_) {}
-  setStatus(`connecting mouse${twoMouse ? ' (2-player)' : ''}…`);
-  logger?.event?.('mouse-arm-reboot', { system: sys, file: m.file, core: m.core, title: m.title, twoMouse: !!(mouse && mouse.mice?.length > 1) });
-  try {
-    await rebootPrimaryConsole(m, null, mouse);
-    const cart = cartridges.find((c) => c.userData.file === m.file);
-    if (cart && grabMgr) grabMgr.setInsertedCart(cart);
-    setStatus('mouse connected');
-  } catch (e) {
-    console.warn('[mouse] live arm failed, falling back to reload:', e);
-    logger?.event?.('mouse-arm-reboot-fallback', { error: String(e?.message || e) });
-    try {
-      sessionStorage.setItem(PENDING_KEY, JSON.stringify({
-        file: m.file, core: m.core, system: m.system, title: m.title, rom: m.rom, mouse: true, twoMouse: m.twoMouse || false,
-      }));
-      if (editor) { try { stashRoomBridge(JSON.stringify(editor.serialize())); } catch (_) {} }
-      stashSessionRejoin();
-      location.reload();
-    } catch (e2) {
-      console.warn('[mouse] arm reload fallback failed:', e2);
-      setStatus('could not connect the mouse');
+      console.warn(`[${desc.id}] arm reload fallback failed:`, e2);
+      setStatus(`could not connect the ${desc.label}`);
     }
   }
 }
@@ -6661,72 +6262,67 @@ function syncPeripheralArmButtons() {
   mouseArmBtn?.setLabel(window.__mouseArmed ? 'Disarm Mouse' : 'Mouse: Off');
 }
 
-// Disarm: the explicit counterpart to armLightGunAndReload. Clears the sticky
-// session flag (so a LATER unrelated game on the same gun-capable SYSTEM stops
-// silently inheriting the gun — see [[gun-mouse-arming-leak-bug]]). If the
-// CURRENTLY running game only has the gun because of that flag (its own meta
-// doesn't declare lightgun:true), live-reboot it without the device; a curated
-// gun title keeps its gun regardless, since disarming here only affects what
-// happens NEXT.
-async function disarmLightGunAndReload() {
-  if (!window.__lightgunArmed && !_lightgunArmedConsole) { setStatus('no light gun connected'); return; }
-  try { sessionStorage.removeItem(LIGHTGUN_ARM_KEY); } catch (_) {}
-  window.__lightgunArmed = false;
-  logger?.event?.('lightgun-disarm', { system: currentMeta?.system || null, consoleId: CONSOLE_ID, hadDevice: _lightgunArmedConsole });
-  // Display-only client: the host owns the device (see _forwardPeripheralArm).
-  if (!amRoomHost()) { _forwardPeripheralArm('gun', false); syncPeripheralArmButtons(); return; }
-  const declaredByGame = !!_lastLoadedMeta?.lightgun;
-  if (!_lightgunArmedConsole || declaredByGame) {
-    syncPeripheralArmButtons();
-    setStatus(declaredByGame ? 'gun stays connected for this game' : 'gun disarmed');
-    return;
-  }
-  const m = _lastLoadedMeta;
-  setStatus('disconnecting light gun…');
-  try {
-    await rebootPrimaryConsole(m, null, null);
-    const cart = cartridges.find((c) => c.userData.file === m.file);
-    if (cart && grabMgr) grabMgr.setInsertedCart(cart);
-    setStatus('light gun disconnected');
-  } catch (e) {
-    console.warn('[lightgun] disarm reboot failed:', e);
-    logger?.event?.('lightgun-disarm-fail', { error: String(e?.message || e) });
-    setStatus('could not disconnect the light gun');
-  }
-  syncPeripheralArmButtons();
-}
-
-// Mirrors disarmLightGunAndReload for the mouse. Also unplugs the mouse's
-// in-world cable jack (armMouseAndReload plugs it in) so the cord's visual
-// state matches "not connected" when we actually drop the device.
-async function disarmMouseAndReload() {
-  if (!window.__mouseArmed && !_mouseArmedConsole) { setStatus('no mouse connected'); return; }
-  try { sessionStorage.removeItem(MOUSE_ARM_KEY); } catch (_) {}
-  window.__mouseArmed = false;
-  logger?.event?.('mouse-disarm', { system: currentMeta?.system || null, consoleId: CONSOLE_ID, hadDevice: _mouseArmedConsole });
-  // Display-only client: the host owns the device (see _forwardPeripheralArm).
-  if (!amRoomHost()) { _forwardPeripheralArm('mouse', false); syncPeripheralArmButtons(); return; }
-  const declaredByGame = !!_lastLoadedMeta?.mouse;
-  if (!_mouseArmedConsole || declaredByGame) {
-    syncPeripheralArmButtons();
-    setStatus(declaredByGame ? 'mouse stays connected for this game' : 'mouse disarmed');
-    return;
-  }
-  const m = _lastLoadedMeta;
-  setStatus('disconnecting mouse…');
-  try {
-    await rebootPrimaryConsole(m, null, null);
-    const cart = cartridges.find((c) => c.userData.file === m.file);
-    if (cart && grabMgr) grabMgr.setInsertedCart(cart);
+// Anything a device must undo in the world when it is really disconnected,
+// beyond the reboot itself. Only the mouse has one.
+const _DISARM_HOOKS = {
+  // Unplug the mouse's in-world cable jack (the mouse arm plan plugs it in) so
+  // the cord's visual state matches "not connected".
+  mouse: () => {
     try {
       cable.unplugController(mouseObj.userData.cableId);
       _broadcastCablePort(mouseObj.userData.cableId);
     } catch (_) {}
-    setStatus('mouse disconnected');
+  },
+};
+
+// Disarm: the explicit counterpart to armPeripheral. Clears the sticky session
+// flag (so a LATER unrelated game on the same capable SYSTEM stops silently
+// inheriting the device — see [[gun-mouse-arming-leak-bug]]). If the CURRENTLY
+// running game only has the device because of that flag (its own meta doesn't
+// declare lightgun:true / mouse:true), live-reboot it without the device; a
+// curated gun/mouse title keeps its device regardless, since disarming here
+// only affects what happens NEXT.
+async function disarmPeripheral(desc) {
+  if (!window[desc.armKey] && !_armedConsoleFor(desc)) { setStatus(`no ${desc.label} connected`); return; }
+  try { sessionStorage.removeItem(desc.sessionKey); } catch (_) {}
+  window[desc.armKey] = false;
+  logger?.event?.(`${desc.id}-disarm`, { system: currentMeta?.system || null, consoleId: CONSOLE_ID, hadDevice: _armedConsoleFor(desc) });
+  // Display-only client: the host owns the device (see _forwardPeripheralArm).
+  if (!amRoomHost()) { _forwardPeripheralArm(desc.wireDevice, false); syncPeripheralArmButtons(); return; }
+  // Same join rule as armPeripheral: a disarm-reboot must not supersede a
+  // cartridge that is still downloading. The sticky flag is already cleared, so
+  // the load in flight boots WITHOUT the device and there is usually nothing
+  // left to reboot for.
+  if (_primaryLoadInFlight) {
+    setStatus(`${desc.shortLabel} disconnects when the game finishes loading…`);
+    await awaitPrimaryLoad();
+  }
+  const declaredByGame = !!_lastLoadedMeta?.[desc.metaFlag];
+  if (!_armedConsoleFor(desc) || declaredByGame) {
+    syncPeripheralArmButtons();
+    setStatus(declaredByGame ? `${desc.shortLabel} stays connected for this game` : `${desc.shortLabel} disarmed`);
+    return;
+  }
+  const m = _lastLoadedMeta;
+  setStatus(`disconnecting ${desc.label}…`);
+  try {
+    const booted = await rebootPrimaryConsole(m, null, null);
+    // Superseded at the checkpoint — nothing was stood up and nothing committed.
+    // The newer boot owns the status line and, with the sticky flag already
+    // cleared above, boots without the device anyway (mirrors armPeripheral).
+    if (booted === null) {
+      logger?.event?.(`${desc.id}-disarm-superseded`, { consoleId: CONSOLE_ID, file: m.file });
+      syncPeripheralArmButtons();
+      return;
+    }
+    const cart = cartridges.find((c) => c.userData.file === m.file);
+    if (cart && grabMgr) grabMgr.setInsertedCart(cart);
+    _DISARM_HOOKS[desc.id]?.();
+    setStatus(`${desc.label} disconnected`);
   } catch (e) {
-    console.warn('[mouse] disarm reboot failed:', e);
-    logger?.event?.('mouse-disarm-fail', { error: String(e?.message || e) });
-    setStatus('could not disconnect the mouse');
+    console.warn(`[${desc.id}] disarm reboot failed:`, e);
+    logger?.event?.(`${desc.id}-disarm-fail`, { error: String(e?.message || e) });
+    setStatus(`could not disconnect the ${desc.label}`);
   }
   syncPeripheralArmButtons();
 }
@@ -7063,23 +6659,40 @@ async function loadCartridge(meta, { echo = true } = {}) {
     return;
   }
   setStatus(`loading ${meta.title}…`);
-  // See _primaryLoadGeneration's declaration: whichever loadCartridge() call
-  // is newest at the moment each check runs wins; any older call still
-  // resolving a slow fetch quietly gives up instead of booting over it.
-  const myLoadGen = ++_primaryLoadGeneration;
-  const supersededByNewerLoad = () => myLoadGen !== _primaryLoadGeneration;
+  // See the boot-epoch declaration: whichever PRIMARY boot is newest at the
+  // moment each check runs wins; any older one still resolving a slow fetch
+  // quietly gives up instead of booting over it. The epoch is shared with the
+  // other four boot entry points now, so a local-ROM pick made mid-fetch
+  // supersedes this load too — it used to only lose to another loadCartridge(),
+  // and finished booting over that.
+  // The ONE path that does not compete with this one is the peripheral
+  // arm/disarm reboot: it waits for this load instead (awaitPrimaryLoad), so the
+  // silent 'newer-load' abandon below can only ever mean a genuinely newer GAME
+  // was requested — which does own the status line.
+  const supersededByNewerBoot = beginBootTransaction(CONSOLE_ID, 'loadCartridge');
   // COR-3: the amRoomHost() check above is ENTRY-ONLY, and everything below it
   // awaits — a PS2 disc over a headset's Wi-Fi is seconds. If the server migrates
   // the host away inside that window, demotion pauses the rack but has no idea a
-  // boot is in flight, and the generation check above still says "go" (no NEWER
-  // load exists). The result was a demoted watcher finishing the boot and resuming
+  // boot is in flight, and the boot-epoch check above still says "go" (no NEWER
+  // boot exists). The result was a demoted watcher finishing the boot and resuming
   // its own core behind the new host's video feed. Authority is therefore part of
   // this boot transaction too: captured here, re-checked after every await.
   // captureBootAuthority(), not the raw epoch guard: a Leave mid-fetch moves the
   // epoch as well, and that one must NOT abandon — it leaves us solo and able to
   // run the core, so the boot finishes locally.
   const authorityLost = captureBootAuthority();
-  const abandonReason = () => (supersededByNewerLoad() ? 'newer-load' : authorityLost() ? 'authority-lost' : null);
+  // 'newer-load' is kept as the label (the logs and scripts/test-authority-epoch.mjs
+  // both read it) even though the epoch now also fires for a newer REBOOT or a
+  // local-ROM pick — what it means is "a newer boot for this console won".
+  const abandonReason = () => (supersededByNewerBoot() ? 'newer-load' : authorityLost() ? 'authority-lost' : null);
+  // Publish "a primary load is in flight" for awaitPrimaryLoad() — see its
+  // declaration for why the peripheral-arm path has to wait rather than reboot
+  // over this. Set BEFORE the first await (nothing has yielded yet, so an arm
+  // that starts after the insert always sees it) and cleared in the `finally`
+  // below, on every exit including the abandon returns.
+  let _thisLoadDone;
+  const _thisLoad = new Promise((r) => { _thisLoadDone = r; });
+  _primaryLoadInFlight = _thisLoad;
   const logAbandon = (reason, where) => {
     logger?.event?.(
       reason === 'newer-load' ? 'load-superseded' : 'mp-boot-suppressed',
@@ -7111,8 +6724,8 @@ async function loadCartridge(meta, { echo = true } = {}) {
     // RomResolver (Phase R.2) turns the entry into bytes from url / local
     // folder / picker / OPFS cache, per its rom.source (default: url).
     let buf = await resolveRom(meta);
-    // A newer loadCartridge() call already won the primary console while
-    // this one's fetch was still in flight — or we stopped being the host
+    // A newer boot already won the primary console while this one's
+    // fetch was still in flight — or we stopped being the host
     // (COR-3). Stop here, before touching any shared boot state, so neither a
     // stale request nor a demoted peer can clobber it.
     let abandoned = abandonReason();
@@ -7157,7 +6770,12 @@ async function loadCartridge(meta, { echo = true } = {}) {
     if (abandoned) { logAbandon(abandoned, 'pre-boot'); return; }
     // publishTv:false — this function does its own `tv` publish + broadcast below,
     // gated on `echo` (see the M1.4d note on bootOnPrimary).
-    await bootOnPrimary(meta, { name: coreName, url: core.url, style: core.style }, content, startOptions, { publishTv: false });
+    // bootTxn: bootOnPrimary is a boot entry point in its own right (the two
+    // local-ROM pickers call it bare), so it opens a transaction when it is not
+    // handed one. Hand it OURS — a second transaction here would bump the epoch
+    // this function captured at entry and every checkpoint below would read as
+    // "superseded", abandoning the boot we are in the middle of.
+    await bootOnPrimary(meta, { name: coreName, url: core.url, style: core.style }, content, startOptions, { publishTv: false, bootTxn: supersededByNewerBoot });
     // COR-3, the commit gate: the boot itself is the longest await of all, so ask
     // one last time before ANY of the state below is committed. Everything past
     // this line tells the machine (and, on the echo path, the whole room) that
@@ -7273,6 +6891,12 @@ async function loadCartridge(meta, { echo = true } = {}) {
     setPrimaryScreen(placeholderCanvas);
     nowPlayingPanel?.userData.setNowPlaying?.({});
     discSwapPanel?.userData.setStatus(null);
+  } finally {
+    // Only clear the marker if it is still OURS: a newer load that started while
+    // this one was resolving has already claimed it, and that one is the load an
+    // arm should be waiting for.
+    if (_primaryLoadInFlight === _thisLoad) _primaryLoadInFlight = null;
+    _thisLoadDone();
   }
 }
 window.__loadCartridge = loadCartridge; // debug hook: boot a game via RomResolver
@@ -7309,6 +6933,12 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
   // Handoff-aware (see captureBootAuthority): a Leave mid-fetch makes us solo and
   // this boot goes on to finish on its console, exactly as it did pre-COR-3.
   const authorityLost = captureBootAuthority();
+  // ARC-2(c), the other axis: "is this still the current boot for THIS console?".
+  // Two carts dropped on the same rack console in quick succession used to race
+  // exactly the way two primary loads did before the load generation existed —
+  // whichever fetch finished last won, and the loser still committed the
+  // console's power/ports/keyboard/persisted meta on its way past.
+  const supersededByNewerBoot = beginBootTransaction(consoleId, 'loadCartridgeIntoConsole');
   logger?.event?.('boot-attempt', {
     consoleId, file: meta.file, system: meta.system, core: meta.core,
     plan: resolutionPlan(meta), opfs: opfsSupported(),
@@ -7389,6 +7019,16 @@ async function loadCartridgeIntoConsole(consoleId, meta) {
       execution: intoStart.execution, requiresThreads: intoStart.requiresThreads,
       firmware: intoStart.firmware, restoredSaves: intoStart.restoredSaves,
     };
+    // ARC-2(c): a newer cart for THIS console won while we were fetching. Same
+    // checkpoint, same "leaves the console exactly as it was" guarantee as the
+    // authority check just below; it prints nothing because the newer boot
+    // already owns the status line with its own `loading … on consoleN…`.
+    if (supersededByNewerBoot()) {
+      logger?.event?.('boot-superseded', {
+        where: 'loadCartridgeIntoConsole', consoleId, file: meta.file, core: meta.core,
+      });
+      return;
+    }
     // COR-3: last checkpoint before this console's core is actually touched.
     // Abandoning here leaves the console exactly as it was (still on its previous
     // game, still paused by pauseAll) rather than standing up a fresh runtime for
@@ -7649,8 +7289,27 @@ async function bootFreshRuntime(consoleId, meta, bootOpts) {
 // it was; note that even if both fired, `NetMgr.setObjectState` drops an
 // unchanged value and `VideoMgr.startBroadcast` early-outs on an unchanged
 // canvas, so a double call is inert rather than harmful.
-async function bootOnPrimary(meta, bootCore, content, startOptions, { publishTv = true } = {}) {
+async function bootOnPrimary(meta, bootCore, content, startOptions, { publishTv = true, bootTxn = null } = {}) {
+  // ARC-2(c): the boot transaction this work belongs to. Given one by
+  // loadCartridge (see its call site); opened here for the two local-ROM picker
+  // paths, which call this bare and are otherwise ordered against nothing.
+  const supersededByNewerBoot = bootTxn || beginBootTransaction(CONSOLE_ID, 'bootOnPrimary');
   const booted = await _bootOnPrimaryCore(meta, bootCore, content, startOptions);
+  // Both commits below are SHARED state — the console's SaveRAM identity and the
+  // room's `tv` key — so a boot that was overtaken while its core was starting
+  // must publish neither. Getting this wrong is the COR-6 failure from the other
+  // end: SaveRAM filed under the game that is no longer running, and a room told
+  // it is watching a game the host has already replaced. The runtime install
+  // itself is NOT guarded and deliberately so: _bootOnPrimaryCore has already
+  // rebound the primary client by the time we get here, and abandoning halfway
+  // through an install leaves an orphan (the COR-5 lesson) instead of a clean
+  // no-op. The newer boot's own install replaces it.
+  if (supersededByNewerBoot()) {
+    logger?.event?.('boot-superseded', {
+      where: 'bootOnPrimary', consoleId: CONSOLE_ID, file: meta.file, core: bootCore.name,
+    });
+    return booted;
+  }
   // COR-6: whatever this console is now running is what its SaveRAM writes must
   // be keyed on — `bootCore.name`, NOT meta.core. They differ for a light-gun
   // boot (SMS → genesis_plus_gx), and the restore path (buildStartOptions) keys
@@ -7763,6 +7422,13 @@ async function _bootOnPrimaryCore(meta, bootCore, content, startOptions) {
 // canvas via routeVideo() (rackMgr.get(CONSOLE_ID).canvas) and the host-video
 // capture follows it via the primaryCanvas() getter. Returns the new runtime.
 async function rebootPrimaryConsole(meta, gun, mouse = null) {
+  // ARC-2(c): a reboot is a boot transaction like any other — it awaits a ROM
+  // resolve, a SaveRAM flush and a fresh runtime, and then commits currentCore /
+  // currentMeta / _lastLoadedMeta / the peripheral-armed flags. Before this, a
+  // cartridge load that landed while a gun arm-reboot was still resolving had
+  // its identity overwritten by the reboot's — the arm-reboot re-stamped the
+  // PREVIOUS game's meta over the game that was actually now running.
+  const supersededByNewerBoot = beginBootTransaction(CONSOLE_ID, gun ? 'reboot-gun' : mouse ? 'reboot-mouse' : 'reboot');
   // `gun` and `mouse` are mutually-exclusive device configs of the same shape
   // ({ core, inputDevices, coreOptions, remapName }). Either (or neither) seats a
   // peripheral on a fresh boot — the gun path is unchanged; the mouse path reuses it.
@@ -7807,6 +7473,22 @@ async function rebootPrimaryConsole(meta, gun, mouse = null) {
     firmware: startOptions.firmware,
     restoredSaves: startOptions.restoredSaves,
   };
+  // ARC-2(c) checkpoint, and the ONLY one this function can safely have: last
+  // moment before anything is stood up or committed, so abandoning here is a
+  // clean no-op — the console keeps running exactly what it was running and the
+  // newer boot owns the status line (same rule as loadCartridge's 'newer-load'
+  // abandon, which deliberately prints nothing). There is deliberately NO second
+  // checkpoint after bootFreshRuntime: past that line a fresh runtime exists and
+  // bailing would strand it unbound, which is the COR-5 shape (an orphan nobody
+  // disposes) rather than a safe refusal. Closing that last window needs the
+  // install and the commit to be one owned unit — a BootCoordinator — which is
+  // out of scope here on purpose.
+  if (supersededByNewerBoot()) {
+    logger?.event?.('boot-superseded', {
+      where: 'rebootPrimaryConsole', consoleId: CONSOLE_ID, file: meta.file, core: coreName,
+    });
+    return null;
+  }
   // The fresh runtime's client records the configuration it booted with itself
   // (EmulatorClient._bootConfig), so there is nothing to keep in sync here — the
   // next cartridge insert asks that client directly via clientNeedsFreshBoot().
@@ -8186,143 +7868,12 @@ async function resumePendingLoad() {
 }
 
 // --- Memory cards (save states) ------------------------------------------
-
-let memoryCards = [];
-
-async function buildMemoryCards() {
-  // Restore previously-saved cards from IndexedDB and render 4 cards on a
-  // wall-mounted rack to the user's right.
-  let saved = [];
-  // FIX 2: Race against a timeout so a stalled IndexedDB open (headless Chrome)
-  // can't wedge init and leave __locomotion/__gameInput undefined.
-  const MEMORY_CARD_TIMEOUT_MS = 2000;
-  try {
-    saved = await Promise.race([
-      listStates(),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('listStates timeout')), MEMORY_CARD_TIMEOUT_MS)),
-    ]);
-  } catch (e) { console.warn('[main] listStates failed:', e); }
-  const bySlot = new Map(saved.map((s) => [s.slotId, s]));
-
-  // Small plank mirroring the cartridge shelves but lower and shorter,
-  // mounted on the right wall just within reach. Cards stand upright on it.
-  const rack = new THREE.Group();
-  rack.name = 'memory-card-rack';
-  rack.position.set(2.85, 0.95, -0.2);
-  rack.rotation.y = -Math.PI / 2;
-  const plank = new THREE.Mesh(
-    new THREE.BoxGeometry(0.55, 0.025, 0.10),
-    new THREE.MeshStandardMaterial({ color: 0x5a3a22, roughness: 0.7 }),
-  );
-  rack.add(plank);
-  scene.addObject(rack);
-
-  for (let i = 1; i <= 4; i++) {
-    const slotId = `slot-${i}`;
-    const s = bySlot.get(slotId);
-    const meta = s ? { core: s.core, file: s.file, title: s.title, system: s.system, ts: s.ts } : null;
-    const card = createMemoryCard({ slot: i, savedMeta: meta });
-    // Stand cards on the plank, evenly spaced along its long axis.
-    const x = -0.225 + (i - 1) * 0.15;
-    card.position.set(x, 0.075, 0);
-    rack.add(card);
-    // Compute world-space home from current parented transform so a refused
-    // insert can snap the card back exactly here.
-    rack.updateMatrixWorld(true);
-    card.updateMatrixWorld(true);
-    const worldPos = new THREE.Vector3();
-    const worldQuat = new THREE.Quaternion();
-    card.getWorldPosition(worldPos);
-    card.getWorldQuaternion(worldQuat);
-    card.userData.homePosition = worldPos.clone();
-    card.userData.homeQuaternion = worldQuat.clone();
-    // Reparent into scene root so locomotion / drop-handling treat it like
-    // any other grabbable (rack is decorative — homes are world-space).
-    scene.scene.attach(card);
-    card.position.copy(worldPos);
-    card.quaternion.copy(worldQuat);
-    grabMgr.addGrabbable(card);
-    memoryCards.push(card);
-  }
-}
-
-function handleMemoryCardInserted(card) {
-  const meta = card.userData.savedMeta;
-  // Empty card → save current game state.
-  if (!meta) {
-    if (!currentMeta) {
-      setStatus('insert a cartridge first');
-      card.userData.pulse(0xcc2222);
-      return false;
-    }
-    if (!client.canSerialize?.()) {
-      setStatus(`${currentMeta.core} core has no save-state support`);
-      card.userData.pulse(0xcc2222);
-      return false;
-    }
-    setStatus(`saving ${currentMeta.title} to slot ${card.userData.slot}…`);
-    client.serializeState().then((data) => {
-      const payload = {
-        data,
-        core: currentMeta.core,
-        file: currentMeta.file,
-        title: currentMeta.title,
-        system: currentMeta.system,
-        ts: Date.now(),
-      };
-      return saveState(`slot-${card.userData.slot}`, payload).then(() => {
-        card.userData.setSaved({ ...currentMeta, ts: payload.ts });
-        card.userData.pulse(0xffffff);
-        setStatus(`saved ${currentMeta.title} to slot ${card.userData.slot}`);
-      });
-    }).catch((e) => {
-      console.warn('[main] save failed:', e);
-      setStatus(`save failed: ${e.message || e}`);
-      card.userData.pulse(0xcc2222);
-    });
-    return true;
-  }
-
-  // Filled card → only loads if the current game matches what was saved.
-  // Loading a save from a different ROM would corrupt state; the cleanest
-  // refusal here is a red pulse + bounce.
-  if (!currentMeta || currentMeta.file !== meta.file || currentMeta.core !== meta.core) {
-    setStatus(`slot ${card.userData.slot} holds ${meta.title}; load that cart first`);
-    card.userData.pulse(0xcc2222);
-    return false;
-  }
-  if (!client.canSerialize?.()) {
-    setStatus(`${currentMeta.core} core has no save-state support`);
-    card.userData.pulse(0xcc2222);
-    return false;
-  }
-  setStatus(`loading slot ${card.userData.slot}…`);
-  loadState(`slot-${card.userData.slot}`).then((row) => {
-    if (!row?.data) {
-      setStatus(`slot ${card.userData.slot} empty`);
-      card.userData.pulse(0xcc2222);
-      return;
-    }
-    // Filename+core already narrowed the obvious mismatch above; this catches
-    // the subtler case a PSX-JIT core rebuild introduces — a state saved
-    // against one build_hash isn't guaranteed binary-compatible with another.
-    const compat = checkSaveStateCompatibility(row, { coreId: currentMeta.core, coreBuildHash: client.buildHash });
-    if (!compat.compatible) {
-      setStatus(`slot ${card.userData.slot} incompatible with the loaded core build (${compat.reason})`);
-      card.userData.pulse(0xcc2222);
-      return;
-    }
-    return client.unserializeState(row.data).then(() => {
-      card.userData.pulse(0xffffff);
-      setStatus(`loaded ${meta.title} from slot ${card.userData.slot}`);
-    });
-  }).catch((e) => {
-    console.warn('[main] load failed:', e);
-    setStatus(`load failed: ${e.message || e}`);
-    card.userData.pulse(0xcc2222);
-  });
-  return true;
-}
+//
+// The rack, the cards and the save/load transaction now live in
+// [[src/MemoryCardUI.js]]; main.js keeps only the wiring. Constructed in
+// buildCartridgeWorld() right after grabMgr exists (see there), because the
+// module needs grabMgr to register the cards as grabbables.
+let memoryCardUI = null;
 
 // --- Disc-swap panel (multi-disc M3U content) -----------------------------
 //

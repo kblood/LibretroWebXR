@@ -21,7 +21,7 @@ const seatOf = (cable, id) => {
   return p == null ? null : { consoleId: 'console0', player: p + 1 };
 };
 import { GameInputMgr } from '../src/GameInputMgr.js';
-import { RETROPAD_KEYS, EXTRA_PLAYER_KEYS, mapForSystem } from '../src/ControllerMaps.js';
+import { RETROPAD_KEYS, EXTRA_PLAYER_KEYS } from '../src/ControllerMaps.js';
 
 let passed = 0;
 let failed = 0;

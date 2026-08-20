@@ -165,8 +165,7 @@ const eq = (got, want, msg) => {
 // ─── Logger: failure increments failCount + sets backoff ─────────────────────
 
 {
-  let callCount = 0;
-  globalThis.fetch = () => { callCount++; return Promise.reject(new Error('offline')); };
+  globalThis.fetch = () => Promise.reject(new Error('offline'));
 
   const logger = new Logger({ sessionId: 'xr' });
   logger.init({ serverUrl: 'http://x.invalid' });

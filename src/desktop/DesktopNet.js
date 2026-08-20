@@ -4,7 +4,9 @@
 // VR-only parts removed (no avatars, no per-frame head/hand pose sync, no
 // three.js). The VR NetMgr can't be reused directly because it imports three and
 // samples scene transforms every frame; everything ELSE it relies on is pure and
-// is reused here verbatim: PresenceState, RoomObjects, VideoMgr, NetProtocol.
+// is reused here verbatim: PresenceState, RoomObjects, VideoMgr, NetProtocol —
+// and, since CODEX ARC-2 was closed, the whole connection lifecycle itself
+// ([[src/net/RoomConnection.js]], composed below as `this._conn`).
 //
 // Netplay model (unchanged from the VR build, see [[src/net/VideoMgr.js]]):
 //   • The HOST is elected by the SERVER (M1.4): the peer that has been in the
@@ -23,62 +25,25 @@ import { PresenceState } from '../net/PresenceState.js';
 import { RoomObjects } from '../net/RoomObjects.js';
 import { VideoMgr } from '../net/VideoMgr.js';
 import {
-  MSG, makeJoin, makePose, makeState, makeSignal, makeInput,
-  hostInputTarget, encode, decode,
-  PROTOCOL_VERSION, judgeServerVersion, isPermanentClose,
+  MSG, makePose, makeState, makeSignal, makeInput,
+  hostInputTarget, encode,
+  PROTOCOL_VERSION,
 } from '../net/NetProtocol.js';
 import { stableSessionId } from '../net/SessionUtils.js';
-import { FALLBACK_HOST_KEY, normaliseClaim, resolveFallbackHost } from '../net/HostElection.js';
+import { FALLBACK_HOST_KEY } from '../net/HostElection.js';
+import { RoomConnection } from '../net/RoomConnection.js';
 
+// The socket, the COR-9 handshake, the reconnect/soft-refusal backoff and the
+// M1.4 host election are NOT written here any more: they live in
+// [[src/net/RoomConnection.js]], which this class COMPOSES (`this._conn`) and
+// NetMgr composes too. That is CODEX ARC-2 closed — before it, this file held a
+// second hand-written copy of all of it, and the COR-9 gate, the fatal/no-retry
+// rule and the whole soft-refusal retry path each had to be implemented twice
+// (this file grew 405 → 479 lines doing exactly that). RoomConnection imports no
+// `three`, so composing it keeps the flat-screen chunk inside the budget
+// scripts/check-dist.mjs enforces on it. What is left below is this build's
+// PRESENTATION half: the DOM video wiring, the roster callback, the heartbeat.
 const HEARTBEAT_MS = 2000;
-// M1.4: how long to wait for the SERVER to name a host before the peers elect one
-// among themselves. Only a pre-M1.4 room server (one that sends no `host` key in
-// HELLO) ever reaches the deadline; against a current server the flag flips on the
-// first HELLO and this never fires. Without it, deploying this page against an
-// un-upgraded relay would leave hostId null forever - which the boot gate reads as
-// "nobody may host", i.e. no game at all for anyone.
-const FALLBACK_ELECT_MS = 1200;
-// Backoff for re-opening the socket after an UNEXPECTED close.
-const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
-// The relay's "try again later" close (RFC 6455 1013). Spelled out here rather
-// than imported from NetProtocol ON PURPOSE: NetProtocol owns the codes that are
-// part of the client/server CONTRACT, and 1013 is deliberately not one of them —
-// it must never join PERMANENT_CLOSE_CODES, because the whole point of it is that
-// we come back. What it means to this class is only "pick the slower table", a
-// client-local policy, so that is where it lives.
-const TRY_AGAIN_CLOSE_CODE = 1013;
-// Backoff for a relay that refused us on purpose (1013 + a reason: room full,
-// address at its socket cap, relay at capacity). Deliberately an order of
-// magnitude slower than the drop table above, and it is a SERVER-LOAD fix as much
-// as a client one.
-//
-// A capacity refusal is soft — the relay accepts the upgrade and closes it, so
-// 'open' fires — and the shipped clients used to reset `_reconnectTries` there.
-// The backoff chain therefore never advanced past its first step and a refused
-// client knocked at 2 Hz for the life of the page; two of them behind one NAT
-// exhausted that address's whole upgrade budget and locked out the household,
-// already-connected headsets included. Both halves are fixed: the counter now
-// resets when a SESSION exists (the HELLO), not when a handshake completes, and a
-// refusal picks this table. A full room polled at 5-30 s costs the relay ~2
-// upgrades a minute per device instead of 120.
-//
-// What that costs the user, stated honestly rather than as "within seconds":
-// ~10-30 s after a seat actually opens, in the case this table exists for. A
-// household that drops off Wi-Fi without a clean close leaves ghost sockets the
-// relay only reaps a heartbeat sweep after the ping they missed, so the seats
-// free at ~18-20 s; each device's first retry is on the FAST table (a blip is a
-// 1006), is refused 1013 because the ghosts still hold both the address slots and
-// the room seats, and from there this table applies — the 10 s attempt is still
-// too early and the room reassembles on the 20 s one. A peer that leaves CLEANLY
-// frees its seat at once, so there the next scheduled attempt is the whole wait.
-// This is also why the refusal reason has to reach the UI: during that gap the
-// only honest thing to show is what the relay said and when we will ask again.
-const RETRY_LATER_DELAYS_MS = [5000, 10000, 20000, 30000, 30000];
-
-function defaultServerUrl() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${location.host}/ws/`;
-}
 
 export class DesktopNet {
   constructor({
@@ -99,14 +64,45 @@ export class DesktopNet {
     sessionId = null,
     now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now()),
   } = {}) {
-    this.room = room || 'lobby';
-    this.nick = nick || 'Player';
-    this.color = color || '#88aaff';
-    this.serverUrl = serverUrl || defaultServerUrl();
     this._now = now;
-    this._hostId = null;              // M1.4: server-elected, not tv-derived
-    this._onHostChange = onHostChange;
-    this.sessionId = sessionId || stableSessionId();
+    const sid = sessionId || stableSessionId();
+    // THE TRANSPORT HALF (CODEX ARC-2, [[src/net/RoomConnection.js]]): the socket,
+    // the COR-9 handshake, both backoff tables, `_retryLater`, `lastClose` and the
+    // M1.4 host election — including the pre-M1.4 peer-side fallback — now have
+    // exactly ONE implementation, shared with NetMgr. The delegating accessors
+    // below keep every field name this class exposed (`_connected`, `_fatal`,
+    // `_reconnectTimer`, `lastClose`, `serverVersion`, `room`, …) working
+    // byte-for-byte, because src/desktop/main.js and scripts/test-net.mjs read
+    // and in places WRITE them.
+    //
+    // The hooks are the only genuinely flat-screen parts of the lifecycle: where a
+    // message goes, and the `onDisconnect` callback this class fires from its
+    // close handler (NetMgr fires nothing there — that is the one asymmetry, so
+    // it is a hook rather than a reason to keep two lifecycles).
+    this._conn = new RoomConnection({
+      room, nick, color, serverUrl, sessionId: sid,
+      logPrefix: '[desktop-net]',
+      onHostChange, onFatal, onRetry,
+      presence: () => this.presence,
+      objects: () => this.objects,
+      setObjectState: (key, value) => this.setObjectState(key, value),
+      isHost: () => this.isHost(),
+      reopen: () => this.connect(),
+      onMessage: (msg) => this._route(msg),
+      // The socket is gone: tear the capture down locally, but don't pretend to
+      // announce a 'bye' that could not possibly be delivered.
+      onSocketClosed: () => { this.video.stopBroadcast({ announce: false }); },
+      onFatalTeardown: () => { if (this._onDisconnect) { try { this._onDisconnect(); } catch (_) {} } },
+      onClosed: () => { if (this._onDisconnect) { try { this._onDisconnect(); } catch (_) {} } },
+      onBeforeReopen: () => {
+        // The server assigns a NEW peer id on reconnect, so the old roster and the
+        // old fallback claims are meaningless. Shared object state is replayed.
+        this.presence.clear();
+        // Connection genuinely lost (this path only runs after an UNEXPECTED
+        // close): teardown yes, byes no — they could never reach a peer.
+        this.video.disable({ announce: false });
+      },
+    });
 
     this.presence = new PresenceState({ ttlMs: 5000 });
     this.objects = new RoomObjects();
@@ -116,43 +112,12 @@ export class DesktopNet {
     this._onConnect = onConnect;
     this._onDisconnect = onDisconnect;
 
-    this.ws = null;
-    this._connected = false;
+    // `ws`, `_connected`, `_closing`, the reconnect counters, `_retryLater`,
+    // `_fatal`, `lastClose`, `serverVersion` and the M1.4 election bookkeeping are
+    // all initialised by the RoomConnection above — one copy, shared with NetMgr.
     this._hbAcc = 0;
     this._lastRosterSig = '';
     this._recvInputs = []; // small ring of inputs we received as host (debug)
-    // M1.4 election bookkeeping (mirrors NetMgr): has the SERVER named a host, and
-    // the peer-side fallback claims used when it never does.
-    this._serverElects = false;
-    this._fallbackClaims = new Map();   // peerId -> { id, at }
-    this._fallbackTimer = null;
-    this._joinedAt = Date.now();
-    // Reconnect bookkeeping. `_closing` distinguishes OUR disconnect() from a
-    // dropped socket, which must not be silent (the role has to be given up).
-    this._closing = false;
-    this._reconnectTries = 0;
-    this._reconnectTimer = null;
-    // Sticky "the relay is refusing us, not dropping us" — same contract as
-    // NetMgr's (CODEX ARC-2: one lifecycle written twice, so a rule that landed
-    // in only one of them is a rule that only works in VR). Set by a 1013,
-    // cleared only by a session, because the relay's cheap second-tier refusal
-    // kills the upgrade and reaches a browser as a bare 1006.
-    this._retryLater = false;
-    // COR-9 protocol handshake — same contract as NetMgr's (this class is the
-    // flat-screen duplicate of that lifecycle, CODEX ARC-2, so a rule that only
-    // landed in one of them would be a rule that only works in VR).
-    this._fatal = null;
-    this._onFatal = onFatal;
-    // Transient counterpart of `_fatal` — see the long note on NetMgr.lastClose.
-    // Same shape here because the two classes are one lifecycle written twice
-    // (CODEX ARC-2): a diagnostic that exists in only one of them is a
-    // diagnostic that goes stale in the other. The VR app paints it (src/main.js,
-    // mpOfflineStatus); a flat-screen host that wants the same status line reads
-    // this object the same way rather than latching what `onRetry` handed it,
-    // since _noteSessionEstablished() clears it when we get in.
-    this.lastClose = null;       // { code, reason, attempt, delayMs } | null
-    this._onRetry = onRetry;
-    this.serverVersion = null;
 
     this.video = new VideoMgr({
       getSelfId: () => this.presence.selfId,
@@ -182,109 +147,62 @@ export class DesktopNet {
     const self = this.presence.selfId;
     return !!self && self === this._hostId;
   }
-  // `silent` is for our OWN deliberate disconnect(): the app is tearing the session
-  // down anyway, and firing a demotion callback mid-teardown made the role handler
-  // run against a half-dismantled session.
-  _setHost(id, { silent = false } = {}) {
-    const next = id == null ? null : String(id);
-    if (next === this._hostId) return false;
-    const prev = this._hostId;
-    this._hostId = next;
-    if (this._onHostChange && !silent) {
-      try { this._onHostChange({ hostId: next, prevHostId: prev, isHost: this.isHost(), connected: this._connected }); }
-      catch (e) { console.warn('[desktop-net] onHostChange', e); }
-    }
-    return true;
-  }
 
-  // --- M1.4 fallback election (pre-M1.4 room server) -------------------------
-  // Same algorithm as NetMgr's, over the same pure helper: the EARLIEST claim by a
-  // still-present peer wins (ties broken by id), which reproduces the server's
-  // seniority rule. Claims ride the persisted STATE channel so they're replayed to
-  // late joiners.
-  _noteFallbackClaim(raw) {
-    const c = normaliseClaim(raw);
-    if (!c) return;
-    const prev = this._fallbackClaims.get(c.id);
-    if (!prev || c.at < prev.at) this._fallbackClaims.set(c.id, c);
-    if (!this._serverElects) this._runFallbackElection();
-  }
+  // --- transport state, delegated to the composed RoomConnection -------------
+  //
+  // Accessors, not a rename. The socket state moved into
+  // [[src/net/RoomConnection.js]] so this class and NetMgr share ONE copy of it
+  // (CODEX ARC-2), but the field NAMES are load-bearing: scripts/test-net.mjs
+  // drives BOTH classes through the identical case table and reads — in two
+  // cases WRITES — `_fatal`, `_reconnectTimer`, `_reconnectTries`, `_closing`,
+  // `lastClose` and `serverVersion` as plain properties. Getter+setter pairs keep
+  // all of that working byte-for-byte with only one copy of the value.
+  get room() { return this._conn.room; }
+  set room(v) { this._conn.room = v; }
+  get nick() { return this._conn.nick; }
+  set nick(v) { this._conn.nick = v; }
+  get color() { return this._conn.color; }
+  set color(v) { this._conn.color = v; }
+  get serverUrl() { return this._conn.serverUrl; }
+  set serverUrl(v) { this._conn.serverUrl = v; }
+  get sessionId() { return this._conn.sessionId; }
+  set sessionId(v) { this._conn.sessionId = v; }
+  get ws() { return this._conn.ws; }
+  set ws(v) { this._conn.ws = v; }
+  get lastClose() { return this._conn.lastClose; }
+  set lastClose(v) { this._conn.lastClose = v; }
+  get serverVersion() { return this._conn.serverVersion; }
+  set serverVersion(v) { this._conn.serverVersion = v; }
+  get _connected() { return this._conn._connected; }
+  set _connected(v) { this._conn._connected = v; }
+  get _closing() { return this._conn._closing; }
+  set _closing(v) { this._conn._closing = v; }
+  get _reconnectTries() { return this._conn._reconnectTries; }
+  set _reconnectTries(v) { this._conn._reconnectTries = v; }
+  get _reconnectTimer() { return this._conn._reconnectTimer; }
+  set _reconnectTimer(v) { this._conn._reconnectTimer = v; }
+  get _retryLater() { return this._conn._retryLater; }
+  set _retryLater(v) { this._conn._retryLater = v; }
+  get _fatal() { return this._conn._fatal; }
+  set _fatal(v) { this._conn._fatal = v; }
+  get _hostId() { return this._conn._hostId; }
+  set _hostId(v) { this._conn._hostId = v; }
+  get _serverElects() { return this._conn._serverElects; }
+  set _serverElects(v) { this._conn._serverElects = v; }
+  get _fallbackClaims() { return this._conn._fallbackClaims; }
 
-  _runFallbackElection() {
-    if (this._serverElects || !this._connected) return;
-    const selfId = this.presence.selfId;
-    if (!selfId) return;
-    if (!this._fallbackClaims.has(selfId)) {
-      this._fallbackClaims.set(selfId, { id: selfId, at: this._joinedAt });
-    }
-    const stored = this.objects.get(FALLBACK_HOST_KEY);
-    this._noteFallbackClaimQuiet(stored);
-    const { hostId, announce } = resolveFallbackHost({
-      claims: [...this._fallbackClaims.values()],
-      presentIds: [selfId, ...this.presence.peers().map((p) => p.id)],
-      selfId,
-      now: this._joinedAt,
-      stored,
-    });
-    if (announce) this.setObjectState(FALLBACK_HOST_KEY, announce);
-    this._setHost(hostId);
-  }
-
-  _noteFallbackClaimQuiet(raw) {
-    const c = normaliseClaim(raw);
-    if (!c) return;
-    const prev = this._fallbackClaims.get(c.id);
-    if (!prev || c.at < prev.at) this._fallbackClaims.set(c.id, c);
-  }
-
-  _armFallbackElection() {
-    if (this._serverElects || this._fallbackTimer) return;
-    this._fallbackTimer = setTimeout(() => {
-      this._fallbackTimer = null;
-      if (this._serverElects || this._hostId) return;
-      console.warn('[desktop-net] no host announced by the room server - electing among peers (legacy server?)');
-      this._runFallbackElection();
-    }, FALLBACK_ELECT_MS);
-  }
-
-  _clearFallbackTimer() {
-    if (this._fallbackTimer) { clearTimeout(this._fallbackTimer); this._fallbackTimer = null; }
-  }
-
-  // --- COR-9 protocol compatibility ------------------------------------------
-  // Mirrors NetMgr._noteFatal / _checkServerProtocol exactly; see the long notes
-  // there. Kept in step by the shared pure rules in NetProtocol
-  // (judgeServerVersion, isPermanentClose) rather than by copied conditionals:
-  // as of 2026-08-15 the "which verdict is fatal, with which close code" mapping
-  // is judgeServerVersion's, so this class and NetMgr cannot drift on it (ARC-2).
-
-  _noteFatal({ code, reason }) {
-    if (this._fatal) return;
-    this._fatal = { code: Number(code), reason: String(reason || '') };
-    this._closing = true;
-    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
-    console.error(`[desktop-net] room server refused this build permanently (${this._fatal.code}): ${this._fatal.reason} - not reconnecting (client protocol ${PROTOCOL_VERSION}, server ${this.serverVersion ?? 'unknown'})`);
-    if (this._onFatal) {
-      try { this._onFatal(this._fatal); } catch (e) { console.warn('[desktop-net] onFatal', e); }
-    }
-  }
-
-  /** Judge the server's HELLO version. False = incompatible, socket closed. */
-  _checkServerProtocol(v) {
-    const verdict = judgeServerVersion(v);
-    this.serverVersion = verdict.serverVersion;
-    if (verdict.action === 'accept') return true;
-    if (verdict.action === 'accept-legacy') {
-      if (!this._legacyServerLogged) {
-        this._legacyServerLogged = true;
-        console.warn(`[desktop-net] room server announced no protocol version - pre-COR-9 relay, continuing (client speaks ${PROTOCOL_VERSION})`);
-      }
-      return true;
-    }
-    this._noteFatal({ code: verdict.code, reason: verdict.reason });
-    try { this.ws?.close(verdict.code, verdict.reason); } catch { /* already closing */ }
-    return false;
-  }
+  // …and the methods, for the same reason. `_setHost`, the fallback election and
+  // the COR-9 pair used to be written out in full here AND in NetMgr; each is now
+  // one line to the shared implementation, which carries the long "why" notes.
+  _setHost(id, opts) { return this._conn._setHost(id, opts); }
+  _noteFatal(f) { return this._conn._noteFatal(f); }
+  _checkServerProtocol(v) { return this._conn._checkServerProtocol(v); }
+  _noteSessionEstablished() { return this._conn._noteSessionEstablished(); }
+  _scheduleReconnect(why = null) { return this._conn._scheduleReconnect(why); }
+  _noteFallbackClaim(raw) { return this._conn._noteFallbackClaim(raw); }
+  _runFallbackElection() { return this._conn._runFallbackElection(); }
+  _armFallbackElection() { return this._conn._armFallbackElection(); }
+  _clearFallbackTimer() { return this._conn._clearFallbackTimer(); }
 
   peerCount() { return this.presence.size; }
   peers() { return this.presence.peers(); }
@@ -371,159 +289,58 @@ export class DesktopNet {
   // --- connection ------------------------------------------------------------
 
   connect() {
-    const sep = this.serverUrl.includes('?') ? '&' : '?';
-    const url = `${this.serverUrl}${sep}room=${encodeURIComponent(this.room)}&sid=${encodeURIComponent(this.sessionId)}`;
-    let ws;
-    try { ws = new WebSocket(url); } catch (e) { console.warn('[desktop-net] connect failed', e); return this; }
-    this.ws = ws;
-    ws.addEventListener('open', () => {
-      this._connected = true;
-      // NOT `_reconnectTries = 0` — see _noteSessionEstablished(). A soft capacity
-      // refusal produces an 'open' too, one close frame before it arrives.
-      this._joinedAt = Date.now();
-      ws.send(encode(makeJoin({ nick: this.nick, color: this.color })));
-      console.log(`[desktop-net] connected to "${this.room}" as ${this.nick}`);
-    });
-    ws.addEventListener('message', (e) => {
-      const msg = decode(typeof e.data === 'string' ? e.data : '');
-      if (!msg) return;
-      // COR-9: judge the server's announced protocol before acting on anything
-      // it sent (an OLD SERVER cannot check OUR JOIN version, so this direction
-      // of the skew is only ever caught here).
-      if (msg.type === MSG.HELLO && !this._checkServerProtocol(msg.v)) return;
-      // A compatible HELLO is the first proof we have a SESSION and not merely a
-      // socket — which is what the backoff must key on.
-      if (msg.type === MSG.HELLO) this._noteSessionEstablished();
-      if (msg.type === MSG.SIGNAL) {
-        if (msg.channel === 'video') this.video.handleSignal(msg);
-        // (voice signals are not used on desktop v1)
-      } else if (msg.type === MSG.STATE) {
-        this._applyState(msg);
-      } else if (msg.type === MSG.INPUT) {
-        this._applyGameInput(msg);
-      } else if (msg.type === MSG.HOST) {
-        this._serverElects = true;                   // M1.4 migration / reclaim
-        this._clearFallbackTimer();
-        this._setHost(msg.id);
-      } else if (msg.type === MSG.HELLO) {
-        this.presence.apply(msg, this._now());
-        // A server that does host election ALWAYS sends the key (even as null,
-        // during a departed host's reclaim window). Its ABSENCE means a pre-M1.4
-        // relay, in which case the peers must elect among themselves - otherwise
-        // nobody is ever host and the boot gate refuses every game.
-        if ('host' in msg) {
-          this._serverElects = true;
-          this._clearFallbackTimer();
-          this._setHost(msg.host ?? null);
-        } else {
-          this._armFallbackElection();
-        }
-        if (this._onConnect) { try { this._onConnect(this.presence.selfId); } catch (_) {} }
-        this._emitRoster();
-      } else {
-        // JOIN / LEAVE / POSE roster traffic.
-        const leftId = (msg.type === MSG.LEAVE) ? msg.id : null;
-        this.presence.apply(msg, this._now());
-        if (leftId != null && !this._serverElects) {
-          // A departing fallback host hands over to the earliest remaining claim.
-          this._fallbackClaims.delete(String(leftId));
-          if (this._hostId === String(leftId)) this._setHost(null);
-          this._runFallbackElection();
-        }
-        this._emitRoster();
-      }
-    });
-    // An UNEXPECTED close (Wi-Fi blip, server restart, proxy timeout): we are no
-    // longer the room's authority. Stop streaming and give up the role - a host that
-    // kept both would become a SECOND host the moment the server migrates - then
-    // reconnect (the server holds our sid in its reclaim window, so a quick return
-    // gets the role back). Our own disconnect() sets _closing and skips all this.
-    ws.addEventListener('close', (ev) => {
-      this._connected = false;
-      // The socket is gone: tear the capture down locally, but don't pretend to
-      // announce a 'bye' that could not possibly be delivered.
-      this.video.stopBroadcast({ announce: false });
-      // COR-9: 4010 is PERMANENT - the server refuses this build's protocol, so
-      // the backoff chain must stop instead of reconnecting into the same
-      // refusal every few seconds for the rest of the page's life.
-      if (isPermanentClose(ev?.code)) {
-        this._noteFatal({ code: ev.code, reason: String(ev.reason || 'incompatible protocol') });
-        this._setHost(null);
-        if (this._onDisconnect) { try { this._onDisconnect(); } catch (_) {} }
-        return;
-      }
-      // Retry EVERY non-permanent close, first connect included. The old gate
-      // (`wasConnected || this._reconnectTries`) is falsy on a fresh client's
-      // first attempt, so a relay that was briefly unreachable — or that refused
-      // the upgrade at the handshake, which its admission caps used to do — was
-      // terminal: no retry, no reason. Same note as NetMgr's copy of this line.
-      if (!this._closing) {
-        this._setHost(null);
-        this._scheduleReconnect({ code: ev?.code, reason: ev?.reason });
-      }
-      if (this._onDisconnect) { try { this._onDisconnect(); } catch (_) {} }
-    });
-    ws.addEventListener('error', () => { /* close follows */ });
+    // The socket itself belongs to [[src/net/RoomConnection.js]] (CODEX ARC-2):
+    // the URL, the JOIN, the COR-9 HELLO gate, both backoff tables and the whole
+    // close handler are shared with NetMgr. What is left here is this build's
+    // routing table plus the flat-screen teardown hooks handed to the connection
+    // in the constructor.
+    this._conn.open();
     return this;
   }
 
-  /**
-   * A SESSION exists: the relay answered our JOIN with a HELLO, so we have a peer
-   * id, a roster and (in a moment) the room's replayed state.
-   *
-   * This is where the reconnect backoff resets, and the distinction is not
-   * academic. It used to reset in the socket's 'open' handler, which was correct
-   * when the only way to get an 'open' was to be admitted — and stopped being
-   * correct the moment the relay started refusing capacity SOFTLY (accept the
-   * upgrade, then close 1013 + a reason, so a deployed client retries at all).
-   * A refusal now MAKES 'open' fire, so resetting there meant every refusal reset
-   * the backoff: 500 ms, open, refused, 500 ms, forever. 'open' means "the
-   * handshake completed"; only a HELLO means "we are in".
-   *
-   * `lastClose` is cleared for the same reason — it is the TRANSIENT "why are we
-   * offline right now", and we are not.
-   */
-  _noteSessionEstablished() {
-    this._reconnectTries = 0;
-    this._retryLater = false;
-    this.lastClose = null;
-  }
-
-  _scheduleReconnect(why = null) {
-    // `_fatal` guarded here too: this is the only path that re-opens a socket.
-    if (this._closing || this._fatal || this._reconnectTimer) return;
-    // A close code of 0 means the socket never opened at all — not a code worth
-    // showing a user, so it is normalised to null instead of printed as "(0)".
-    const code = Number(why?.code ?? 0) || null;
-    // 1013 = "we are busy, come back later", not "the network broke".
-    if (code === TRY_AGAIN_CLOSE_CODE) this._retryLater = true;
-    const table = this._retryLater ? RETRY_LATER_DELAYS_MS : RECONNECT_DELAYS_MS;
-    const delay = table[Math.min(this._reconnectTries, table.length - 1)];
-    this._reconnectTries++;
-    this.lastClose = {
-      code,
-      reason: String(why?.reason || ''),
-      attempt: this._reconnectTries,
-      delayMs: delay,
-    };
-    const { reason } = this.lastClose;
-    console.warn(`[desktop-net] disconnected from "${this.room}"${code ? ` (${code}${reason ? `: ${reason}` : ''})` : ''} - retrying in ${delay}ms (attempt ${this._reconnectTries})`);
-    if (this._onRetry) {
-      try { this._onRetry({ ...this.lastClose }); } catch (e) { console.warn('[desktop-net] onRetry', e); }
+  // A decoded message from the room server. Reached through the RoomConnection's
+  // `onMessage` hook, which has ALREADY judged a HELLO's announced protocol (an
+  // OLD SERVER cannot check OUR JOIN version, so that direction of the skew is
+  // only ever caught there) and noted the session.
+  _route(msg) {
+    if (msg.type === MSG.SIGNAL) {
+      if (msg.channel === 'video') this.video.handleSignal(msg);
+      // (voice signals are not used on desktop v1)
+    } else if (msg.type === MSG.STATE) {
+      this._applyState(msg);
+    } else if (msg.type === MSG.INPUT) {
+      this._applyGameInput(msg);
+    } else if (msg.type === MSG.HOST) {
+      this._serverElects = true;                   // M1.4 migration / reclaim
+      this._clearFallbackTimer();
+      this._setHost(msg.id);
+    } else if (msg.type === MSG.HELLO) {
+      this.presence.apply(msg, this._now());
+      // A server that does host election ALWAYS sends the key (even as null,
+      // during a departed host's reclaim window). Its ABSENCE means a pre-M1.4
+      // relay, in which case the peers must elect among themselves - otherwise
+      // nobody is ever host and the boot gate refuses every game.
+      if ('host' in msg) {
+        this._serverElects = true;
+        this._clearFallbackTimer();
+        this._setHost(msg.host ?? null);
+      } else {
+        this._armFallbackElection();
+      }
+      if (this._onConnect) { try { this._onConnect(this.presence.selfId); } catch (_) {} }
+      this._emitRoster();
+    } else {
+      // JOIN / LEAVE / POSE roster traffic.
+      const leftId = (msg.type === MSG.LEAVE) ? msg.id : null;
+      this.presence.apply(msg, this._now());
+      if (leftId != null && !this._serverElects) {
+        // A departing fallback host hands over to the earliest remaining claim.
+        this._fallbackClaims.delete(String(leftId));
+        if (this._hostId === String(leftId)) this._setHost(null);
+        this._runFallbackElection();
+      }
+      this._emitRoster();
     }
-    this._reconnectTimer = setTimeout(() => {
-      this._reconnectTimer = null;
-      if (this._closing) return;
-      console.log(`[desktop-net] reconnecting to "${this.room}" (attempt ${this._reconnectTries})`);
-      // The server assigns a NEW peer id on reconnect, so the old roster and the
-      // old fallback claims are meaningless. Shared object state is replayed.
-      this.presence.clear();
-      this._fallbackClaims.clear();
-      // Connection genuinely lost (this path only runs after an UNEXPECTED
-      // close): teardown yes, byes no — they could never reach a peer.
-      this.video.disable({ announce: false });
-      this.connect();
-    }, delay);
   }
 
   // Called every frame from the app's rAF tick.
@@ -555,9 +372,7 @@ export class DesktopNet {
   }
 
   disconnect() {
-    this._closing = true;
-    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
-    this._clearFallbackTimer();
+    this._conn.beginDisconnect();
     // ANNOUNCE BEFORE CLOSING — see the same note in NetMgr.disconnect(). The
     // VideoMgr send closure above is gated on `_connected && ws`, so tearing the
     // video down after the socket was closed made its teardown 'bye' inert and a
@@ -565,11 +380,7 @@ export class DesktopNet {
     // Synchronous sends only: the leave is not delayed, and close() runs strictly
     // after them so there is no send-after-close race.
     this.video.disable();   // → one 'bye' per client we were streaming to
-    try { this.ws?.close(); } catch { /* already closing */ }
-    this._connected = false;
-    this._setHost(null, { silent: true });
-    this._serverElects = false;
-    this._fallbackClaims.clear();
+    this._conn.closeSocket();
     this.presence.clear();
     this.objects.clear();
     this._lastRosterSig = '';

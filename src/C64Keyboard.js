@@ -56,7 +56,7 @@
 // C64KeyLayout.js (sibling pure module).
 
 import * as THREE from 'three';
-import { C64_KEYS, COLS, ROWS, keyAt, keyEventFor, keyDef } from './C64KeyLayout.js';
+import { C64_KEYS, COLS, ROWS, keyAt, keyEventFor } from './C64KeyLayout.js';
 
 // Physical dimensions of the panel in metres.
 const PANEL_W = 1.2;  // width  (roughly 1.2 m wide, close to real C64 scale in VR)

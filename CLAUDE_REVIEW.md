@@ -14,12 +14,13 @@
 
 ---
 
-## 0. STATUS AS OF 2026-08-18 — read this before acting on anything below
+## 0. STATUS AS OF 2026-08-20 — read this before acting on anything below
 
 **The review text below is left exactly as written on 2026-08-13. It is a
 snapshot, not a to-do list.** This block is the current state. A remediation
-pass ran 2026-08-17; where a finding is marked closed here, the finding's own
-section is out of date and the code is right.
+pass ran 2026-08-17 and the structural pass (3.1 / 3.3 / 3.4) 2026-08-19/20;
+where a finding is marked closed here, the finding's own section is out of date
+and the code is right.
 
 **Two findings are settled REJECTIONS. Do not re-litigate them** — both have
 already been re-argued and reverted more than once, which is the whole reason
@@ -49,14 +50,14 @@ this block exists:
 | 9 | P0 1-4 | All four done (see 4.1, 4.2, the `uncaughtException` net, and 6). |
 | 9 | P1 5-11 | All seven done: 5 → 5.1/5.3; 6 → 4.4; 7 → 4.3; 8 → 4.6; 9 → 5.2; 10 → 5.4; 11 → the README's system/gating text now defers to `src/systems.js` as the single source of truth. |
 | 9 | P2 13-14 | 13 → `scripts/run-tests.mjs` discovers every suite and reports all failures (the `scripts/{test,probe,make}/` split was **not** done and is not planned). 14 → PERF-1. |
+| 3.3 / 9 P2 15 | The peripherals are four copies of one idea | 2026-08-20. `src/CabledPeripheral.js` holds one descriptor per port-bound device (GAMEPAD / LIGHTGUN / MOUSE / KEYBOARD) and `src/GhostPeripheralMgr.js` one remote-copy manager; `GhostGamepadMgr` / `GhostLightGunMgr` / `GhostMouseMgr` are now 41-line adapters over it, down from ~190/170/165. The five `systems.js` function *pairs* stay where the hardware knowledge is documented, but callers reach them through the descriptor instead of picking one by hand — a new device adds one descriptor entry, not a sixth pair at every call site. |
 
 ### Still open
 
 | § | Finding | Note |
 |---|---|---|
-| 3.1 / 9 P2 12 | `src/main.js` is the one real structural problem | **It has grown**, 7,974 → 8,820 lines. Nothing was extracted. Read CODEX_REVIEW's ARC-1 and "P2 #12" notes first: three of P2's five size estimates and the whole proposed *order* are wrong, and "tests green between" is vacuous today because **no test imports `main.js`**. |
-| 3.3 / 9 P2 15 | The peripherals are four copies of one idea | Untouched, and the duplication now reaches into `systems.js` too. Still the right call to do it *before* the next peripheral is added. |
-| 3.4 / 9 P2 16 | Client/desktop duplication | Untouched — and it cost real work: the 2026-08-17 relay hardening had to be written twice, once in `src/net/NetMgr.js` and once in `src/desktop/DesktopNet.js`. |
+| 3.1 / 9 P2 12 | `src/main.js` is the one real structural problem | **Partly done, 2026-08-20.** Eight modules were carved out (`MemoryCardUI`, `ConsoleRegistry`, `PowerMgr`, `PropChangeMode`, `PeripheralCords`, `CabledPeripheral`, `GhostPeripheralMgr`, `net/RoomConnection`), each with its own `scripts/test-*.mjs` — the precondition, since "tests green between extractions" was vacuous while no test imported the file. `main.js` is **8,511 lines**, down from 8,960 at HEAD and 8,820 at review time; the drop is small because the boot-epoch and arm-join logic the extractions exposed was *added back*. The review's "no file over 1,500" target is **not reachable from its own list**: `buildCartridgeWorld()` alone is a single 1,708-line function, and the boot block another ~1,690. Those two, plus `LocalRomPicker` and prop-add (deliberately left until state ownership is settled), are what remains. |
+| 3.4 / 9 P2 16 | Client/desktop duplication | **Half closed, 2026-08-20.** The socket *lifecycle* — the half that made the 2026-08-17 relay hardening get written twice — is one file now: `src/net/RoomConnection.js` (592 lines), used by both `NetMgr` (1,191 → 584) and `DesktopNet` (905 → 388). What stays separate is what genuinely differs: the XR client's scene/prop wiring and the desktop client's DOM. |
 
 ---
 

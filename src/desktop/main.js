@@ -522,7 +522,6 @@ function disconnect() {
 
 // React to a tv-state change: am I host, client, or idle now?
 function onRoleMaybeChanged(tvValue, ownerId) {
-  const self = net?.selfId;
   const r = role();
   input.releaseAll();
   flushRemotePlayer(2);

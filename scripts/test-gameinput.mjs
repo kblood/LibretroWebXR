@@ -8,8 +8,6 @@ import { GameInputMgr } from '../src/GameInputMgr.js';
 
 let pass = 0, fail = 0;
 const ok  = (name, cond) => { if (cond) { pass++; } else { fail++; console.error(`FAIL  ${name}`); } };
-const eq  = (name, got, want) => ok(`${name} (got ${JSON.stringify(got)})`,
-  JSON.stringify(got) === JSON.stringify(want));
 
 // ---------------------------------------------------------------------------
 // Fake helpers

@@ -4,10 +4,10 @@ Review date: 2026-08-13
 Reviewed revision: `cb29aa8` (`Guard loadCartridge() against a slower older request clobbering a newer one`)  
 Scope: the tracked application, server, deployment configuration, documentation, authored games, tests, and the locally present ignored runtime/build assets. The pre-existing untracked `CLAUDE_REVIEW.md` was deliberately not used as input.
 
-## STATUS AS OF 2026-08-18 - read this before acting on anything below
+## STATUS AS OF 2026-08-20 - read this before acting on anything below
 
 **Everything after this block is the report exactly as written on 2026-08-13. It
-is a snapshot, not a to-do list.** A remediation pass ran 2026-08-17; where a
+is a snapshot, not a to-do list.** A remediation pass ran 2026-08-17 and the structural pass (ARC-1/ARC-2/section 3.3) 2026-08-19/20; where a
 finding is marked closed here, its own section below is out of date and the code
 is right. Verified against the tree, not against prior status text.
 
@@ -56,6 +56,7 @@ all:
 | **PERF-1** | Shipped - TV textures upload only on a new emulator frame. |
 | **PERF-2** | `195ee4e` - measured what a swap costs and fixed what the measurement found. |
 | **PERF-5** | `BUNDLE_BUDGETS` in `scripts/check-dist.mjs`: a raw **and** a gzip ceiling per rollup chunk, `oversize-chunk` as a hard violation, the full chunk table printed on every green build, and `vite.config.js` deriving rollup's own advisory threshold from the largest budget so the two cannot drift. Gzip is the governing number - it is what a Quest downloads cold. |
+| **ARC-2** | All three halves, 2026-08-20. (a) The socket lifecycle is `src/net/RoomConnection.js`, shared by `NetMgr` (1,191 -> 584) and `DesktopNet` (905 -> 388), so relay hardening is written once. (b) `buildRetroArchLaunchConfig()` in `src/RetroArchConfig.js` builds the `.cfg`/`.rmp`/core-options text for **both** backends and hands back the paths it wrote, so `EmulatorClient`'s `REMAP_DIR` and the worker runtime's literal copy are gone. Its header records the one behaviour the two backends genuinely did **not** share - `{}` normalization - and keeps it at the caller rather than silently unifying it. (c) `beginBootTransaction()` / `captureBootEpoch()` in `main.js` are the boot epoch ARC-2 asked for, wired at all five boot entry points and deliberately distinct from COR-3's authority epoch (`src/net/AuthorityEpoch.js`); `scripts/test-boot-transaction.mjs` slices the shipped functions out of `main.js` by header text so the code under test is byte-for-byte the code that runs. |
 
 ### Closed to a deliberately narrower scope
 
@@ -63,15 +64,14 @@ all:
 |---|---|
 | **PERF-3** | The shared inner loop moved to `src/runtime/audioFrames.js` - one hoisted format branch and a strided walk, removing ~96,000 per-second string compares from the XR render thread and de-duplicating `SpatialAudio`/`DesktopAudio`, which were verbatim copies. **Refused:** moving the deinterleave into the worker, and the AudioWorklet ring the review recommends. Measured at ~0.01-0.02 ms per 72 Hz frame for the one worker console the rack budget can ever have live; it would change the worker-to-page audio message shape, and silent worker-core audio is a worse outcome than 1 ms/s. |
 | **PERF-4** | (a) The pump is now `src/runtime/FramePump.js`, testable with a fake clock, and it checks `paused` **before** re-arming - an auto-paused rack console used to wake its worker thread ~62x/s for ever, producing nothing. (b) `RoomObjects.version` + `PresenceState.rosterVersion` + a memoised `HoldView` make the four per-frame ghost-sync ticks O(1) in the steady state instead of rebuilding the whole room-state map four times per rendered frame. **Deferred, not forgotten:** ack-driven frame delivery. The one-in-flight ACK gate already caps *production* at the presentation rate, so what remains is wakeups, not pixels - and driving delivery off `FRAME_ACK` puts a permanently black console one lost message away, the exact failure the 500 ms stale-ack watchdog exists for. Needs a headset measurement first. |
+| **CLAUDE_REVIEW section 3.3** | Closed 2026-08-20 - see that review's status block. |
 
 ### Still open
 
 | ID | Note |
 |---|---|
-| **ARC-1** | `src/main.js` has **grown**: 7,974 -> 8,820 lines. Do **not** attempt the four-session (`AppSession`/`RoomSession`/`ConsoleSession`/`WorldSession`) rewrite as one change - it is a rewrite of a file with zero test coverage. Note also that CLAUDE_REVIEW's P2 #12 extraction order and three of its five size estimates were found to be wrong on re-review, and that "tests green between" is vacuous today because **no test imports `main.js`** - any extraction must ship a `scripts/test-<module>.mjs` in the same change. |
-| **ARC-2** | All three halves. (a) `NetMgr`/`DesktopNet` share the protocol *decisions* but not the socket *lifecycle* - and it cost real work: the 2026-08-17 relay hardening had to be written twice. (b) RetroArch `.cfg`/`.rmp` generation is still duplicated verbatim between the main-thread and worker backends. (c) Launch **option**-building is shared; transaction assembly is not. COR-3's authority epoch is not the boot epoch (c) asks for. |
+| **ARC-1** | **Partly done, 2026-08-20** - eight modules extracted, each with its own `scripts/test-*.mjs`, and `main.js` is 8,511 lines (from 8,960). The four-session rewrite was **not** attempted and still should not be: what shipped is eight independent carve-outs, not a restructure. What is left is the hard half - `buildCartridgeWorld()` (one 1,708-line function), the ~1,690-line boot block, `LocalRomPicker` and prop-add. See CLAUDE_REVIEW section 3.1 for the per-module list and why "no file over 1,500" is not reachable from the review's own list. |
 | **ARC-4** | `TestApi` is still eagerly imported and constructed on every build (`src/main.js:35`). |
-| **CLAUDE_REVIEW section 3.3** | The four peripherals are still four copies, and the duplication now reaches into `systems.js`. Worth doing *before* the next peripheral is added. |
 | **docs index** | No `docs/README.md` marking which files under `docs/` are current vs. historical (CLAUDE_REVIEW section 8). |
 | **`test-routing:175-180`** | Contributes zero assertions if `r` is empty - the last of `docs/ROADMAP.md` loose-end 20. Loose-end 19 (negative-only "nothing happened" checks) is also still open. |
 

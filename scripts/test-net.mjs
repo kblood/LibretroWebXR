@@ -1117,13 +1117,22 @@ section('`v` MUST NEVER MAKE A MESSAGE UNDECODABLE (COR-9 regression, 2026-08-15
 //   • [[src/net/NetMgr.js]]        — the VR client that actually ships to headsets
 //   • [[src/desktop/DesktopNet.js]] — the flat-screen client
 //
-// BOTH, not one (2026-08-15). They own two hand-duplicated copies of the
+// BOTH, not one (2026-08-15). They USED to own two hand-duplicated copies of the
 // connection lifecycle (CODEX ARC-2), and until this suite ran the identical
 // assertions against each, NetMgr's entire COR-9 change could have been deleted
 // wholesale with every suite still green — the negative controls were all driven
 // through DesktopNet. NetMgr imports three and constructs AvatarMgr/VoiceMgr/
 // VideoMgr, but none of that touches the DOM until a capture/mic starts, so a
 // stub scene is enough to reach its real connect()/message/close handlers.
+//
+// Since 2026-08-20 there is ONE lifecycle — [[src/net/RoomConnection.js]], which
+// both classes compose — so these cases no longer compare two implementations.
+// They stay, and stay driven through BOTH, because they assert the claim that
+// still matters to the app: the shipped CLASSES behave this way through their own
+// public surface. The structural half of the finding (that there is one
+// implementation, that the delegated field names survived, that the transport
+// drags no `three` into the desktop chunk) lives in
+// scripts/test-room-connection.mjs.
 section('Client reconnect gate: 4010 is permanent, everything else is retried', () => {
   // The relay's "try again later" close. Spelled out rather than imported:
   // NetProtocol owns the codes that are part of the CONTRACT, and 1013 is
@@ -1506,6 +1515,167 @@ section('Client reconnect gate: 4010 is permanent, everything else is retried', 
         `${name}: and the permanent refusal, so a probe stops waiting for a reconnect that never comes`);
       ok(shot !== p._fatal, `${name}: debugApi hands out a COPY of the fatal (a probe cannot corrupt client state)`);
       p.disconnect();
+    }
+  } finally {
+    console.error = realErr;
+    console.warn = realWarn;
+    console.log = realLog;
+    if (prevWS === undefined) delete globalThis.WebSocket; else globalThis.WebSocket = prevWS;
+  }
+});
+
+// === RoomConnection merge invariants (2026-08-20) ============================
+//
+// [[src/net/RoomConnection.js]] is one class serving two owners, merged out of
+// NetMgr's and DesktopNet's hand-written copies of the same lifecycle. Where the
+// two copies had DRIFTED, the merge had to pick one — and a pick is invisible:
+// every case below was green both before and after the merge, because none of
+// the differences is reachable through a normal session. They are pinned here so
+// each resolution is a decision with a test behind it rather than a coin-flip
+// nobody can see. Each is asserted against BOTH real clients, since the whole
+// point of the merge is that the two can no longer disagree.
+section('RoomConnection merge invariants: the resolved copy drifts', () => {
+  class FakeWS {
+    constructor(url) {
+      this.url = url; this.readyState = 0; this.sent = []; this._l = new Map();
+      FakeWS.last = this;
+      FakeWS.made = (FakeWS.made || 0) + 1;
+    }
+    addEventListener(t, f) { if (!this._l.has(t)) this._l.set(t, []); this._l.get(t).push(f); }
+    _emit(t, ev) { for (const f of this._l.get(t) || []) f(ev); }
+    send(s) { this.sent.push(s); }
+    close(code = 1000, reason = '') { if (this.readyState === 3) return; this.readyState = 3; this._emit('close', { code, reason }); }
+    accept() { this.readyState = 1; this._emit('open', {}); }
+    deliver(msg) { this._emit('message', { data: encode(msg) }); }
+    drop(code, reason = '') { this.readyState = 3; this._emit('close', { code, reason }); }
+  }
+  const prevWS = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWS;
+  const realErr = console.error;
+  const realWarn = console.warn;
+  const realLog = console.log;
+  const warns = [];
+  // ok()'s FAIL lines go to console.error and MUST still reach the terminal — a
+  // blanket capture would turn every failure in this section into a silent pass.
+  console.error = (...a) => { const s = a.join(' '); if (s.includes('FAIL')) realErr(...a); };
+  console.warn = (...a) => { warns.push(a.join(' ')); };
+  console.log = () => {};
+
+  const stubScene = { addObject() {}, removeObject() {}, playerRig: null, renderer: null, camera: null, controllers: [] };
+  const CLIENTS = [
+    ['NetMgr', () => new NetMgr({ scene: stubScene, room: 'r', serverUrl: 'ws://x/ws/', sessionId: 'sid-test' }).connect()],
+    ['DesktopNet', () => new DesktopNet({ room: 'r', serverUrl: 'ws://x/ws/', sessionId: 'sid-test' }).connect()],
+  ];
+  // A HELLO with NO `host` key at all: a pre-M1.4 relay, which is the only
+  // situation in which the client-side fallback election runs.
+  const legacyHello = { type: MSG.HELLO, selfId: 'me', room: 'r', peers: [] };
+
+  try {
+    for (const [name, build] of CLIENTS) {
+      // --- DRIFT 1: `_closing` is cleared by the 'open' handler ---------------
+      // NetMgr's handler cleared it; DesktopNet's did not. Unreachable in both
+      // (every path that latches `_closing` closes the socket in the same turn,
+      // and a close during CONNECTING fails the connection without ever firing
+      // 'open'), so this drives the handler directly.
+      const a = build();
+      const aws = FakeWS.last;
+      a._closing = true;
+      aws.accept();
+      ok(a._closing === false, `${name}: an 'open' clears a latched _closing (NetMgr's form, now shared)`);
+      a.disconnect();
+
+      // ...and the control that says why that is safe: clearing `_closing`
+      // cannot resurrect a permanently refused session, because `_fatal` is a
+      // separate latch that _scheduleReconnect checks on its own.
+      const b = build();
+      const bws = FakeWS.last;
+      b._fatal = { code: PROTOCOL_CLOSE_CODE, reason: 'refused earlier' };
+      b._closing = true;
+      bws.accept();
+      ok(b._closing === false, `${name} control: the same clear happens with _fatal set`);
+      bws.drop(1006);
+      ok(b._reconnectTimer === null, `${name} control: but _fatal still blocks the reconnect (the clear is not an escape hatch)`);
+      b.disconnect();
+
+      // --- DRIFT 2: the reconnect timer clears the fallback claims AFTER the
+      //     owner's teardown hook, which is the order both copies had ----------
+      const c = build();
+      const cws = FakeWS.last;
+      cws.accept();
+      cws.deliver(legacyHello);
+      const cconn = c._conn;
+      cconn._fallbackClaims.set('older-peer', { id: 'older-peer', at: 1 });
+      const seeded = cconn._fallbackClaims.size;
+      const innerHook = cconn._onBeforeReopen;
+      let claimsSeenByHook = -1;
+      cconn._onBeforeReopen = () => { claimsSeenByHook = cconn._fallbackClaims.size; if (innerHook) innerHook(); };
+      // Take over the backoff timer: _scheduleReconnect only ARMS a setTimeout,
+      // so the ordering under test lives in the callback, not in the call.
+      const realSetTimeout = globalThis.setTimeout;
+      const armed = [];
+      try {
+        globalThis.setTimeout = (fn) => { armed.push(fn); return { fakeTimer: true }; };
+        cconn._scheduleReconnect({ code: 1006 });
+        for (const fn of armed.splice(0)) fn();
+      } finally {
+        globalThis.setTimeout = realSetTimeout;
+      }
+      ok(seeded > 0, `${name}: (precondition) the reconnect starts with fallback claims to clear`);
+      ok(claimsSeenByHook === seeded, `${name}: onBeforeReopen still sees the fallback claims — they are cleared AFTER the owner's teardown`);
+      ok(cconn._fallbackClaims.size === 0, `${name}: and the claims ARE cleared before the socket re-opens (a new peer id makes them meaningless)`);
+      c.disconnect();
+
+      // --- DRIFT 3: an unset `_joinedAt` must not become seniority 0 ----------
+      // NetMgr's election read `_joinedAt ?? Date.now()`; DesktopNet's read it
+      // bare. The forms differ only when `_joinedAt` is unset — and there they
+      // differ a lot: normaliseClaim turns `at: undefined` into `at: 0`, the
+      // earliest timestamp there is, so the bare form claims the room forever
+      // and publishes that claim to late joiners over the STATE channel.
+      //
+      // One FRESH client per case on purpose: the first election ANNOUNCES its
+      // winning claim into the shared objects, and the next one reads that back
+      // through _noteStoredClaim — so reusing an instance would measure the
+      // stored claim rather than the timestamp under test.
+      const elect = (joinedAt) => {
+        const x = build();
+        const born = x._conn._joinedAt;
+        const xws = FakeWS.last;
+        xws.accept();
+        xws.deliver(legacyHello);
+        x._conn._joinedAt = joinedAt;
+        x._conn._runFallbackElection();
+        const claim = x._conn._fallbackClaims.get('me');
+        x.disconnect();
+        return { born, at: claim?.at };
+      };
+      // Positive control: a real join time is the claim's timestamp, untouched.
+      const real = elect(12345);
+      ok(typeof real.born === 'number' && real.born > 0,
+        `${name}: _joinedAt is stamped by the CONSTRUCTOR, before any 'open' (DesktopNet's form, now shared)`);
+      ok(real.at === 12345, `${name} control: a real _joinedAt is used as the claim's timestamp, untouched`);
+      // Now the drift itself.
+      const before = Date.now();
+      const unset = elect(undefined);
+      ok(normaliseClaim({ id: 'me', at: undefined }).at === 0,
+        `${name}: (why it matters) normaliseClaim turns an undefined 'at' into 0 — infinite seniority`);
+      ok(typeof unset.at === 'number' && unset.at >= before,
+        `${name}: an UNSET _joinedAt still yields a real timestamp, so this peer can lose an election it should lose`);
+
+      // --- DRIFT 4: the four drifting log TEXTS were unified on NetMgr's
+      //     em-dashes; the PREFIX stays the thing that tells the clients apart.
+      //     Nothing in the repo greps those texts (checked before unifying), so
+      //     this pins the surface a probe may legitimately match on instead.
+      warns.length = 0;
+      const e = build();
+      const ews = FakeWS.last;
+      ews.accept();
+      ews.deliver(legacyHello);
+      ews.drop(1006);
+      const retryLine = warns.find((w) => w.includes('retrying in'));
+      ok(!!retryLine, `${name}: a drop is announced with a retry line`);
+      ok(retryLine?.startsWith(name === 'NetMgr' ? '[net]' : '[desktop-net]'),
+        `${name}: and the PREFIX identifies the client — match on that and on the close code, never on the punctuation`);
+      e.disconnect();
     }
   } finally {
     console.error = realErr;

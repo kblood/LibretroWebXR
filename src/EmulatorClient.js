@@ -18,7 +18,7 @@
 //   - The core drives its own rAF loop (`emscripten_set_main_loop`).
 //   - Three.js samples `emuCanvas` as a CanvasTexture for the TV mesh.
 
-import { RETROARCH_CFG, RETROARCH_CFG_DIR, RETROARCH_CFG_PATH, RETROARCH_SYSTEM_DIR } from './RetroArchConfig.js';
+import { RETROARCH_CFG_DIR, RETROARCH_SYSTEM_DIR, buildRetroArchLaunchConfig } from './RetroArchConfig.js';
 
 const ROM_VFS_DIR = '/rom';
 // Single-file whole-disc extensions Play!'s Js_DiscImageDeviceStream bridge can
@@ -50,18 +50,12 @@ function romVfsPath(ext) {
   return `${ROM_VFS_DIR}/rom.${clean || 'bin'}`;
 }
 const ROM_VFS_PATH = romVfsPath('bin');
-// Legacy single-file libretro core options. We point RA at this explicitly
-// (core_options_path) and write `<key> = "<value>"` lines into it for cores
-// that need a non-default option — e.g. PUAE's `puae_kickstart = "aros"`, which
-// selects the built-in AROS Kickstart so the Amiga boots with no proprietary BIOS.
-const CORE_OPTIONS_PATH = RETROARCH_CFG_DIR + '/retroarch-core-options.cfg';
-// Per-core input remap directory. RetroArch reads a controller-port device
-// override (input_libretro_device_pN) from a core-specific remap file at
-// <remap_dir>/<LibraryName>/<LibraryName>.rmp — and, critically, HONOURS it at
-// boot when the main cfg's input_libretro_device_pN is ignored (verified during
-// the light-gun bring-up; see docs/LIGHTGUN_SUPPORT.md). This is how a light gun
-// gets its console to connect the Zapper / Super Scope / Light Phaser on a port.
-const REMAP_DIR = RETROARCH_CFG_DIR + '/config/remaps';
+// The core-options path (CORE_OPTIONS_PATH) and the per-core remap directory
+// (REMAP_DIR) used to be declared here. They are RETROARCH_CORE_OPTIONS_PATH and
+// RETROARCH_REMAP_DIR in RetroArchConfig.js now — one definition each, shared
+// with the worker-execution backend, with their "why" comments — and this file
+// no longer needs to name either: buildRetroArchLaunchConfig returns the paths
+// it built alongside the text (CODEX ARC-2 (b)).
 const STATE_DIR = '/home/web_user/retroarch/userdata/states';
 const STATE_PATH = STATE_DIR + '/rom.state';
 // RetroArch system directory — where cores look for BIOS / firmware. Some cores
@@ -864,75 +858,48 @@ export class EmulatorClient extends EventTarget {
   _writeRetroArchConfig() {
     const M = this._getModule();
     if (!M?.FS) return;
-    // Write the cfg to every path RA might consult: the webretro
-    // userdata path (explicit -c target), and the three default paths
-    // RA searches ($HOME/.config/retroarch/, $HOME/.retroarch.cfg, and
-    // $XDG_CONFIG_HOME/retroarch/). $HOME is /home/web_user in
-    // emscripten. We don't know which one this RA build will actually
-    // honour, so we cover all of them.
-    // When the core needs non-default options, point RA at an explicit
-    // single-file core-options path and write the requested key/values there.
-    let cfg = RETROARCH_CFG;
-    // NOTE: no `system_directory` line here. RETROARCH_CFG already carries it,
-    // and RetroArch keeps the FIRST occurrence of a duplicated key — an appended
-    // second one is inert, which is exactly how BIOS provisioning was silently
-    // broken until 2026-08-15 (see RETROARCH_SYSTEM_DIR's comment).
-    if (this._coreOptions) {
-      cfg += `core_options_path = "${CORE_OPTIONS_PATH}"\n`;
-      const body = Object.entries(this._coreOptions)
-        .map(([k, v]) => `${k} = "${v}"`).join('\n') + '\n';
+    // The cfg / .rmp / core-options TEXT is assembled by the shared, pure
+    // buildRetroArchLaunchConfig (src/RetroArchConfig.js) — the same builder the
+    // worker-execution backend calls. What is left here is the half that
+    // legitimately differs: writing those strings through Emscripten's `FS`.
+    // Every "why" behind the emitted lines (the gun mouse-button binds, why the
+    // per-core .rmp and NOT the main cfg's input_libretro_device_pN is what
+    // connects a device at boot, why the cfg goes to three search paths) lives on
+    // the builder now. It used to be hand-copied line for line into both this
+    // function and EmulatorWorkerRuntime.js's writeConfig, so a light-gun or
+    // mouse binding fixed on one backend silently missed every core on the other
+    // (CODEX ARC-2 (b)).
+    const built = buildRetroArchLaunchConfig({
+      // Already run through normalizeBootMap() by start(), so `{}` arrived here
+      // as null long before the builder sees it — that is why an empty map
+      // emits nothing on this backend and DOES emit on the worker, which
+      // forwards its start payload raw. The builder itself does not normalize
+      // (it would silently change the worker's bytes); see its header note.
+      inputDevices: this._inputDevices,
+      remapName: this._remapName,
+      coreOptions: this._coreOptions,
+      systemFiles: this._systemFiles,
+      // Two main-thread-only quirks, preserved exactly as they were rather than
+      // silently normalized by the extraction: this path appends its own
+      // (inert, duplicate) core_options_path line, and it does NOT write the
+      // static RETROARCH_CORE_OPTIONS baseline — those keys belong to the
+      // worker-only PSX/DOS cores, so no main-thread core has ever had them.
+      emitCoreOptionsPathLine: true,
+    });
+    let cfg = built.cfgText;
+    if (built.coreOptionsText !== null) {
       try { M.FS.mkdirTree(RETROARCH_CFG_DIR); } catch (_) {}
-      try { M.FS.writeFile(CORE_OPTIONS_PATH, body); } catch (e) {
+      try { M.FS.writeFile(built.coreOptionsPath, built.coreOptionsText); } catch (e) {
         console.warn('[EmulatorClient] failed to write core options', e);
       }
     }
-    if (this._inputDevices) {
-      // Port device overrides + light-gun input wiring. RetroArch's libretro
-      // lightgun reads its absolute aim from the MOUSE pointer (rwebinput maps
-      // the canvas-relative cursor to gun X/Y — the rwebinput patch in
-      // docs/patches/) and its buttons from mouse buttons, so for any gun port we
-      // bind trigger→LMB and the off-screen/reload shot→RMB. sendLightgun() emits
-      // those synthetic mouse events. A "gun" port is one whose device base class
-      // is LIGHTGUN (4) — or POINTER (6), which covers nestopia's Zapper (id 262 =
-      // SUBCLASS(POINTER,0)) that is nonetheless read via the LIGHTGUN path.
-      const RETRO_DEVICE_MASK = 0xff, RETRO_DEVICE_MOUSE = 2, RETRO_DEVICE_LIGHTGUN = 4, RETRO_DEVICE_POINTER = 6;
-      const validPorts = Object.entries(this._inputDevices)
-        .filter(([player]) => Number.isInteger(Number(player)) && Number(player) >= 1);
-      // Main cfg: enable the per-core remap dir (so the .rmp below is honoured at
-      // boot) + the device line (belt-and-suspenders; ignored at boot but correct
-      // for any runtime re-read) + the gun mouse-button binds.
-      cfg += `input_remap_binds_enable = "true"\n`;
-      cfg += `input_remapping_directory = "${REMAP_DIR}"\n`;
-      for (const [player, dev] of validPorts) {
-        const p = Number(player);
-        cfg += `input_libretro_device_p${p} = "${dev}"\n`;
-        const base = Number(dev) & RETRO_DEVICE_MASK;
-        if (base === RETRO_DEVICE_LIGHTGUN || base === RETRO_DEVICE_POINTER) {
-          cfg += `input_player${p}_mouse_index = "0"\n`;
-          cfg += `input_player${p}_gun_trigger_mbtn = "1"\n`;
-          cfg += `input_player${p}_gun_offscreen_shot_mbtn = "2"\n`;
-        } else if (base === RETRO_DEVICE_MOUSE) {
-          // A MOUSE port reads its motion + buttons from a physical mouse index.
-          // In a web build there is only one (index 0); sendMouse() feeds the
-          // canvas-targeted DOM mouse events (movementX/Y + L/R buttons) the core
-          // integrates. Two mice on one console reading distinct pointers needs a
-          // multiport rwebinput patch (see sendMouse / docs/MOUSE_SUPPORT.md).
-          cfg += `input_player${p}_mouse_index = "0"\n`;
-        }
-      }
-      // The per-core remap FILE is what actually connects the device at boot.
-      // <REMAP_DIR>/<LibraryName>/<LibraryName>.rmp with input_libretro_device_pN.
-      if (this._remapName && validPorts.length) {
-        const rmp = validPorts.map(([p, dev]) => `input_libretro_device_p${Number(p)} = "${dev}"`).join('\n') + '\n';
-        const dir = `${REMAP_DIR}/${this._remapName}`;
-        try { M.FS.mkdirTree(dir); } catch (_) {}
-        try { M.FS.writeFile(`${dir}/${this._remapName}.rmp`, rmp); } catch (e) {
-          console.warn('[EmulatorClient] failed to write remap', e);
-        }
-      } else if (this._inputDevices) {
-        console.warn('[EmulatorClient] inputDevices set without remapName — port device will not connect at boot');
+    if (built.rmpPath) {
+      try { M.FS.mkdirTree(built.rmpDir); } catch (_) {}
+      try { M.FS.writeFile(built.rmpPath, built.rmpText); } catch (e) {
+        console.warn('[EmulatorClient] failed to write remap', e);
       }
     }
+    if (built.warning) console.warn(`[EmulatorClient] ${built.warning}`);
     // Debug/test hook: append arbitrary raw cfg lines (e.g. to probe input grab
     // behaviour during light-gun bring-up). Never set in production.
     if (typeof window !== 'undefined' && typeof window.__forceCfgExtra === 'string') {
@@ -950,12 +917,7 @@ export class EmulatorClient extends EventTarget {
         }
       }
     }
-    const targets = [
-      [RETROARCH_CFG_DIR, RETROARCH_CFG_PATH],
-      ['/home/web_user/.config/retroarch', '/home/web_user/.config/retroarch/retroarch.cfg'],
-      ['/home/web_user',                   '/home/web_user/.retroarch.cfg'],
-    ];
-    for (const [dir, path] of targets) {
+    for (const [dir, path] of built.cfgPaths) {
       try { M.FS.mkdirTree(dir); } catch (_) {}
       try { M.FS.writeFile(path, cfg); } catch (e) {
         console.warn('[EmulatorClient] failed to write retroarch.cfg at', path, e);

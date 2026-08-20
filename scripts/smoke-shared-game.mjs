@@ -129,12 +129,6 @@ async function shot(page, name) {
   try { await page.screenshot({ path: `${SHOTS}/${name}.png` }); } catch { /* ok */ }
 }
 
-// Is a screen in this peer's world painting a remote host's <video> (TV.setVideo)
-// rather than a local canvas? This is the difference between "a track arrived" and
-// "the user is looking at the host's game".
-const tvOnHostFeed = (page) => page.evaluate(() =>
-  (window.__rack?.tvs?.() || []).some((t) => t.video));
-
 // Does the host's picture actually MOVE? receivingCount() stays 1 over a frozen
 // frame (decoder stalled, element auto-paused, host canvas replaced by a live
 // reboot), which is exactly the failure mode the two-machine playtest saw. Sample
@@ -216,6 +210,9 @@ try {
   await shot(B, 'client-watching');
 
   // --- 4b. the client's TV really shows that stream, and it MOVES -------------
+  // A screen painting a remote host's <video> (TV.setVideo) rather than a local
+  // canvas is the difference between "a track arrived" and "the user is looking
+  // at the host's game".
   ok(await waitFor(B, () => (window.__rack?.tvs?.() || []).some((t) => t.video), 15000),
     "the client's in-world TV is painting the host's video (not a local canvas)");
   const adv1 = await pictureAdvances(B);
