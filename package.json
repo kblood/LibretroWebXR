@@ -112,7 +112,7 @@
     "globals": "^17.11.0",
     "jsnes": "^2.1.0",
     "puppeteer-core": "^25.0.2",
-    "vite": "^7.3.5",
+    "vite": "^8.2.1",
     "ws": "^8.18.0"
   },
   "dependencies": {
