@@ -3364,6 +3364,29 @@ async function buildCartridgeWorld() {
   addControllerPlug(mouseObj);
   // The primary keyboard gets its grabbable plug and auto-connects to the primary
   // console (like the default gamepad auto-plugs into port 0).
+  // A room ADOPTED from the host can contain peripherals a peer added: they ride
+  // the descriptor carrying the cableId their port binding is keyed by
+  // (`gun:<cableId>` / `mouse:<cableId>` STATE). buildRoom places their meshes but
+  // knows nothing about the patchbay, so register them here exactly as
+  // _createRemoteProp does for a peer who was already in the room when the gun was
+  // added. Without this the adopted gun existed in the world but sat in no port,
+  // and _reconcileGunState could never seat it — its cableId was not in the
+  // registry — so a LATE JOINER saw the mesh and never the port binding.
+  //
+  // Only descriptor props that NAME a cableId are touched. Every room.json on disk
+  // omits it, so the default gun/mouse above keep sole ownership of gun-1/mouse-1
+  // and local (non-adopted) rooms behave exactly as before.
+  for (const { prop: placedProp, object: placedObj } of built.placed) {
+    if (placedProp?.cableId == null || !placedObj) continue;
+    if (placedObj === lightGunObj || placedObj === mouseObj || placedObj === gamepadObj) continue;
+    const desc = placedProp.type === 'lightgun' ? LIGHTGUN
+      : placedProp.type === 'mouse' ? MOUSE
+      : placedProp.type === 'gamepad' ? GAMEPAD : null;
+    if (!desc) continue;
+    _registerPeripheral(desc, placedObj);
+    addControllerPlug(placedObj);
+  }
+
   addKeyboardPlug(c64kbd?.object3d);
   // The keyboard body is grabbable in play mode (move it like a controller);
   // _isCandidate gates this on its visibility so it's inert while hidden.

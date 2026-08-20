@@ -126,6 +126,20 @@ function rig({ controllers, cable, grab, system, onLogicalInput }) {
   gim.tick();
   ok(computeRouting({ controllers: [c], heldObject: grab.heldObject, isControllerFree: grab.isControllerFree, playerOf: (id) => seatOf(cable, id) }).length === 0, 'no held pad → empty routing');
   ok(client.keydownCodes().size === 0, 'no input dispatched when nothing is held');
+
+  // POSITIVE COMPANION (ROADMAP loose end 19). Both zeros above pass hardest
+  // when the whole path is DEAD: a severed tick(), a mis-wired rig, or a press()
+  // that no longer sets `pressed` each read as "correctly routed nothing". So the
+  // same rig, the same controller and the same already-pressed button must
+  // dispatch the moment the pad is held. Only this arm makes the two zeros mean
+  // "nothing was routed" rather than "nothing works".
+  cable.plug('gp-1', 0);
+  grab.hold(c, gamepadObj('gp-1'));
+  gim.tick();
+  ok(computeRouting({ controllers: [c], heldObject: grab.heldObject, isControllerFree: grab.isControllerFree, playerOf: (id) => seatOf(cable, id) }).length > 0,
+    'positive arm: the same rig DOES route once the pad is held');
+  ok(RETROPAD_KEYS.A.some((code) => client.keydownCodes().has(code)),
+    'positive arm: the same still-pressed button DOES dispatch once the pad is held');
 }
 
 // === 3. Two pads, two ports: each player gets ONLY its own keys (no crosstalk)
@@ -252,6 +266,34 @@ function rig({ controllers, cable, grab, system, onLogicalInput }) {
   gim.setRemoteButton({ player: 2, btn: 'A', down: false });
   gim.tick();
   ok(client.keyupCodes().has(EXTRA_PLAYER_KEYS[2].A), 'releasing the remote button lifts the key');
+}
+
+// === M1.1: the local keyup sweep is ALIVE while it spares the remote key =====
+// The "a still-held remote key is not lifted by the local sweep" check above is
+// negative-only, and it passes hardest when the sweep does nothing at all — the
+// rig it runs in has no local controllers, so an entirely dead sweep scores the
+// same as a correct one (ROADMAP loose end 19). Here the same sweep must lift a
+// LOCAL key on the very tick it leaves the remote one down.
+{
+  const cable = new CableMgr();
+  cable.plug('gp-1', 0); // local pad → player 1
+  const grab = mockGrab();
+  const pad = mockController('right');
+  grab.hold(pad, gamepadObj('gp-1'));
+  const { gim, client } = rig({ controllers: [pad], cable, grab, system: 'snes' });
+
+  gim.setRemoteButton({ player: 2, btn: 'A', down: true });
+  pad.press(FACE_A);
+  gim.tick();
+  ok(RETROPAD_KEYS.A.some((code) => client.keydownCodes().has(code)), 'local P1 A went down');
+  ok(client.keydownCodes().has(EXTRA_PLAYER_KEYS[2].A), 'remote P2 A went down alongside it');
+
+  client.clear();
+  pad.release(FACE_A); // the LOCAL button only; the remote one is still held
+  gim.tick();
+  const lifted = client.keyupCodes();
+  ok(RETROPAD_KEYS.A.some((code) => lifted.has(code)), 'the local sweep IS alive: it lifted P1 A');
+  ok(!lifted.has(EXTRA_PLAYER_KEYS[2].A), 'and that same sweep left the still-held remote P2 A down');
 }
 
 // === M1.1: remote (P2) and local (P1) inputs coexist with no crosstalk =======

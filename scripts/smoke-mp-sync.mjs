@@ -118,6 +118,16 @@ try {
     window.__net.objectEntries().some(([k]) => k === 'gp' || k === 'drag' || k.startsWith('wire')));
   ok(!dWireLeaked, 'WIRE messages are NOT persisted into the STATE snapshot');
 
+  // POSITIVE COMPANION for that zero (ROADMAP loose end 19). `objectEntries()`
+  // returning [] — a broken reader, a snapshot that never arrived — satisfies
+  // "no gp/drag key" perfectly. Line 98 above proves objectState() works, but
+  // that is a DIFFERENT method from the one this check calls, so it does not
+  // cover it. Require the very call used above to see the key that IS supposed
+  // to persist.
+  const dPersisted = await peerC.evaluate(() => window.__net.objectEntries().map(([k]) => k));
+  ok(dPersisted.length > 0 && dPersisted.includes('room'),
+    `positive arm: the same objectEntries() DOES see the persisted room key (got ${dPersisted.length} key(s))`);
+
   // =========================================================================
   // Section 3 (Phase 3): power over STATE + reset over WIRE.
   // =========================================================================

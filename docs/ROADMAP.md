@@ -1078,17 +1078,26 @@ changed. 19 and the `test-routing` half of 20 are still open.
     was removed (a repo-wide grep found those two reads were its only mentions;
     nothing has ever written it), leaving the Node-side `page.on('request')`
     delta as the single, real fetch check.
-19. **Negative-only "nothing happened" checks.** `smoke-gameinput:84`
-    ("bystander received nothing"), `smoke-mp-sync:113-115` ("WIRE messages are
-    NOT persisted"), `test-multiplayer:128` and `:249`, and the "no
-    `roms/<file>` network request" checks in `probe-local-rom:246` /
-    `probe-local-rom-persist:231` all pass hardest when the mechanism under
-    test is *completely dead* — the same shape as the severed-`sendInput()`
-    failure item 13 found in `probe:psx-timecrisis`. Each needs a positive
-    companion arm in the same run. (2026-08-17: `probe-local-rom`'s half was
-    only *clarified* — the dead in-page `__romFetchLog` scaffolding came out so
-    the Node-side request delta is visibly the one real check. It still has no
-    positive arm. The other five sites are untouched.)
+19. **Negative-only "nothing happened" checks** — mostly closed (2026-08-21).
+    Four of the six sites now carry a positive companion arm in the same run, and
+    each arm was mutation-checked (sever the mechanism; the arm fails while the
+    original zero still passes green):
+    - `test-multiplayer` block 2 — the same rig, controller and already-pressed
+      button must dispatch the moment the pad is held.
+    - `test-multiplayer`'s "a still-held remote key is not lifted by the local
+      sweep" — a new block where that same sweep lifts a LOCAL key on the very
+      tick it leaves the remote one down. With the sweep severed the original
+      check still passed, which is exactly the failure this item describes.
+    - `smoke-gameinput:84` — the bystander is proved connected, seeing both
+      peers, and its own input reaches the host. The obvious arm (send an input
+      AT it) is impossible by design: RELAY-4 refuses any INPUT not addressed to
+      the host, so that zero is now enforced at two layers.
+    - `smoke-mp-sync`'s "WIRE is not persisted" — the same `objectEntries()`
+      call must see the `room` key that IS supposed to persist (line 98 proves
+      `objectState()` works, but that is a different method).
+    **Still open:** the "no `roms/<file>` network request" checks in
+    `probe-local-rom:246` / `probe-local-rom-persist:231`. Both are opt-in probes
+    needing fetched cores; neither has a positive arm.
 20. **Config-pinning masquerading as behaviour** — mostly closed
     (2026-08-17). `test-rackbudget` no longer reads the two constants out of the
     module it imported them from: it drives `planLive()` with **no opts** and

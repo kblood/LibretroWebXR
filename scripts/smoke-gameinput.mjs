@@ -89,6 +89,23 @@ try {
   // Directed, not broadcast: the bystander must NOT have received the inputs.
   await sleep(500);
   ok((await bystander.evaluate(() => window.__net.recvInputs().length)) === 0, 'bystander received nothing (directed relay)');
+
+  // POSITIVE COMPANION for that zero (ROADMAP loose end 19). On its own it is
+  // negative-only: a bystander whose page never joined, whose socket died, or
+  // whose recvInputs() reader is broken scores the same clean 0 as a correctly
+  // directed relay.
+  //
+  // The obvious arm — send an input AT the bystander and watch it arrive — is
+  // impossible on purpose: the relay refuses any INPUT whose `to` is not the
+  // room host (server/Hub.js, RELAY-4), so the zero above is now enforced at two
+  // layers. What can still be proved is that the bystander is a live, joined
+  // peer whose socket carries traffic in both directions, which is what turns
+  // its 0 into "not addressed" rather than "not there".
+  ok(await bystander.evaluate(() => !!window.__net?.connected() && window.__net.peerCount() >= 2),
+     'positive arm: the bystander is connected and sees both other peers');
+  await bystander.evaluate((to) => window.__net.sendGameInput({ to, player: 2, btn: 'Start', down: true }), hostId);
+  ok(await waitFor(host, () => window.__net.recvInputs().some((e) => e.btn === 'Start')),
+     "positive arm: the bystander's OWN input reaches the host, so its socket is live");
 } catch (e) {
   failed++; console.error('  FAIL:', e.message);
 }

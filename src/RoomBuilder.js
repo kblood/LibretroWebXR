@@ -308,6 +308,24 @@ export function lockBookcaseHomes(bookcaseGroup) {
   });
 }
 
+// A port-bound peripheral descriptor can name the cable id its port binding is
+// keyed by — `gamepad:<cableId>` / `gun:<cableId>` / `mouse:<cableId>` STATE.
+// Carry it onto the object so main.js's _registerPeripheral ADOPTS it instead of
+// minting a fresh local one.
+//
+// Without this, a peer that adopts the host's room layout (which reloads and
+// rebuilds every prop through this file) re-created the gun under its OWN id, so
+// the peer-scoped `gun:<cableId>` key in the snapshot matched nothing and
+// _reconcileGunState skipped it forever: the late joiner saw the gun MESH but
+// never seated it at the port the room authored. A peer already in the room was
+// unaffected, because its copy comes from _createRemoteProp, which has always
+// adopted payload.cableId. Descriptors without a cableId (every room.json on
+// disk) are untouched and still get a locally minted id.
+const adoptCableId = (obj, prop) => {
+  if (obj && prop?.cableId != null) obj.userData.cableId = prop.cableId;
+  return obj;
+};
+
 /**
  * Build ONE prop into the scene through its scene factory and return a small
  * record the caller wires up. Shared by `buildRoom` (initial build) and the
@@ -346,6 +364,7 @@ export function buildProp(prop, { scene, collections }) {
     case 'gamepad': {
       const obj = createGamepad({ position: v3(prop.pos) });
       applyRot(obj, prop.rot);
+      adoptCableId(obj, prop);
       scene.addObject(obj);
       return { object: obj, kind: 'gamepad' };
     }
@@ -407,6 +426,7 @@ export function buildProp(prop, { scene, collections }) {
       // arms gun-capable games when it's picked up.
       const obj = createLightGun({ position: v3(prop.pos) });
       applyRot(obj, prop.rot);
+      adoptCableId(obj, prop);
       scene.addObject(obj);
       return { object: obj, kind: 'lightgun' };
     }
@@ -416,6 +436,7 @@ export function buildProp(prop, { scene, collections }) {
       // on mouse-capable games (Amiga) when it's picked up.
       const obj = createMouse({ position: v3(prop.pos) });
       applyRot(obj, prop.rot);
+      adoptCableId(obj, prop);
       scene.addObject(obj);
       return { object: obj, kind: 'mouse' };
     }
